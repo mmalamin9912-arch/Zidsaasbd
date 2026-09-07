@@ -299,6 +299,8 @@ export async function syncMerchantSubscription(
           email: cleanEmail,
           store_name: updatedProfile.storeName,
           store_slug: cleanSlug,
+          // Permanent identity — survives any slug/name change.
+          ...(updatedProfile.storeCode ? { store_code: updatedProfile.storeCode } : {}),
           owner_name: updatedProfile.ownerName,
           phone: updatedProfile.phone,
           subscription_plan: planId,

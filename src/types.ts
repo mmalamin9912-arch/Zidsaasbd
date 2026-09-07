@@ -4,7 +4,7 @@ export interface GalleryImage {
   link?: string;
 }
 
-export type NavigationTab = 
+export type NavigationTab =
   | 'dashboard'
   | 'orders'
   | 'products'
@@ -23,7 +23,7 @@ export type NavigationTab =
   | 'settings'
   | 'super_admin_portal';
 
-export type ProductSubTab = 
+export type ProductSubTab =
   | 'all_products'
   | 'categories'
   | 'preorder_campaigns'
@@ -33,7 +33,7 @@ export type ProductSubTab =
   | 'custom_fields'
   | 'options_library';
 
-export type CustomerSubTab = 
+export type CustomerSubTab =
   | 'all_customers'
   | 'customer_wallet'
   | 'groups'
@@ -42,7 +42,7 @@ export type CustomerSubTab =
   | 'questions'
   | 'stock_notifications';
 
-export type StoreSubTab = 
+export type StoreSubTab =
   | 'themes'
   | 'landing_pages'
   | 'brand'
@@ -152,7 +152,16 @@ export interface Product {
 }
 
 export interface MerchantProfile {
+  /** Canonical Supabase stores.id UUID — used for ALL database queries. */
+  id?: string;
+  /** Permanent system ID (e.g. ZID-BD-1001) — set once at registration. */
+  storeCode?: string;
+  /** Alias of storeCode (snake_case mirror of the DB column). */
+  store_code?: string;
+  /** Canonical store UUID mirror for order/customer payloads. */
+  storeId?: string;
   storeName: string;
+  /** Display-only custom slug — never used for database queries. */
   storeSlug: string;
   ownerName?: string;
   email?: string;

@@ -125,13 +125,15 @@ export function buildCategoryDbPayload(category: any, merchant?: { id?: string; 
   };
 }
 
-export function buildProductDbPayload(product: any, merchant?: { id?: string; storeSlug?: string } | null) {
+export function buildProductDbPayload(product: any, merchant?: { id?: string; storeSlug?: string; storeCode?: string; store_code?: string; storeId?: string } | null) {
   const title = String(product.title || product.name || '').trim() || 'Untitled Product';
   const merchantId = product.merchantId || product.merchant_id || merchant?.id || merchant?.storeSlug || 'default';
   const storeSlug = product.storeSlug || product.store_slug || merchant?.storeSlug || merchantId || 'bd';
   const price = Number(product.priceBDT ?? product.price ?? product.price_bdt ?? 0);
   const stock = Number(product.stock ?? product.stock_quantity ?? product.quantity ?? 0);
   const image = String(product.image || product.imageUrl || product.image_url || '');
+  const storeId = product.storeId || product.store_id || merchant?.id || merchant?.storeId || '';
+  const storeCode = product.storeCode || product.store_code || merchant?.storeCode || merchant?.store_code || '';
 
   return {
     ...product,
@@ -141,6 +143,8 @@ export function buildProductDbPayload(product: any, merchant?: { id?: string; st
     slug: product.slug || product.seoSlug || toCatalogSlug(title, 'product'),
     store_slug: storeSlug,
     storeSlug,
+    ...(storeId ? { storeId, store_id: storeId } : {}),
+    ...(storeCode ? { storeCode, store_code: storeCode } : {}),
     merchantId,
     merchant_id: merchantId,
     category: product.category || 'General',
@@ -217,6 +221,10 @@ export async function upsertProductToSupabase(productData: any, storeSlugInput?:
     stock: stock_quantity,
     stock_quantity,
     store_slug: storeSlug || 'bd',
+    // Permanent store identity — attached to every product create so queries
+    // never depend on the (mutable) display slug.
+    ...(productData.storeId || productData.store_id ? { store_id: String(productData.storeId || productData.store_id) } : {}),
+    ...(productData.storeCode || productData.store_code ? { store_code: String(productData.storeCode || productData.store_code) } : {}),
   };
 
   let clientError: string | undefined = undefined;

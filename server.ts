@@ -536,6 +536,15 @@ app.post('/api/products', async (req, res) => {
     const rawSlug = String(body.store_slug || body.storeSlug || req.query.store_slug || 'bd');
     const store_slug = String(rawSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
 
+    // Permanent store identity: accept store_code / store_id / UUID from the
+    // payload and always resolve down to the canonical stores.id UUID.
+    const permanentRef = String(body.store_code || body.storeCode || body.store_id || body.storeId || '').trim();
+    const storeId = isUuidLike(permanentRef)
+      ? permanentRef
+      : (permanentRef || store_slug)
+        ? await resolveStoreIdBySlug(permanentRef || store_slug)
+        : null;
+
     const price = parseFloat(body.price ?? body.priceBDT ?? body.price_bdt ?? 0) || 0;
     const stock_quantity = parseInt(body.stock_quantity ?? body.stock ?? 0, 10) || 0;
     const stock = stock_quantity;
@@ -600,9 +609,13 @@ app.post('/api/products', async (req, res) => {
 
     if (isConfigured) {
       try {
-        const sbRecord = {
+        const sbRecord: Record<string, unknown> = {
           id: String(product.id),
           store_slug,
+          // Permanent identity: attach the canonical store UUID (and the
+          // human-readable code when present) to every product create.
+          ...(storeId ? { store_id: storeId } : {}),
+          ...(String(body.store_code || body.storeCode || '') ? { store_code: String(body.store_code || body.storeCode) } : {}),
           title,
           name: title,
           price,
@@ -1400,12 +1413,27 @@ function isUuidLike(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim());
 }
 
+// Resolves ANY store reference — permanent store_code (ZID-BD-XXXX), UUID, or
+// slug — to the canonical stores.id UUID. Slugs are display metadata only and
+// may change freely; the code/UUID never do.
 async function resolveStoreIdBySlug(rawSlug: string): Promise<string | null> {
   const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
   if (!isConfigured) return null;
-  const slug = String(rawSlug || '').split(':')[0].trim().toLowerCase() || 'bd';
+  const ref = String(rawSlug || '').split(':')[0].trim().toLowerCase() || 'bd';
+  if (isUuidLike(ref)) return ref;
   try {
-    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`, {
+    // 1) Permanent store code (ZID-BD-XXXX).
+    if (/^zid-bd-\d{4,}$/i.test(ref)) {
+      const codeRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+      });
+      if (codeRes.ok) {
+        const rows = await codeRes.json();
+        if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
+      }
+    }
+    // 2) Slug fallback (display reference only).
+    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
       headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
     });
     if (sbRes.ok) {
@@ -1438,7 +1466,8 @@ async function loadOrdersForStoreRef(ref: string): Promise<any[]> {
   }
 }
 
-// GET /api/orders/:storeRef — fetch orders for a store (accepts slug or store UUID).
+// GET /api/orders/:storeRef — fetch orders for a store. Accepts the permanent
+// store_code (ZID-BD-XXXX), the canonical UUID, or a slug (display fallback).
 app.get('/api/orders/:storeRef', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -1463,10 +1492,13 @@ app.post('/api/orders', async (req, res) => {
     let synced = 0;
     for (const order of arr) {
       if (!order || typeof order !== 'object') continue;
-      const merchantRef = String(order.merchantId || order.merchant_id || order.storeSlug || order.store_slug || '').trim();
+      const merchantRef = String(
+        order.storeCode || order.store_code || order.storeId || order.store_id ||
+        order.merchantId || order.merchant_id || order.storeSlug || order.store_slug || ''
+      ).trim();
       const slug = String(merchantRef).split(':')[0].trim().toLowerCase() || 'bd';
-      const storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug) || merchantRef);
-      if (!storeId) continue;
+      const storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug));
+      if (!storeId || !isUuidLike(storeId)) continue;
 
       const record = {
         store_id: storeId,

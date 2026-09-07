@@ -261,9 +261,11 @@ export default function App() {
 
   const prevSlugRef = React.useRef<string>(merchant?.storeSlug || '');
 
-  // Fetch data from DB on mount, storeSlug change, or tab switch
+  // Fetch data from DB on mount, storeSlug change, or tab switch.
+  // Data loads are keyed on the PERMANENT store identity (UUID / store_code);
+  // the slug is only a fallback, so renaming a store never breaks lookups.
   React.useEffect(() => {
-    const merchantId = merchant?.id || merchant?.storeSlug || 'default';
+    const merchantId = merchant?.id || merchant?.storeCode || merchant?.storeSlug || 'default';
     const storeSlug = merchant?.storeSlug || merchant?.id || 'default';
     let isMounted = true;
 
@@ -370,7 +372,7 @@ export default function App() {
     return () => {
       isMounted = false;
     };
-  }, [merchant?.id, merchant?.storeSlug, activeTab]);
+  }, [merchant?.id, merchant?.storeCode, merchant?.storeSlug, activeTab]);
 
   // Auto-sync merchant settings and categories to Supabase on change
   React.useEffect(() => {
@@ -1061,26 +1063,23 @@ export default function App() {
             if (merchant?.storeSlug === storeSlug) {
               setOrders(prev => [newOrder, ...prev]);
             }
-            // Insert into Supabase orders table — resolve the real store UUID from
-            // the slug first, so store_id always references stores.id (never a slug).
+            // Insert into Supabase orders table — resolve the canonical store UUID
+            // via the PERMANENT identity (store_code ZID-BD-XXXX / UUID) first;
+            // the slug is a last-resort display fallback, never the primary key.
             try {
               const { supabase } = await import('./lib/supabase');
+              const { resolveStoreRef } = await import('./lib/storeId');
               if (supabase) {
                 const cleanSlug = String(storeSlug || newOrder.storeSlug || '').split(':')[0].trim().toLowerCase();
-                const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanSlug || '');
+                const permanentRef =
+                  (merchant as any)?.storeCode || (merchant as any)?.store_code || '';
                 let storeId = '';
 
-                // Resolve the store's real UUID from the canonical 'stores' table.
-                if (!isUuid && cleanSlug) {
-                  const { data: storeRow } = await supabase
-                    .from('stores')
-                    .select('id')
-                    .eq('store_slug', cleanSlug)
-                    .maybeSingle();
-                  if (storeRow?.id) storeId = String(storeRow.id);
-                } else if (isUuid) {
-                  storeId = cleanSlug;
-                }
+                // 1) Resolve via permanent code → UUID → slug, in that order.
+                const ref = await resolveStoreRef(supabase, permanentRef)
+                  || await resolveStoreRef(supabase, (merchant as any)?.id)
+                  || await resolveStoreRef(supabase, cleanSlug);
+                if (ref?.id) storeId = String(ref.id);
 
                 if (!storeId) {
                   console.warn('Could not resolve store UUID for slug:', cleanSlug, '— order insert skipped to protect FK/RLS integrity.');

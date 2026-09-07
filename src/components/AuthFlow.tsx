@@ -36,6 +36,7 @@ import {
   syncMerchantSubscription
 } from '../lib/subscriptionService';
 import { safeParseJson } from '../lib/safeFetch';
+import { generateStoreCode, resolveStoreRef, withPermanentStoreId } from '../lib/storeId';
 
 interface AuthFlowProps {
   onLoginSuccess: (userProfile: MerchantProfile) => void;
@@ -237,11 +238,11 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   };
 
   const normalizeMerchantRecord = (raw: any, cleanEmail: string): MerchantProfile => {
-    return resolveMerchantSubscription({
+    return withPermanentStoreId(resolveMerchantSubscription({
       ...defaultMerchant,
       ...raw,
       email: cleanEmail
-    });
+    }));
   };
 
   const enhanceWithPrepayment = (profile: MerchantProfile): MerchantProfile => {
@@ -824,10 +825,20 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         console.error('Error checking for existing merchant:', e);
     }
 
-    const newUserProfile: MerchantProfile = existingProfile ? {
+    // Permanent store identity: canonical UUID + immutable ZID-BD-XXXX code.
+    // The code is generated ONCE here and never regenerated on name/slug change.
+    let storeRef: any = null;
+    try {
+      const { resolveStoreRef } = await import('../lib/storeId');
+      storeRef = await resolveStoreRef(supabase, slug) || await resolveStoreRef(supabase, cleanEmail);
+    } catch (e) {
+      console.warn('[AuthFlow] store identity resolution notice:', e);
+    }
+
+    const newUserProfile: MerchantProfile = existingProfile ? withPermanentStoreId({
         ...defaultMerchant,
         ...existingProfile
-    } : {
+      }, storeRef) : withPermanentStoreId({
       ...defaultMerchant,
       ownerName: fullName,
       storeName: storeName.trim(),
@@ -835,7 +846,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       phone: formattedPhone,
       storeSlug: slug,
       logoUrl: storeLogo || defaultMerchant.logoUrl || '',
-    };
+    }, storeRef);
 
     // If Supabase is available, update user password and metadata
     if (supabase) {
@@ -867,6 +878,40 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       }
     ];
     localStorage.setItem('zid_registered_users', JSON.stringify(updatedUsers));
+
+    // Persist the permanent store identity to Supabase (store_code is written
+    // once; migration 0002 makes it immutable and unique). Local fallback row
+    // for anon Supabase-less installs keeps the same permanent code.
+    if (supabase && cleanEmail) {
+      try {
+        const { error: storeUpsertErr } = await supabase
+          .from('stores')
+          .upsert({
+            email: cleanEmail,
+            store_name: storeName.trim(),
+            store_slug: slug,
+            store_code: newUserProfile.storeCode,
+            owner_name: fullName,
+            phone: formattedPhone,
+          }, { onConflict: 'email' });
+        if (storeUpsertErr) {
+          console.warn('[AuthFlow] store_code upsert notice:', storeUpsertErr.message);
+        } else {
+          // Re-resolve so the profile carries the canonical UUID (stores.id).
+          const ref = await resolveStoreRef(supabase, newUserProfile.storeCode || slug || cleanEmail);
+          if (ref) {
+            newUserProfile.id = ref.id;
+            newUserProfile.storeId = ref.id;
+            if (ref.storeCode) {
+              newUserProfile.storeCode = ref.storeCode;
+              newUserProfile.store_code = ref.storeCode;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[AuthFlow] permanent store identity persist failed:', e);
+      }
+    }
 
     finishLogin(newUserProfile);
   };
