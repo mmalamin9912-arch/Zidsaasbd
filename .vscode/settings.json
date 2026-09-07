@@ -1,6 +1,6 @@
 {
     "CodeGPT.apiKey": "CodeGPT Plus Beta",
-    "pycodeloop.provider": "c:\\Users\\Dell\\.vscode\\extensions\\fernandocelmer.pycodeloop-0.5.0\\providers\\openai.json",
+    "pycodeloop.provider": "c:\\Users\\Dell\\.vscode\\extensions\\fernandocelmer.pycodeloop-0.5.0\\providers\\gemini.json",
     "pycodeloop.url": "",
-    "pycodeloop.model": "gpt-5.6-terra"
+    "pycodeloop.model": "gemini-3.6-flash"
 }

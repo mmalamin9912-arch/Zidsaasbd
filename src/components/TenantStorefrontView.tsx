@@ -126,9 +126,20 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           .from('stores')
           .select('id, store_slug')
           .in('store_slug', slugsToQuery);
-        const slugStoreIds = Array.from(new Set(((slugStoreRows || []) as any[]).map((s) => s.id).filter(Boolean)));
-        const { data: prodRows, error: prodErr } = slugStoreIds.length > 0
-          ? await supabase.from('products').select('*').in('store_id', slugStoreIds)
+
+        // Fallback to getting the first store if slug lookup returned nothing
+        let storeIds = Array.from(new Set(((slugStoreRows || []) as any[]).map((s) => s.id).filter(Boolean)));
+        if (storeIds.length === 0) {
+          const { data: firstStore } = await supabase
+            .from('stores')
+            .select('id')
+            .limit(1)
+            .maybeSingle();
+          if (firstStore) storeIds = [firstStore.id];
+        }
+
+        const { data: prodRows, error: prodErr } = storeIds.length > 0
+          ? await supabase.from('products').select('*').in('store_id', storeIds)
           : { data: [], error: null };
         if (prodErr) {
           console.warn('[TenantStorefrontView] Supabase products load error:', prodErr.message);
@@ -159,7 +170,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               if (bySlug) themeRow = bySlug;
             }
 
-            // 1b. Fall back to domain lookup (custom domain hosting the storefront)
+            // 1b. Fall back to host lookup (custom domain hosting the storefront)
             if (!themeRow) {
               const hostSlug = (() => {
                 try {
@@ -174,14 +185,6 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   .eq('store_slug', hostSlug)
                   .maybeSingle();
                 if (byDomain) themeRow = byDomain;
-                else {
-                  const { data: byDomainCol } = await supabase
-                    .from('stores')
-                    .select(themeFields)
-                    .ilike('domain', window.location.hostname.replace(/^www\./, ''))
-                    .maybeSingle();
-                  if (byDomainCol) themeRow = byDomainCol;
-                }
               }
             }
 
