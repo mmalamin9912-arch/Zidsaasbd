@@ -118,10 +118,16 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           'verandabd',
           'default'
         ])).filter(Boolean);
-        const { data: prodRows, error: prodErr } = await supabase
-          .from('products')
-          .select('*')
+        // Resolve the store UUID from 'stores' by slug, then query products by
+        // store_id (products table has no store_slug column).
+        const { data: slugStoreRows } = await supabase
+          .from('stores')
+          .select('id, store_slug')
           .in('store_slug', slugsToQuery);
+        const slugStoreIds = Array.from(new Set(((slugStoreRows || []) as any[]).map((s) => s.id).filter(Boolean)));
+        const { data: prodRows, error: prodErr } = slugStoreIds.length > 0
+          ? await supabase.from('products').select('*').in('store_id', slugStoreIds)
+          : { data: [], error: null };
         if (prodErr) {
           console.warn('[TenantStorefrontView] Supabase products load error:', prodErr.message);
           if (String(prodErr.message || '').toLowerCase().includes('row-level') || String(prodErr.message || '').toLowerCase().includes('permission')) {
@@ -435,10 +441,19 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       // 1. Direct Supabase client load — API routes bypassed (they 500 on Vercel)
       try {
         if (supabase) {
-          const slugsToQuery = Array.from(new Set([effectiveSlug, effectiveSlug?.toLowerCase?.(), 'bd', 'verandabd', 'default'])).filter(Boolean);
+          // Resolve store UUID from 'stores' by slug, then query products by store_id
+          const slugsToQuery = Array.from(new Set([effectiveSlug, effectiveSlug?.toLowerCase?.(), 'bd', 'verandabd', 'default'])).filter(Boolean) as string[];
+          const { data: storeRows } = await supabase
+            .from('stores')
+            .select('id, store_slug')
+            .in('store_slug', slugsToQuery);
+          const storeIds = Array.from(new Set(((storeRows || []) as any[]).map((s) => s.id).filter(Boolean)));
+
           const [catRes, prodRes] = await Promise.all([
             supabase.from('categories').select('*').in('store_slug', slugsToQuery),
-            supabase.from('products').select('*').in('store_slug', slugsToQuery).eq('status', 'active')
+            storeIds.length > 0
+              ? supabase.from('products').select('*').in('store_id', storeIds).eq('status', 'active')
+              : Promise.resolve({ data: [], error: null } as any)
           ]);
 
           if (catRes && catRes.error) {
@@ -497,10 +512,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       // 2. Fetch from Supabase client if available (deduplicated above)
       try {
         if (supabase) {
-          const slugsToQuery = Array.from(new Set([storeSlug, storeSlug?.toLowerCase?.(), 'bd', 'verandabd', 'default'])).filter(Boolean);
+          const slugsToQuery = Array.from(new Set([storeSlug, storeSlug?.toLowerCase?.(), 'bd', 'verandabd', 'default'])).filter(Boolean) as string[];
+          const { data: storeRows } = await supabase
+            .from('stores')
+            .select('id, store_slug')
+            .in('store_slug', slugsToQuery);
+          const storeIds = Array.from(new Set(((storeRows || []) as any[]).map((s) => s.id).filter(Boolean)));
+
           const [catRes, prodRes] = await Promise.all([
             supabase.from('categories').select('*').in('store_slug', slugsToQuery),
-            supabase.from('products').select('*').in('store_slug', slugsToQuery).eq('status', 'active')
+            storeIds.length > 0
+              ? supabase.from('products').select('*').in('store_id', storeIds).eq('status', 'active')
+              : Promise.resolve({ data: [], error: null } as any)
           ]);
 
           if (catRes && catRes.data && Array.isArray(catRes.data)) catData.push(...catRes.data);
