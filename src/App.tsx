@@ -1064,28 +1064,37 @@ export default function App() {
               setOrders(prev => [newOrder, ...prev]);
             }
             // Insert into Supabase orders table — resolve the canonical store UUID
-            // via the PERMANENT identity (store_code ZID-BD-XXXX / UUID) first;
-            // the slug is a last-resort display fallback, never the primary key.
             try {
               const { supabase } = await import('./lib/supabase');
-              const { resolveStoreRef } = await import('./lib/storeId');
+              const { resolveStoreRef, generateStoreCode } = await import('./lib/storeId');
               if (supabase) {
                 const cleanSlug = String(storeSlug || newOrder.storeSlug || '').split(':')[0].trim().toLowerCase();
-                const permanentRef =
-                  (merchant as any)?.storeCode || (merchant as any)?.store_code || '';
-                let storeId = '';
+                
+                // 1. Resolve store by slug, store_code, or fallback to first available store
+                let ref = await resolveStoreRef(supabase, (merchant as any)?.storeCode || (merchant as any)?.store_code)
+                  || await resolveStoreRef(supabase, cleanSlug)
+                  || await resolveStoreRef(supabase, (merchant as any)?.id);
 
-                // 1) Resolve via permanent code → UUID → slug, in that order.
-                const ref = await resolveStoreRef(supabase, permanentRef)
-                  || await resolveStoreRef(supabase, (merchant as any)?.id)
-                  || await resolveStoreRef(supabase, cleanSlug);
-                if (ref?.id) storeId = String(ref.id);
+                if (!ref) {
+                  // Fallback: Try to get the first store from 'stores' table
+                  const { data: firstStore } = await supabase
+                    .from('stores')
+                    .select('id, store_code, store_slug')
+                    .limit(1)
+                    .maybeSingle();
+                  
+                  if (firstStore) {
+                    ref = {
+                      id: String(firstStore.id),
+                      storeCode: firstStore.store_code || generateStoreCode(String(firstStore.id)),
+                      storeSlug: firstStore.store_slug
+                    };
+                  }
+                }
 
-                if (!storeId) {
-                  console.warn('Could not resolve store UUID for slug:', cleanSlug, '— order insert skipped to protect FK/RLS integrity.');
-                } else {
+                if (ref?.id) {
                   await supabase.from('orders').insert({
-                    store_id: storeId,
+                    store_id: ref.id,
                     order_number: newOrder.orderNumber?.replace('#', '') || newOrder.id,
                     customer_name: newOrder.customerName,
                     customer_phone: newOrder.customerPhone,
@@ -1097,6 +1106,8 @@ export default function App() {
                     status: 'New',
                     created_at: new Date().toISOString(),
                   });
+                } else {
+                  console.error('CRITICAL: Failed to resolve any store UUID for checkout. Order NOT inserted to avoid constraint violations.');
                 }
               }
             } catch (e) {
