@@ -106,16 +106,16 @@ function sanitizeServerMerchant(m: any) {
   const planId = m.subscriptionPlan || m.subscription_plan || 'free_trial';
   const isPaid = planId !== 'free_trial' && planId !== 'trial';
   const durationDays = getPlanDurationInDays(planId);
-  
+
   const rawStart = m.plan_started_at || m.planStartedAt || m.created_at || new Date().toISOString();
   const { plan_started_at: calcStart, expires_at: calcExpiry, expiryDate } = calculatePlanTimestamps(planId, new Date(rawStart));
-  
+
   const existingExpiryMs = m.expires_at ? new Date(m.expires_at).getTime() : 0;
   const isStale = !existingExpiryMs || isNaN(existingExpiryMs) || (isPaid && durationDays >= 90 && (existingExpiryMs - Date.now() < 35 * 86400000));
-  
+
   const plan_started_at = isStale ? new Date().toISOString() : (m.plan_started_at || m.planStartedAt || calcStart);
   const expires_at = isStale ? new Date(Date.now() + durationDays * 86400000).toISOString() : (m.expires_at || m.expiresAt || calcExpiry);
-  
+
   return {
     ...m,
     subscriptionPlan: planId,
@@ -217,13 +217,13 @@ app.get('/api/health', (req, res) => {
 app.all('/api/categories', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const rawSlug = typeof req.query.store_slug === 'string' 
-      ? req.query.store_slug.trim().toLowerCase() 
-      : typeof req.body?.store_slug === 'string' 
-        ? req.body.store_slug.trim().toLowerCase() 
+    const rawSlug = typeof req.query.store_slug === 'string'
+      ? req.query.store_slug.trim().toLowerCase()
+      : typeof req.body?.store_slug === 'string'
+        ? req.body.store_slug.trim().toLowerCase()
         : '';
     const storeSlug = String(rawSlug || '').split(':')[0].trim().toLowerCase();
-        
+
     const categories = Array.isArray(req.body?.categories) ? req.body.categories : (req.body ? [req.body] : []);
 
     if (req.method === 'POST' || req.method === 'PUT') {
@@ -310,7 +310,7 @@ app.all('/api/categories', async (req, res) => {
       const cats = categoryStore.get(storeSlug) || [];
       return res.status(200).json({ ok: true, store_slug: storeSlug, categories: cats });
     }
-    
+
     res.setHeader('Allow', 'GET, POST, PUT, DELETE');
     return res.status(405).json({ ok: false, error: `Method ${req.method} is not allowed` });
   } catch (err: any) {
@@ -322,10 +322,10 @@ app.all('/api/categories', async (req, res) => {
 app.all('/api/merchants/update', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const storeSlug = typeof req.query.store_slug === 'string' 
-      ? req.query.store_slug.trim() 
-      : typeof req.body?.store_slug === 'string' 
-        ? req.body.store_slug.trim() 
+    const storeSlug = typeof req.query.store_slug === 'string'
+      ? req.query.store_slug.trim()
+      : typeof req.body?.store_slug === 'string'
+        ? req.body.store_slug.trim()
         : req.body?.merchant?.storeSlug || req.body?.merchant?.store_slug || 'bd';
 
     if (req.method === 'GET') {
@@ -356,10 +356,10 @@ app.all('/api/merchants/update', (req, res) => {
     return res.status(405).json({ ok: false, error: `Method ${req.method} is not allowed` });
   } catch (err: any) {
     console.error('Merchants update API error:', err);
-    return res.status(200).json({ 
-      ok: true, 
-      merchant: req.body?.merchant || { storeName: 'SlateBD', storeSlug: 'bd' }, 
-      error: err?.message 
+    return res.status(200).json({
+      ok: true,
+      merchant: req.body?.merchant || { storeName: 'SlateBD', storeSlug: 'bd' },
+      error: err?.message
     });
   }
 });
@@ -368,7 +368,7 @@ app.get('/api/merchants/check/:email', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   const email = (req.params.email || '').trim().toLowerCase();
   if (!email) return res.json(null);
-  
+
   // 1. Query Supabase REST if configured
   const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
 
@@ -397,13 +397,13 @@ app.get('/api/merchants/check/:email', async (req, res) => {
       return res.json(sanitizeServerMerchant(m));
     }
   }
-  
+
   // 3. Check local-store.json
   const payload = await readStorePayload();
   if (payload.merchant && payload.merchant.email && String(payload.merchant.email).toLowerCase() === email) {
     return res.json(sanitizeServerMerchant(payload.merchant));
   }
-  
+
   if (Array.isArray(payload.allMerchants)) {
     const found = payload.allMerchants.find((m: any) => m && m.email && String(m.email).toLowerCase() === email);
     if (found) return res.json(sanitizeServerMerchant(found));
@@ -416,7 +416,7 @@ app.get('/api/merchants/by-slug', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   const slug = (req.query.slug as string || '').trim().toLowerCase();
   if (!slug) return res.json({ ok: false, merchant: null });
-  
+
   // 1. Query Supabase REST if configured
   const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
 
@@ -441,7 +441,7 @@ app.get('/api/merchants/by-slug', async (req, res) => {
 
   const inMemory = merchantStore.get(slug);
   if (inMemory) return res.json({ ok: true, merchant: sanitizeServerMerchant(inMemory) });
-  
+
   const payload = await readStorePayload();
   if (payload.merchant && payload.merchant.storeSlug === slug) {
     return res.json({ ok: true, merchant: sanitizeServerMerchant(payload.merchant) });
@@ -861,7 +861,7 @@ interface WhatsAppDeliveryResult {
 async function dispatchLiveWhatsAppMessage(phone: string, code: string, userType: string): Promise<WhatsAppDeliveryResult> {
   const isKsa = phone.startsWith('+966');
   const digitsOnly = phone.replace(/[^\d]/g, '');
-  
+
   // Message payload in English and Bengali / Arabic
   const messageBody = isKsa
     ? `*Zid E-Commerce Platform Verification*\n\nYour 6-digit WhatsApp OTP verification code is:\n*${code}*\n\nرمز التحقق الخاص بك هو: *${code}*\n(Valid for 10 minutes. Do not share this code with anyone.)`
@@ -1221,8 +1221,8 @@ app.post('/api/courier/steadfast', async (req, res) => {
     const data = await response.json().catch(() => ({}));
 
     if (data.status === 200 || data.status === 'success' || data.success) {
-      return res.json({ 
-        success: true, 
+      return res.json({
+        success: true,
         tracking_code: data.consignment?.consignment_id || data.tracking_code || `STF-${Date.now()}`,
         consignment: data.consignment || data
       });
@@ -1266,8 +1266,8 @@ app.post('/api/courier/steadfast/route', async (req, res) => {
     const data = await response.json().catch(() => ({}));
 
     if (data.status === 200 || data.status === 'success' || data.success) {
-      return res.json({ 
-        success: true, 
+      return res.json({
+        success: true,
         tracking_code: data.consignment?.consignment_id || data.tracking_code || `STF-${Date.now()}`,
         consignment: data.consignment || data
       });
@@ -1322,8 +1322,8 @@ const handleSteadfastFraudCheck = async (req: any, res: any) => {
       total_delivered = Number(externalData.total_delivered || externalData.delivered || 0);
       total_cancelled = Number(externalData.total_cancelled || externalData.returned || externalData.cancelled || 0);
       total_parcels = Number(externalData.total_parcels || (total_delivered + total_cancelled) || 1);
-      success_rate = externalData.delivery_ratio 
-        ? Math.round(Number(externalData.delivery_ratio)) 
+      success_rate = externalData.delivery_ratio
+        ? Math.round(Number(externalData.delivery_ratio))
         : Math.round((total_delivered / (total_parcels || 1)) * 100);
     } else {
       // Deterministic calculation based on customer phone digits for demo & test mode
@@ -1390,6 +1390,120 @@ app.get('/api/courier/steadfast/fraud-check', handleSteadfastFraudCheck);
 app.post('/api/courier/steadfast/fraud-check', handleSteadfastFraudCheck);
 app.get('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
+
+// ── Orders ──────────────────────────────────────────────────────────────────────
+// Orders are always scoped to a real row in the 'stores' table (store_id = store UUID).
+// A client-supplied slug is resolved to the store's real UUID first, so every query
+// stays safely targeted on 'stores' — never on a free-form store_id.
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim());
+}
+
+async function resolveStoreIdBySlug(rawSlug: string): Promise<string | null> {
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return null;
+  const slug = String(rawSlug || '').split(':')[0].trim().toLowerCase() || 'bd';
+  try {
+    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+    });
+    if (sbRes.ok) {
+      const rows = await sbRes.json();
+      if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
+    }
+  } catch (e) {
+    console.warn('[Server] resolveStoreIdBySlug warning:', e);
+  }
+  return null;
+}
+
+async function loadOrdersForStoreRef(ref: string): Promise<any[]> {
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return [];
+  const raw = String(ref || '').trim();
+  if (!raw) return [];
+  try {
+    const storeId = isUuidLike(raw) ? raw : (await resolveStoreIdBySlug(raw) || '');
+    if (!storeId) return [];
+    const sbRes = await fetch(`${supabaseUrl}/rest/v1/orders?store_id=eq.${encodeURIComponent(storeId)}&select=*&order=created_at.desc`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+    });
+    if (!sbRes.ok) return [];
+    const rows = await sbRes.json();
+    return Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    console.warn('[Server] loadOrdersForStoreRef warning:', e);
+    return [];
+  }
+}
+
+// GET /api/orders/:storeRef — fetch orders for a store (accepts slug or store UUID).
+app.get('/api/orders/:storeRef', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const orders = await loadOrdersForStoreRef(req.params.storeRef || '');
+    return res.status(200).json(Array.isArray(orders) ? orders : []);
+  } catch (err: any) {
+    console.error('[Server] GET /api/orders error:', err);
+    return res.status(200).json([]);
+  }
+});
+
+// POST /api/orders — batch sync updated orders, resolving store_id from slug.
+app.post('/api/orders', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const arr: any[] = Array.isArray(req.body)
+      ? req.body
+      : Array.isArray((req.body as any)?.orders)
+        ? (req.body as any).orders
+        : [];
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    let synced = 0;
+    for (const order of arr) {
+      if (!order || typeof order !== 'object') continue;
+      const merchantRef = String(order.merchantId || order.merchant_id || order.storeSlug || order.store_slug || '').trim();
+      const slug = String(merchantRef).split(':')[0].trim().toLowerCase() || 'bd';
+      const storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug) || merchantRef);
+      if (!storeId) continue;
+
+      const record = {
+        store_id: storeId,
+        order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
+        customer_name: order.customerName || order.customer_name || 'Customer',
+        customer_phone: order.customerPhone || order.customer_phone || '',
+        shipping_address: String(order.address || order.shipping_address || '').trim(),
+        items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []),
+        total_amount: order.totalBDT ?? order.total_amount ?? order.total ?? 0,
+        payment_method: order.paymentMethod || order.payment_method || 'COD',
+        payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
+        status: order.status || 'New',
+      };
+      if (isConfigured) {
+        try {
+          const sbRes = await fetch(`${supabaseUrl}/rest/v1/orders`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': supabaseKey,
+              'Authorization': `Bearer ${supabaseKey}`,
+              'Prefer': 'return=minimal',
+            },
+            body: JSON.stringify(record),
+          });
+          if (sbRes.ok) synced++;
+        } catch (e) {
+          console.warn('[Server] POST /api/orders insert warning:', e);
+        }
+      }
+    }
+    return res.status(200).json({ ok: true, synced });
+  } catch (err: any) {
+    console.error('[Server] POST /api/orders error:', err);
+    return res.status(200).json({ ok: false, synced: 0, error: err?.message || 'Order sync failed' });
+  }
+});
 
 // Fallback for any unhandled /api/* request so it returns JSON and NOT HTML
 app.all('/api/*', (req, res) => {

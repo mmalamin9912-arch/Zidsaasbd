@@ -1061,23 +1061,44 @@ export default function App() {
             if (merchant?.storeSlug === storeSlug) {
               setOrders(prev => [newOrder, ...prev]);
             }
-            // Insert into Supabase orders table
+            // Insert into Supabase orders table — resolve the real store UUID from
+            // the slug first, so store_id always references stores.id (never a slug).
             try {
               const { supabase } = await import('./lib/supabase');
               if (supabase) {
-                await supabase.from('orders').insert({
-                  store_id: storeSlug,
-                  order_number: newOrder.orderNumber?.replace('#', '') || newOrder.id,
-                  customer_name: newOrder.customerName,
-                  customer_phone: newOrder.customerPhone,
-                  shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
-                  items: JSON.stringify(newOrder.items),
-                  total_amount: newOrder.totalBDT,
-                  payment_method: newOrder.paymentMethod,
-                  payment_status: newOrder.paymentStatus,
-                  status: 'New',
-                  created_at: new Date().toISOString(),
-                });
+                const cleanSlug = String(storeSlug || newOrder.storeSlug || '').split(':')[0].trim().toLowerCase();
+                const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanSlug || '');
+                let storeId = '';
+
+                // Resolve the store's real UUID from the canonical 'stores' table.
+                if (!isUuid && cleanSlug) {
+                  const { data: storeRow } = await supabase
+                    .from('stores')
+                    .select('id')
+                    .eq('store_slug', cleanSlug)
+                    .maybeSingle();
+                  if (storeRow?.id) storeId = String(storeRow.id);
+                } else if (isUuid) {
+                  storeId = cleanSlug;
+                }
+
+                if (!storeId) {
+                  console.warn('Could not resolve store UUID for slug:', cleanSlug, '— order insert skipped to protect FK/RLS integrity.');
+                } else {
+                  await supabase.from('orders').insert({
+                    store_id: storeId,
+                    order_number: newOrder.orderNumber?.replace('#', '') || newOrder.id,
+                    customer_name: newOrder.customerName,
+                    customer_phone: newOrder.customerPhone,
+                    shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
+                    items: JSON.stringify(newOrder.items),
+                    total_amount: newOrder.totalBDT,
+                    payment_method: newOrder.paymentMethod,
+                    payment_status: newOrder.paymentStatus,
+                    status: 'New',
+                    created_at: new Date().toISOString(),
+                  });
+                }
               }
             } catch (e) {
               console.warn('Supabase order insert failed:', e);
