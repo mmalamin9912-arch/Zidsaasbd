@@ -102,6 +102,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // Effective store slug for cache keys — resolved from prop or the active merchant session.
   const effectiveStoreSlug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
   const [liveStoreData, setLiveStoreData] = useState<ZidStoreData>(() => readZidStoreData(storeSlug));
+  // Real store UUID resolved from the 'stores' table — used for orders.store_id
+  const [resolvedStoreId, setResolvedStoreId] = useState<string>('');
   useEffect(() => subscribeToZidStoreData(setLiveStoreData, storeSlug), [storeSlug]);
   useEffect(() => {
     let active = true;
@@ -926,10 +928,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     }).filter(Boolean) as any);
   };
 
-  const handleCheckoutSubmit = (e: React.FormEvent) => {
+  const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const orderNum = '#' + Math.floor(100000 + Math.random() * 900000);
-    setConfirmedOrderNum(orderNum);
 
     const items: OrderItem[] = (cart || []).length > 0 ? (cart || []).map((c, i) => ({
       id: `item-${i}`,
@@ -973,6 +974,70 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       items,
     };
 
+    // ---------------------------------------------------------------------
+    // Insert the order into the Supabase 'orders' table BEFORE showing the
+    // success screen. store_id must be the real UUID from 'stores', never a
+    // slug (enforced by FK + RLS in 0001_orders_store_rls.sql).
+    // ---------------------------------------------------------------------
+    let storeId = resolvedStoreId;
+    try {
+      if (!storeId && supabase) {
+        const cleanSlug = String(effectiveStoreSlug || '').split(':')[0].trim().toLowerCase();
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanSlug || '');
+        if (isUuid) {
+          storeId = cleanSlug;
+        } else if (cleanSlug) {
+          const { data: storeRow, error: storeErr } = await supabase
+            .from('stores')
+            .select('id')
+            .eq('store_slug', cleanSlug)
+            .maybeSingle();
+          if (storeErr) console.error('[Checkout] stores lookup error:', storeErr.message);
+          if (storeRow?.id) {
+            storeId = String(storeRow.id);
+            setResolvedStoreId(storeId);
+          }
+        }
+      }
+
+      if (!storeId) {
+        const msg = 'Could not resolve the store UUID from the stores table — order not saved.';
+        console.error('[Checkout]', msg, 'slug:', effectiveStoreSlug);
+        alert(`Order failed: ${msg}`);
+        return; // do NOT proceed to success screen
+      }
+
+      const { error: insertError } = await supabase.from('orders').insert({
+        store_id: storeId,
+        order_number: newOrder.orderNumber?.replace('#', '') || newOrder.id,
+        customer_name: newOrder.customerName,
+        customer_phone: newOrder.customerPhone,
+        customer_city: newOrder.customerCity,
+        shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
+        items: JSON.stringify(newOrder.items),
+        total_amount: newOrder.totalBDT,
+        payment_method: newOrder.paymentMethod,
+        payment_status: newOrder.paymentStatus,
+        transaction_id: newOrder.transactionId || null,
+        status: 'New',
+        created_at: new Date().toISOString(),
+      });
+
+      if (insertError) {
+        console.error('[Checkout] Supabase orders insert failed:', insertError.message, insertError);
+        alert(`Order failed to save: ${insertError.message}`);
+        return; // do NOT proceed to success screen
+      }
+
+      console.log('[Checkout] Order inserted into Supabase orders table:', { store_id: storeId, order_number: newOrder.orderNumber });
+    } catch (err: any) {
+      console.error('[Checkout] Unexpected order insert failure:', err);
+      alert(`Order failed to save: ${err?.message || 'Unexpected error'}`);
+      return; // do NOT proceed to success screen
+    }
+
+    // Only now — after a successful insert — proceed to the success screen.
+    setConfirmedOrderNum(orderNum);
     onPlaceOrder(newOrder);
     setCheckoutStep('success');
     setCart([]);
