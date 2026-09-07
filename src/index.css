@@ -101,7 +101,7 @@
   gap: 22px;
   overflow: hidden;
   color: #f8fafc;
-  background: #12151f;
+  background: radial-gradient(circle at 50% 30%, #1a1f2d 0%, #131722 50%, #0a0d15 100%);
   animation: zid-splash-enter .35s ease-out both;
   transition: opacity .5s ease, visibility .5s ease, transform .5s ease;
 }
@@ -128,14 +128,40 @@
   animation: zid-ai-pulse-ring 2s ease-out infinite;
 }
 
+/* ZID splash — glassmorphic frame around the logo sequence */
+.zid-splash__frame {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 20px;
+  padding: 28px 32px 24px;
+  border-radius: 26px;
+  background: rgba(18, 21, 31, .55);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(251, 191, 36, .2);
+  box-shadow:
+    0 0 32px rgba(251, 191, 36, .1),
+    0 0 92px rgba(251, 191, 36, .05),
+    inset 0 1px 0 rgba(255, 255, 255, .07),
+    inset 0 -1px 0 rgba(10, 13, 21, .4);
+  overflow: hidden;
+}
+
+@keyframes zid-splash-glow {
+  0%, 100% { opacity: .4; transform: scale(.85); }
+  28% { opacity: .68; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.14); }
+  72% { opacity: .6; transform: scale(.96); }
+}
+
 .zid-splash__ambient {
   position: absolute;
-  width: 42vw;
-  max-width: 520px;
-  aspect-ratio: 1;
+  inset: -16% -18%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(251, 191, 36, .12), transparent 67%);
-  filter: blur(16px);
+  background: radial-gradient(circle, rgba(251, 191, 36, .16), rgba(251, 191, 36, .05) 46%, transparent 72%);
+  filter: blur(14px);
+  animation: zid-splash-glow 5.5s ease-in-out both;
 }
 
 .zid-splash::before {
@@ -160,6 +186,6 @@
 .zid-splash__bar span { display: block; width: 100%; height: 100%; background: #fbbf24; animation: zid-splash-progress 5.5s ease-in-out both; }
 
 @media (prefers-reduced-motion: reduce) {
-  .zid-splash, .zid-splash__core, .zid-splash__orbit, .zid-splash__brand, .zid-splash__bar span { animation-duration: .01ms; animation-delay: 0ms; }
+  .zid-splash, .zid-splash__core, .zid-splash__orbit, .zid-splash__brand, .zid-splash__bar span, .zid-splash__ambient { animation-duration: .01ms; animation-delay: 0ms; }
   .zid-splash--exiting { transition-duration: .01ms; }
 }

@@ -40,14 +40,16 @@ export const SplashLoader: React.FC<SplashLoaderProps> = ({ visible = true }) =>
 
   return (
     <div className={`zid-splash${exiting ? ' zid-splash--exiting' : ''}`} role="status" aria-label="Loading ZID SaaS BD" data-testid="zid-splash-loader">
-      <div className="zid-splash__ambient" aria-hidden="true" />
-      <div className="zid-splash__mark" aria-hidden="true">
-        <span className="zid-splash__orbit zid-splash__orbit--i">I</span>
-        <span className="zid-splash__core">Z</span>
-        <span className="zid-splash__orbit zid-splash__orbit--d">D</span>
+      <div className="zid-splash__frame">
+        <div className="zid-splash__ambient" aria-hidden="true" />
+        <div className="zid-splash__mark" aria-hidden="true">
+          <span className="zid-splash__orbit zid-splash__orbit--i">I</span>
+          <span className="zid-splash__core">Z</span>
+          <span className="zid-splash__orbit zid-splash__orbit--d">D</span>
+        </div>
+        <div className="zid-splash__brand">ZID <span>SAAS BD</span></div>
+        <div className="zid-splash__bar" aria-hidden="true"><span /></div>
       </div>
-      <div className="zid-splash__brand">ZID <span>SAAS BD</span></div>
-      <div className="zid-splash__bar" aria-hidden="true"><span /></div>
     </div>
   );
 };
