@@ -990,22 +990,22 @@ export default function App() {
   const handleUpdateCustomers = async (updatedCustomers: Customer[]) => {
     setCustomers(updatedCustomers);
     if (merchant?.id) {
-        await fetch('/api/customers', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatedCustomers.map(c => ({...c, merchantId: merchant.id})))
-        }).catch(err => console.error('Error updating customers in DB:', err));
+      await fetch('/api/customers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedCustomers.map(c => ({ ...c, merchantId: merchant.id })))
+      }).catch(err => console.error('Error updating customers in DB:', err));
     }
   };
 
   const handleUpdateOrders = async (updatedOrders: Order[]) => {
     setOrders(updatedOrders);
     if (merchant?.id) {
-        await fetch('/api/orders', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updatedOrders.map(o => ({...o, merchantId: merchant.id})))
-        }).catch(err => console.error('Error updating orders in DB:', err));
+      await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedOrders.map(o => ({ ...o, merchantId: merchant.id })))
+      }).catch(err => console.error('Error updating orders in DB:', err));
     }
   };
 
@@ -1109,28 +1109,28 @@ export default function App() {
                   }
                 }
 
-                    await supabase.from('orders').insert({
-                      store_id: storeUuid,
-                      order_number: newOrder.orderNumber?.replace('#', '') || newOrder.id,
-                      customer_name: newOrder.customerName,
-                      customer_phone: newOrder.customerPhone,
-                      shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
-                      items: JSON.stringify(newOrder.items),
-                      total_amount: newOrder.totalBDT,
-                      payment_method: newOrder.paymentMethod,
-                      payment_status: newOrder.paymentStatus,
-                      status: 'New',
-                      created_at: new Date().toISOString(),
-                    }).then(
-                      ({ error }) => {
-                        if (error) console.warn('Supabase order insert warning:', error.message);
-                      },
-                      (err) => console.warn('Supabase order insert warning:', err)
-                    );
-                  }
-                } catch (e) {
-                  console.warn('Supabase order insert warning:', e);
-                }
+                await supabase.from('orders').insert({
+                  store_id: storeUuid,
+                  order_number: newOrder.orderNumber?.replace('#', '') || newOrder.id,
+                  customer_name: newOrder.customerName,
+                  customer_phone: newOrder.customerPhone,
+                  shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
+                  items: JSON.stringify(newOrder.items),
+                  total_amount: newOrder.totalBDT,
+                  payment_method: newOrder.paymentMethod,
+                  payment_status: newOrder.paymentStatus,
+                  status: 'New',
+                  created_at: new Date().toISOString(),
+                }).then(
+                  ({ error }) => {
+                    if (error) console.warn('Supabase order insert warning:', error.message);
+                  },
+                  (err) => console.warn('Supabase order insert warning:', err)
+                );
+              }
+            } catch (e) {
+              console.warn('Supabase order insert warning:', e);
+            }
           } catch (e) {
             console.error('Error recording order to database:', e);
           }
@@ -1335,16 +1335,14 @@ export default function App() {
   }
 
   return (
-    <div className={`min-h-screen flex flex-col font-sans selection:bg-[#D4AF37] selection:text-slate-950 transition-colors duration-200 ${
-      isDarkMode ? 'bg-[#141721] text-slate-100' : 'bg-[#F4F6F9] text-slate-900'
-    }`}>
+    <div className={`min-h-screen flex flex-col font-sans selection:bg-[#D4AF37] selection:text-slate-950 transition-colors duration-200 ${isDarkMode ? 'bg-[#141721] text-slate-100' : 'bg-[#F4F6F9] text-slate-900'
+      }`}>
       {/* Global Platform Announcement */}
       {platformAnnouncement.isActive && (
-        <div className={`py-1.5 px-4 text-center text-[10px] font-black uppercase tracking-[0.1em] shadow-sm relative z-[100] ${
-          platformAnnouncement.type === 'urgent' ? 'bg-red-600 text-white' :
-          platformAnnouncement.type === 'warning' ? 'bg-orange-500 text-slate-950' :
-          'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950'
-        }`}>
+        <div className={`py-1.5 px-4 text-center text-[10px] font-black uppercase tracking-[0.1em] shadow-sm relative z-[100] ${platformAnnouncement.type === 'urgent' ? 'bg-red-600 text-white' :
+            platformAnnouncement.type === 'warning' ? 'bg-orange-500 text-slate-950' :
+              'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950'
+          }`}>
           {platformAnnouncement.message}
         </div>
       )}
