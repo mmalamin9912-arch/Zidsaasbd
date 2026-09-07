@@ -202,8 +202,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               if (byEmail) themeRow = byEmail;
             }
             if (!themeRow && cleanEmail) {
+              // Legacy fallback removed — 'stores' is the canonical table.
               const { data: merchantRow } = await supabase
-                .from('merchants')
+                .from('stores')
                 .select(themeFields)
                 .ilike('email', cleanEmail)
                 .maybeSingle();

@@ -1,15 +1,15 @@
 import React, { useState } from 'react';
 import { BrandLogo } from './BrandLogo';
-import { 
-  ShieldAlert, 
-  DollarSign, 
-  ShoppingBag, 
-  Users, 
-  CreditCard, 
-  CheckCircle, 
-  XCircle, 
-  Clock, 
-  Settings, 
+import {
+  ShieldAlert,
+  DollarSign,
+  ShoppingBag,
+  Users,
+  CreditCard,
+  CheckCircle,
+  XCircle,
+  Clock,
+  Settings,
   Save,
   Search,
   Lock,
@@ -144,7 +144,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team'>('analytics');
   const [openCategory, setOpenCategory] = useState<string | null>(null);
-  
+
   // New modal state for creating merchant
   const [isCreateMerchantModalOpen, setIsCreateMerchantModalOpen] = useState(false);
   const [newMerchantForm, setNewMerchantForm] = useState({
@@ -224,7 +224,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   };
   const [logSearchQuery, setLogSearchQuery] = useState('');
   const [logSeverityFilter, setLogSeverityFilter] = useState<'All' | 'Info' | 'Warning' | 'Critical'>('All');
-  
+
   // Broadcast State
   const [broadcastForm, setBroadcastForm] = useState<Partial<BroadcastMessage>>({
     audience: 'All Merchants',
@@ -259,7 +259,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   };
 
   const filteredLogs = auditLogs.filter(log => {
-    const matchesSearch = 
+    const matchesSearch =
       log.action.toLowerCase().includes(logSearchQuery.toLowerCase()) ||
       log.targetEntity.toLowerCase().includes(logSearchQuery.toLowerCase()) ||
       log.adminUser.toLowerCase().includes(logSearchQuery.toLowerCase());
@@ -301,7 +301,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
+
     setSaveSuccess('Logs exported to CSV successfully.');
     setTimeout(() => setSaveSuccess(null), 3000);
   };
@@ -450,7 +450,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   });
 
   const filteredTickets = supportTickets.filter(ticket => {
-    const matchesSearch = ticket.subject.toLowerCase().includes(ticketSearchQuery.toLowerCase()) || 
+    const matchesSearch = ticket.subject.toLowerCase().includes(ticketSearchQuery.toLowerCase()) ||
                          (ticket?.storeName || '').toLowerCase().includes(ticketSearchQuery.toLowerCase()) ||
                          ticket.id.toLowerCase().includes(ticketSearchQuery.toLowerCase());
     const matchesStatus = ticketStatusFilter === 'All' || ticket.status === ticketStatusFilter;
@@ -470,9 +470,9 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       timestamp: new Date().toISOString()
     };
 
-    onUpdateSupportTickets(prev => prev.map(t => 
-      t.id === selectedTicketId 
-        ? { ...t, messages: [...t.messages, newMessage], status: t.status === 'Open' ? 'In Progress' : t.status } 
+    onUpdateSupportTickets(prev => prev.map(t =>
+      t.id === selectedTicketId
+        ? { ...t, messages: [...t.messages, newMessage], status: t.status === 'Open' ? 'In Progress' : t.status }
         : t
     ));
     setReplyMessage('');
@@ -561,7 +561,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     if (supabase) {
       (async () => {
         try {
-          await supabase.from('merchants').insert([{
+          await supabase.from('stores').insert([{
             store_name: newMerchant.storeName,
             store_slug: newMerchant.storeSlug,
             email: newMerchant.email,
@@ -717,7 +717,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
           };
 
           if (req.email) {
-            await supabase.from('merchants').update(updatePayload).ilike('email', req.email.trim());
+            await supabase.from('stores').update(updatePayload).ilike('email', req.email.trim());
             await supabase.from('subscriptions').upsert([{
               merchant_email: req.email.trim().toLowerCase(),
               store_slug: (req.storeName || '').toLowerCase().replace(/\s+/g, '-'),
@@ -809,7 +809,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     onUpdateAllMerchants(prev => prev.map(m => {
       if (
         (req.storeId && m?.storeSlug === req.storeId) ||
-        (req.storeName && m?.storeName === req.storeName) || 
+        (req.storeName && m?.storeName === req.storeName) ||
         (m?.email && req.email && m?.email === req.email)
       ) {
         const existing = m?.unlockedThemeIds || [];
@@ -825,7 +825,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     // If current active merchant matches, unlock theme for them
     if (
       (req.storeId && currentMerchant?.storeSlug === req.storeId) ||
-      (req.storeName && currentMerchant?.storeName === req.storeName) || 
+      (req.storeName && currentMerchant?.storeName === req.storeName) ||
       (currentMerchant?.email && req.email && currentMerchant?.email === req.email)
     ) {
       const existing = currentMerchant?.unlockedThemeIds || [];
@@ -990,7 +990,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const handleChangePlan = (storeName: string) => {
     const m = allMerchants.find(x => x?.storeName === storeName);
     if (!m) return;
-    
+
     // Cycle through plans for demo/simple logic
     const plans: SubscriptionPlanId[] = ['free_trial', 'starter_3m', 'pro_6m', 'enterprise_12m'];
     const currentIndex = plans.indexOf(m.subscriptionPlan || 'free_trial');
@@ -1072,18 +1072,18 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
   const filteredMerchants = allMerchants.filter(m => {
     const query = merchantSearchQuery.toLowerCase();
-    const matchesSearch = 
+    const matchesSearch =
       (m?.storeName || '').toLowerCase().includes(query) ||
       (m?.email || '').toLowerCase().includes(query) ||
       (m?.ownerName || '').toLowerCase().includes(query);
-    
+
     if (!matchesSearch) return false;
 
     if (merchantStatusFilter === 'all') return true;
     if (merchantStatusFilter === 'active') return m.subscriptionPlan !== 'trial' && m.subscriptionPlan !== 'free_trial' && !m.isLocked;
     if (merchantStatusFilter === 'trial') return m.subscriptionPlan === 'trial' || m.subscriptionPlan === 'free_trial';
     if (merchantStatusFilter === 'suspended') return m.isLocked === true;
-    
+
     return true;
   });
 
@@ -1095,7 +1095,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
   return (
     <div className="min-h-screen bg-[#12151F] text-slate-100 flex flex-col font-sans">
-      
+
       {/* Super Admin Top Header Bar */}
       <header className="bg-[#181B26] border-b border-[#2E3548] px-6 py-4 flex items-center justify-between sticky top-0 z-50 shadow-lg">
         <div className="flex items-center gap-3">
@@ -1315,7 +1315,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 <div className="text-[11px] text-amber-400 font-semibold">0% Commission Model</div>
               </div>
             </div>
-            
+
             {/* AI Executive Summary Widget */}
             <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-4">
               <div className="flex items-center justify-between">
@@ -1323,7 +1323,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   <Cpu className="w-5 h-5 text-indigo-400" />
                   AI Executive Summary
                 </h3>
-                <button 
+                <button
                   onClick={async () => {
                     setIsGeneratingSummary(true);
                     try {
@@ -1440,8 +1440,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       key={status}
                       onClick={() => setApprovalStatusFilter(status as any)}
                       className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all cursor-pointer ${
-                        approvalStatusFilter === status 
-                          ? 'bg-indigo-600 text-white shadow-lg' 
+                        approvalStatusFilter === status
+                          ? 'bg-indigo-600 text-white shadow-lg'
                           : 'text-slate-500 hover:text-white'
                       }`}
                     >
@@ -1483,7 +1483,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                           <span className="font-mono bg-[#181B26] text-pink-400 px-2.5 py-1 rounded border border-[#2E3548] font-bold text-[11px]">
                             {req.transactionId}
                           </span>
-                          <button 
+                          <button
                             onClick={() => handleCopyToClipboard(req.transactionId)}
                             className="p-1.5 hover:bg-[#3A435E] rounded-lg transition-colors cursor-pointer text-slate-500 hover:text-white"
                             title="Copy Transaction ID"
@@ -1590,7 +1590,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                             <span className="font-mono bg-[#181B26] text-pink-400 px-2.5 py-1 rounded border border-[#2E3548] font-bold text-[11px]">
                               {req.transactionId}
                             </span>
-                            <button 
+                            <button
                               onClick={() => handleCopyToClipboard(req.transactionId)}
                               className="p-1.5 hover:bg-[#3A435E] rounded-lg transition-colors cursor-pointer text-slate-500 hover:text-white"
                             >
@@ -1683,7 +1683,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       <div className="w-10 h-10 rounded-xl bg-pink-500 flex items-center justify-center text-white font-black text-xs shadow-lg shadow-pink-500/20">bKash</div>
                       <h4 className="font-bold text-white text-sm">bKash Admin</h4>
                     </div>
-                    <div 
+                    <div
                       onClick={() => setGatewayForm({...gatewayForm, bkashActive: !gatewayForm.bkashActive})}
                       className={`w-10 h-5 rounded-full transition-all relative cursor-pointer ${gatewayForm.bkashActive ? 'bg-pink-500' : 'bg-slate-700'}`}
                     >
@@ -1725,7 +1725,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       <div className="w-10 h-10 rounded-xl bg-orange-500 flex items-center justify-center text-white font-black text-xs shadow-lg shadow-orange-500/20">Nagad</div>
                       <h4 className="font-bold text-white text-sm">Nagad Admin</h4>
                     </div>
-                    <div 
+                    <div
                       onClick={() => setGatewayForm({...gatewayForm, nagadActive: !gatewayForm.nagadActive})}
                       className={`w-10 h-5 rounded-full transition-all relative cursor-pointer ${gatewayForm.nagadActive ? 'bg-orange-500' : 'bg-slate-700'}`}
                     >
@@ -1767,7 +1767,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       <div className="w-10 h-10 rounded-xl bg-violet-600 flex items-center justify-center text-white font-black text-xs shadow-lg shadow-violet-600/20">Rocket</div>
                       <h4 className="font-bold text-white text-sm">Rocket Admin</h4>
                     </div>
-                    <div 
+                    <div
                       onClick={() => setGatewayForm({...gatewayForm, rocketActive: !gatewayForm.rocketActive})}
                       className={`w-10 h-5 rounded-full transition-all relative cursor-pointer ${gatewayForm.rocketActive ? 'bg-violet-600' : 'bg-slate-700'}`}
                     >
@@ -1810,7 +1810,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       </div>
                       <h4 className="font-bold text-white text-sm">QR Payment</h4>
                     </div>
-                    <div 
+                    <div
                       onClick={() => setGatewayForm({...gatewayForm, qrActive: !gatewayForm.qrActive})}
                       className={`w-10 h-5 rounded-full transition-all relative cursor-pointer ${gatewayForm.qrActive ? 'bg-emerald-600' : 'bg-slate-700'}`}
                     >
@@ -1865,14 +1865,14 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <h4 className="font-bold text-white text-sm">{gateway.name}</h4>
                       </div>
                       <div className="flex items-center gap-2">
-                        <button 
+                        <button
                           type="button"
                           onClick={() => removeCustomGateway(gateway.id)}
                           className="p-1.5 hover:bg-red-500/20 text-slate-500 hover:text-red-400 rounded-lg transition"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
-                        <div 
+                        <div
                           onClick={() => toggleCustomGateway(gateway.id)}
                           className={`w-10 h-5 rounded-full transition-all relative cursor-pointer ${gateway.isActive ? 'bg-indigo-600' : 'bg-slate-700'}`}
                         >
@@ -1910,14 +1910,14 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       <p className="text-[10px] text-slate-500">For direct renewals</p>
                     </div>
                   </div>
-                  <div 
+                  <div
                     onClick={() => setGatewayForm({...gatewayForm, bankActive: !gatewayForm.bankActive})}
                     className={`w-10 h-5 rounded-full transition-all relative cursor-pointer ${gatewayForm.bankActive ? 'bg-blue-600' : 'bg-slate-700'}`}
                   >
                     <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm ${gatewayForm.bankActive ? 'left-5.5' : 'left-0.5'}`} />
                   </div>
                 </div>
-                
+
                 <div className="p-6">
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
                     <div>
@@ -2109,7 +2109,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                           <span className={`${
                             (() => {
                               const endsAt = m.trialEndsAt ? new Date(m.trialEndsAt) : null;
-                              const rem = endsAt 
+                              const rem = endsAt
                                 ? Math.max(0, Math.ceil((endsAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
                                 : (m.trialDaysRemaining ?? 0);
                               return rem <= 5 ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30';
@@ -2117,7 +2117,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                           } px-2.5 py-1 rounded-full font-bold text-[11px]`}>
                             {(() => {
                               const endsAt = m.trialEndsAt ? new Date(m.trialEndsAt) : null;
-                              return endsAt 
+                              return endsAt
                                 ? Math.max(0, Math.ceil((endsAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
                                 : (m.trialDaysRemaining ?? 0);
                             })()} Days Left
@@ -2215,7 +2215,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 >
                   <ChevronLeft className="w-4 h-4" />
                 </button>
-                
+
                 <div className="flex items-center gap-1.5">
                   {totalMerchantPages > 0 && Array.from({ length: totalMerchantPages }).map((_, i) => (
                     <button
@@ -2277,7 +2277,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         Popular Choice
                       </div>
                     )}
-                    
+
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <div className="bg-indigo-600/20 p-2 rounded-lg">
@@ -2296,7 +2296,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <span className="text-[10px] bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded font-black uppercase tracking-wider">{plan.badge}</span>
                       </div>
                     </div>
-                    
+
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Plan Name</label>
@@ -2533,9 +2533,9 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       Live Banner Preview
                     </div>
                     <div className={`py-3 px-6 flex flex-col sm:flex-row items-center justify-center gap-4 text-center rounded-xl shadow-2xl transition-all duration-500 ${
-                      announcementForm.type === 'Critical Alert' ? 'bg-red-600 text-white' : 
-                      announcementForm.type === 'Success Announcement' ? 'bg-emerald-600 text-white' : 
-                      announcementForm.type === 'System Maintenance' ? 'bg-purple-600 text-white' : 
+                      announcementForm.type === 'Critical Alert' ? 'bg-red-600 text-white' :
+                      announcementForm.type === 'Success Announcement' ? 'bg-emerald-600 text-white' :
+                      announcementForm.type === 'System Maintenance' ? 'bg-purple-600 text-white' :
                       'bg-amber-500 text-slate-950'
                     }`}>
                       <p className="text-[11px] font-black uppercase tracking-[0.05em]">
@@ -2808,7 +2808,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                     AI Tool Freemium Controls
                   </h4>
                   <p className="text-xs text-slate-400 mb-4">Select which AI-powered tools require a paid PRO subscription. Free tools are available to all trial and starter users.</p>
-                  
+
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div className="flex items-center justify-between p-4 bg-[#181B26] border border-[#2E3548] rounded-xl">
                       <div className="flex-1 pr-4">
@@ -2852,7 +2852,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       </button>
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center gap-2 mt-2 px-1">
                     <ShieldAlert className="w-4 h-4 text-slate-500" />
                     <span className="text-[10px] text-slate-500 font-medium italic">Smart Sales Copilot / Chatbot remains FREE by system default.</span>
@@ -2872,7 +2872,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
             </form>
           </div>
         )}
-        
+
         {/* 10. ADD-ONS MANAGER TAB */}
         {activeSubTab === 'addons' && (
           <div className="space-y-6">
@@ -2950,8 +2950,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                     <div className="bg-[#202533] px-4 py-3 rounded-xl flex items-center justify-between border border-[#3A435E]/30">
                       <div className="text-[9px] text-slate-400 uppercase font-black tracking-widest">{addon.pricingType}</div>
                       <div className={`text-[10px] font-black uppercase px-3 py-1.5 rounded-lg border shadow-lg ${
-                        addon.pricingType === 'Free' 
-                          ? 'bg-amber-500 text-white border-amber-600/50 shadow-amber-500/20' 
+                        addon.pricingType === 'Free'
+                          ? 'bg-amber-500 text-white border-amber-600/50 shadow-amber-500/20'
                           : 'bg-indigo-600 text-white border-indigo-700/50 shadow-indigo-600/20'
                       }`}>
                         {addon.pricingType === 'Free' ? 'FREE' : `৳${addon.price}${addon.pricingType === 'Monthly Recurring' ? '/MO' : ''}`}
@@ -3043,7 +3043,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                             {member.lastActive !== 'Never' ? new Date(member.lastActive).toLocaleString() : 'Never'}
                           </td>
                           <td className="p-4 text-right">
-                            <div 
+                            <div
                               className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ml-auto ${member.status === 'Active' ? 'bg-emerald-600' : 'bg-slate-700'}`}
                               onClick={() => toggleMemberStatus(member.id)}
                             >
@@ -3079,12 +3079,12 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           {['analytics', 'merchants', 'support', 'broadcast', 'addons', 'gateways', 'plans', 'themes', 'announcements'].map(tabId => (
-                            <div 
+                            <div
                               key={tabId}
                               onClick={() => handleTogglePermission(rp.role, tabId)}
                               className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition ${
-                                rp.allowedTabs.includes(tabId) 
-                                  ? 'bg-indigo-600/10 border-indigo-500/30 text-indigo-400' 
+                                rp.allowedTabs.includes(tabId)
+                                  ? 'bg-indigo-600/10 border-indigo-500/30 text-indigo-400'
                                   : 'bg-[#181B26] border-transparent text-slate-500 hover:text-slate-400'
                               }`}
                             >
@@ -3142,7 +3142,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   </h4>
                   <div className="flex gap-2">
                     <input type="text" placeholder="e.g. Promote our new AI features to all merchants" className="flex-1 bg-[#202533] border border-[#3A435E] rounded-xl px-4 py-2 text-sm text-white outline-none" id="broadcastTopic" />
-                    <button 
+                    <button
                       onClick={async () => {
                         const topic = (document.getElementById('broadcastTopic') as HTMLInputElement).value;
                         if (!topic) return;
@@ -3258,7 +3258,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <div className="text-xs font-bold text-white">Subscription Expiry</div>
                         <div className="text-[9px] text-slate-500 mt-0.5">3 days before expiration alert.</div>
                       </div>
-                      <div 
+                      <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.subscriptionExpiryWarning ? 'bg-indigo-600' : 'bg-slate-700'}`}
                         onClick={() => onUpdateAutomationSettings({...automationSettings, subscriptionExpiryWarning: !automationSettings.subscriptionExpiryWarning})}
                       >
@@ -3271,7 +3271,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <div className="text-xs font-bold text-white">Welcome Email</div>
                         <div className="text-[9px] text-slate-500 mt-0.5">Sent instantly on new signup.</div>
                       </div>
-                      <div 
+                      <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.welcomeEmail ? 'bg-indigo-600' : 'bg-slate-700'}`}
                         onClick={() => onUpdateAutomationSettings({...automationSettings, welcomeEmail: !automationSettings.welcomeEmail})}
                       >
@@ -3284,7 +3284,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <div className="text-xs font-bold text-white">Payment Status Alerts</div>
                         <div className="text-[9px] text-slate-500 mt-0.5">Approval/Rejection notifications.</div>
                       </div>
-                      <div 
+                      <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.paymentApprovalAlert ? 'bg-indigo-600' : 'bg-slate-700'}`}
                         onClick={() => onUpdateAutomationSettings({...automationSettings, paymentApprovalAlert: !automationSettings.paymentApprovalAlert})}
                       >
@@ -3297,7 +3297,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <div className="text-xs font-bold text-white">Suspension Alerts</div>
                         <div className="text-[9px] text-slate-500 mt-0.5">Critical account status emails.</div>
                       </div>
-                      <div 
+                      <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.merchantSuspensionAlert ? 'bg-indigo-600' : 'bg-slate-700'}`}
                         onClick={() => onUpdateAutomationSettings({...automationSettings, merchantSuspensionAlert: !automationSettings.merchantSuspensionAlert})}
                       >
@@ -3526,7 +3526,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <div className="text-xs font-bold text-white">Force 2FA for Merchants</div>
                         <div className="text-[9px] text-slate-500 mt-0.5">Require multi-factor auth for all sellers.</div>
                       </div>
-                      <div 
+                      <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${securitySettings.force2FAForMerchants ? 'bg-indigo-600' : 'bg-slate-700'}`}
                         onClick={() => onUpdateSecuritySettings({...securitySettings, force2FAForMerchants: !securitySettings.force2FAForMerchants})}
                       >
@@ -3539,7 +3539,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         <div className="text-xs font-bold text-white">IP Whitelisting</div>
                         <div className="text-[9px] text-slate-500 mt-0.5">Restrict admin access to known IPs.</div>
                       </div>
-                      <div 
+                      <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${securitySettings.ipWhitelistingEnabled ? 'bg-indigo-600' : 'bg-slate-700'}`}
                         onClick={() => onUpdateSecuritySettings({...securitySettings, ipWhitelistingEnabled: !securitySettings.ipWhitelistingEnabled})}
                       >
@@ -3890,7 +3890,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 <XCircle className="w-6 h-6" />
               </button>
             </div>
-            
+
             <form onSubmit={handleSaveMember} className="p-6 space-y-5">
               <div className="space-y-4">
                 <div>
@@ -3974,7 +3974,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 <XCircle className="w-6 h-6" />
               </button>
             </div>
-            
+
             <form onSubmit={handleSaveAddon} className="p-6 space-y-5 overflow-y-auto max-h-[70vh]">
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
@@ -4107,8 +4107,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
               {selectedTicket.messages.map((msg) => (
                 <div key={msg.id} className={`flex ${msg.sender === 'admin' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[80%] rounded-2xl p-4 ${
-                    msg.sender === 'admin' 
-                      ? 'bg-indigo-600 text-white rounded-tr-none' 
+                    msg.sender === 'admin'
+                      ? 'bg-indigo-600 text-white rounded-tr-none'
                       : 'bg-[#202533] border border-[#2E3548] text-slate-200 rounded-tl-none'
                   }`}>
                     <p className="text-sm whitespace-pre-wrap">{msg.message}</p>
@@ -4176,7 +4176,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 <XCircle className="w-6 h-6" />
               </button>
             </div>
-            
+
             <form onSubmit={handleSaveTheme} className="p-6 space-y-5 overflow-y-auto max-h-[70vh]">
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
@@ -4291,7 +4291,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 <XCircle className="w-6 h-6" />
               </button>
             </div>
-            
+
             <form onSubmit={handleCreateMerchant} className="p-6 space-y-5">
               <div className="space-y-4">
                 <div>
@@ -4379,7 +4379,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 <XCircle className="w-6 h-6" />
               </button>
             </div>
-            
+
             <div className="p-8 space-y-6">
               <div className="grid grid-cols-2 gap-8">
                 <div className="space-y-4">
@@ -4437,7 +4437,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
               <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-5 shadow-inner">
                 <div className="flex items-center justify-between mb-4">
                   <div className="text-[10px] uppercase font-black text-slate-500">Submitted Transaction ID</div>
-                  <button 
+                  <button
                     onClick={() => handleCopyToClipboard(selectedApprovalRequest.transactionId)}
                     className="flex items-center gap-1.5 text-indigo-400 hover:text-white transition-colors text-[10px] font-black uppercase cursor-pointer"
                   >
@@ -4504,7 +4504,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                 <XCircle className="w-6 h-6" />
               </button>
             </div>
-            
+
             <div className="p-6 space-y-4">
               <div>
                 <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Gateway Name</label>

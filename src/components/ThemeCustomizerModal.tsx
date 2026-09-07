@@ -630,12 +630,12 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       console.warn('[ThemeCustomizer] Shared store write failed:', e);
     }
 
-    // Persist to Supabase 'merchants' table (theme_config + hero/announcement fields)
+    // Persist to Supabase 'stores' table (theme_config + hero/announcement fields)
     // so the customer-facing storefront renders the saved theme after reload.
     try {
       if (supabase && merchant?.email) {
         const { error: themeSaveErr } = await supabase
-          .from('merchants')
+          .from('stores')
           .upsert({
             email: updatedMerchant.email.trim().toLowerCase(),
             store_name: updatedMerchant.storeName,

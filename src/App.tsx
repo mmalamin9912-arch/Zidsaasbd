@@ -320,7 +320,7 @@ export default function App() {
 
     // Merchant Settings & Profile by storeSlug
     if (merchant?.storeSlug) {
-      safeFetch(`/api/merchants/slug/${encodeURIComponent(merchant.storeSlug)}`).then(dbMerchant => {
+      safeFetch(`/api/stores/slug/${encodeURIComponent(merchant.storeSlug)}`).then(dbMerchant => {
         if (isMounted && dbMerchant) {
           setMerchant(prev => ({
             ...prev,
@@ -376,7 +376,7 @@ export default function App() {
   React.useEffect(() => {
     if (!merchant || !merchant.storeSlug) return;
     const timer = setTimeout(() => {
-      fetch('/api/merchants/update', {
+      fetch('/api/stores/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(merchant)

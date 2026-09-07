@@ -322,7 +322,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // 1. Database Check Before Account Creation: Perform immediate backend query to check if merchant exists in Supabase
     let existingProfile: any = null;
     try {
-      const response = await fetch(`/api/merchants/check/${encodeURIComponent(cleanEmail)}`, {
+      const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
         headers: { 'Accept': 'application/json' }
       });
       const data = await safeParseJson(response, null);
@@ -334,7 +334,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // Direct Supabase query as supplemental check
     if (!existingProfile && supabase) {
       try {
-        const { data } = await supabase.from('merchants').select('*').ilike('email', cleanEmail).maybeSingle();
+        const { data } = await supabase.from('stores').select('*').ilike('email', cleanEmail).maybeSingle();
         if (data) existingProfile = data;
       } catch (e) {
         console.warn('Supabase client check:', e);
@@ -446,7 +446,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // Database Check Before Account Creation: Check if merchant already exists in Supabase
     let existingProfile: any = null;
     try {
-      const response = await fetch(`/api/merchants/check/${encodeURIComponent(cleanEmail)}`, {
+      const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
         headers: { 'Accept': 'application/json' }
       });
       const data = await safeParseJson(response, null);
@@ -457,7 +457,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
     if (!existingProfile && supabase) {
       try {
-        const { data } = await supabase.from('merchants').select('*').ilike('email', cleanEmail).maybeSingle();
+        const { data } = await supabase.from('stores').select('*').ilike('email', cleanEmail).maybeSingle();
         if (data) existingProfile = data;
       } catch (e) {
         console.warn('Supabase client check:', e);
@@ -615,7 +615,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // Database Check: Check if merchant account already exists in Supabase or backend
     let existingProfile: any = null;
     try {
-      const response = await fetch(`/api/merchants/check/${encodeURIComponent(cleanedEmail)}`, {
+      const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanedEmail)}`, {
         headers: { 'Accept': 'application/json' }
       });
       const data = await safeParseJson(response, null);
@@ -626,7 +626,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
     if (!existingProfile && supabase) {
       try {
-        const { data } = await supabase.from('merchants').select('*').ilike('email', cleanedEmail).maybeSingle();
+        const { data } = await supabase.from('stores').select('*').ilike('email', cleanedEmail).maybeSingle();
         if (data) existingProfile = data;
       } catch (e) {
         console.warn('Supabase client check:', e);
@@ -816,7 +816,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // Check for existing merchant profile in Supabase first
     let existingProfile = null;
     try {
-        const response = await fetch(`/api/merchants/check/${encodeURIComponent(cleanEmail)}`, {
+        const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
           headers: { 'Accept': 'application/json' }
         });
         existingProfile = await safeParseJson(response, null);

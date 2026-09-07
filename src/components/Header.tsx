@@ -169,9 +169,9 @@ export const Header: React.FC<HeaderProps> = ({
           return;
         }
 
-        // Fallback: Query 'merchants' table in Supabase
+        // Fallback: Query 'stores' table in Supabase
         const { data: mData } = await supabase
-          .from('merchants')
+          .from('stores')
           .select('*')
           .or(`email.ilike.${email},store_slug.ilike.${storeSlug}`)
           .maybeSingle();

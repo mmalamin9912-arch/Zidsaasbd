@@ -170,7 +170,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
     try {
       if (!dbMerchant && userId) {
         const { data: mData } = await supabase
-          .from('merchants')
+          .from('stores')
           .select('*')
           .or(`auth_user_id.eq.${userId},id.eq.${userId}`)
           .maybeSingle();
@@ -191,7 +191,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
 
       if (!dbMerchant && cleanEmail) {
         const { data: mData } = await supabase
-          .from('merchants')
+          .from('stores')
           .select('*')
           .ilike('email', cleanEmail)
           .maybeSingle();
@@ -207,7 +207,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
         if (sData) dbSubscription = sData;
       } else if (!dbMerchant && cleanSlug) {
         const { data: mData } = await supabase
-          .from('merchants')
+          .from('stores')
           .select('*')
           .ilike('store_slug', cleanSlug)
           .maybeSingle();
@@ -233,13 +233,13 @@ export async function fetchMerchantSubscriptionFromSupabase(
   if (!dbMerchant) {
     try {
       if (cleanEmail) {
-        const res = await fetch(`/api/merchants/check/${encodeURIComponent(cleanEmail)}`, {
+        const res = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
           headers: { 'Accept': 'application/json' }
         });
         const data = await safeParseJson(res, null);
         if (data) dbMerchant = data;
       } else if (cleanSlug) {
-        const res = await fetch(`/api/merchants/by-slug?slug=${encodeURIComponent(cleanSlug)}`, {
+        const res = await fetch(`/api/stores/by-slug?slug=${encodeURIComponent(cleanSlug)}`, {
           headers: { 'Accept': 'application/json' }
         });
         const data = await safeParseJson(res, null);
@@ -290,11 +290,11 @@ export async function syncMerchantSubscription(
   const cleanEmail = (updatedProfile.email || '').trim().toLowerCase();
   const cleanSlug = updatedProfile.storeSlug || updatedProfile.storeName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-  // 1. Sync to Supabase `merchants` and `subscriptions`
+  // 1. Sync to Supabase `stores` and `subscriptions`
   if (supabase && cleanEmail) {
     try {
       await supabase
-        .from('merchants')
+        .from('stores')
         .upsert({
           email: cleanEmail,
           store_name: updatedProfile.storeName,
@@ -401,7 +401,7 @@ export async function syncMerchantSubscription(
  * Realtime Supabase Subscription Listener for Production (Vercel & Live Supabase):
  * Native Supabase Realtime subscription (`supabase.channel().on('postgres_changes', ...)`).
  * When Super Admin approves/accepts a plan request or updates the record directly in Supabase:
- * 1. Listens to postgres_changes on both 'merchants' and 'subscriptions' tables.
+ * 1. Listens to postgres_changes on both 'stores' and 'subscriptions' tables.
  * 2. Matches incoming changes to the logged-in merchant's email, store slug, or user ID.
  * 3. Immediately normalizes the updated plan & timestamps into a live MerchantProfile.
  * 4. Invokes onUpdate to switch the UI state to ACTIVE instantly without requiring a page refresh.
@@ -429,7 +429,7 @@ export function subscribeToMerchantSubscription(
         {
           event: '*',
           schema: 'public',
-          table: 'merchants'
+          table: 'stores'
         },
         async (payload) => {
           try {
@@ -445,7 +445,7 @@ export function subscribeToMerchantSubscription(
               (merchantId && recId && merchantId === recId);
 
             if (isMatch) {
-              console.log('[Supabase Realtime] Merchants table update received:', newRecord);
+              console.log('[Supabase Realtime] Stores table update received:', newRecord);
               // Re-fetch complete resolved profile from Supabase to guarantee all fields are fresh
               const refreshed = await fetchMerchantSubscriptionFromSupabase({
                 email: cleanEmail || recEmail,
