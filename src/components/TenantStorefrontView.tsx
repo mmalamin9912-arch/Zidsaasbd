@@ -1086,38 +1086,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         }
       }
 
-      // Non-blocking insert: log failures but NEVER alert or return early.
-      try {
-        const { error: insertError } = await supabase.from('orders').insert({
-          store_id: storeId,
-          order_number: newOrder.orderNumber?.replace('#', '') || newOrder.id,
-          customer_name: newOrder.customerName,
-          customer_phone: newOrder.customerPhone,
-          customer_city: newOrder.customerCity,
-          shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
-          items: JSON.stringify(newOrder.items),
-          total_price: newOrder.totalBDT,
-          payment_method: newOrder.paymentMethod,
-          payment_status: newOrder.paymentStatus,
-          transaction_id: newOrder.transactionId || null,
-          status: 'New',
-          created_at: new Date().toISOString(),
-        });
+      (newOrder as any).storeId = storeId;
 
-        if (insertError) {
-          // NEVER block checkout — keep the order locally and continue.
-          console.warn('[Checkout] Supabase orders insert warning:', insertError.message, {
-            store_id: storeId,
-            store_code: resolvedStoreCode,
-          });
-        } else {
-          console.log('[Checkout] Order inserted into Supabase orders table:', { store_id: storeId, store_code: resolvedStoreCode, order_number: newOrder.orderNumber });
-        }
-      } catch (insertErr: any) {
-        console.warn('[Checkout] Supabase orders insert warning:', insertErr?.message || insertErr, {
-          store_id: storeId,
-          store_code: resolvedStoreCode,
-        });
+      // Save order to backend API (MongoDB-backed). Non-blocking: log failures
+      // but NEVER alert or return early.
+      try {
+        await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify([newOrder]),
+        }).catch(err => console.warn('[Checkout] Order API warning:', err));
+      } catch (e) {
+        console.warn('[Checkout] Order API warning:', e);
       }
     } catch (err: any) {
       // NEVER block checkout with an alert — always continue to success.

@@ -426,6 +426,7 @@ export interface Order {
   orderToken?: string;
   merchantId?: string;
   storeSlug?: string;
+  storeId?: string;
   items: OrderItem[];
 }
 

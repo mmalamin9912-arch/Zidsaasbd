@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import { createServer as createViteServer } from 'vite';
+import mongoose from 'mongoose';
 
 const app = express();
 app.use(express.json());
@@ -99,6 +100,32 @@ function getServerSupabaseConfig() {
   const supabaseKey = cleanEnvKey(rawSupabaseKey);
   const isConfigured = Boolean(supabaseUrl && supabaseKey && isValidUrl(supabaseUrl));
   return { supabaseUrl, supabaseKey, isConfigured };
+}
+
+const MONGODB_URI = process.env.MONGODB_URI || '';
+
+const orderSchema = new mongoose.Schema({
+  store_id: { type: String, required: true, index: true },
+  order_number: String,
+  customer_name: String,
+  customer_phone: String,
+  customer_city: String,
+  shipping_address: String,
+  items: String,
+  total_price: Number,
+  payment_method: String,
+  payment_status: String,
+  transaction_id: String,
+  status: String,
+  created_at: { type: Date, default: Date.now },
+}, { strict: false });
+
+const Order = mongoose.models.Order || mongoose.model('Order', orderSchema, 'orders');
+
+async function connectToMongoDB() {
+  if (!MONGODB_URI) return;
+  if (mongoose.connection.readyState === 1) return;
+  await mongoose.connect(MONGODB_URI);
 }
 
 function sanitizeServerMerchant(m: any) {
@@ -1405,9 +1432,9 @@ app.get('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 
 // ── Orders ──────────────────────────────────────────────────────────────────────
-// Orders are always scoped to a real row in the 'stores' table (store_id = store UUID).
-// A client-supplied slug is resolved to the store's real UUID first, so every query
-// stays safely targeted on 'stores' — never on a free-form store_id.
+// Orders are persisted in MongoDB. The API still accepts the same store refs
+// (store_code, UUID, or slug) and resolves them via Supabase 'stores' lookup,
+// but all order reads/writes go to MongoDB to avoid Supabase schema mismatches.
 
 function isUuidLike(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim());
@@ -1446,32 +1473,21 @@ async function resolveStoreIdBySlug(rawSlug: string): Promise<string | null> {
   return null;
 }
 
-async function loadOrdersForStoreRef(ref: string): Promise<any[]> {
-  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-  if (!isConfigured) return [];
-  const raw = String(ref || '').trim();
-  if (!raw) return [];
-  try {
-    const storeId = isUuidLike(raw) ? raw : (await resolveStoreIdBySlug(raw) || '');
-    if (!storeId) return [];
-    const sbRes = await fetch(`${supabaseUrl}/rest/v1/orders?store_id=eq.${encodeURIComponent(storeId)}&select=*&order=created_at.desc`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
-    });
-    if (!sbRes.ok) return [];
-    const rows = await sbRes.json();
-    return Array.isArray(rows) ? rows : [];
-  } catch (e) {
-    console.warn('[Server] loadOrdersForStoreRef warning:', e);
-    return [];
-  }
-}
-
-// GET /api/orders/:storeRef — fetch orders for a store. Accepts the permanent
-// store_code (ZID-BD-XXXX), the canonical UUID, or a slug (display fallback).
+// GET /api/orders/:storeRef — fetch orders for a store from MongoDB.
 app.get('/api/orders/:storeRef', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const orders = await loadOrdersForStoreRef(req.params.storeRef || '');
+    if (!MONGODB_URI) return res.status(200).json([]);
+    await connectToMongoDB();
+    const raw = String(req.params.storeRef || '').trim();
+    if (!raw) return res.status(200).json([]);
+
+    let storeId = raw;
+    if (!isUuidLike(raw)) {
+      storeId = await resolveStoreIdBySlug(raw) || raw;
+    }
+
+    const orders = await Order.find({ store_id: storeId }).sort({ created_at: -1 }).lean();
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
@@ -1479,19 +1495,25 @@ app.get('/api/orders/:storeRef', async (req, res) => {
   }
 });
 
-// POST /api/orders — batch sync updated orders, resolving store_id from slug.
+// POST /api/orders — batch sync updated orders into MongoDB.
 app.post('/api/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
+    if (!MONGODB_URI) {
+      return res.status(200).json({ ok: true, synced: 0 });
+    }
+    await connectToMongoDB();
+
     const arr: any[] = Array.isArray(req.body)
       ? req.body
       : Array.isArray((req.body as any)?.orders)
         ? (req.body as any).orders
         : [];
-    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-    let synced = 0;
+
+    const inserted = [];
     for (const order of arr) {
       if (!order || typeof order !== 'object') continue;
+
       const merchantRef = String(
         order.storeCode || order.store_code || order.storeId || order.store_id ||
         order.merchantId || order.merchant_id || order.storeSlug || order.store_slug || ''
@@ -1500,37 +1522,27 @@ app.post('/api/orders', async (req, res) => {
       const storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug));
       if (!storeId || !isUuidLike(storeId)) continue;
 
-      const record = {
+      const record: any = {
         store_id: storeId,
         order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
         customer_name: order.customerName || order.customer_name || 'Customer',
         customer_phone: order.customerPhone || order.customer_phone || '',
+        customer_city: order.customerCity || order.customer_city || '',
         shipping_address: String(order.address || order.shipping_address || '').trim(),
         items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []),
         total_price: order.totalBDT ?? order.total_amount ?? order.total ?? 0,
         payment_method: order.paymentMethod || order.payment_method || 'COD',
         payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
+        transaction_id: order.transactionId || order.transaction_id || null,
         status: order.status || 'New',
+        created_at: new Date(),
       };
-      if (isConfigured) {
-        try {
-          const sbRes = await fetch(`${supabaseUrl}/rest/v1/orders`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
-              'Prefer': 'return=minimal',
-            },
-            body: JSON.stringify(record),
-          });
-          if (sbRes.ok) synced++;
-        } catch (e) {
-          console.warn('[Server] POST /api/orders insert warning:', e);
-        }
-      }
+
+      const doc = await Order.create(record);
+      inserted.push(doc);
     }
-    return res.status(200).json({ ok: true, synced });
+
+    return res.status(200).json({ ok: true, synced: inserted.length });
   } catch (err: any) {
     console.error('[Server] POST /api/orders error:', err);
     return res.status(200).json({ ok: false, synced: 0, error: err?.message || 'Order sync failed' });

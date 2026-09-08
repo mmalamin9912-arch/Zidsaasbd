@@ -1,6 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, OrderItem } from '../../types';
-import { supabase } from '../../lib/supabase';
 import {
   ShoppingBag,
   Search,
@@ -136,39 +135,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     const timer = setInterval(fetchLiveOrders, 4000);
     return () => clearInterval(timer);
   }, [merchantId]);
-
-  // Realtime Supabase subscription for orders live sync
-  useEffect(() => {
-    if (!merchantId) return;
-    if (!supabase) return;
-    channelRef.current = supabase
-      .channel('orders-realtime')
-      .on('postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'orders', filter: `store_id=eq.${merchantId}` },
-        () => {
-          // Refetch latest orders whenever a new order is inserted
-          const refetch = async () => {
-            try {
-              const res = await fetch(`/api/orders/${merchantId}`);
-              const data = await res.json();
-              if (Array.isArray(data)) {
-                onUpdateOrders(data);
-              }
-            } catch (err) {
-              console.warn('Error refetching orders after realtime event:', err);
-            }
-          };
-          refetch();
-        }
-      )
-      .subscribe();
-    return () => {
-      if (channelRef.current) {
-        supabase.removeChannel(channelRef.current);
-        channelRef.current = null;
-      }
-    };
-  }, [merchantId, onUpdateOrders]);
   // Sub-menu state
   const [subMenu, setSubMenu] = useState<OrderSubMenu>('all');
 
