@@ -124,6 +124,31 @@ const orderSchema = new mongoose.Schema({
 
 const Order = mongoose.models.Order || mongoose.model('Order', orderSchema, 'orders');
 
+const productSchema = new mongoose.Schema({
+  id: { type: String, required: true, index: true },
+  store_slug: { type: String, required: true, index: true },
+  storeSlug: { type: String, index: true },
+  store_id: { type: String, index: true },
+  store_code: { type: String, index: true },
+  merchant_id: { type: String, index: true },
+  name: String,
+  title: String,
+  price: Number,
+  priceBDT: Number,
+  stock_quantity: Number,
+  stock: Number,
+  category: String,
+  category_id: String,
+  image_url: String,
+  image: String,
+  status: String,
+  is_published: Boolean,
+  description: String,
+  sku: String,
+}, { strict: false });
+
+const Product = mongoose.models.Product || mongoose.model('Product', productSchema, 'products');
+
 async function connectToMongoDB() {
   if (!MONGODB_URI) return;
   if (mongoose.connection.readyState === 1) return;
@@ -545,8 +570,30 @@ app.get('/api/products', async (req, res) => {
     const rawSlug = (req.query.store_slug as string || req.query.storeSlug as string || '').trim().toLowerCase();
     const storeSlug = String(rawSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
     const merchantId = (req.query.merchant_id as string || req.query.merchantId as string || '').trim();
+
     const payload = await readStorePayload();
-    const prods = getMergedProductsForStore(storeSlug, merchantId, payload);
+    let prods = getMergedProductsForStore(storeSlug, merchantId, payload);
+
+    if (prods.length === 0) {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        try {
+          const mongoProds = await mongoose.connection.db.collection('products').find({
+            $or: [
+              { store_slug: storeSlug },
+              { storeSlug: storeSlug },
+              { store_id: storeSlug }
+            ]
+          }).toArray();
+          if (Array.isArray(mongoProds) && mongoProds.length > 0) {
+            prods = mongoProds;
+          }
+        } catch (mongoErr) {
+          console.warn('[Server] GET /api/products MongoDB query warning:', mongoErr);
+        }
+      }
+    }
+
     return res.status(200).json(Array.isArray(prods) ? prods : []);
   } catch (err: any) {
     console.error('[Server] GET /api/products error:', err);
@@ -632,6 +679,28 @@ app.post('/api/products', async (req, res) => {
     }
 
     await writeStorePayload(payload);
+
+    // 3b. MongoDB persistence
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      try {
+        await mongoose.connection.db.collection('products').updateOne(
+          { id: product.id },
+          {
+            $set: {
+              ...product,
+              store_slug: store_slug,
+              storeSlug: store_slug,
+              ...(storeId ? { store_id: storeId } : {}),
+              ...(String(body.store_code || body.storeCode || '') ? { store_code: String(body.store_code || body.storeCode) } : {}),
+            }
+          },
+          { upsert: true }
+        );
+      } catch (mongoErr) {
+        console.warn('[Server] POST /api/products MongoDB upsert warning:', mongoErr);
+      }
+    }
 
     // 4. Supabase direct REST upsert
     const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();

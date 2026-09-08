@@ -189,7 +189,27 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         store_slug: activeStoreSlug
       };
 
-      // 2. Direct Supabase insert (bypass API routes entirely)
+      // 2. Persist via Express API (MongoDB + file payload)
+      let apiErrorMsg: string | null = null;
+      try {
+        const apiRes = await fetch('/api/products', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const apiData = await apiRes.json().catch(() => null);
+        if (!apiRes.ok || apiData?.ok === false) {
+          apiErrorMsg = apiData?.error || `HTTP ${apiRes.status}`;
+        }
+      } catch (apiErr: any) {
+        apiErrorMsg = apiErr?.message || 'API request failed';
+      }
+
+      if (apiErrorMsg) {
+        console.warn('[ProductsView] API save warning:', apiErrorMsg);
+      }
+
+      // 3. Direct Supabase insert (kept as secondary persistence)
       let supabaseErrorMsg: string | null = null;
       let inserted = false;
       try {
@@ -199,33 +219,20 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
           if (error) {
             console.error('[ProductsView] Supabase insert error:', error.message, error);
             supabaseErrorMsg = error.message;
-            // Explicit browser alert on schema error or RLS policy rejection
-            alert(
-              `Supabase insert failed: ${error.message}\n\n` +
-              `Hints:\n- Schema error: verify the products table has columns name, price, stock, category, image, store_slug\n` +
-              `- RLS rejection: add an INSERT policy for anon/authenticated roles on products`
-            );
           } else {
             inserted = true;
             if (data && data[0]) {
               payload.id = (data[0] as any).id;
             }
           }
-        } else {
-          alert('Supabase client is not configured. Product was NOT saved to the database.');
-          supabaseErrorMsg = 'Supabase client not configured';
         }
       } catch (e: any) {
         console.error('[ProductsView] Supabase exception:', e);
         supabaseErrorMsg = e?.message || 'Supabase exception';
-        alert('Supabase exception: ' + supabaseErrorMsg);
       }
 
       if (supabaseErrorMsg) {
-        setToastNotification({
-          type: 'error',
-          message: `Supabase persistence notice: ${supabaseErrorMsg}. (Check table columns or RLS policies)`
-        });
+        console.warn('[ProductsView] Supabase persistence notice:', supabaseErrorMsg);
       }
 
       // 3. Update UI State after persistence
