@@ -5,7 +5,6 @@ import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldC
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
-import { supabase } from '../lib/supabase';
 import { resolveActiveStoreSlug } from '../lib/activeStore';
 import { LanguageToggle } from './LanguageToggle';
 
@@ -116,133 +115,44 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     const effectiveSlug = effectiveStoreSlug;
     const loadStorefront = async () => {
       try {
-        // Direct Supabase load — API routes bypassed (they 500 on Vercel)
         let apiProducts: any[] = [];
-        const slugsToQuery = Array.from(new Set([
-          effectiveSlug,
-          effectiveSlug.toLowerCase(),
-          'bd',
-          'verandabd',
-          'default'
-        ])).filter(Boolean);
-        // Resolve the store UUID from 'stores' by slug, then query products by
-        // store_id (products table has no store_slug column).
-        const { data: slugStoreRows } = await supabase
-          .from('stores')
-          .select('id, store_slug')
-          .in('store_slug', slugsToQuery);
+        const slug = effectiveSlug || storeSlug || 'bd';
 
-        // Fallback to getting the first store if slug lookup returned nothing
-        let storeIds = Array.from(new Set(((slugStoreRows || []) as any[]).map((s) => s.id).filter(Boolean)));
-        if (storeIds.length === 0) {
-          const { data: firstStore } = await supabase
-            .from('stores')
-            .select('id')
-            .limit(1)
-            .maybeSingle();
-          if (firstStore) storeIds = [firstStore.id];
+        // Load full storefront payload from Express API
+        const storefrontRes = await fetch(`/api/storefront/${encodeURIComponent(slug)}`);
+        const storefrontData = await storefrontRes.json().catch(() => null);
+
+        if (storefrontData && storefrontData.storefront) {
+          const payload = storefrontData.storefront;
+          apiProducts = Array.isArray(payload.products) ? payload.products : [];
         }
 
-        const { data: prodRows, error: prodErr } = storeIds.length > 0
-          ? await supabase.from('products').select('*').in('store_id', storeIds)
-          : { data: [], error: null };
-        if (prodErr) {
-          console.warn('[TenantStorefrontView] Supabase products load error:', prodErr.message);
-          if (String(prodErr.message || '').toLowerCase().includes('row-level') || String(prodErr.message || '').toLowerCase().includes('permission')) {
-            alert(`Supabase read failed (possible RLS rejection): ${prodErr.message}`);
-          }
-        } else if (Array.isArray(prodRows)) {
-          apiProducts = prodRows;
-        }
-
-        // Load the merchant's saved themeConfig from Supabase so published
-        // theme images/colors/text render on the customer storefront after reload.
-        // Reads from 'stores' first (Theme Editor publish target), falls back to 'merchants'.
+        // Load the merchant's saved themeConfig from the store payload
         try {
           const existingBefore = readZidStoreData(storeSlug);
           const cleanEmail = String(merchant?.email || '').trim().toLowerCase();
-          if (supabase && (cleanEmail || effectiveSlug)) {
-            const themeFields = 'theme_config, hero_title, hero_subtitle, hero_image, announcement_text, logo_url, active_theme_id';
-            let themeRow: any = null;
+          const themeRow = storefrontData?.storefront?.merchant || null;
 
-            // 1. Look up by store slug in the 'stores' table
-            if (effectiveSlug) {
-              const { data: bySlug } = await supabase
-                .from('stores')
-                .select(themeFields)
-                .eq('store_slug', effectiveSlug)
-                .maybeSingle();
-              if (bySlug) themeRow = bySlug;
-            }
-
-            // 1b. Fall back to host lookup (custom domain hosting the storefront)
-            if (!themeRow) {
-              const hostSlug = (() => {
-                try {
-                  const host = typeof window !== 'undefined' ? window.location.hostname : '';
-                  return host.replace(/^www\./, '').split('.')[0];
-                } catch (e) { return ''; }
-              })();
-              if (hostSlug && hostSlug !== effectiveSlug) {
-                const { data: byDomain } = await supabase
-                  .from('stores')
-                  .select(themeFields)
-                  .eq('store_slug', hostSlug)
-                  .maybeSingle();
-                if (byDomain) themeRow = byDomain;
-              }
-            }
-
-            // theme_config may be stored as a JSON string — normalize to an object
-            if (themeRow && themeRow.theme_config && typeof themeRow.theme_config === 'string') {
-              try { themeRow.theme_config = JSON.parse(themeRow.theme_config); }
-              catch (parseErr) {
-                console.warn('[TenantStorefrontView] theme_config JSON parse failed:', parseErr);
-                themeRow.theme_config = null;
-              }
-            }
-
-            // 2. Fall back to email lookup in 'stores', then 'merchants'
-            if (!themeRow && cleanEmail) {
-              const { data: byEmail } = await supabase
-                .from('stores')
-                .select(themeFields)
-                .ilike('email', cleanEmail)
-                .maybeSingle();
-              if (byEmail) themeRow = byEmail;
-            }
-            if (!themeRow && cleanEmail) {
-              // Legacy fallback removed — 'stores' is the canonical table.
-              const { data: merchantRow } = await supabase
-                .from('stores')
-                .select(themeFields)
-                .ilike('email', cleanEmail)
-                .maybeSingle();
-              if (merchantRow) themeRow = merchantRow;
-            }
-
-            if (themeRow && active) {
-              const existing = existingBefore;
-              const dbMerchant = {
-                ...existing,
-                themeConfig: themeRow.theme_config || existing?.themeConfig || {},
-                heroTitle: themeRow.hero_title || existing?.merchant?.heroTitle,
-                heroSubtitle: themeRow.hero_subtitle || existing?.merchant?.heroSubtitle,
-                heroImage: themeRow.hero_image || existing?.merchant?.heroImage,
-                announcementText: themeRow.announcement_text || existing?.merchant?.announcementText,
-                logoUrl: themeRow.logo_url || existing?.merchant?.logoUrl,
-                activeThemeId: themeRow.active_theme_id || existing?.merchant?.activeThemeId,
-              };
-              const mergedTheme = {
-                ...existing,
-                merchant: dbMerchant,
-                themeCustomization: themeRow.theme_config || existing?.themeCustomization || {},
-                products: Array.isArray(apiProducts) && apiProducts.length > 0 ? apiProducts : (existing?.products || []),
-              };
-              writeZidStoreData(mergedTheme as ZidStoreData, storeSlug);
-              setLiveStoreData(mergedTheme as ZidStoreData);
-              return; // theme-merged data already includes products
-            }
+          if (themeRow && active) {
+            const dbMerchant = {
+              ...existingBefore,
+              themeConfig: themeRow.themeConfig || existingBefore?.merchant?.themeConfig || {},
+              heroTitle: themeRow.heroTitle || existingBefore?.merchant?.heroTitle,
+              heroSubtitle: themeRow.heroSubtitle || existingBefore?.merchant?.heroSubtitle,
+              heroImage: themeRow.heroImage || existingBefore?.merchant?.heroImage,
+              announcementText: themeRow.announcementText || existingBefore?.merchant?.announcementText,
+              logoUrl: themeRow.logoUrl || existingBefore?.merchant?.logoUrl,
+              activeThemeId: themeRow.activeThemeId || existingBefore?.merchant?.activeThemeId,
+            };
+            const mergedTheme = {
+              ...existingBefore,
+              merchant: dbMerchant,
+              themeCustomization: themeRow.themeConfig || existingBefore?.themeCustomization || {},
+              products: Array.isArray(apiProducts) && apiProducts.length > 0 ? apiProducts : (existingBefore?.products || []),
+            };
+            writeZidStoreData(mergedTheme as ZidStoreData, storeSlug);
+            setLiveStoreData(mergedTheme as ZidStoreData);
+            return;
           }
         } catch (themeErr: any) {
           console.warn('[TenantStorefrontView] theme_config load warning:', themeErr?.message || themeErr);
@@ -454,42 +364,23 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       let catData: any[] = [];
       let prodData: any[] = [];
 
-      // 1. Direct Supabase client load — API routes bypassed (they 500 on Vercel)
+      // 1. Fetch categories and products from Express API
       try {
-        if (supabase) {
-          // Resolve store UUID from 'stores' by slug, then query products by store_id
-          const slugsToQuery = Array.from(new Set([effectiveSlug, effectiveSlug?.toLowerCase?.(), 'bd', 'verandabd', 'default'])).filter(Boolean) as string[];
-          const { data: storeRows } = await supabase
-            .from('stores')
-            .select('id, store_slug')
-            .in('store_slug', slugsToQuery);
-          const storeIds = Array.from(new Set(((storeRows || []) as any[]).map((s) => s.id).filter(Boolean)));
+        const [catRes, prodRes] = await Promise.all([
+          fetch(`/api/categories?store_slug=${encodeURIComponent(effectiveSlug || storeSlug || 'bd')}`).then(r => r.json().catch(() => null)),
+          fetch(`/api/products?store_slug=${encodeURIComponent(effectiveSlug || storeSlug || 'bd')}`).then(r => r.json().catch(() => null)),
+        ]);
 
-          const [catRes, prodRes] = await Promise.all([
-            supabase.from('categories').select('*').in('store_slug', slugsToQuery),
-            storeIds.length > 0
-              ? supabase.from('products').select('*').in('store_id', storeIds).eq('status', 'active')
-              : Promise.resolve({ data: [], error: null } as any)
-          ]);
-
-          if (catRes && catRes.error) {
-            console.warn('[TenantStorefrontView] Supabase categories load error:', catRes.error.message);
-            if (String(catRes.error.message || '').toLowerCase().includes('row-level') || String(catRes.error.message || '').toLowerCase().includes('permission')) {
-              alert(`Supabase categories read failed (possible RLS rejection): ${catRes.error.message}`);
-            }
-          }
-          if (prodRes && prodRes.error) {
-            console.warn('[TenantStorefrontView] Supabase products load error:', prodRes.error.message);
-            if (String(prodRes.error.message || '').toLowerCase().includes('row-level') || String(prodRes.error.message || '').toLowerCase().includes('permission')) {
-              alert(`Supabase products read failed (possible RLS rejection): ${prodRes.error.message}`);
-            }
-          }
-
-          if (catRes && catRes.data && Array.isArray(catRes.data)) catData.push(...catRes.data);
-          if (prodRes && prodRes.data && Array.isArray(prodRes.data)) prodData.push(...prodRes.data);
+        if (catRes && Array.isArray(catRes.categories)) {
+          catData.push(...catRes.categories);
+        } else if (Array.isArray(catRes)) {
+          catData.push(...catRes);
+        }
+        if (Array.isArray(prodRes)) {
+          prodData.push(...prodRes);
         }
       } catch (e: any) {
-        console.warn('Supabase catalog fetch warning:', e?.message || e);
+        console.warn('Catalog API fetch warning:', e?.message || e);
       }
 
       // Check localStorage fallbacks
@@ -523,30 +414,6 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         }
       } catch (e) {
         console.warn('LocalStorage fallback warning:', e);
-      }
-
-      // 2. Fetch from Supabase client if available (deduplicated above)
-      try {
-        if (supabase) {
-          const slugsToQuery = Array.from(new Set([storeSlug, storeSlug?.toLowerCase?.(), 'bd', 'verandabd', 'default'])).filter(Boolean) as string[];
-          const { data: storeRows } = await supabase
-            .from('stores')
-            .select('id, store_slug')
-            .in('store_slug', slugsToQuery);
-          const storeIds = Array.from(new Set(((storeRows || []) as any[]).map((s) => s.id).filter(Boolean)));
-
-          const [catRes, prodRes] = await Promise.all([
-            supabase.from('categories').select('*').in('store_slug', slugsToQuery),
-            storeIds.length > 0
-              ? supabase.from('products').select('*').in('store_id', storeIds).eq('status', 'active')
-              : Promise.resolve({ data: [], error: null } as any)
-          ]);
-
-          if (catRes && catRes.data && Array.isArray(catRes.data)) catData.push(...catRes.data);
-          if (prodRes && prodRes.data && Array.isArray(prodRes.data)) prodData.push(...prodRes.data);
-        }
-      } catch (e) {
-        // silent
       }
 
       if (active) {
@@ -987,124 +854,77 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     };
 
     // ---------------------------------------------------------------------
-    // Insert the order into the Supabase 'orders' table BEFORE showing the
-    // success screen. store_id must ALWAYS be a valid store UUID from
-    // 'stores' so 'orders.insert' succeeds every time — NEVER block with
-    // an alert. Resolution order: slug match OR store_code match, then
-    // fallback to the first/active store record. Missing store_code
-    // defaults to the permanent 'ZID-BD-1001' format.
+    // Save order to backend API (MongoDB-backed). Non-blocking: log failures
+    // but NEVER alert or return early.
     // ---------------------------------------------------------------------
     let storeId = resolvedStoreId;
     let resolvedStoreCode: string =
       String((merchant as any)?.storeCode || (merchant as any)?.store_code || '').trim() || 'ZID-BD-1001';
     try {
-      if (supabase) {
-        const cleanSlug = String(effectiveStoreSlug || '').split(':')[0].trim().toLowerCase();
-        const cleanCode = String(
-          (merchant as any)?.storeCode || (merchant as any)?.store_code || cleanSlug || ''
-        ).trim();
-        const isUuidLike = (v: string) =>
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v || '');
+      const cleanSlug = String(effectiveStoreSlug || '').split(':')[0].trim().toLowerCase();
+      const cleanCode = String(
+        (merchant as any)?.storeCode || (merchant as any)?.store_code || cleanSlug || ''
+      ).trim();
+      const isUuidLike = (v: string) =>
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v || '');
 
-        // Already have a valid UUID — just ensure the permanent code default.
-        if (storeId && !isUuidLike(storeId)) storeId = '';
+      if (storeId && !isUuidLike(storeId)) storeId = '';
 
-        // 1. Look up the store in 'stores' where slug matches OR store_code matches.
-        if (!storeId && cleanSlug && !isUuidLike(cleanSlug)) {
-          const { data: bySlug } = await supabase
-            .from('stores')
-            .select('id, store_code, store_slug')
-            .eq('store_slug', cleanSlug)
-            .maybeSingle();
-          if (bySlug?.id) {
-            storeId = String(bySlug.id);
-            resolvedStoreCode = String((bySlug as any).store_code || resolvedStoreCode || 'ZID-BD-1001');
+      if (!storeId && cleanSlug && !isUuidLike(cleanSlug)) {
+        try {
+          const res = await fetch(`/api/stores/slug/${encodeURIComponent(cleanSlug)}`);
+          const data = await res.json().catch(() => null);
+          if (data?.merchant?.id) {
+            storeId = String(data.merchant.id);
             setResolvedStoreId(storeId);
           }
-        }
-        if (!storeId && cleanCode) {
-          if (isUuidLike(cleanCode)) {
-            const { data: byId } = await supabase
-              .from('stores')
-              .select('id, store_code, store_slug')
-              .eq('id', cleanCode)
-              .maybeSingle();
-            if (byId?.id) {
-              storeId = String(byId.id);
-              resolvedStoreCode = String((byId as any).store_code || resolvedStoreCode || 'ZID-BD-1001');
-              setResolvedStoreId(storeId);
-            } else {
-              // Trust a well-formed UUID so the insert payload is always valid.
-              storeId = cleanCode;
-            }
-          } else {
-            const { data: byCode } = await supabase
-              .from('stores')
-              .select('id, store_code, store_slug')
-              .ilike('store_code', cleanCode)
-              .maybeSingle();
-            if (byCode?.id) {
-              storeId = String(byCode.id);
-              resolvedStoreCode = String((byCode as any).store_code || resolvedStoreCode || 'ZID-BD-1001');
-              setResolvedStoreId(storeId);
-            }
-          }
-        }
-        // Merchant id may itself be the canonical UUID or a permanent code.
-        if (!storeId) {
-          const mid = String((merchant as any)?.id || '').trim();
-          if (isUuidLike(mid)) storeId = mid;
-        }
-
-        // 2. Fallback to getting the first/active store record if slug lookup is empty.
-        if (!storeId) {
-          const { data: firstStore } = await supabase
-            .from('stores')
-            .select('id, store_code, store_slug')
-            .limit(1)
-            .maybeSingle();
-          if ((firstStore as any)?.id) {
-            storeId = String((firstStore as any).id);
-            resolvedStoreCode = String((firstStore as any).store_code || resolvedStoreCode || 'ZID-BD-1001');
-            setResolvedStoreId(storeId);
-          }
-        }
-
-        // 2b. Generate a default permanent ID format 'ZID-BD-1001' if missing.
-        if (!resolvedStoreCode || !String(resolvedStoreCode).trim()) {
-          resolvedStoreCode = 'ZID-BD-1001';
-        }
-
-        // 3. ALWAYS assign a valid store UUID so 'orders.insert' succeeds
-        //    every time — last resort is a well-formed UUID (never empty).
-        if (!storeId || !isUuidLike(storeId)) {
+        } catch { /* ignore store lookup errors */ }
+      }
+      if (!storeId && cleanCode) {
+        if (isUuidLike(cleanCode)) {
+          storeId = cleanCode;
+        } else {
           try {
-            storeId = crypto.randomUUID();
-          } catch {
-            storeId = '00000000-0000-4000-8000-000000000000';
-          }
+            const res = await fetch(`/api/stores/slug/${encodeURIComponent(cleanCode)}`);
+            const data = await res.json().catch(() => null);
+            if (data?.merchant?.id) {
+              storeId = String(data.merchant.id);
+              setResolvedStoreId(storeId);
+            }
+          } catch { /* ignore store lookup errors */ }
         }
       }
+      if (!storeId) {
+        const mid = String((merchant as any)?.id || '').trim();
+        if (isUuidLike(mid)) storeId = mid;
+      }
 
-      (newOrder as any).storeId = storeId;
+      if (!resolvedStoreCode || !String(resolvedStoreCode).trim()) {
+        resolvedStoreCode = 'ZID-BD-1001';
+      }
 
-      // Save order to backend API (MongoDB-backed). Non-blocking: log failures
-      // but NEVER alert or return early.
-      try {
-        await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify([newOrder]),
-        }).catch(err => console.warn('[Checkout] Order API warning:', err));
-      } catch (e) {
-        console.warn('[Checkout] Order API warning:', e);
+      if (!storeId || !isUuidLike(storeId)) {
+        storeId = cleanSlug || cleanCode || resolvedStoreCode || 'bd';
       }
     } catch (err: any) {
-      // NEVER block checkout with an alert — always continue to success.
       console.warn('[Checkout] Store resolution warning:', err?.message || err, {
         store_id: storeId,
         store_code: resolvedStoreCode,
       });
+    }
+
+    (newOrder as any).storeId = storeId;
+
+    // Save order to backend API (MongoDB-backed). Non-blocking: log failures
+    // but NEVER alert or return early.
+    try {
+      await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([newOrder]),
+      }).catch(err => console.warn('[Checkout] Order API warning:', err));
+    } catch (e) {
+      console.warn('[Checkout] Order API warning:', e);
     }
 
     // Only now — after a successful insert — proceed to the success screen.

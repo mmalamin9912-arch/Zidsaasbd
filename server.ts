@@ -106,6 +106,8 @@ const MONGODB_URI = process.env.MONGODB_URI || '';
 
 const orderSchema = new mongoose.Schema({
   store_id: { type: String, required: true, index: true },
+  store_slug: { type: String, index: true },
+  merchant_id: { type: String, index: true },
   order_number: String,
   customer_name: String,
   customer_phone: String,
@@ -787,6 +789,29 @@ app.put('/api/store', async (req, res) => {
   const payload = req.body || defaultStorePayload;
   await writeStorePayload(payload);
   res.json({ status: 'ok', synced: true });
+});
+
+app.get('/api/stores/slug/:slug', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const slug = (req.params.slug || '').trim().toLowerCase();
+  const payload = await readStorePayload();
+  const merchant = payload.merchant || {};
+  if (merchant.storeSlug === slug || merchant.store_slug === slug) {
+    return res.json({ ok: true, store_slug: slug, merchant });
+  }
+  const found = (Array.isArray(payload.allMerchants) ? payload.allMerchants : []).find((m: any) => m && (m.storeSlug === slug || m.store_slug === slug));
+  return res.json({ ok: true, store_slug: slug, merchant: found || merchant });
+});
+
+app.post('/api/stores/update', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const patch = req.body || {};
+  const payload = await readStorePayload();
+  if (patch.merchant) {
+    payload.merchant = { ...(payload.merchant || {}), ...patch.merchant };
+  }
+  await writeStorePayload(payload);
+  return res.status(200).json({ ok: true, store_slug: payload.merchant?.storeSlug || patch.merchant?.storeSlug || '' });
 });
 
 app.post('/api/subscription/update', async (req, res) => {
@@ -1487,7 +1512,10 @@ app.get('/api/orders/:storeRef', async (req, res) => {
       storeId = await resolveStoreIdBySlug(raw) || raw;
     }
 
-    const orders = await Order.find({ store_id: storeId }).sort({ created_at: -1 }).lean();
+    let orders = await Order.find({ store_id: storeId }).sort({ created_at: -1 }).lean();
+    if (!Array.isArray(orders) || orders.length === 0) {
+      orders = await Order.find({ $or: [{ store_slug: raw }, { merchant_id: raw }] }).sort({ created_at: -1 }).lean();
+    }
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
@@ -1519,11 +1547,13 @@ app.post('/api/orders', async (req, res) => {
         order.merchantId || order.merchant_id || order.storeSlug || order.store_slug || ''
       ).trim();
       const slug = String(merchantRef).split(':')[0].trim().toLowerCase() || 'bd';
-      const storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug));
-      if (!storeId || !isUuidLike(storeId)) continue;
+      let storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug));
+      if (!storeId) storeId = merchantRef || slug;
 
       const record: any = {
         store_id: storeId,
+        store_slug: slug || order.storeSlug || order.store_slug || '',
+        merchant_id: order.merchantId || order.merchant_id || '',
         order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
         customer_name: order.customerName || order.customer_name || 'Customer',
         customer_phone: order.customerPhone || order.customer_phone || '',

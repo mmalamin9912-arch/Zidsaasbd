@@ -306,21 +306,15 @@ export default function App() {
     // Products
     const loadAppProducts = async () => {
       try {
-        const { supabase } = await import('./lib/supabase');
-        if (supabase) {
-          const { data, error } = await supabase
-            .from('products')
-            .select('*')
-            .eq('store_slug', 'bd');
-
-          if (!error && isMounted && Array.isArray(data) && data.length > 0) {
-            const { mapApiProduct } = await import('./utils/catalogPayload');
-            setProducts(data.map((p: any) => mapApiProduct(p)));
-            return;
-          }
+        const res = await fetch(`/api/products?store_slug=${encodeURIComponent(storeSlug)}`);
+        const data = await res.json().catch(() => null);
+        if (isMounted && Array.isArray(data) && data.length > 0) {
+          const { mapApiProduct } = await import('./utils/catalogPayload');
+          setProducts(data.map((p: any) => mapApiProduct(p)));
+          return;
         }
-      } catch (sbErr) {
-        console.warn('[App] Supabase initial load notice:', sbErr);
+      } catch (err) {
+        console.warn('[App] Product load warning:', err);
       }
 
       safeFetch(`/api/products-by-slug/${encodeURIComponent(storeSlug)}`).then(data => {
@@ -543,6 +537,12 @@ export default function App() {
     try {
       const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
       if (saved) return JSON.parse(saved).orders || [];
+    } catch (e) {
+      console.error(e);
+    }
+    try {
+      const saved2 = localStorage.getItem(`ZID_MERCHANT_STORE_DATA_${(merchant as any)?.storeSlug || 'bd'}`);
+      if (saved2) return JSON.parse(saved2).orders || [];
     } catch (e) {
       console.error(e);
     }
