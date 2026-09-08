@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig, CodConfig, Order, OrderItem, ThemeConfig } from '../types';
 import { buildCategoryDbPayload, buildProductDbPayload, maxCatalogId, packCatalogItem, toCatalogSlug, ensureCategory, mapApiProduct, mapApiCategory } from '../utils/catalogPayload';
 import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play } from 'lucide-react';
@@ -100,7 +100,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // immediately without remounting or refreshing the page.
   const { t } = useLanguage();
   // Effective store slug for cache keys — resolved from prop or the active merchant session.
-  const effectiveStoreSlug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
+  // Memoized so the data-load effects below don't re-run on every render (which would
+  // otherwise start a new 3s poll + Supabase fetch cascade each time setLiveStoreData fires).
+  const effectiveStoreSlug = useMemo(
+    () => resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug),
+    [storeSlug, (merchant as any)?.storeSlug]
+  );
   const [liveStoreData, setLiveStoreData] = useState<ZidStoreData>(() => readZidStoreData(storeSlug));
   // Real store UUID resolved from the 'stores' table — used for orders.store_id
   const [resolvedStoreId, setResolvedStoreId] = useState<string>('');
@@ -108,7 +113,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   useEffect(() => {
     let active = true;
     // Active store slug resolved from prop (route param) or merchant session — never hardcoded.
-    const effectiveSlug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
+    const effectiveSlug = effectiveStoreSlug;
     const loadStorefront = async () => {
       try {
         // Direct Supabase load — API routes bypassed (they 500 on Vercel)
@@ -257,8 +262,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       }
     };
     void loadStorefront();
-    const poll = window.setInterval(() => void loadStorefront(), 3000);
-    return () => { active = false; window.clearInterval(poll); };
+    // NOTE: removed the 3s setInterval poll. Polling Supabase every 3s while also
+    // calling writeZidStoreData()/setLiveStoreData() inside the poll created an
+    // infinite request loop (each write re-renders -> resubscribes -> refetches).
+    // Reactivity for cross-tab/local edits is already handled by the
+    // subscribeToZidStoreData listener above. A single load on mount + slug change
+    // is sufficient; Supabase Realtime covers live DB changes.
+    return () => { active = false; };
   }, [effectiveStoreSlug]);
 
   const themeCustomization = (liveStoreData.themeCustomization || {}) as {

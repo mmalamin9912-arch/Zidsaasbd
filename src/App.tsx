@@ -260,11 +260,24 @@ export default function App() {
   const isTrialActive = !isPaidPlan && trialDaysRemaining > 0;
 
   const prevSlugRef = React.useRef<string>(merchant?.storeSlug || '');
+  // Stable identity key for the data-load effect. We only want to re-fetch when
+  // the PERMANENT store identity changes — NOT when `setMerchant`/`setProducts`
+  // (called inside this very effect) mutate the merchant object. Without this
+  // guard, the effect re-runs on every state update it triggers, producing the
+  // 300+ request infinite fetch loop.
+  const storeIdentityKey = React.useRef<string>('');
+  const pendingIdentity = [merchant?.id, merchant?.storeCode, merchant?.storeSlug, activeTab].join('|');
 
   // Fetch data from DB on mount, storeSlug change, or tab switch.
   // Data loads are keyed on the PERMANENT store identity (UUID / store_code);
   // the slug is only a fallback, so renaming a store never breaks lookups.
   React.useEffect(() => {
+    // Skip re-run if the permanent identity + active tab haven't changed.
+    // This breaks the loop: setMerchant()/setProducts() inside this effect
+    // change `merchant`, but the identity key stays the same.
+    if (storeIdentityKey.current === pendingIdentity) return;
+    storeIdentityKey.current = pendingIdentity;
+
     const merchantId = merchant?.id || merchant?.storeCode || merchant?.storeSlug || 'default';
     const storeSlug = merchant?.storeSlug || merchant?.id || 'default';
     let isMounted = true;
@@ -333,7 +346,8 @@ export default function App() {
       });
     }
 
-    // Categories
+    // Categories — only update merchant state when categories actually
+    // changed, otherwise setMerchant re-triggers the auto-sync effect.
     const loadCategories = async () => {
       let catsRes = await safeFetch(`/api/categories?store_slug=${encodeURIComponent(storeSlug)}`);
       let cats = Array.isArray(catsRes) ? catsRes : (Array.isArray(catsRes?.categories) ? catsRes.categories : null);
@@ -341,16 +355,20 @@ export default function App() {
         const bySlug = await safeFetch(`/api/categories-by-slug/${encodeURIComponent(storeSlug)}`);
         cats = Array.isArray(bySlug) ? bySlug : (Array.isArray(bySlug?.categories) ? bySlug.categories : []);
       }
-      if (isMounted && Array.isArray(cats)) {
-        if (cats.length > 0 || !(merchant?.themeConfig?.categoriesList?.length)) {
-          setMerchant(prev => ({
+      if (isMounted && Array.isArray(cats) && cats.length > 0) {
+        setMerchant(prev => {
+          const existing = prev?.themeConfig?.categoriesList;
+          // Avoid a no-op state update (same reference / same length) that would
+          // retrigger downstream effects and the auto-sync loop.
+          if (Array.isArray(existing) && existing.length === cats.length) return prev;
+          return {
             ...prev,
             themeConfig: {
               ...(prev.themeConfig || {}),
               categoriesList: cats
             }
-          }));
-        }
+          };
+        });
       }
     };
     loadCategories();
@@ -372,18 +390,28 @@ export default function App() {
     return () => {
       isMounted = false;
     };
-  }, [merchant?.id, merchant?.storeCode, merchant?.storeSlug, activeTab]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingIdentity]);
 
-  // Auto-sync merchant settings and categories to Supabase on change
+  // Auto-sync merchant settings and categories to Supabase on change.
+  // Skip the very first run (initial hydration) and only sync when a field we
+  // actually persist has changed — otherwise every setMerchant() (including the
+  // categories/realtime loads above) fires a POST and re-triggers the loop.
+  const merchantSyncRef = React.useRef<boolean>(false);
   React.useEffect(() => {
     if (!merchant || !merchant.storeSlug) return;
+    // Skip initial mount; only sync on subsequent real edits.
+    if (!merchantSyncRef.current) {
+      merchantSyncRef.current = true;
+      return;
+    }
     const timer = setTimeout(() => {
       fetch('/api/stores/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(merchant)
       }).catch(err => console.warn('Merchant auto-sync warning:', err));
-    }, 800);
+    }, 1200);
     return () => clearTimeout(timer);
   }, [merchant]);
 
@@ -1340,8 +1368,8 @@ export default function App() {
       {/* Global Platform Announcement */}
       {platformAnnouncement.isActive && (
         <div className={`py-1.5 px-4 text-center text-[10px] font-black uppercase tracking-[0.1em] shadow-sm relative z-[100] ${platformAnnouncement.type === 'urgent' ? 'bg-red-600 text-white' :
-            platformAnnouncement.type === 'warning' ? 'bg-orange-500 text-slate-950' :
-              'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950'
+          platformAnnouncement.type === 'warning' ? 'bg-orange-500 text-slate-950' :
+            'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950'
           }`}>
           {platformAnnouncement.message}
         </div>
