@@ -1507,7 +1507,7 @@ app.post('/api/orders', async (req, res) => {
         customer_phone: order.customerPhone || order.customer_phone || '',
         shipping_address: String(order.address || order.shipping_address || '').trim(),
         items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []),
-        total_amount: order.totalBDT ?? order.total_amount ?? order.total ?? 0,
+        total_price: order.totalBDT ?? order.total_amount ?? order.total ?? 0,
         payment_method: order.paymentMethod || order.payment_method || 'COD',
         payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
         status: order.status || 'New',

@@ -573,8 +573,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     };
 
     void fetchCatalog();
-    const interval = setInterval(fetchCatalog, 3000);
-    return () => { active = false; clearInterval(interval); };
+    return () => { active = false; };
   }, [effectiveStoreSlug]);
 
   const combinedRawProducts = [
@@ -1097,7 +1096,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           customer_city: newOrder.customerCity,
           shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
           items: JSON.stringify(newOrder.items),
-          total_amount: newOrder.totalBDT,
+          total_price: newOrder.totalBDT,
           payment_method: newOrder.paymentMethod,
           payment_status: newOrder.paymentStatus,
           transaction_id: newOrder.transactionId || null,

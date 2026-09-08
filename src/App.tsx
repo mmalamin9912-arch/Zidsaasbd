@@ -1144,7 +1144,7 @@ export default function App() {
                   customer_phone: newOrder.customerPhone,
                   shipping_address: `${newOrder.address || ''}, ${newOrder.customerCity || ''}`,
                   items: JSON.stringify(newOrder.items),
-                  total_amount: newOrder.totalBDT,
+                  total_price: newOrder.totalBDT,
                   payment_method: newOrder.paymentMethod,
                   payment_status: newOrder.paymentStatus,
                   status: 'New',
