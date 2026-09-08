@@ -1,0 +1,38 @@
+{"type":"commit_made","sha":"39604363d0caf17d17cac44731590dcbd8c3ff0c","message_first_line":"fix: save and fetch products via mongodb api","files":0,"ts":"2026-09-08T21:09:26.137456400Z"}
+{"type":"commit_made","sha":"8fd3d278ba1ec7730bb9029a161e53c7623eacea","message_first_line":"fix: save and fetch products via mongodb api","files":0,"ts":"2026-09-08T21:09:26.137459600Z"}
+{"type":"commit_made","sha":"ee09d101e1d0013593ad7971813a7608c2d3580b","message_first_line":"fix: save and fetch products via mongodb api","files":0,"ts":"2026-09-08T21:09:26.137460200Z"}
+{"type":"commit_made","sha":"57dae421e90a6e98cb2a575c09c3aa564dbfa204","message_first_line":"fix: save and fetch products via mongodb api","files":0,"ts":"2026-09-08T21:09:26.137461Z"}
+{"type":"commit_made","sha":"17b244f3d58eb983a23674a60686109a2836b41e","message_first_line":"fix: cleanup supabase residual queries and fix API routes","files":0,"ts":"2026-09-08T21:09:26.137462100Z"}
+{"type":"commit_made","sha":"7e297778e9c9f6668c8ec7b9a8d2ee4d1d4b9668","message_first_line":"fix: resolve mongodb order flow and dashboard fetching","files":0,"ts":"2026-09-08T21:09:26.137463400Z"}
+{"type":"commit_made","sha":"0d1c2eb85dd438c70110d589ba14040b7475edf2","message_first_line":"fix: resolve total_price column mismatch and storefront infinite loop","files":0,"ts":"2026-09-08T21:09:26.137464500Z"}
+{"type":"commit_made","sha":"7f6ad93208e54b08554f6fbf8d563b9f8aa26d32","message_first_line":"fix: resolve supabase fetching issues and infinite loops in TenantStorefrontView","files":0,"ts":"2026-09-08T21:09:26.137465300Z"}
+{"type":"commit_made","sha":"61b7ac34361255296446bcc69bb9a73090f772e1","message_first_line":"resolve worktree conflicts and apply mongodb hybrid setup","files":0,"ts":"2026-09-08T21:09:26.137465900Z"}
+{"type":"commit_made","sha":"4f6feba5e2ee8c9df4d2c79545051d6b45b1328f","message_first_line":"fix domain query error and product level delivery charge","files":0,"ts":"2026-09-08T21:09:26.138000100Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.949Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.955Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.944Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.961Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.965Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.967Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.953Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.970Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.972Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.975Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.978Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.984Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.988Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.991Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:58.995Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:58.999Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:59.002Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:59.006Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:59.018Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:59.028Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:59.021Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:59.032Z"}
+{"type":"file_opened","path":"[REDACTED_PATH]","ts":"2026-09-08T21:10:59.042Z"}
+{"type":"snippet_selected","path":"[REDACTED_PATH]","lines":[1,1],"ts":"2026-09-08T21:10:59.046Z"}
+{"type":"snippet_selected","path":"extension-output-smallcloud.codify-#8-Custom rust LSP server","lines":[1,1],"ts":"2026-09-08T21:10:59.080Z"}
+{"type":"snippet_selected","path":"extension-output-smallcloud.codify-#8-Custom rust LSP server","lines":[1,1],"ts":"2026-09-08T21:10:59.083Z"}
+{"type":"snippet_selected","path":"extension-output-smallcloud.codify-#8-Custom rust LSP server","lines":[1,12],"ts":"2026-09-08T21:10:59.087Z"}
+{"type":"snippet_selected","path":"extension-output-smallcloud.codify-#8-Custom rust LSP server","lines":[1,1],"ts":"2026-09-08T21:10:59.094Z"}
