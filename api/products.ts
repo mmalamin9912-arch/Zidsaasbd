@@ -204,6 +204,23 @@ async function resolveStoreId(supabase: SupabaseClient, storeSlug: string): Prom
   return null;
 }
 
+/** Resolve a store_slug to the canonical store UUID from the 'stores' table */
+async function resolveStoreIdBySlug(supabase: SupabaseClient, storeSlug: string): Promise<string | null> {
+  if (!storeSlug || !storeSlug.trim()) return null;
+  const clean = storeSlug.trim();
+  try {
+    const { data } = await supabase
+      .from('stores')
+      .select('id')
+      .eq('store_slug', clean)
+      .maybeSingle();
+    if (data?.id) return data.id;
+  } catch (e) {
+    console.warn('[Vercel /api/products] store_id lookup by slug failed:', e);
+  }
+  return null;
+}
+
 /** Resolve a store_id UUID or ZID-BD-XXXX code back to the store_slug in Supabase */
 async function resolveStoreSlugByRef(supabase: SupabaseClient, storeRef: string): Promise<string | null> {
   if (!storeRef || !storeRef.trim()) return null;

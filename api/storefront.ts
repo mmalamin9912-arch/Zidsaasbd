@@ -29,6 +29,73 @@ function getDatabaseClient(): SupabaseClient | null {
   } catch { return null; }
 }
 
+/** Extract store_id from request (query params, body, or URL search params) */
+function extractStoreId(req: Request): string | null {
+  try {
+    // 1. Query parameter
+    const qStoreId = req.query?.store_id || req.query?.storeId;
+    if (typeof qStoreId === 'string' && qStoreId.trim()) return qStoreId.trim().toLowerCase();
+
+    // 2. Body parameter
+    if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
+      const bStoreId = (req.body as Record<string, any>).store_id || (req.body as Record<string, any>).storeId;
+      if (typeof bStoreId === 'string' && bStoreId.trim()) return bStoreId.trim().toLowerCase();
+    }
+
+    // 3. URL search params
+    if (req.url) {
+      try {
+        const urlObj = new URL(req.url, 'http://localhost');
+        const sStoreId = urlObj.searchParams.get('store_id') || urlObj.searchParams.get('storeId');
+        if (sStoreId && sStoreId.trim()) return sStoreId.trim().toLowerCase();
+      } catch {}
+    }
+  } catch (err: any) {
+    console.warn('[Vercel Serverless /api/storefront] Error extracting store_id:', err?.message || err);
+  }
+  return null;
+}
+
+/** Resolve store_id (canonical UUID) from store_slug by querying the stores table */
+async function resolveStoreIdBySlug(storeSlug: string): Promise<string | null> {
+  if (!storeSlug || !storeSlug.trim()) return null;
+  const clean = storeSlug.trim().toLowerCase();
+  const supabase = getDatabaseClient();
+  if (!supabase) return null;
+
+  // If it's already a UUID, return it directly (validate against stores table)
+  if (UUID_RE.test(clean)) {
+    try {
+      const { data } = await supabase.from('stores').select('id').eq('id', clean).maybeSingle();
+      return data?.id || null;
+    } catch (e) {
+      console.warn('[Vercel /api/storefront] store_id UUID validation failed:', e);
+    }
+    return null;
+  }
+
+  // If it's a store_code (ZID-BD-XXXX), resolve to UUID
+  if (STORE_CODE_RE.test(clean)) {
+    try {
+      const { data } = await supabase.from('stores').select('id').ilike('store_code', clean).maybeSingle();
+      if (data?.id) return data.id;
+    } catch (e) {
+      console.warn('[Vercel /api/storefront] ZID-BD store_code -> store_id lookup failed:', e);
+    }
+    return null;
+  }
+
+  // It's a slug — resolve to store_id from stores table
+  try {
+    const { data } = await supabase.from('stores').select('id').eq('store_slug', clean).maybeSingle();
+    if (data?.id) return data.id;
+  } catch (e) {
+    console.warn('[Vercel /api/storefront] store_slug -> store_id lookup failed:', e);
+  }
+  return null;
+}
+
+/** Resolve store_slug from a store_id UUID or ZID-BD code */
 async function resolveStoreSlugByRef(ref: string): Promise<string | null> {
   if (!ref || !ref.trim()) return null;
   const clean = ref.trim();
@@ -48,6 +115,52 @@ async function resolveStoreSlugByRef(ref: string): Promise<string | null> {
     } catch (e) { console.warn('[Vercel /api/storefront] ZID-BD store_code lookup failed:', e); }
   }
   return null;
+}
+
+/** Fetch products from Supabase by store_slug and store_id, deduplicating by product id */
+async function fetchProducts(storeSlug: string, storeId: string | null): Promise<any[]> {
+  const supabase = getDatabaseClient();
+  if (!supabase) return [];
+
+  try {
+    const allProducts: any[] = [];
+
+    // Query by store_slug
+    const { data: slugData, error: slugErr } = await supabase
+      .from('products')
+      .select('*')
+      .eq('store_slug', storeSlug);
+
+    if (!slugErr && Array.isArray(slugData) && slugData.length > 0) {
+      allProducts.push(...slugData);
+    }
+
+    // Query by store_id if resolved
+    if (storeId) {
+      const { data: idData, error: idErr } = await supabase
+        .from('products')
+        .select('*')
+        .eq('store_id', storeId);
+
+      if (!idErr && Array.isArray(idData) && idData.length > 0) {
+        allProducts.push(...idData);
+      }
+    }
+
+    // Deduplicate by product id
+    if (allProducts.length > 0) {
+      const seen = new Set<string>();
+      return allProducts.filter(p => {
+        const key = String(p.id);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+  } catch (e: any) {
+    console.warn('[Vercel Serverless /api/storefront] fetchProducts warning:', e?.message || e);
+  }
+  return [];
 }
 
 export default async function handler(req: Request, res: Response) {
