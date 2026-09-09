@@ -170,20 +170,59 @@ const FALLBACK_PRODUCTS = [
   },
 ];
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
+
+/** Resolve a store_id UUID or ZID-BD-XXXX code back to the store_slug in Supabase */
+async function resolveStoreSlugByRef(supabase: SupabaseClient, storeRef: string): Promise<string | null> {
+  if (!storeRef || !storeRef.trim()) return null;
+  const clean = storeRef.trim();
+
+  // 1. UUID lookup
+  if (UUID_RE.test(clean)) {
+    try {
+      const { data } = await supabase.from('stores').select('store_slug').eq('id', clean).maybeSingle();
+      if (data?.store_slug) return data.store_slug;
+    } catch (e) {
+      console.warn('[Vercel /api/products] store_id UUID lookup failed:', e);
+    }
+  }
+
+  // 2. ZID-BD-XXXX code lookup
+  if (STORE_CODE_RE.test(clean)) {
+    try {
+      const { data } = await supabase.from('stores').select('store_slug').ilike('store_code', clean).maybeSingle();
+      if (data?.store_slug) return data.store_slug;
+    } catch (e) {
+      console.warn('[Vercel /api/products] ZID-BD store_code lookup failed:', e);
+    }
+  }
+
+  return null;
+}
+
 async function loadProducts(cleanSlug: string): Promise<any[]> {
   try {
     const sanitizedSlug = String(cleanSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
 
-    // 1. Safe Supabase Query
+    // If sanitizedSlug is a UUID or ZID-BD code, resolve it to the actual store_slug first
+    let resolvedSlug = sanitizedSlug;
     const supabase = getDatabaseClient();
+    if (supabase && (UUID_RE.test(sanitizedSlug) || STORE_CODE_RE.test(sanitizedSlug))) {
+      const maybeSlug = await resolveStoreSlugByRef(supabase, sanitizedSlug);
+      if (maybeSlug) resolvedSlug = maybeSlug;
+    }
+
+    // 1. Safe Supabase Query — try both store_slug and store_id
     if (supabase) {
       try {
         const sbQuery = (async () => {
           try {
-            const { data, error } = await supabase
+            // Primary: query by resolved store_slug
+            let { data, error } = await supabase
               .from('products')
               .select('*')
-              .eq('store_slug', sanitizedSlug);
+              .eq('store_slug', resolvedSlug);
 
             if (error) {
               console.error('[Vercel Serverless /api/products] Supabase products query error:', error.message);
@@ -194,12 +233,21 @@ async function loadProducts(cleanSlug: string): Promise<any[]> {
               return data;
             }
 
+            // If original slug is a UUID, also try query by store_id
+            if (UUID_RE.test(sanitizedSlug)) {
+              const { data: byId, error: errById } = await supabase
+                .from('products')
+                .select('*')
+                .eq('store_id', sanitizedSlug);
+              if (!errById && Array.isArray(byId) && byId.length > 0) return byId;
+            }
+
             // Check tenants table
             try {
               const { data: tenantData, error: tenantErr } = await supabase
                 .from('tenants')
                 .select('products')
-                .eq('store_slug', sanitizedSlug)
+                .eq('store_slug', resolvedSlug)
                 .maybeSingle();
 
               if (tenantErr) {
@@ -207,6 +255,20 @@ async function loadProducts(cleanSlug: string): Promise<any[]> {
               } else if (tenantData?.products && Array.isArray(tenantData.products) && tenantData.products.length > 0) {
                 return tenantData.products;
               }
+
+              // Try tenants by store_id if original is a UUID
+              if (UUID_RE.test(sanitizedSlug)) {
+                const { data: tenantById, error: errById } = await supabase
+                  .from('tenants')
+                  .select('products')
+                  .eq('store_id', sanitizedSlug)
+                  .maybeSingle();
+                if (!errById && tenantById?.products && Array.isArray(tenantById.products) && tenantById.products.length > 0) {
+                  return tenantById.products;
+                }
+              }
+
+              return null;
             } catch (tErr: any) {
               console.error('[Vercel Serverless /api/products] Supabase tenant lookup exception:', tErr?.message || tErr);
             }
@@ -227,14 +289,17 @@ async function loadProducts(cleanSlug: string): Promise<any[]> {
       }
     }
 
-    // 2. Safe KV Storage Query
-    try {
-      const tenant = await fetchWithTimeout(getTenant(sanitizedSlug), 2000, null);
-      if (tenant && Array.isArray(tenant.products) && tenant.products.length > 0) {
-        return tenant.products;
+    // 2. Safe KV Storage Query — try resolved slug and original slug
+    const kvSlugsToTry = new Set([resolvedSlug, sanitizedSlug]);
+    for (const kvSlug of kvSlugsToTry) {
+      try {
+        const tenant = await fetchWithTimeout(getTenant(kvSlug), 2000, null);
+        if (tenant && Array.isArray(tenant.products) && tenant.products.length > 0) {
+          return tenant.products;
+        }
+      } catch (kvErr: any) {
+        console.warn('[Vercel Serverless /api/products] KV load error for slug', kvSlug, ':', kvErr?.message || kvErr);
       }
-    } catch (kvErr: any) {
-      console.warn('[Vercel Serverless /api/products] KV load error:', kvErr?.message || kvErr);
     }
 
     // 3. Fallback mock products for standard preview slugs
