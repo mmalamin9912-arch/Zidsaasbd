@@ -206,8 +206,7 @@ async function writeStorePayload(payload: any) {
   await fs.writeFile(STORE_FILE, JSON.stringify(payload, null, 2));
 }
 
-// Subscription endpoint by store name or slug
-app.get('/api/subscription/by-store/:storeName', async (req, res) => {
+app.all('/api/categories', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const storeName = decodeURIComponent(req.params.storeName || '').trim();
@@ -510,6 +509,134 @@ app.get('/api/categories-by-slug/:slug', (req, res) => {
   return res.json(cats);
 });
 
+// UUID and store code patterns
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
+
+function isUuidLike(value: string): boolean {
+  return UUID_RE.test(value.trim());
+}
+
+/** Resolve a store_id UUID or ZID-BD-XXXX store code to the canonical store_slug via Supabase */
+async function resolveStoreSlugFromRef(storeRef: string): Promise<string | undefined> {
+  if (!storeRef) return undefined;
+  const clean = storeRef.trim();
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return undefined;
+
+  // UUID lookup
+  if (isUuidLike(clean)) {
+    try {
+      const res = await fetch(`${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      });
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length > 0) return rows[0].store_slug;
+      }
+    } catch (e) { /* noop */ }
+  }
+
+  // ZID-BD store code lookup
+  if (STORE_CODE_RE.test(clean)) {
+    try {
+      const res = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      });
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length > 0) return rows[0].store_slug;
+      }
+    } catch (e) { /* noop */ }
+  }
+
+  return undefined;
+}
+
+/** Resolve a store_slug to the canonical store_id (UUID) via Supabase */
+async function resolveStoreIdBySlug(slug: string): Promise<string | undefined> {
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return undefined;
+
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+    });
+    if (res.ok) {
+      const rows = await res.json();
+      if (Array.isArray(rows) && rows.length > 0) return rows[0].id;
+    }
+  } catch (e) { /* noop */ }
+
+  // Fallback: generate deterministic UUID from slug for backwards compatibility
+  return undefined;
+}
+
+// Store identity helpers
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
+
+function isUuidLike(value: string | undefined | null): boolean {
+  if (!value || typeof value !== 'string') return false;
+  return UUID_RE.test(value.trim());
+}
+
+/**
+ * Resolve a store_id UUID or ZID-BD-XXXX store code to store_slug
+ * by querying Supabase stores table.
+ */
+async function resolveStoreSlugByRef(storeRef: string): Promise<string | null> {
+  if (!storeRef || typeof storeRef !== 'string') return null;
+  const clean = storeRef.trim();
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return null;
+
+  if (isUuidLike(clean)) {
+    try {
+      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      });
+      if (sbRes.ok) {
+        const rows = await sbRes.json();
+        if (Array.isArray(rows) && rows.length > 0 && rows[0].store_slug) return rows[0].store_slug;
+      }
+    } catch (e) { console.warn('[Server] store_id UUID lookup failed:', e); }
+  }
+
+  if (STORE_CODE_RE.test(clean)) {
+    try {
+      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      });
+      if (sbRes.ok) {
+        const rows = await sbRes.json();
+        if (Array.isArray(rows) && rows.length > 0 && rows[0].store_slug) return rows[0].store_slug;
+      }
+    } catch (e) { console.warn('[Server] ZID-BD store_code lookup failed:', e); }
+  }
+
+  return null;
+}
+
+/** Resolve store_slug to the canonical store_id UUID from Supabase stores table. */
+async function resolveStoreIdBySlug(slug: string): Promise<string | null> {
+  if (!slug || typeof slug !== 'string') return null;
+  const clean = slug.trim();
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return null;
+
+  try {
+    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(clean)}&select=id&limit=1`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+    });
+    if (sbRes.ok) {
+      const rows = await sbRes.json();
+      if (Array.isArray(rows) && rows.length > 0 && rows[0].id) return rows[0].id;
+    }
+  } catch (e) { console.warn('[Server] store slug to id lookup failed:', e); }
+  return null;
+}
+
 // Products mocked in memory to prevent 404s
 const productStore = new Map<string, any[]>();
 
@@ -559,6 +686,45 @@ async function resolveStoreIdBySlug(storeSlug: string): Promise<string | null> {
       if (Array.isArray(rows) && rows.length > 0) return rows[0].id;
     }
   } catch (e) { console.warn('[Server] resolveStoreIdBySlug warning:', e); }
+  return null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
+
+function isUuidLike(value: string): boolean { return UUID_RE.test(value); }
+
+/** Resolve a store_id (UUID) or store_code (ZID-BD-XXXX) to store_slug via Supabase REST */
+async function resolveStoreIdBySlug(ref: string): Promise<string | null> {
+  if (!ref || !ref.trim()) return null;
+  const clean = ref.trim();
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return null;
+
+  if (isUuidLike(clean)) {
+    try {
+      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(clean)}&select=store_slug`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      });
+      if (sbRes.ok) {
+        const rows = await sbRes.json();
+        if (Array.isArray(rows) && rows.length > 0 && rows[0].store_slug) return rows[0].store_slug;
+      }
+    } catch (e) { console.warn('[Server] resolveStoreIdBySlug UUID lookup failed:', e); }
+  }
+
+  if (STORE_CODE_RE.test(clean)) {
+    try {
+      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(clean)}&select=store_slug`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+      });
+      if (sbRes.ok) {
+        const rows = await sbRes.json();
+        if (Array.isArray(rows) && rows.length > 0 && rows[0].store_slug) return rows[0].store_slug;
+      }
+    } catch (e) { console.warn('[Server] resolveStoreIdBySlug store_code lookup failed:', e); }
+  }
+
   return null;
 }
 
@@ -616,8 +782,40 @@ function getMergedProductsForStore(storeSlug: string, merchantId: string, payloa
 app.get('/api/products', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const rawSlug = (req.query.store_slug as string || req.query.storeSlug as string || '').trim().toLowerCase();
-    const storeSlug = String(rawSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
+    // Accept store_slug, storeSlug, store_id, or store_code from query
+    const rawSlug = (req.query.store_slug as string ||
+      req.query.storeSlug as string ||
+      req.query.store_id as string ||
+      req.query.store_code as string ||
+      '').trim().toLowerCase();
+    let storeSlug = String(rawSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
+
+    // If the input matches a UUID or ZID-BD-XXXX pattern, try to resolve to store_slug
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
+    if ((UUID_RE.test(storeSlug) || STORE_CODE_RE.test(storeSlug)) && getServerSupabaseConfig().isConfigured) {
+      try {
+        const { supabaseUrl, supabaseKey } = getServerSupabaseConfig();
+        let lookupUrl = '';
+        if (UUID_RE.test(storeSlug)) {
+          lookupUrl = `${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(storeSlug)}&select=store_slug&limit=1`;
+        } else {
+          lookupUrl = `${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(storeSlug)}&select=store_slug&limit=1`;
+        }
+        const slugRes = await fetch(lookupUrl, {
+          headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
+        });
+        if (slugRes.ok) {
+          const slugRows = await slugRes.json();
+          if (Array.isArray(slugRows) && slugRows.length > 0 && slugRows[0].store_slug) {
+            storeSlug = slugRows[0].store_slug.toLowerCase();
+          }
+        }
+      } catch (e) {
+        console.warn('[Server] GET /api/products store_slug resolution failed:', e);
+      }
+    }
+
     const merchantId = (req.query.merchant_id as string || req.query.merchantId as string || '').trim();
 
     const payload = await readStorePayload();
