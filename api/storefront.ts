@@ -1,7 +1,7 @@
 import { getTenant, publicTenant, saveTenant } from './tenantStore';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-type Request = { method?: string; query: Record<string, string | string[] | undefined>; body?: Record<string, unknown>; url?: string };
+type Request = { method?: string; query: Record<string, string | string[] | undefined>; body?: Record<string, unknown>; url?: string; params?: Record<string, string> };
 type Response = { status: (status: number) => Response; json: (body: unknown) => unknown; setHeader: (name: string, value: string) => void };
 const reply = (res: Response, status: number, body: Record<string, unknown> | unknown) => res.status(status).json(body);
 
