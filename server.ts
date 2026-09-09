@@ -573,8 +573,8 @@ async function resolveStoreIdBySlug(slug: string): Promise<string | undefined> {
 }
 
 // Store identity helpers
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
+const UUID_RE_PLACEHOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STORE_CODE_RE_PLACEHOLDER = /^ZID-BD-\d{4,}$/i;
 
 function isUuidLike(value: string | undefined | null): boolean {
   if (!value || typeof value !== 'string') return false;
@@ -737,6 +737,7 @@ app.get('/api/products-by-slug/:slug', async (req, res) => {
 
 function getMergedProductsForStore(storeSlug: string, merchantId: string, payload: Record<string, any>): any[] {
   const targetSlug = (storeSlug || 'bd').toLowerCase().trim();
+  const isRef = isUuidLike(targetSlug) || STORE_CODE_RE.test(targetSlug);
   const fileProds = Array.isArray(payload.products) ? payload.products : [];
   const storeProds = (targetSlug && payload.stores?.[targetSlug]?.products && Array.isArray(payload.stores[targetSlug].products))
     ? payload.stores[targetSlug].products
@@ -760,6 +761,14 @@ function getMergedProductsForStore(storeSlug: string, merchantId: string, payloa
     results = results.filter(p => {
       const pSlug = (p.storeSlug || p.store_slug || '').toString().trim().toLowerCase();
       const pMerchant = (p.merchantId || p.merchant_id || '').toString().trim();
+      const pStoreId = (p.store_id || p.storeId || '').toString().trim();
+      const pStoreCode = (p.store_code || p.storeCode || '').toString().trim();
+
+      if (isRef) {
+        // Match by store_id UUID or store_code
+        if (isUuidLike(targetSlug) && pStoreId && pStoreId === targetSlug) return true;
+        if (STORE_CODE_RE.test(targetSlug) && pStoreCode && pStoreCode.toLowerCase() === targetSlug.toLowerCase()) return true;
+      }
 
       if (targetSlug) {
         if (pSlug === targetSlug) return true;
@@ -787,30 +796,16 @@ app.get('/api/products', async (req, res) => {
       req.query.storeSlug as string ||
       req.query.store_id as string ||
       req.query.store_code as string ||
-      '').trim().toLowerCase();
+      '').trim();
+    // Preserve original for UUID/store_code matching (before .toLowerCase())
+    const rawSlugOriginal = rawSlug.trim();
     let storeSlug = String(rawSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
 
     // If the input matches a UUID or ZID-BD-XXXX pattern, try to resolve to store_slug
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
-    if ((UUID_RE.test(storeSlug) || STORE_CODE_RE.test(storeSlug)) && getServerSupabaseConfig().isConfigured) {
+    if ((isUuidLike(rawSlugOriginal) || STORE_CODE_RE.test(rawSlugOriginal)) && getServerSupabaseConfig().isConfigured) {
       try {
-        const { supabaseUrl, supabaseKey } = getServerSupabaseConfig();
-        let lookupUrl = '';
-        if (UUID_RE.test(storeSlug)) {
-          lookupUrl = `${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(storeSlug)}&select=store_slug&limit=1`;
-        } else {
-          lookupUrl = `${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(storeSlug)}&select=store_slug&limit=1`;
-        }
-        const slugRes = await fetch(lookupUrl, {
-          headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
-        });
-        if (slugRes.ok) {
-          const slugRows = await slugRes.json();
-          if (Array.isArray(slugRows) && slugRows.length > 0 && slugRows[0].store_slug) {
-            storeSlug = slugRows[0].store_slug.toLowerCase();
-          }
-        }
+        const resolved = await resolveStoreSlugByRef(rawSlugOriginal);
+        if (resolved) storeSlug = resolved.toLowerCase();
       } catch (e) {
         console.warn('[Server] GET /api/products store_slug resolution failed:', e);
       }
@@ -821,17 +816,32 @@ app.get('/api/products', async (req, res) => {
     const payload = await readStorePayload();
     let prods = getMergedProductsForStore(storeSlug, merchantId, payload);
 
+    // Also try with the raw reference (UUID/code) if resolved lookup didn't find products
+    if (prods.length === 0 && (isUuidLike(rawSlugOriginal) || STORE_CODE_RE.test(rawSlugOriginal))) {
+      prods = getMergedProductsForStore(rawSlugOriginal, merchantId, payload);
+    }
+
     if (prods.length === 0) {
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
         try {
-          const mongoProds = await mongoose.connection.db.collection('products').find({
-            $or: [
-              { store_slug: storeSlug },
-              { storeSlug: storeSlug },
-              { store_id: storeSlug }
-            ]
-          }).toArray();
+          // Build query: try resolved slug, and original ref (UUID/store_code)
+          const mongoOr: any[] = [
+            { store_slug: storeSlug },
+            { storeSlug: storeSlug },
+          ];
+          // If original was a UUID or store_code, also match by store_id / store_code
+          if (isUuidLike(rawSlugOriginal)) {
+            mongoOr.push({ store_id: rawSlugOriginal });
+          }
+          if (STORE_CODE_RE.test(rawSlugOriginal)) {
+            mongoOr.push({ store_code: rawSlugOriginal });
+          }
+          // Also try by slug if it differs from original
+          if (storeSlug !== rawSlugOriginal.toLowerCase()) {
+            mongoOr.push({ store_id: storeSlug });
+          }
+          const mongoProds = await mongoose.connection.db.collection('products').find({ $or: mongoOr }).toArray();
           if (Array.isArray(mongoProds) && mongoProds.length > 0) {
             prods = mongoProds;
           }
