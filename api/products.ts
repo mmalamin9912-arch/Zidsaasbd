@@ -88,7 +88,8 @@ function getDatabaseClient(): SupabaseClient | null {
 
 function extractRawStoreSlug(req: VercelRequest): string {
   try {
-    const qSlug = req.query?.store_slug || req.query?.slug || req.query?.store;
+    // Accept store_slug, store_id, store_code, slug, or store from query
+    const qSlug = req.query?.store_slug || req.query?.store_id || req.query?.store_code || req.query?.slug || req.query?.store;
     if (typeof qSlug === 'string' && qSlug.trim()) return qSlug.trim();
     if (Array.isArray(qSlug) && typeof qSlug[0] === 'string' && qSlug[0].trim()) return qSlug[0].trim();
 
@@ -97,6 +98,8 @@ function extractRawStoreSlug(req: VercelRequest): string {
         const urlObj = new URL(req.url, 'http://localhost');
         const sSlug =
           urlObj.searchParams.get('store_slug') ||
+          urlObj.searchParams.get('store_id') ||
+          urlObj.searchParams.get('store_code') ||
           urlObj.searchParams.get('slug') ||
           urlObj.searchParams.get('store');
         if (sSlug && sSlug.trim()) return sSlug.trim();
@@ -112,6 +115,8 @@ function extractRawStoreSlug(req: VercelRequest): string {
     if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
       const bSlug =
         (req.body as Record<string, any>).store_slug ||
+        (req.body as Record<string, any>).store_id ||
+        (req.body as Record<string, any>).store_code ||
         (req.body as Record<string, any>).slug ||
         (req.body as Record<string, any>).storeSlug;
       if (typeof bSlug === 'string' && bSlug.trim()) return bSlug.trim();
@@ -303,8 +308,11 @@ async function loadProducts(cleanSlug: string): Promise<any[]> {
     }
 
     // 3. Fallback mock products for standard preview slugs
-    if (sanitizedSlug === 'bd' || sanitizedSlug === 'verandabd' || sanitizedSlug === 'default') {
-      return FALLBACK_PRODUCTS.map(p => ({ ...p, store_slug: sanitizedSlug, storeSlug: sanitizedSlug }));
+    const isFallbackSlug = sanitizedSlug === 'bd' || sanitizedSlug === 'verandabd' || sanitizedSlug === 'default' ||
+      resolvedSlug === 'bd' || resolvedSlug === 'verandabd' || resolvedSlug === 'default';
+    if (isFallbackSlug) {
+      const targetSlug = resolvedSlug === sanitizedSlug ? sanitizedSlug : resolvedSlug;
+      return FALLBACK_PRODUCTS.map(p => ({ ...p, store_slug: targetSlug, storeSlug: targetSlug }));
     }
 
     return [];
