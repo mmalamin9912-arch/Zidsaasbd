@@ -948,9 +948,68 @@ app.all('/api/tenant-store', async (req, res) => {
 });
 
 app.get('/api/storefront/:slug', async (req, res) => {
-  const slug = (req.params.slug || '').trim().toLowerCase();
-  const payload = await readStorePayload();
-  return res.json({ ok: true, store_slug: slug, storefront: payload });
+  try {
+    const slug = (req.params.slug || '').trim().toLowerCase();
+    const payload = await readStorePayload();
+
+    // Filter products by store_slug to only return products belonging to this store
+    const allProducts = Array.isArray(payload.products) ? payload.products : [];
+    const storeProducts = allProducts.filter((p: any) => {
+      const pSlug = (p.storeSlug || p.store_slug || '').toString().trim().toLowerCase();
+      return pSlug === slug || (slug === 'bd' && (!pSlug || pSlug === 'bd'));
+    });
+
+    // Also check store-specific products in payload.stores
+    if (payload.stores && payload.stores[slug] && Array.isArray(payload.stores[slug].products)) {
+      const storeP = payload.stores[slug].products;
+      const existingIds = new Set(storeProducts.map((p: any) => String(p.id)));
+      for (const p of storeP) {
+        if (p && !existingIds.has(String(p.id))) {
+          storeProducts.push(p);
+          existingIds.add(String(p.id));
+        }
+      }
+    }
+
+    // Also query MongoDB for this store's products
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      try {
+        const mongoProds = await mongoose.connection.db.collection('products').find({
+          $or: [
+            { store_slug: slug },
+            { storeSlug: slug },
+          ]
+        }).toArray();
+        if (Array.isArray(mongoProds) && mongoProds.length > 0) {
+          const existingIds = new Set(storeProducts.map((p: any) => String(p.id)));
+          for (const p of mongoProds) {
+            if (p && !existingIds.has(String(p.id))) {
+              storeProducts.push(p);
+            }
+          }
+        }
+      } catch (mongoErr) {
+        console.warn('[Server] GET /api/storefront/:slug MongoDB query warning:', mongoErr);
+      }
+    }
+
+    // Build storefront with only the data needed by the public customer link
+    const storefront = {
+      merchant: payload.merchant || null,
+      products: storeProducts,
+      categories: Array.isArray(payload.categories) ? payload.categories : [],
+      themes: Array.isArray(payload.themes) ? payload.themes : [],
+      bankAccounts: Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [],
+      mobileBanking: Array.isArray(payload.mobileBanking) ? payload.mobileBanking : [],
+      codConfig: payload.codConfig || null,
+    };
+
+    return res.json({ ok: true, store_slug: slug, storefront });
+  } catch (err: any) {
+    console.error('[Server] GET /api/storefront/:slug error:', err);
+    return res.json({ ok: true, store_slug: 'bd', storefront: { products: [] } });
+  }
 });
 
 app.get('/api/store', async (req, res) => {

@@ -212,23 +212,19 @@ export default async function handler(req: Request, res: Response) {
     }
 
     if (req.method === 'GET' || !req.method) {
-      const tenantData = await getTenant(cleanSlug);
+      // Always resolve store_id from the slug so products can be filtered
+      // by store_id in addition to store_slug
+      const querySlug = UUID_RE.test(cleanSlug) && !STORE_CODE_RE.test(cleanSlug) ? await resolveStoreSlugByRef(cleanSlug) : cleanSlug;
+      const slugForProducts = querySlug || cleanSlug;
+      const storeIdForProducts = await resolveStoreIdBySlug(slugForProducts);
+
+      const tenantData = await getTenant(slugForProducts);
       const storefront = publicTenant(tenantData);
 
-      // Also fetch from Supabase products table using store_slug
-      const supabase = getDatabaseClient();
-      if (supabase) {
-        try {
-          const { data: sbProducts, error: sbErr } = await supabase
-            .from('products')
-            .select('*')
-            .eq('store_slug', cleanSlug);
-          if (!sbErr && Array.isArray(sbProducts) && sbProducts.length > 0) {
-            storefront.products = sbProducts;
-          }
-        } catch (sbErr) {
-          console.warn('[Vercel /api/storefront] Supabase products query failed:', sbErr);
-        }
+      // Fetch products from Supabase using both store_slug and store_id
+      const sbProducts = await fetchProducts(slugForProducts, storeIdForProducts);
+      if (Array.isArray(sbProducts) && sbProducts.length > 0) {
+        storefront.products = sbProducts;
       }
 
       return reply(res, 200, { ok: true, store_slug: cleanSlug, storefront });

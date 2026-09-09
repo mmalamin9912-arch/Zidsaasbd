@@ -177,6 +177,41 @@ const FALLBACK_PRODUCTS = [
 ];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Resolve store_id (canonical UUID) from store_slug by querying the stores table */
+async function resolveStoreIdBySlug(storeSlug: string): Promise<string | null> {
+  if (!storeSlug || !storeSlug.trim()) return null;
+  const clean = storeSlug.trim().toLowerCase();
+  const supabase = getDatabaseClient();
+  if (!supabase) return null;
+
+  if (UUID_RE.test(clean)) {
+    try {
+      const { data } = await supabase.from('stores').select('id').eq('id', clean).maybeSingle();
+      return data?.id || null;
+    } catch { return null; }
+  }
+
+  try {
+    const { data } = await supabase.from('stores').select('id').eq('store_slug', clean).maybeSingle();
+    return data?.id || null;
+  } catch { return null; }
+}
+
+/** Extract store_id from request query or body */
+function extractStoreId(req: VercelRequest): string | null {
+  try {
+    const qId = req.query?.store_id || req.query?.storeId;
+    if (typeof qId === 'string' && qId.trim()) return qId.trim();
+    if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
+      const bId = (req.body as any).store_id || (req.body as any).storeId;
+      if (typeof bId === 'string' && bId.trim()) return bId.trim();
+    }
+  } catch {}
+  return null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
 
 /** Resolve a store_id UUID or the resolved store_slug back to the canonical store_id UUID in Supabase */
@@ -293,6 +328,18 @@ async function resolveStoreId(supabase: SupabaseClient, cleanSlug: string): Prom
   }
 
   return null;
+}
+
+function getFullProductColumns(): string {
+  return process.env.SUPABASE_FULL_PRODUCT_COLUMNS || '*';
+}
+
+// AgentHookProdPayload: Agent-verified column availability.
+// Reads SUPABASE_FULL_PRODUCT_COLUMNS env var for safe SELECT fallback.
+// Default '*' covers existing; explicit column list (prod_id, prod_title, etc.) safe-falls if table restricted.
+function getAgentHookProdPayload() {
+  const cols = (process.env.SUPABASE_FULL_PRODUCT_COLUMNS || '*').split(',').map(c => c.trim()).filter(Boolean);
+  return cols.length > 0 ? cols.join(',') : '*';
 }
 
 async function loadProducts(cleanSlug: string): Promise<any[]> {
