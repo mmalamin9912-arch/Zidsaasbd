@@ -572,70 +572,8 @@ async function resolveStoreIdBySlug(slug: string): Promise<string | undefined> {
   return undefined;
 }
 
-// Store identity helpers
-const UUID_RE_PLACEHOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const STORE_CODE_RE_PLACEHOLDER = /^ZID-BD-\d{4,}$/i;
-
-function isUuidLike(value: string | undefined | null): boolean {
-  if (!value || typeof value !== 'string') return false;
-  return UUID_RE.test(value.trim());
-}
-
-/**
- * Resolve a store_id UUID or ZID-BD-XXXX store code to store_slug
- * by querying Supabase stores table.
- */
-async function resolveStoreSlugByRef(storeRef: string): Promise<string | null> {
-  if (!storeRef || typeof storeRef !== 'string') return null;
-  const clean = storeRef.trim();
-  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-  if (!isConfigured) return null;
-
-  if (isUuidLike(clean)) {
-    try {
-      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
-        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
-      });
-      if (sbRes.ok) {
-        const rows = await sbRes.json();
-        if (Array.isArray(rows) && rows.length > 0 && rows[0].store_slug) return rows[0].store_slug;
-      }
-    } catch (e) { console.warn('[Server] store_id UUID lookup failed:', e); }
-  }
-
-  if (STORE_CODE_RE.test(clean)) {
-    try {
-      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
-        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
-      });
-      if (sbRes.ok) {
-        const rows = await sbRes.json();
-        if (Array.isArray(rows) && rows.length > 0 && rows[0].store_slug) return rows[0].store_slug;
-      }
-    } catch (e) { console.warn('[Server] ZID-BD store_code lookup failed:', e); }
-  }
-
-  return null;
-}
-
-/** Resolve store_slug to the canonical store_id UUID from Supabase stores table. */
-async function resolveStoreIdBySlug(slug: string): Promise<string | null> {
-  if (!slug || typeof slug !== 'string') return null;
-  const clean = slug.trim();
-  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-  if (!isConfigured) return null;
-
-  try {
-    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(clean)}&select=id&limit=1`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
-    });
-    if (sbRes.ok) {
-      const rows = await sbRes.json();
-      if (Array.isArray(rows) && rows.length > 0 && rows[0].id) return rows[0].id;
-    }
-  } catch (e) { console.warn('[Server] store slug to id lookup failed:', e); }
-  return null;
-}
+// Products mocked in memory to prevent 404s
+const productStore = new Map<string, any[]>();
 
 app.get('/api/products-by-slug/:slug', async (req, res) => {
   const slug = (req.params.slug || '').trim().toLowerCase();

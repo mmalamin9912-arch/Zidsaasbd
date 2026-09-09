@@ -289,33 +289,88 @@ async function loadProducts(cleanSlug: string): Promise<any[]> {
       if (maybeSlug) resolvedSlug = maybeSlug;
     }
 
-    // 1. Safe Supabase Query — try both store_slug and store_id
+    // Also resolve store_id from the stores table (canonical UUID)
+    let resolvedStoreId: string | null = null;
     if (supabase) {
+      try {
+        // Determine which reference to use for resolution
+        const refForId = UUID_RE.test(sanitizedSlug) ? sanitizedSlug : (STORE_CODE_RE.test(sanitizedSlug) ? sanitizedSlug : resolvedSlug);
+        resolvedStoreId = await resolveStoreId(supabase, refForId);
+      } catch (e: any) {
+        console.warn('[Vercel Serverless /api/products] store_id resolution warning:', e?.message || e);
+      }
+    }
+
+    // 1. Safe Supabase Query — try store_slug, store_id, and tenants table
+    if (supabase && (resolvedSlug !== 'bd' || resolvedStoreId)) {
       try {
         const sbQuery = (async () => {
           try {
-            // Primary: query by resolved store_slug
-            let { data, error } = await supabase
-              .from('products')
-              .select('*')
-              .eq('store_slug', resolvedSlug);
-
-            if (error) {
-              console.error('[Vercel Serverless /api/products] Supabase products query error:', error.message);
-              return null;
+            // Resolve store_id (UUID) from store_slug using stores table
+            let storeId: string | null = null;
+            try {
+              const { data: storeRow, error: storeErr } = await supabase
+                .from('stores')
+                .select('id')
+                .eq('store_slug', resolvedSlug)
+                .maybeSingle();
+              if (!storeErr && storeRow?.id) {
+                storeId = String(storeRow.id);
+              }
+            } catch (resolveErr: any) {
+              console.warn('[Vercel /api/products] store_id resolve warning:', resolveErr?.message || resolveErr);
             }
 
-            if (Array.isArray(data) && data.length > 0) {
-              return data;
-            }
+            // Query products by store_slug AND store_id in parallel for comprehensive results
+            let allProducts: any[] = [];
 
-            // If original slug is a UUID, also try query by store_id
-            if (UUID_RE.test(sanitizedSlug)) {
-              const { data: byId, error: errById } = await supabase
+            // Query by store_slug
+            try {
+              const { data: slugData, error: slugErr } = await supabase
                 .from('products')
                 .select('*')
-                .eq('store_id', sanitizedSlug);
-              if (!errById && Array.isArray(byId) && byId.length > 0) return byId;
+                .eq('store_slug', resolvedSlug);
+
+              if (slugErr) {
+                console.error('[Vercel Serverless /api/products] Supabase products query error (slug):', slugErr.message);
+              } else if (Array.isArray(slugData)) {
+                allProducts.push(...slugData);
+              }
+            } catch (slugQueryErr: any) {
+              console.error('[Vercel Serverless /api/products] Slug query exception:', slugQueryErr?.message || slugQueryErr);
+            }
+
+            // Query by store_id (UUID) if resolved, or if original slug is a UUID / ZID-BD code
+            const idToQuery = storeId || (UUID_RE.test(sanitizedSlug) ? sanitizedSlug : null);
+            if (idToQuery) {
+              try {
+                const { data: idData, error: idErr } = await supabase
+                  .from('products')
+                  .select('*')
+                  .eq('store_id', idToQuery);
+
+                if (idErr) {
+                  console.error('[Vercel Serverless /api/products] Supabase products query error (store_id):', idErr.message);
+                } else if (Array.isArray(idData)) {
+                  allProducts.push(...idData);
+                }
+              } catch (idQueryErr: any) {
+                console.error('[Vercel Serverless /api/products] store_id query exception:', idQueryErr?.message || idQueryErr);
+              }
+            }
+
+            // Deduplicate by product id
+            if (allProducts.length > 0) {
+              const seen = new Set<string>();
+              const unique: any[] = [];
+              for (const p of allProducts) {
+                const key = String(p.id);
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  unique.push(p);
+                }
+              }
+              if (unique.length > 0) return unique;
             }
 
             // Check tenants table
@@ -333,11 +388,12 @@ async function loadProducts(cleanSlug: string): Promise<any[]> {
               }
 
               // Try tenants by store_id if original is a UUID
-              if (UUID_RE.test(sanitizedSlug)) {
+              if (UUID_RE.test(sanitizedSlug) || storeId) {
+                const tenantIdQuery = storeId || sanitizedSlug;
                 const { data: tenantById, error: errById } = await supabase
                   .from('tenants')
                   .select('products')
-                  .eq('store_id', sanitizedSlug)
+                  .eq('store_id', tenantIdQuery)
                   .maybeSingle();
                 if (!errById && tenantById?.products && Array.isArray(tenantById.products) && tenantById.products.length > 0) {
                   return tenantById.products;
@@ -411,9 +467,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.end();
     }
 
-    // Sanitize store_slug
+    // Sanitize store_slug — preserve UUIDs and ZID-BD codes
     const rawParam = extractRawStoreSlug(req);
-    const cleanSlug = String(rawParam || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
+    let cleanSlug = String(rawParam || 'bd').trim();
+    // Only split on ':' and lowercase for plain slugs (not UUIDs or store codes)
+    if (!UUID_RE.test(cleanSlug) && !STORE_CODE_RE.test(cleanSlug)) {
+      cleanSlug = cleanSlug.split(':')[0].trim().toLowerCase() || 'bd';
+    }
 
     // GET handler - Safe query & guaranteed 200 array response
     if (req.method === 'GET' || !req.method) {
@@ -477,7 +537,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const supabase = getDatabaseClient();
         if (supabase) {
           try {
-            const sbRecord = {
+            // Resolve store_id UUID from store_slug
+            let storeId: string | undefined;
+            try {
+              const { data: storeRow } = await supabase
+                .from('stores')
+                .select('id')
+                .eq('store_slug', store_slug)
+                .maybeSingle();
+              if (storeRow?.id) storeId = String(storeRow.id);
+            } catch (resolveErr: any) {
+              console.warn('[Vercel Serverless /api/products] store_id resolve warning:', resolveErr?.message || resolveErr);
+            }
+
+            const sbRecord: any = {
               id: String(product.id),
               store_slug,
               title,
@@ -494,19 +567,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               sku,
               description,
             };
+            if (storeId) sbRecord.store_id = storeId;
 
             const { error: upsertErr } = await supabase.from('products').upsert(sbRecord, { onConflict: 'id' });
             if (upsertErr) {
               console.error('[Vercel Serverless /api/products] Supabase products error on full upsert:', upsertErr.message);
               // Fallback minimal upsert with core columns
-              const { error: minErr } = await supabase.from('products').upsert({
+              const fallbackRecord: any = {
                 id: sbRecord.id,
                 store_slug: sbRecord.store_slug,
                 title: sbRecord.title,
                 price: sbRecord.price,
                 image: sbRecord.image,
                 status: 'active',
-              }, { onConflict: 'id' });
+              };
+              if (storeId) fallbackRecord.store_id = storeId;
+              const { error: minErr } = await supabase.from('products').upsert(fallbackRecord, { onConflict: 'id' });
 
               if (minErr) {
                 console.error('[Vercel Serverless /api/products] Supabase products error on minimal upsert:', minErr.message);

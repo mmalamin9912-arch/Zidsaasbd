@@ -56,17 +56,38 @@ export default async function handler(req: Request, res: Response) {
   res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
 
   try {
-    const rawSlug = typeof req.query?.store_slug === 'string'
-      ? req.query.store_slug
-      : typeof req.body?.store_slug === 'string'
-        ? req.body.store_slug
-        : typeof req.query?.slug === 'string'
-          ? req.query.slug
-          : typeof req.query?.store_id === 'string'
-            ? req.query.store_id
-            : typeof req.query?.store_code === 'string'
-              ? req.query.store_code
-              : 'bd';
+    // 1. Try path params (e.g., /api/storefront/:slug or /api/storefront/:slug?store_id=xxx)
+    let rawSlug;
+    if (req.params && typeof req.params.store_slug === 'string' && req.params.store_slug.trim()) {
+      rawSlug = req.params.store_slug;
+    } else if (req.params && typeof req.params.slug === 'string' && req.params.slug.trim()) {
+      rawSlug = req.params.slug;
+    }
+    // 2. Fallback: query string or body
+    else if (typeof req.query?.store_slug === 'string') {
+      rawSlug = req.query.store_slug;
+    } else if (typeof req.body?.store_slug === 'string') {
+      rawSlug = req.body.store_slug;
+    } else if (typeof req.query?.slug === 'string') {
+      rawSlug = req.query.slug;
+    } else if (typeof req.query?.store_id === 'string') {
+      rawSlug = req.query.store_id;
+    } else if (typeof req.query?.store_code === 'string') {
+      rawSlug = req.query.store_code;
+    }
+    // 3. Fallback: parse from URL pathname for path-based routing (e.g., /api/storefront/abc123)
+    else if (req.url) {
+      try {
+        const u = new URL(req.url, 'http://localhost');
+        const parts = u.pathname.split('/').filter(Boolean);
+        // Remove 'api' and 'storefront' to get path segments
+        const segments = parts.filter(p => p !== 'api' && p !== 'storefront');
+        if (segments.length > 0) {
+          rawSlug = segments[segments.length - 1];
+        }
+      } catch {}
+    }
+    if (!rawSlug || !String(rawSlug || '').trim()) rawSlug = 'bd';
 
     let cleanSlug = String(rawSlug || '').split(':')[0].trim().toLowerCase() || 'bd';
 
@@ -79,7 +100,25 @@ export default async function handler(req: Request, res: Response) {
 
     if (req.method === 'GET' || !req.method) {
       const tenantData = await getTenant(cleanSlug);
-      return reply(res, 200, { ok: true, store_slug: cleanSlug, storefront: publicTenant(tenantData) });
+      const storefront = publicTenant(tenantData);
+
+      // Also fetch from Supabase products table using store_slug
+      const supabase = getDatabaseClient();
+      if (supabase) {
+        try {
+          const { data: sbProducts, error: sbErr } = await supabase
+            .from('products')
+            .select('*')
+            .eq('store_slug', cleanSlug);
+          if (!sbErr && Array.isArray(sbProducts) && sbProducts.length > 0) {
+            storefront.products = sbProducts;
+          }
+        } catch (sbErr) {
+          console.warn('[Vercel /api/storefront] Supabase products query failed:', sbErr);
+        }
+      }
+
+      return reply(res, 200, { ok: true, store_slug: cleanSlug, storefront });
     }
 
     if (req.method === 'POST') {
