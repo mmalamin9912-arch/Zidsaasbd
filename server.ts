@@ -688,7 +688,7 @@ app.get('/api/products', async (req, res) => {
           if (storeSlug !== rawSlugOriginal.toLowerCase()) {
             mongoOr.push({ store_id: storeSlug });
           }
-          const mongoProds = await mongoose.connection.db.collection('products').find({ $or: mongoOr }).toArray();
+          const mongoProds = await mongoose.connection.db.collection('products').find({ $or: mongoOr } as any).toArray();
           if (Array.isArray(mongoProds) && mongoProds.length > 0) {
             prods = mongoProds;
           }
@@ -1685,9 +1685,9 @@ app.get('/api/orders/:storeRef', async (req, res) => {
       storeId = await resolveStoreIdBySlug(raw) || raw;
     }
 
-    let orders = await Order.find({ store_id: storeId }).sort({ created_at: -1 }).lean();
+    let orders = await Order.find({ store_id: storeId } as any).sort({ created_at: -1 }).lean();
     if (!Array.isArray(orders) || orders.length === 0) {
-      orders = await Order.find({ $or: [{ store_slug: raw }, { merchant_id: raw }] }).sort({ created_at: -1 }).lean();
+      orders = await Order.find({ $or: [{ store_slug: raw }, { merchant_id: raw }] } as any).sort({ created_at: -1 }).lean();
     }
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {

@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { getTenant, saveTenant } from './tenantStore';
+import mongoose from 'mongoose';
 
 type VercelRequest = {
   method?: string;
