@@ -209,7 +209,7 @@ async function writeStorePayload(payload: any) {
 app.all('/api/categories', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const storeName = decodeURIComponent(req.params.storeName || '').trim();
+    const storeName = decodeURIComponent((req.params as any)?.storeName || '').trim();
     if (!storeName) {
       return res.status(200).json({ ok: false, subscription_plan: null, subscription_expiry: null });
     }
@@ -514,7 +514,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
 
 function isUuidLike(value: string): boolean {
-  return UUID_RE.test(value.trim());
+  return UUID_RE.test(String(value || '').trim());
 }
 
 /** Resolve a store_id UUID or ZID-BD-XXXX store code to the canonical store_slug via Supabase */
@@ -553,22 +553,38 @@ async function resolveStoreSlugFromRef(storeRef: string): Promise<string | undef
   return undefined;
 }
 
-/** Resolve a store_slug to the canonical store_id (UUID) via Supabase */
-async function resolveStoreIdBySlug(slug: string): Promise<string | undefined> {
+const resolveStoreSlugByRef = resolveStoreSlugFromRef;
+
+// Resolves ANY store reference — permanent store_code (ZID-BD-XXXX), UUID, or
+// slug — to the canonical stores.id UUID. Slugs are display metadata only and
+// may change freely; the code/UUID never do.
+async function resolveStoreIdBySlug(rawSlug: string): Promise<string | undefined> {
   const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
   if (!isConfigured) return undefined;
-
+  const ref = String(rawSlug || '').split(':')[0].trim().toLowerCase() || 'bd';
+  if (isUuidLike(ref)) return ref;
   try {
-    const res = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
-    });
-    if (res.ok) {
-      const rows = await res.json();
-      if (Array.isArray(rows) && rows.length > 0) return rows[0].id;
+    // 1) Permanent store code (ZID-BD-XXXX).
+    if (/^zid-bd-\d{4,}$/i.test(ref)) {
+      const codeRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
+        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+      });
+      if (codeRes.ok) {
+        const rows = await codeRes.json();
+        if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
+      }
     }
-  } catch (e) { /* noop */ }
-
-  // Fallback: generate deterministic UUID from slug for backwards compatibility
+    // 2) Slug fallback (display reference only).
+    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
+      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
+    });
+    if (sbRes.ok) {
+      const rows = await sbRes.json();
+      if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
+    }
+  } catch (e) {
+    console.warn('[Server] resolveStoreIdBySlug warning:', e);
+  }
   return undefined;
 }
 
@@ -1697,42 +1713,6 @@ app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 // (store_code, UUID, or slug) and resolves them via Supabase 'stores' lookup,
 // but all order reads/writes go to MongoDB to avoid Supabase schema mismatches.
 
-function isUuidLike(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').trim());
-}
-
-// Resolves ANY store reference — permanent store_code (ZID-BD-XXXX), UUID, or
-// slug — to the canonical stores.id UUID. Slugs are display metadata only and
-// may change freely; the code/UUID never do.
-async function resolveStoreIdBySlug(rawSlug: string): Promise<string | null> {
-  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-  if (!isConfigured) return null;
-  const ref = String(rawSlug || '').split(':')[0].trim().toLowerCase() || 'bd';
-  if (isUuidLike(ref)) return ref;
-  try {
-    // 1) Permanent store code (ZID-BD-XXXX).
-    if (/^zid-bd-\d{4,}$/i.test(ref)) {
-      const codeRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
-        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
-      });
-      if (codeRes.ok) {
-        const rows = await codeRes.json();
-        if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
-      }
-    }
-    // 2) Slug fallback (display reference only).
-    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
-    });
-    if (sbRes.ok) {
-      const rows = await sbRes.json();
-      if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
-    }
-  } catch (e) {
-    console.warn('[Server] resolveStoreIdBySlug warning:', e);
-  }
-  return null;
-}
 
 // GET /api/orders/:storeRef — fetch orders for a store from MongoDB.
 app.get('/api/orders/:storeRef', async (req, res) => {
