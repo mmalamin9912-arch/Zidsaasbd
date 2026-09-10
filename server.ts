@@ -980,7 +980,7 @@ app.get('/api/storefront/:slug', async (req, res) => {
             { store_slug: slug },
             { storeSlug: slug },
           ]
-        }).toArray();
+        } as any).toArray();
         if (Array.isArray(mongoProds) && mongoProds.length > 0) {
           const existingIds = new Set(storeProducts.map((p: any) => String(p.id)));
           for (const p of mongoProds) {
