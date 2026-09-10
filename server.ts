@@ -688,7 +688,9 @@ app.get('/api/products', async (req, res) => {
           if (storeSlug !== rawSlugOriginal.toLowerCase()) {
             mongoOr.push({ store_id: storeSlug });
           }
-          const mongoProds = await mongoose.connection.db.collection('products').find({ $or: mongoOr } as any).toArray();
+          // @ts-ignore
+          const mongoOrQuery: any = { $or: mongoOr };
+          const mongoProds = await (mongoose.connection.db.collection('products') as any).find(mongoOrQuery).toArray();
           if (Array.isArray(mongoProds) && mongoProds.length > 0) {
             prods = mongoProds;
           }
@@ -975,12 +977,14 @@ app.get('/api/storefront/:slug', async (req, res) => {
     await connectToMongoDB();
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       try {
-        const mongoProds = await mongoose.connection.db.collection('products').find({
+        // @ts-ignore
+        const mongoSlugQuery: any = {
           $or: [
             { store_slug: slug },
             { storeSlug: slug },
           ]
-        } as any).toArray();
+        };
+        const mongoProds = await (mongoose.connection.db.collection('products') as any).find(mongoSlugQuery).toArray();
         if (Array.isArray(mongoProds) && mongoProds.length > 0) {
           const existingIds = new Set(storeProducts.map((p: any) => String(p.id)));
           for (const p of mongoProds) {
@@ -1744,9 +1748,13 @@ app.get('/api/orders/:storeRef', async (req, res) => {
       storeId = await resolveStoreIdBySlug(raw) || raw;
     }
 
-    let orders = await Order.find({ store_id: storeId } as any).sort({ created_at: -1 }).lean();
+    // @ts-ignore
+    const queryStoreId: any = { store_id: storeId };
+    let orders = await (Order as any).find(queryStoreId).sort({ created_at: -1 }).lean();
     if (!Array.isArray(orders) || orders.length === 0) {
-      orders = await Order.find({ $or: [{ store_slug: raw }, { merchant_id: raw }] } as any).sort({ created_at: -1 }).lean();
+      // @ts-ignore
+      const queryOr: any = { $or: [{ store_slug: raw }, { merchant_id: raw }] };
+      orders = await (Order as any).find(queryOr).sort({ created_at: -1 }).lean();
     }
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
