@@ -1,22 +1,21 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-export function cleanEnvUrl(raw?: string): string {
+function cleanEnvUrl(raw?: string): string {
   if (!raw) return '';
   let str = String(raw).trim();
-  // Strip all leading and trailing quotes, backslashes, spaces
   str = str.replace(/^["'`\\]+|["'`\\]+$/g, '').trim();
   str = str.replace(/^["'`\\]+|["'`\\]+$/g, '').trim();
   return str.replace(/\/+$/, '');
 }
 
-export function cleanEnvKey(raw?: string): string {
+function cleanEnvKey(raw?: string): string {
   if (!raw) return '';
   let str = String(raw).trim();
   str = str.replace(/^["'`\\]+|["'`\\]+$/g, '').trim();
   return str.replace(/^["'`\\]+|["'`\\]+$/g, '').trim();
 }
 
-export function isValidUrl(url: string): boolean {
+function isValidUrl(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
   try {
     const parsed = new URL(url);
@@ -26,7 +25,7 @@ export function isValidUrl(url: string): boolean {
   }
 }
 
-// Support Vite, Vercel, Next, and standard Node environment variable naming
+// Safely read env — works in both Vite (import.meta.env) and Node (process.env)
 const metaEnv = (typeof import.meta !== 'undefined' && (import.meta as any).env) || {};
 const procEnv = (typeof process !== 'undefined' && process.env) || {};
 
@@ -63,37 +62,48 @@ export const isSupabaseConfigured = Boolean(
   isValidUrl(supabaseUrl)
 );
 
-// Never fall back to a placeholder URL: createClient() would silently accept
-// it and every request would fail at runtime with "TypeError: Failed to fetch".
-// Instead, fail fast with an explicit configuration error.
-if (!isSupabaseConfigured) {
-  throw new Error(
-    '[supabase] Missing or invalid environment configuration. ' +
-    'Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file ' +
-    '(e.g. VITE_SUPABASE_URL=https://your-project.supabase.co) and restart the dev server.'
-  );
-}
+// Lazy singleton — never throws at module load time
+let _client: SupabaseClient | null = null;
 
-export const supabase: SupabaseClient = createClient(
-  supabaseUrl,
-  supabaseAnonKey,
-  {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true
-    },
-    realtime: {
-      params: {
-        eventsPerSecond: 10
-      }
-    }
+export function getSupabaseClient(): SupabaseClient | null {
+  if (_client) return _client;
+  if (!isSupabaseConfigured) {
+    console.warn(
+      '[supabase] Missing or invalid environment configuration. ' +
+      'Set VITE_SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and ' +
+      'VITE_SUPABASE_ANON_KEY in your environment variables.'
+    );
+    return null;
   }
-);
-
-// Always returns a live client instance (never null).
-export function getSupabaseClient(): SupabaseClient {
-  return supabase;
+  try {
+    _client = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+      realtime: {
+        params: { eventsPerSecond: 10 },
+      },
+    });
+    return _client;
+  } catch (err) {
+    console.error('[supabase] createClient failed:', err);
+    return null;
+  }
 }
 
-
+// Convenience export — returns the singleton (creates it on first call)
+// DOES NOT throw; callers must check for null if env is not configured.
+export const supabase = new Proxy({} as SupabaseClient, {
+  get(_target, prop) {
+    const client = getSupabaseClient();
+    if (!client) {
+      throw new Error(
+        `[supabase] Client not initialised — env vars missing. ` +
+        `Tried to access property "${String(prop)}".`
+      );
+    }
+    return (client as any)[prop];
+  },
+});
