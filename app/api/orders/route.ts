@@ -1,10 +1,12 @@
-import { connectToDatabase } from "@/lib/mongodb";
+import { MongoClient, Db } from "mongodb";
 
 export const dynamic = "force-dynamic";
 
 // MongoDB is the system of record for orders — nothing is written to Supabase.
-// `connectToDatabase()` keeps a pooled mongoose connection (it reuses the
-// existing connection while readyState === 1) and reads MONGODB_URI from env.
+//
+// The database ('zidbdsaas') and collection ('orders') are targeted explicitly
+// below rather than inferred from the connection string, so the write lands in a
+// known place regardless of what the URI's default auth database happens to be.
 //
 // NextResponse is not a hard dependency of this project (the app builds with
 // Vite, and `next` is not installed), so a tiny JSON responder is used instead.
@@ -14,6 +16,35 @@ const jsonResponse = (body: unknown, status = 200) =>
     status,
     headers: { "Content-Type": "application/json" },
   });
+
+const DB_NAME = "zidbdsaas";
+const COLLECTION_NAME = "orders";
+
+// ---------------------------------------------------------------------------
+// Pooled native MongoClient, cached across warm serverless invocations.
+// A module-level promise guard prevents a stampede of parallel connections.
+// ---------------------------------------------------------------------------
+let cachedClientPromise: Promise<MongoClient> | null = null;
+
+function getMongoClient(): Promise<MongoClient> {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    throw new Error("MONGODB_URI is not set in environment variables");
+  }
+  if (!cachedClientPromise) {
+    cachedClientPromise = new MongoClient(uri, {
+      maxPoolSize: 10,
+      minPoolSize: 0,
+      serverSelectionTimeoutMS: 10000,
+    }).connect();
+  }
+  return cachedClientPromise;
+}
+
+async function getOrdersDb(): Promise<Db> {
+  const client = await getMongoClient();
+  return client.db(DB_NAME);
+}
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -77,14 +108,8 @@ export async function POST(req: Request) {
       return jsonResponse({ success: false, error: "No order data provided" }, 400);
     }
 
-    // ---------- 2. Connect to MongoDB (pooled, MONGODB_URI from env) ----------
-    const { db } = await connectToDatabase();
-    if (!db) {
-      return jsonResponse(
-        { success: false, error: "MongoDB is not configured. Set MONGODB_URI." },
-        503
-      );
-    }
+    // ---------- 2. Connect to MongoDB ('zidbdsaas' via MONGODB_URI) ----------
+    const db = await getOrdersDb();
 
     const inserted: any[] = [];
     const failures: string[] = [];
@@ -139,8 +164,8 @@ export async function POST(req: Request) {
           updated_at: new Date(),
         };
 
-        // ---------- 4. Insert the order document into MongoDB ----------
-        const result = await db.collection("orders").insertOne(document);
+        // ---------- 4. Insert into zidbdsaas.orders ----------
+        const result = await db.collection(COLLECTION_NAME).insertOne(document);
         inserted.push({ ...document, _id: result.insertedId });
       } catch (orderErr: any) {
         const message = orderErr?.message || "Failed to insert order";
@@ -160,13 +185,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // ---------- 5. Success ----------
+    // ---------- 5. Success -> 201 ----------
     // `data` carries the inserted document(s) so the caller can reconcile its
     // optimistic local copy; `message` is the contract the checkout UI reads.
     return jsonResponse(
       {
         success: true,
-        message: "Order placed successfully",
+        message: "Order placed",
         data: inserted.length === 1 ? inserted[0] : inserted,
         count: inserted.length,
         ...(failures.length > 0 ? { failures } : {}),
@@ -189,6 +214,9 @@ export async function GET() {
     success: true,
     route: "/api/orders",
     store: "mongodb",
+    database: DB_NAME,
+    collection: COLLECTION_NAME,
+    configured: Boolean(process.env.MONGODB_URI),
     methods: ["POST", "GET", "OPTIONS"],
   });
 }
