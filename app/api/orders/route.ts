@@ -151,15 +151,22 @@ export async function POST(req: Request) {
 
     if (inserted.length === 0) {
       return jsonResponse(
-        { success: false, error: failures[0] || "Failed to process order", failures },
+        {
+          success: false,
+          error: failures[0] || "Failed to process order",
+          failures,
+        },
         500
       );
     }
 
     // ---------- 5. Success ----------
+    // `data` carries the inserted document(s) so the caller can reconcile its
+    // optimistic local copy; `message` is the contract the checkout UI reads.
     return jsonResponse(
       {
         success: true,
+        message: "Order placed successfully",
         data: inserted.length === 1 ? inserted[0] : inserted,
         count: inserted.length,
         ...(failures.length > 0 ? { failures } : {}),
@@ -182,5 +189,23 @@ export async function GET() {
     success: true,
     route: "/api/orders",
     store: "mongodb",
+    methods: ["POST", "GET", "OPTIONS"],
+  });
+}
+
+/**
+ * Explicit CORS/preflight handler. Without this, a browser preflight (or any
+ * method the router has no handler for) is answered by the platform with a bare
+ * 405 — which is exactly the symptom being fixed here.
+ */
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      Allow: "POST, GET, OPTIONS",
+      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Max-Age": "86400",
+    },
   });
 }
