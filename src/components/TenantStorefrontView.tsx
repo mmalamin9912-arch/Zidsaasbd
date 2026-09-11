@@ -921,7 +921,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     // Save order to backend API (MongoDB-backed). Non-blocking: log failures
     // but NEVER alert or return early.
     try {
-      await fetch('/api/orders', {
+      await fetch(`${window.location.origin}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify([newOrder]),

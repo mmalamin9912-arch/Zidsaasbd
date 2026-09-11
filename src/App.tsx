@@ -1029,7 +1029,7 @@ export default function App() {
   const handleUpdateOrders = async (updatedOrders: Order[]) => {
     setOrders(updatedOrders);
     if (merchant?.id) {
-      await fetch('/api/orders', {
+      await fetch(`${window.location.origin}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedOrders.map(o => ({ ...o, merchantId: merchant.id })))
