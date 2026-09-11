@@ -185,19 +185,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // ---------- 5. Success -> 201 ----------
-    // `data` carries the inserted document(s) so the caller can reconcile its
-    // optimistic local copy; `message` is the contract the checkout UI reads.
-    return jsonResponse(
-      {
-        success: true,
-        message: "Order placed",
-        data: inserted.length === 1 ? inserted[0] : inserted,
-        count: inserted.length,
-        ...(failures.length > 0 ? { failures } : {}),
-      },
-      201
-    );
+    return jsonResponse({ success: true }, 201);
   } catch (error: any) {
     // ---------- 6. Error -> JSON 500 ----------
     console.error("[POST /api/orders] Error inserting order:", error);
