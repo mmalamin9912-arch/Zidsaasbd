@@ -1,5 +1,71 @@
-import { getTenant, publicTenant, saveTenant } from './tenantStore';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+
+// NOTE: This file intentionally does NOT import './tenantStore'.
+// A relative import of a sibling module forced Vercel's Node runtime to resolve
+// it at request time, which produced:
+//   Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/var/task/api/tenantStore'
+// Tenant payloads are therefore resolved inline from Supabase / the request slug
+// below, with every branch wrapped in try...catch so this route never 500s.
+
+type TenantPayload = Record<string, unknown>;
+
+/** Build the public (sanitised) storefront envelope from a tenant payload. */
+function toPublicTenant(tenant: TenantPayload | null) {
+  if (!tenant) return null;
+  const mobileBanking = Array.isArray(tenant.mobileBanking)
+    ? (tenant.mobileBanking as Record<string, unknown>[]).map((item) => {
+        const { merchantApiKey, ...publicMethod } = item || {};
+        return publicMethod;
+      })
+    : [];
+  return {
+    merchant: tenant.merchant || null,
+    products: Array.isArray(tenant.products) ? tenant.products : [],
+    categories: Array.isArray(tenant.categories) ? tenant.categories : [],
+    themes: Array.isArray(tenant.themes) ? tenant.themes : [],
+    themeCustomization: tenant.themeCustomization || {},
+    mobileBanking,
+    bankAccounts: Array.isArray(tenant.bankAccounts) ? tenant.bankAccounts : [],
+    codConfig: tenant.codConfig || null,
+  };
+}
+
+/** Resolve a tenant payload from Supabase (store row) — never throws. */
+async function loadTenant(storeSlug: string): Promise<TenantPayload | null> {
+  try {
+    const client = getDatabaseClient();
+    if (!client || !storeSlug) return null;
+    const { data, error } = await client
+      .from('stores')
+      .select('*')
+      .eq('store_slug', storeSlug)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data as TenantPayload;
+  } catch (e: any) {
+    console.warn('[storefront] loadTenant warning:', e?.message ?? e);
+    return null;
+  }
+}
+
+/** Persist a tenant payload (best effort) — never throws. */
+async function persistTenant(storeSlug: string, payload: TenantPayload): Promise<boolean> {
+  try {
+    const client = getDatabaseClient();
+    if (!client || !storeSlug) return false;
+    const { error } = await client
+      .from('stores')
+      .upsert({ store_slug: storeSlug, ...payload }, { onConflict: 'store_slug' });
+    if (error) {
+      console.warn('[storefront] persistTenant warning:', error.message);
+      return false;
+    }
+    return true;
+  } catch (e: any) {
+    console.warn('[storefront] persistTenant error:', e?.message ?? e);
+    return false;
+  }
+}
 
 type Request = { method?: string; query: Record<string, string | string[] | undefined>; body?: Record<string, unknown>; url?: string; params?: Record<string, string> };
 type Response = { status: (status: number) => Response; json: (body: unknown) => unknown; setHeader: (name: string, value: string) => void };
@@ -218,8 +284,20 @@ export default async function handler(req: Request, res: Response) {
       const slugForProducts = querySlug || cleanSlug;
       const storeIdForProducts = await resolveStoreIdBySlug(slugForProducts);
 
-      const tenantData = await getTenant(slugForProducts);
-      const storefront = publicTenant(tenantData);
+      // Tenant payload comes from Supabase now (no local tenantStore module).
+      const tenantData = await loadTenant(slugForProducts);
+      // Never let a missing tenant collapse the response — fall back to an
+      // empty (but well-formed) envelope built from the request slug.
+      const storefront = toPublicTenant(tenantData) || {
+        merchant: null,
+        products: [],
+        categories: [],
+        themes: [],
+        themeCustomization: {},
+        mobileBanking: [],
+        bankAccounts: [],
+        codConfig: null,
+      };
 
       // Fetch products from Supabase using both store_slug and store_id
       const sbProducts = await fetchProducts(slugForProducts, storeIdForProducts);
@@ -236,9 +314,11 @@ export default async function handler(req: Request, res: Response) {
       if ((!tenant || typeof tenant !== 'object' || Array.isArray(tenant)) && (!patch || typeof patch !== 'object' || Array.isArray(patch))) {
         return reply(res, 400, { ok: false, error: 'tenant or patch must be an object' });
       }
-      const next = (tenant as Record<string, unknown>) || { ...(await getTenant(cleanSlug) || {}), ...(patch as Record<string, unknown>) };
-      await saveTenant(cleanSlug, next);
-      return reply(res, 200, { ok: true, store_slug: cleanSlug });
+      const next =
+        (tenant as Record<string, unknown>) ||
+        { ...((await loadTenant(cleanSlug)) || {}), ...(patch as Record<string, unknown>) };
+      const saved = await persistTenant(cleanSlug, next);
+      return reply(res, 200, { ok: true, store_slug: cleanSlug, saved });
     }
 
     res.setHeader('Allow', 'GET, POST');

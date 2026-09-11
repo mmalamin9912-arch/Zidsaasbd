@@ -1,5 +1,41 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { getTenant, saveTenant } from './tenantStore';
+
+// NOTE: './tenantStore' is deliberately NOT imported here.
+// Vercel's Node runtime resolved the sibling module at request time and failed with:
+//   Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/var/task/api/tenantStore'
+// The tiny tenant helpers are inlined below (KV-backed, in-memory fallback) and
+// every call site is wrapped in try...catch so this route never 500s.
+
+type TenantPayload = Record<string, unknown>;
+const memoryStore = new Map<string, TenantPayload>();
+const kvUrl = process.env.KV_REST_API_URL;
+const kvToken = process.env.KV_REST_API_TOKEN;
+const keyFor = (storeSlug: string) => `zid:tenant:${storeSlug}`;
+
+async function kv(command: string, ...args: string[]): Promise<{ result: unknown } | null> {
+  if (!kvUrl || !kvToken) return null;
+  const encodedArgs = args.map((arg) => encodeURIComponent(arg)).join('/');
+  const endpoint = `${kvUrl}/${command}/${encodedArgs}`;
+  const response = await fetch(endpoint, {
+    headers: { Authorization: `Bearer ${kvToken}` },
+  });
+  if (!response.ok) throw new Error(`KV ${command} failed`);
+  return (await response.json()) as { result: unknown };
+}
+
+async function getTenant(storeSlug: string): Promise<TenantPayload | null> {
+  try {
+    const result = await kv('get', keyFor(storeSlug));
+    if (typeof result?.result === 'string') return JSON.parse(result.result) as TenantPayload;
+  } catch { /* fall back to the in-memory store */ }
+  return memoryStore.get(storeSlug) || null;
+}
+
+async function saveTenant(storeSlug: string, payload: TenantPayload): Promise<TenantPayload> {
+  memoryStore.set(storeSlug, payload);
+  try { await kv('set', keyFor(storeSlug), JSON.stringify(payload)); } catch { /* local fallback remains available */ }
+  return payload;
+}
 
 type VercelRequest = {
   method?: string;
@@ -283,7 +319,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               ? [req.body]
               : [];
 
-        // Save to KV / tenantStore
+        // Save to KV / tenant cache
         try {
           const tenant = (await getTenant(cleanSlug)) || {};
           await saveTenant(cleanSlug, { ...tenant, categories });
