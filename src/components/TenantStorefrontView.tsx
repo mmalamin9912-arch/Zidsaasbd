@@ -259,6 +259,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     heroImage: themeCustomization.heroImage || liveStoreData.merchant?.heroImage || merchant.heroImage,
     announcementText: themeCustomization.announcementText || liveStoreData.merchant?.announcementText || merchant.announcementText,
   };
+
+  // Store balance comes ONLY from the database-backed merchant record.
+  // No hardcoded 0.00 default is rendered — the value shown is whatever the
+  // stores table / merchant profile actually contains.
+  const dbMerchantRecord = liveStoreData.merchant || merchant || {};
+  const storeBalance = Number(
+    (dbMerchantRecord as any).store_balance ??
+    (dbMerchantRecord as any).balance ??
+    (dbMerchantRecord as any).storeBalance ??
+    (dbMerchantRecord as any).wallet_balance ??
+    0
+  );
   const storeDisplayName = (
     storefrontMerchant.storeName ||
     storefrontMerchant.ownerName ||
@@ -381,15 +393,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         }
       } catch (e: any) {
         console.warn('Catalog API fetch warning:', e?.message || e);
+        setCatalogLoadFailed(true);
       }
 
-      // Check localStorage fallbacks
-      try {
+        // Check localStorage fallbacks — only THIS store's keys, never the mock
+        // 'bd'/'default'/'verandabd' demo keys that inject dummy products.
+        try {
         const localCatKeys = [
-          `zid_store_categories_v2:${storeSlug}`,
-          'zid_store_categories_v2:bd',
-          'zid_store_categories_v2:default',
-          'zid_store_categories_v2:verandabd'
+          `zid_store_categories_v2:${storeSlug}`
         ];
         for (const k of localCatKeys) {
           const val = localStorage.getItem(k);
@@ -400,9 +411,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         }
 
         const localStoreKeys = [
-          `ZID_MERCHANT_STORE_DATA_${storeSlug}`,
-          'ZID_MERCHANT_STORE_DATA_bd',
-          'ZID_MERCHANT_STORE_DATA_verandabd'
+          `ZID_MERCHANT_STORE_DATA_${storeSlug}`
         ];
         for (const k of localStoreKeys) {
           const val = localStorage.getItem(k);
@@ -436,6 +445,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         setSupabaseCategories(Array.from(uniqueCatMap.values()).map(mapSupabaseCategory));
         setSupabaseProducts(Array.from(uniqueProdMap.values()).map(mapSupabaseProduct));
         setIsLoadingSupabase(false);
+        setCatalogLoadFailed(uniqueProdMap.size === 0);
       }
     };
 
@@ -443,21 +453,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     return () => { active = false; };
   }, [effectiveStoreSlug]);
 
-  const combinedRawProducts = [
-    ...(Array.isArray(liveStoreData?.products) ? liveStoreData.products : []),
-    ...(Array.isArray(products) ? products : []),
-    ...supabaseProducts,
-  ];
-  const prodMap = new Map<string, Product>();
-  for (const p of combinedRawProducts) {
-    if (p && p.id) {
-      prodMap.set(p.id, p);
-    }
-  }
+  // Products shown on the storefront come ONLY from the database (via API).
+  // No hardcoded/mock fallback: if nothing was fetched we render an explicit
+  // "No products available" empty state instead of dummy items.
+  const storefrontProducts: Product[] = supabaseProducts;
 
-  const storefrontProducts = supabaseProducts.length > 0
-    ? supabaseProducts
-    : (Array.from(prodMap.values()).length > 0 ? Array.from(prodMap.values()) : (liveStoreData.products || []).map(mapSupabaseProduct));
+  // Tracks whether catalog loading finished (success or failure). While loading
+  // we show a skeleton rather than a premature "no products" message.
+  const [catalogLoadFailed, setCatalogLoadFailed] = useState<boolean>(false);
 
   const storefrontMobileBanking = Array.isArray(liveStoreData.mobileBanking)
     ? liveStoreData.mobileBanking as MobileBankingConfig[]
@@ -1408,8 +1411,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   {displayProducts.length === 0 ? (
                     <div className={`${resolvedTheme.productsLayout === 'List' ? '' : 'col-span-2'} rounded-2xl border border-dashed border-slate-800 bg-slate-900/50 px-4 py-12 text-center space-y-2`}>
                       <ShoppingBag className="mx-auto h-10 w-10 text-slate-600" />
-                      <h3 className="text-sm font-black text-slate-200">{t('sf_no_products')}</h3>
-                      <p className="text-xs text-slate-500">{t('sf_no_products_desc')}</p>
+                      <h3 className="text-sm font-black text-slate-200">{isLoadingSupabase ? t('sf_loading_storefront') : t('sf_no_products')}</h3>
+                      <p className="text-xs text-slate-500">
+                        {isLoadingSupabase
+                          ? 'Fetching products from the store database…'
+                          : catalogLoadFailed
+                            ? 'Products could not be loaded right now. Please try again later.'
+                            : t('sf_no_products_desc')}
+                      </p>
                     </div>
                   ) : displayProducts.map(p => (
                     <div
@@ -1607,6 +1616,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 {resolvedTheme.socialTagline && (
                   <p className="text-[11px] text-slate-400">{resolvedTheme.socialTagline}</p>
                 )}
+                <div className="pt-1">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Store Balance</p>
+                  <p className="text-lg font-black text-[#00D68F] font-mono">৳{storeBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                </div>
                 <div className="flex items-center justify-center gap-3 pt-1">
                   {resolvedTheme.showFacebook && resolvedTheme.facebookHandle && (
                     <a href={`https://facebook.com/${resolvedTheme.facebookHandle.replace(/^@/, '')}`} target="_blank" rel="noreferrer" title="Facebook" className="p-2.5 rounded-full bg-[#1877F2]/15 text-[#4d9fff] border border-[#1877F2]/30 hover:scale-110 transition"><Facebook className="w-4 h-4" /></a>

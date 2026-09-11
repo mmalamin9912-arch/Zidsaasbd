@@ -176,27 +176,7 @@ const FALLBACK_PRODUCTS = [
   },
 ];
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Resolve store_id (canonical UUID) from store_slug by querying the stores table */
-async function resolveStoreIdBySlug(storeSlug: string): Promise<string | null> {
-  if (!storeSlug || !storeSlug.trim()) return null;
-  const clean = storeSlug.trim().toLowerCase();
-  const supabase = getDatabaseClient();
-  if (!supabase) return null;
-
-  if (UUID_RE.test(clean)) {
-    try {
-      const { data } = await supabase.from('stores').select('id').eq('id', clean).maybeSingle();
-      return data?.id || null;
-    } catch { return null; }
-  }
-
-  try {
-    const { data } = await supabase.from('stores').select('id').eq('store_slug', clean).maybeSingle();
-    return data?.id || null;
-  } catch { return null; }
-}
+// (UUID_RE / STORE_CODE_RE and store-resolution helpers are declared once below.)
 
 /** Extract store_id from request query or body */
 function extractStoreId(req: VercelRequest): string | null {
@@ -213,49 +193,6 @@ function extractStoreId(req: VercelRequest): string | null {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
-
-/** Resolve a store_id UUID or the resolved store_slug back to the canonical store_id UUID in Supabase */
-async function resolveStoreId(supabase: SupabaseClient, storeSlug: string): Promise<string | null> {
-  if (!storeSlug || !storeSlug.trim()) return null;
-  const clean = storeSlug.trim();
-
-  // 1. Already a UUID
-  if (UUID_RE.test(clean)) {
-    try {
-      const { data } = await supabase.from('stores').select('id').eq('id', clean).maybeSingle();
-      if (data?.id) return data.id;
-    } catch (e) {
-      console.warn('[Vercel /api/products] store_id UUID validation failed:', e);
-    }
-  }
-
-  // 2. Resolve by store_slug
-  try {
-    const { data } = await supabase.from('stores').select('id').eq('store_slug', clean).maybeSingle();
-    if (data?.id) return data.id;
-  } catch (e) {
-    console.warn('[Vercel /api/products] store_slug to store_id lookup failed:', e);
-  }
-
-  return null;
-}
-
-/** Resolve a store_slug to the canonical store UUID from the 'stores' table */
-async function resolveStoreIdBySlug(supabase: SupabaseClient, storeSlug: string): Promise<string | null> {
-  if (!storeSlug || !storeSlug.trim()) return null;
-  const clean = storeSlug.trim();
-  try {
-    const { data } = await supabase
-      .from('stores')
-      .select('id')
-      .eq('store_slug', clean)
-      .maybeSingle();
-    if (data?.id) return data.id;
-  } catch (e) {
-    console.warn('[Vercel /api/products] store_id lookup by slug failed:', e);
-  }
-  return null;
-}
 
 /** Resolve a store_id UUID or ZID-BD-XXXX code back to the store_slug in Supabase */
 async function resolveStoreSlugByRef(supabase: SupabaseClient, storeRef: string): Promise<string | null> {
