@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { createServer as createViteServer } from 'vite';
 import mongoose from 'mongoose';
+import { connectToDatabase, getMongoDb, getMongoUri, DB_NAME } from './lib/db';
 
 const app = express();
 app.use(express.json());
@@ -102,24 +103,11 @@ function getServerSupabaseConfig() {
   return { supabaseUrl, supabaseKey, isConfigured };
 }
 
-const MONGODB_URI = process.env.MONGODB_URI || '';
+const MONGODB_URI = getMongoUri();
 
 // Orders always live in the 'orders' collection of the 'zidbdsaas' database.
-const ORDERS_DB_NAME = 'zidbdsaas';
+const ORDERS_DB_NAME = DB_NAME;
 const ORDERS_COLLECTION = 'orders';
-
-/**
- * Resolve the native MongoDB handle for a specific database. The connection is
- * shared with mongoose (single pool). `dbName` overrides whatever database the
- * connection string (or `/defaultauthdb` path) points at.
- */
-async function getMongoDb(dbName: string) {
-  if (!MONGODB_URI) return null;
-  if (mongoose.connection.readyState !== 1) {
-    await mongoose.connect(MONGODB_URI, { dbName });
-  }
-  return mongoose.connection.db ?? null;
-}
 
 const orderSchema = new mongoose.Schema({
   store_id: { type: String, required: true, index: true },
@@ -166,10 +154,18 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.models.Product || mongoose.model('Product', productSchema, 'products');
 
+/**
+ * Shared, global-cached MongoDB connection wrapper. Delegates to lib/db.ts so
+ * the connection pool is reused across warm serverless invocations.
+ */
 async function connectToMongoDB() {
   if (!MONGODB_URI) return;
-  if (mongoose.connection.readyState === 1) return;
-  await mongoose.connect(MONGODB_URI);
+  try {
+    await connectToDatabase(ORDERS_DB_NAME);
+  } catch (err: any) {
+    console.error('[Server] connectToMongoDB failed:', err?.message || err);
+    throw err;
+  }
 }
 
 function sanitizeServerMerchant(m: any) {
@@ -702,7 +698,11 @@ app.get('/api/products', async (req, res) => {
     }
 
     if (prods.length === 0) {
-      await connectToMongoDB();
+      try {
+        await connectToMongoDB();
+      } catch (dbErr: any) {
+        console.error('[Server] GET /api/products MongoDB unavailable, falling back to file/memory store:', dbErr?.message || dbErr);
+      }
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
         try {
           // Build query: try resolved slug, and original ref (UUID/store_code)
@@ -1007,7 +1007,11 @@ app.get('/api/storefront/:slug', async (req, res) => {
     }
 
     // Also query MongoDB for this store's products
-    await connectToMongoDB();
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] GET /api/storefront/:slug MongoDB unavailable, falling back to file store:', dbErr?.message || dbErr);
+    }
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       try {
         // @ts-ignore
@@ -1736,7 +1740,12 @@ app.get('/api/orders/:storeRef', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     if (!MONGODB_URI) return res.status(200).json([]);
-    await connectToMongoDB();
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] GET /api/orders DB connection error:', dbErr?.message || dbErr);
+      return res.status(503).json({ ok: false, error: `Database connection failed: ${dbErr?.message || dbErr}` });
+    }
     const raw = String(req.params.storeRef || '').trim();
     if (!raw) return res.status(200).json([]);
 
@@ -1756,7 +1765,7 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
-    return res.status(200).json([]);
+    return res.status(500).json({ ok: false, error: `Failed to fetch orders: ${err?.message || err}` });
   }
 });
 
@@ -1767,7 +1776,12 @@ app.post('/api/orders', async (req, res) => {
     if (!MONGODB_URI) {
       return res.status(200).json({ ok: true, synced: 0 });
     }
-    await connectToMongoDB();
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] POST /api/orders DB connection error:', dbErr?.message || dbErr);
+      return res.status(503).json({ success: false, error: `Database connection failed: ${dbErr?.message || dbErr}` });
+    }
 
     const arr: any[] = Array.isArray(req.body)
       ? req.body

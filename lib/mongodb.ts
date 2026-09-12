@@ -1,24 +1,11 @@
-import mongoose from "mongoose";
+import { connectToDatabase as connect, getMongoDb, DB_NAME } from '../lib/db';
 
-const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  process.env.MONGODB_URL ||
-  "";
-
-let cachedDb: any = null;
-
+/**
+ * Thin compatibility shim. All connection caching now lives in lib/db.ts,
+ * which caches on the Node `global` object so serverless (Vercel) invocations
+ * reuse a single connection pool.
+ */
 export async function connectToDatabase() {
-  if (cachedDb && mongoose.connection.readyState === 1) {
-    return { db: cachedDb };
-  }
-
-  if (mongoose.connection.readyState !== 1) {
-    if (!MONGODB_URI) {
-      console.warn("[MongoDB] Warning: MONGODB_URI is not set in environment variables");
-    }
-    await mongoose.connect(MONGODB_URI);
-  }
-
-  cachedDb = mongoose.connection.db;
-  return { db: cachedDb };
+  await connect(DB_NAME);
+  return { db: await getMongoDb(DB_NAME) };
 }
