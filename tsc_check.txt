@@ -1,3 +1,0 @@
-﻿api/index.ts(1,8): error TS1192: Module '"C:/Users/Dell/Desktop/zid-bd-merchant-dashboard/server"' has no default export.
-api/merchants/update.ts(18,34): error TS2345: Argument of type 'object' is not assignable to parameter of type 'Record<string, unknown>'.
-  Index signature for type 'string' is missing in type '{}'.
