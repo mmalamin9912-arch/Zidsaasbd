@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
 import { MongoClient, Db } from "mongodb";
 
-const DB_NAME = "zidbdsaas";
-const COLLECTION_NAME = "orders";
-
 let cachedClientPromise: Promise<MongoClient> | null = null;
 
 function getMongoClient(): Promise<MongoClient> {
@@ -23,7 +20,7 @@ function getMongoClient(): Promise<MongoClient> {
 
 async function getOrdersDb(): Promise<Db> {
   const client = await getMongoClient();
-  return client.db(DB_NAME);
+  return client.db("zidbdsaas");
 }
 
 export async function POST(req: Request) {
@@ -32,12 +29,9 @@ export async function POST(req: Request) {
 
     const db = await getOrdersDb();
 
-    const result = await db.collection(COLLECTION_NAME).insertOne(body);
+    await db.collection("orders").insertOne(body);
 
-    return NextResponse.json(
-      { success: true, id: result.insertedId },
-      { status: 201 }
-    );
+    return NextResponse.json({ success: true }, { status: 201 });
   } catch (error: unknown) {
     console.error("[POST /api/orders] Error:", error);
     const message = error instanceof Error ? error.message : "Failed to process order";
