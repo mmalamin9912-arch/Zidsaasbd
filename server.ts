@@ -104,6 +104,23 @@ function getServerSupabaseConfig() {
 
 const MONGODB_URI = process.env.MONGODB_URI || '';
 
+// Orders always live in the 'orders' collection of the 'zidbdsaas' database.
+const ORDERS_DB_NAME = 'zidbdsaas';
+const ORDERS_COLLECTION = 'orders';
+
+/**
+ * Resolve the native MongoDB handle for a specific database. The connection is
+ * shared with mongoose (single pool). `dbName` overrides whatever database the
+ * connection string (or `/defaultauthdb` path) points at.
+ */
+async function getMongoDb(dbName: string) {
+  if (!MONGODB_URI) return null;
+  if (mongoose.connection.readyState !== 1) {
+    await mongoose.connect(MONGODB_URI, { dbName });
+  }
+  return mongoose.connection.db ?? null;
+}
+
 const orderSchema = new mongoose.Schema({
   store_id: { type: String, required: true, index: true },
   store_slug: { type: String, index: true },
@@ -1788,14 +1805,22 @@ app.post('/api/orders', async (req, res) => {
         created_at: new Date(),
       };
 
-      const doc = await Order.create(record);
-      inserted.push(doc);
+      // Write through the native driver so the record always lands in
+      // zidbdsaas.orders regardless of the connection string's default DB.
+      const db = await getMongoDb(ORDERS_DB_NAME);
+      if (db) {
+        const result = await db.collection(ORDERS_COLLECTION).insertOne({ ...record });
+        inserted.push({ _id: result.insertedId, ...record });
+      } else {
+        const doc = await Order.create(record);
+        inserted.push(doc);
+      }
     }
 
-    return res.status(200).json({ ok: true, synced: inserted.length });
+    return res.status(201).json({ success: true, message: 'Order placed successfully' });
   } catch (err: any) {
     console.error('[Server] POST /api/orders error:', err);
-    return res.status(200).json({ ok: false, synced: 0, error: err?.message || 'Order sync failed' });
+    return res.status(500).json({ success: false, error: err?.message || 'Order sync failed' });
   }
 });
 
