@@ -12,7 +12,7 @@
   ],
   "functions": {
     "api/index.ts": {
-      "includeFiles": "server/**"
+      "includeFiles": "{server,models,lib,utils,config}/**"
     }
   }
 }
