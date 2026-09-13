@@ -3,80 +3,28 @@
  *
  * WHY THIS FILE LOOKS THE WAY IT DOES
  * ---------------------------------------------------------------------------
- * This project has `"type": "module"` in package.json, so Vercel treats every
- * api/*.ts file as ESM. Under Node's ESM resolver a *relative* import MUST
- * carry a file extension. The previous version did:
+ * Vercel only bundles the /api directory into the serverless function. Root
+ * files such as the original `server.ts` are NOT present in /var/task at
+ * runtime, which is why the previous entry point failed with:
  *
- *     import app from '../server';   // <-- no extension
+ *     Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/var/task/server.js'
+ *     cwd=/var/task files=[.v8-cache, ___vc, api, node_modules, package.json]
  *
- * which Vercel's Node runtime cannot resolve, producing the exact error seen in
- * the runtime logs:
+ * The Express app therefore lives in `api/server.ts` — a SIBLING of this file,
+ * inside the bundled /api directory — and is imported with an explicit `.js`
+ * extension (required because package.json declares "type": "module").
  *
- *     Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/var/task/server'
- *
- * That import failure aborts the whole function, so EVERY route served by this
- * handler (/api/orders, /api/stores, /api/storefront, ...) returned a 500.
- *
- * The app is therefore resolved at call time from an explicit list of
- * candidate specifiers. Static `import` statements are evaluated before any
- * code runs, so a bad specifier cannot be caught — a dynamic import can, and it
- * lets us report the real reason instead of erroring out silently.
+ * `./server.js` resolves to the compiled `api/server.js` that Vercel emits from
+ * `api/server.ts`; bundlers (vite/esbuild) and `tsx` map it back to the .ts
+ * source for local runs. Importing a sibling that Vercel actually ships means
+ * no runtime resolution failure is possible.
  * ---------------------------------------------------------------------------
  */
 
 import mongoose from 'mongoose';
+import app from './server.js';
 
 type ExpressApp = (req: any, res: any) => any;
-
-/**
- * Candidate specifiers for the Express app, in resolution order.
- *
- * `../server.js` is listed FIRST on purpose: Vercel compiles TypeScript to
- * JavaScript before shipping the function, so the emitted sibling file is
- * `server.js` and that is what the runtime can actually find. The extensionless
- * and `.ts` forms are kept as fallbacks for local `tsx` / `vercel dev` runs
- * where the TS source is evaluated directly.
- */
-const APP_CANDIDATES = [
-  '../server.js',
-  '../server.ts',
-  '../server',
-] as const;
-
-let cachedApp: ExpressApp | null = null;
-
-async function loadApp(): Promise<ExpressApp> {
-  if (cachedApp) return cachedApp;
-
-  const failures: string[] = [];
-
-  for (const specifier of APP_CANDIDATES) {
-    try {
-      const mod: any = await import(specifier);
-      const app = mod?.default ?? mod?.app ?? mod;
-      if (typeof app === 'function') {
-        cachedApp = app as ExpressApp;
-        return cachedApp;
-      }
-      failures.push(`${specifier}: module loaded but has no callable default export`);
-    } catch (err: any) {
-      failures.push(`${specifier}: ${err?.message || err}`);
-    }
-  }
-
-  // Include a directory listing so the next runtime log tells us exactly which
-  // files Vercel actually shipped, instead of the opaque '/var/task/server'.
-  let shippedFiles = 'unavailable';
-  try {
-    const fs = await import('fs/promises');
-    shippedFiles = (await fs.readdir(process.cwd())).join(', ');
-  } catch { /* best effort */ }
-
-  throw new Error(
-    `Unable to resolve the Express app from ${APP_CANDIDATES.join(' | ')}. ` +
-    `cwd=${process.cwd()} files=[${shippedFiles}] attempts=[${failures.join(' ;; ')}]`
-  );
-}
 
 /**
  * Reuse one Mongo connection across warm invocations. The connection promise is
@@ -141,17 +89,7 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  let app: ExpressApp;
-  try {
-    app = await loadApp();
-  } catch (err: any) {
-    console.error('[api/index] Failed to load Express app:', err?.message || err);
-    return res.status(500).json({
-      success: false,
-      error: 'Serverless entry point could not load the Express app',
-      detail: err?.message || String(err),
-    });
-  }
+  const expressApp: ExpressApp = app;
 
   const mongo = await ensureMongo();
   if (!mongo.ok) {
@@ -161,7 +99,7 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    return await app(req, res);
+    return await expressApp(req, res);
   } catch (err: any) {
     console.error('[api/index] Unhandled error from Express app:', err?.message || err);
     if (!res.headersSent) {

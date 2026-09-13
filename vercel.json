@@ -54,7 +54,7 @@
   ],
   "functions": {
     "api/index.ts": {
-      "includeFiles": "server.ts,lib/**,src/lib/**"
+      "includeFiles": "api/server.ts"
     }
   }
 }
