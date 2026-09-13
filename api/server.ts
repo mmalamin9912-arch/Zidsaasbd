@@ -735,6 +735,80 @@ async function resolveStoreIdBySlug(rawSlug: string): Promise<string | undefined
   return undefined;
 }
 
+interface StoreIdentity {
+  storeId?: string;    // canonical stores.id UUID (when resolvable)
+  storeSlug?: string;  // normalized store_slug (display identifier)
+  storeCode?: string;  // permanent ZID-BD-XXXX code (when present)
+}
+
+/**
+ * Resolve ANY store reference (a UUID, a ZID-BD-XXXX store code, or a slug) into
+ * the full set of identifiers an order can be keyed on.
+ *
+ * WHY THIS EXISTS
+ * ---------------------------------------------------------------------------
+ * Orders are written by the public storefront and read by the merchant
+ * dashboard. Those two callers do NOT always hold the same identifier: the
+ * dashboard polls with `merchant.id` (a UUID), while checkout may only know the
+ * slug. If the write path stored the slug in `store_id` and the read path
+ * queried by UUID (or vice versa), a successfully saved order was invisible to
+ * the dashboard.
+ *
+ * Resolving every caller-side reference to the SAME { storeId, storeSlug }
+ * pair — and persisting/querying BOTH — guarantees a placed order is always
+ * found, whichever identifier the reader happens to have.
+ * ---------------------------------------------------------------------------
+ */
+async function resolveStoreIdentity(rawRef: string): Promise<StoreIdentity> {
+  const ref = String(rawRef || '').split(':')[0].trim();
+  if (!ref) return {};
+
+  const identity: StoreIdentity = {};
+
+  if (isUuidLike(ref)) {
+    identity.storeId = ref;
+  } else if (STORE_CODE_RE.test(ref)) {
+    identity.storeCode = ref.toUpperCase();
+  } else {
+    identity.storeSlug = ref.toLowerCase();
+  }
+
+  // Ask Supabase for the canonical row (id + store_slug + store_code) so both
+  // the UUID and the slug are populated regardless of which one was supplied.
+  try {
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    if (isConfigured) {
+      const filter = isUuidLike(ref)
+        ? `id=eq.${encodeURIComponent(ref)}`
+        : STORE_CODE_RE.test(ref)
+          ? `store_code=eq.${encodeURIComponent(ref)}`
+          : `store_slug=eq.${encodeURIComponent(ref.toLowerCase())}`;
+      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?${filter}&select=id,store_slug,store_code&limit=1`, {
+        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
+      });
+      if (sbRes.ok) {
+        const rows = await sbRes.json();
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (row) {
+          if (row.id) identity.storeId = String(row.id);
+          if (row.store_slug) identity.storeSlug = String(row.store_slug).toLowerCase();
+          if (row.store_code) identity.storeCode = String(row.store_code).toUpperCase();
+        }
+      }
+    }
+  } catch (e: any) {
+    console.warn('[Server] resolveStoreIdentity warning:', e?.message || e);
+  }
+
+  // Last-resort UUID resolution for a slug/code that the joined lookup missed.
+  if (!identity.storeId && identity.storeSlug) {
+    const idFromSlug = await resolveStoreIdBySlug(identity.storeSlug);
+    if (idFromSlug) identity.storeId = idFromSlug;
+  }
+
+  return identity;
+}
+
 // Products mocked in memory to prevent 404s
 const productStore = new Map<string, any[]>();
 
@@ -2059,19 +2133,35 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     const raw = String(req.params.storeRef || '').trim();
     if (!raw) return res.status(200).json([]);
 
-    let storeId = raw;
-    if (!isUuidLike(raw)) {
-      storeId = await resolveStoreIdBySlug(raw) || raw;
+    // The dashboard polls with `merchant.id` (a UUID); the storefront writes with
+    // whatever it has (UUID and/or slug). Resolve the incoming reference to the
+    // full identity and match on EVERY form the order could have been stored
+    // under, so a placed order is never invisible to its own dashboard.
+    const identity = await resolveStoreIdentity(raw);
+
+    const storeIdCandidates = Array.from(new Set(
+      [identity.storeId, isUuidLike(raw) ? raw : undefined, raw].filter(Boolean) as string[]
+    ));
+    const slugCandidates = Array.from(new Set(
+      [identity.storeSlug, raw.toLowerCase(), String(raw).split(':')[0].trim().toLowerCase()].filter(Boolean) as string[]
+    ));
+
+    // Match on every identifier form the order could carry. Each clause also
+    // probes the aliases (store_slug/storeSlug, merchant_id) so legacy records
+    // written before both fields were persisted still resolve.
+    const idOrSlug = [...storeIdCandidates, ...slugCandidates, raw];
+    const or: any[] = [];
+    or.push({ store_id: { $in: idOrSlug }});
+    or.push({ store_slug: { $in: slugCandidates }});
+    or.push({ storeSlug: { $in: slugCandidates }});
+    or.push({ merchant_id: { $in: idOrSlug }});
+    if (identity.storeCode) {
+      or.push({ store_code: identity.storeCode });
     }
 
     // @ts-ignore
-    const queryStoreId: any = { store_id: storeId };
-    let orders = await (Order as any).find(queryStoreId).sort({ created_at: -1 }).lean();
-    if (!Array.isArray(orders) || orders.length === 0) {
-      // @ts-ignore
-      const queryOr: any = { $or: [{ store_slug: raw }, { merchant_id: raw }] };
-      orders = await (Order as any).find(queryOr).sort({ created_at: -1 }).lean();
-    }
+    const query: any = { $or: or };
+    const orders = await (Order as any).find(query).sort({ created_at: -1 }).lean();
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
@@ -2105,18 +2195,47 @@ app.post('/api/orders', async (req, res) => {
     for (const order of arr) {
       if (!order || typeof order !== 'object') continue;
 
-      const merchantRef = String(
-        order.storeCode || order.store_code || order.storeId || order.store_id ||
-        order.merchantId || order.merchant_id || order.storeSlug || order.store_slug || ''
-      ).trim();
-      const slug = String(merchantRef).split(':')[0].trim().toLowerCase() || 'bd';
-      let storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug));
-      if (!storeId) storeId = merchantRef || slug;
+      // Collect EVERY store reference the client sent, most-specific first. The
+      // checkout payload sends `storeId`/`store_id` (UUID) AND `storeSlug`; the
+      // dashboard sync sends `merchantId`. Resolving them all down to one shared
+      // { storeId, storeSlug } pair is what makes a written order findable by
+      // the dashboard's read query.
+      const refs = [
+        order.storeId, order.store_id,
+        order.storeCode, order.store_code,
+        order.merchantId, order.merchant_id,
+        order.storeSlug, order.store_slug,
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+
+      let identity: StoreIdentity = {};
+      for (const ref of refs) {
+        const resolved = await resolveStoreIdentity(ref);
+        identity = {
+          storeId: identity.storeId || resolved.storeId,
+          storeSlug: identity.storeSlug || resolved.storeSlug,
+          storeCode: identity.storeCode || resolved.storeCode,
+        };
+        if (identity.storeId && identity.storeSlug) break;
+      }
+
+      // Normalized slug — whatever the client gave us, plus what Supabase
+      // returned, falling back to the generic 'bd' bucket.
+      const slug = String(
+        identity.storeSlug || refs.find((r) => !isUuidLike(r) && !STORE_CODE_RE.test(r)) || 'bd'
+      ).split(':')[0].trim().toLowerCase() || 'bd';
+
+      // store_id MUST be the canonical UUID when we could resolve one; only
+      // fall back to the slug/code when Supabase is unavailable, so the record
+      // is still queryable by slug (the read path matches on both).
+      const storeId = identity.storeId || refs.find((r) => isUuidLike(r)) || identity.storeCode || slug;
 
       const record: any = {
         store_id: storeId,
-        store_slug: slug || order.storeSlug || order.store_slug || '',
-        merchant_id: order.merchantId || order.merchant_id || '',
+        store_slug: slug,
+        merchant_id: order.merchantId || order.merchant_id || identity.storeId || '',
+        ...(identity.storeCode ? { store_code: identity.storeCode } : {}),
         order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
         customer_name: order.customerName || order.customer_name || 'Customer',
         customer_phone: order.customerPhone || order.customer_phone || '',
