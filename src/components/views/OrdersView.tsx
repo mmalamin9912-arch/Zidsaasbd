@@ -82,6 +82,9 @@ interface OrdersViewProps {
   orders: Order[];
   onUpdateOrders: (orders: Order[]) => void;
   merchantId?: string;
+  /** Active store slug — sent alongside merchantId so the server can match an
+   *  order by store_slug even when the checkout only knew the slug. */
+  storeSlug?: string;
 }
 
 export type OrderSubMenu = 'all' | 'manual' | 'abandoned';
@@ -115,16 +118,25 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   orders,
   onUpdateOrders,
   merchantId,
+  storeSlug,
 }) => {
   const channelRef = useRef<any>(null);
-  // Live polling effect for orders sync from Supabase
+  // Live polling effect for orders sync from MongoDB.
+  // Uses the flexible GET /api/orders endpoint and sends BOTH merchant_id and
+  // store_slug, so an order placed by the storefront (which may only carry the
+  // slug) is still matched for this merchant's dashboard.
   useEffect(() => {
-    if (!merchantId) return;
+    if (!merchantId && !storeSlug) return;
     const fetchLiveOrders = async () => {
       try {
-        const res = await fetch(`/api/orders/${merchantId}`);
+        const params = new URLSearchParams();
+        if (merchantId) params.set('merchant_id', merchantId);
+        if (storeSlug) params.set('store_slug', storeSlug);
+        const res = await fetch(`/api/orders${params.toString() ? `?${params.toString()}` : ''}`);
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
+        // Apply the authoritative server list even when empty, so a deleted or
+        // reassigned order does not linger in the dashboard view.
+        if (Array.isArray(data)) {
           onUpdateOrders(data);
         }
       } catch (err) {
@@ -134,7 +146,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     fetchLiveOrders();
     const timer = setInterval(fetchLiveOrders, 4000);
     return () => clearInterval(timer);
-  }, [merchantId]);
+  }, [merchantId, storeSlug]);
   // Sub-menu state
   const [subMenu, setSubMenu] = useState<OrderSubMenu>('all');
 

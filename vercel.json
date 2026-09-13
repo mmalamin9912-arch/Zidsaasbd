@@ -24,6 +24,14 @@
       "destination": "/api/index.ts"
     },
     {
+      "source": "/api/stores/slug/:slug*",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/stores/by-slug",
+      "destination": "/api/index.ts"
+    },
+    {
       "source": "/api/stores/:path*",
       "destination": "/api/index.ts"
     },

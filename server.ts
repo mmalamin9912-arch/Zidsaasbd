@@ -114,10 +114,17 @@ const MONGODB_URI = getMongoUri();
 const ORDERS_DB_NAME = DB_NAME;
 const ORDERS_COLLECTION = 'orders';
 
+// NOTE: `store_slug` and `merchant_id` are first-class, indexed fields — NOT
+// schema-driven extras. The storefront (POST) and the merchant dashboard (GET)
+// do not always hold the same store identifier, so every order must persist
+// BOTH beside the canonical `store_id` UUID. Without them a placed order is
+// written but the dashboard's slug/merchant query finds nothing (0 orders).
 const orderSchema = new mongoose.Schema({
   store_id: { type: String, required: true, index: true },
-  store_slug: { type: String, index: true },
+  store_slug: { type: String, index: true, required: true },
   merchant_id: { type: String, index: true },
+  merchantId: { type: String, index: true },
+  storeSlug: { type: String, index: true },
   order_number: String,
   customer_name: String,
   customer_phone: String,
@@ -1199,28 +1206,138 @@ app.get('/api/stores/check/:email', async (req, res) => {
   }
 });
 
+/**
+ * Extract the store reference from a /api/stores/... request.
+ *
+ * WHY THE RAW PATH IS PARSED
+ * ---------------------------------------------------------------------------
+ * `/api/stores/slug/:slug` used to 404 on Vercel because the route only
+ * matched a single Express param and the rewrite chain did not always preserve
+ * it. Reading the LAST path segment as a fallback guarantees that
+ * `/api/stores/slug/mystore`, `/api/stores/mystore`, and the query-string form
+ * (`?slug=mystore`) all resolve to the same reference regardless of how the
+ * edge rewrote the URL.
+ */
+function extractStoreSlugFromRequest(req: express.Request): string {
+  const fromParams = String((req.params as any)?.slug || '').trim();
+  if (fromParams) return fromParams.split(':')[0].trim().toLowerCase();
+
+  const fromQuery = String(
+    (req.query.slug as string) ||
+    (req.query.store_slug as string) ||
+    (req.query.storeSlug as string) ||
+    (req.query.store_id as string) ||
+    (req.query.store_code as string) ||
+    ''
+  ).trim();
+  if (fromQuery) return fromQuery.split(':')[0].trim().toLowerCase();
+
+  // Last-resort: the final path segment (skipping the routing words themselves).
+  try {
+    const segments = String(req.path || req.originalUrl || '')
+      .split('?')[0]
+      .split('/')
+      .filter(Boolean);
+    const last = segments[segments.length - 1];
+    if (last && !['stores', 'store', 'api', 'slug'].includes(last.toLowerCase())) {
+      return decodeURIComponent(last).split(':')[0].trim().toLowerCase();
+    }
+  } catch { /* fall through to empty */ }
+
+  return '';
+}
+
+/**
+ * Resolve a store reference to its merchant record, consulting Supabase (via
+ * lookupStoreRecord), then MongoDB, and finally the resolved store identity.
+ * Never throws — an unknown store resolves to `null`.
+ */
+async function resolveStoreRecordFlexible(ref: string): Promise<Record<string, unknown> | null> {
+  const clean = String(ref || '').split(':')[0].trim();
+  if (!clean) return null;
+
+  // 1. Supabase REST / memory / local payload file.
+  try {
+    const found = await lookupStoreRecord(clean);
+    if (found) return found;
+  } catch (e: any) {
+    console.warn('[Server] resolveStoreRecordFlexible lookup warning:', e?.message || e);
+  }
+
+  // 2. MongoDB `stores` collection — the same table the products/orders flow
+  //    resolves against, so a store that exists only there is still found.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const lower = clean.toLowerCase();
+      const orClauses: any[] = [
+        { store_slug: lower },
+        { storeSlug: lower },
+        { store_code: { $in: [clean, clean.toUpperCase()] } },
+      ];
+      if (isUuidLike(clean)) orClauses.push({ id: clean }, { _id: clean });
+      const storeDoc = await (mongoose.connection.db.collection('stores') as any)
+        .findOne({ $or: orClauses });
+      if (storeDoc) return storeDoc as Record<string, unknown>;
+
+      const merchDoc = await (mongoose.connection.db.collection('merchants') as any)
+        .findOne({ $or: [{ store_slug: lower }, { storeSlug: lower }] });
+      if (merchDoc) return merchDoc as Record<string, unknown>;
+    }
+  } catch (e: any) {
+    console.warn('[Server] resolveStoreRecordFlexible mongo warning:', e?.message || e);
+  }
+
+  // 3. Last resort — return the resolved store id so the client still learns the
+  //    canonical UUID/code instead of receiving a bare `null`.
+  try {
+    const resolvedId = isUuidLike(clean) ? clean : await resolveStoreIdBySlug(clean);
+    if (resolvedId) {
+      return {
+        store_slug: clean.toLowerCase(),
+        storeSlug: clean.toLowerCase(),
+        id: resolvedId,
+        store_id: resolvedId,
+      } as Record<string, unknown>;
+    }
+  } catch { /* ignore */ }
+
+  return null;
+}
+
 // Store lookup by slug via explicit path: /api/stores/slug/:slug.
-app.get('/api/stores/slug/:slug', async (req, res) => {
+//
+// Registered as `app.all` (not `app.get`) so OPTIONS/HEAD probes — and any
+// method the edge forwards — are answered here rather than falling through to
+// the `app.all('/api/*')` 404 fallback. The handler ALWAYS returns 200 JSON:
+// an unknown store yields `merchant: null`, never a 404 route error.
+app.all('/api/stores/slug/:slug', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const slug = String(req.params.slug || '').trim().toLowerCase();
-    const merchant = await lookupStoreRecord(slug);
+    const slug = extractStoreSlugFromRequest(req);
+    if (!slug) {
+      return res.status(200).json({ ok: true, store_slug: '', merchant: null });
+    }
+    const merchant = await resolveStoreRecordFlexible(slug);
     return res.status(200).json({ ok: true, store_slug: slug, merchant: merchant || null });
   } catch (err: any) {
-    console.error('[Server] GET /api/stores/slug/:slug error:', err);
+    console.error('[Server] /api/stores/slug/:slug error:', err);
     return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
   }
 });
 
 // Generic store lookup by single slug segment: /api/stores/:slug.
-app.get('/api/stores/:slug', async (req, res) => {
+app.all('/api/stores/:slug', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const slug = String(req.params.slug || '').trim().toLowerCase();
-    const merchant = await lookupStoreRecord(slug);
+    const slug = extractStoreSlugFromRequest(req);
+    if (!slug) {
+      return res.status(200).json({ ok: true, store_slug: '', merchant: null });
+    }
+    const merchant = await resolveStoreRecordFlexible(slug);
     return res.status(200).json({ ok: true, store_slug: slug, merchant: merchant || null });
   } catch (err: any) {
-    console.error('[Server] GET /api/stores/:slug error:', err);
+    console.error('[Server] /api/stores/:slug error:', err);
     return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
   }
 });
@@ -1889,8 +2006,48 @@ app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 // but all order reads/writes go to MongoDB to avoid Supabase schema mismatches.
 
 
-// GET /api/orders — list orders across the collection. Degrades to [] on any
-// failure so this endpoint never surfaces a 5xx to the client.
+/**
+ * Build the { $or: [...] } filter the dashboard's order list is matched with.
+ *
+ * An order may have been written under ANY of: the canonical stores.id UUID
+ * (`store_id`), the display slug (`store_slug`/`storeSlug`), the permanent
+ * ZID-BD code (`store_code`), or the merchant id (`merchant_id`/`merchantId`).
+ * Matching on EVERY form and alias means a placed order is always visible to
+ * its own dashboard, whichever identifier the reader happens to hold.
+ *
+ * Returns `null` when no filter was supplied, which the caller interprets as
+ * "return all orders for this authenticated merchant" (no restriction).
+ */
+async function buildOrderQuery(rawRef: string): Promise<any | null> {
+  const raw = String(rawRef || '').trim();
+  if (!raw) return null;
+
+  const cleanSlug = raw.split(':')[0].trim().toLowerCase();
+  const resolvedId = !isUuidLike(raw) ? await resolveStoreIdBySlug(cleanSlug) : raw;
+
+  const refValueCandidates = Array.from(new Set(
+    [resolvedId, raw, cleanSlug].filter(Boolean) as string[]
+  ));
+
+  // Probe every alias so a record written under ANY spelling still matches.
+  const or: Record<string, { $in: string[] }>[] = [
+    { store_id: { $in: refValueCandidates } },
+    { store_slug: { $in: refValueCandidates } },
+    { storeSlug: { $in: refValueCandidates } },
+    { merchant_id: { $in: refValueCandidates } },
+    { merchantId: { $in: refValueCandidates } },
+    { store_code: { $in: refValueCandidates } },
+    { storeCode: { $in: refValueCandidates } },
+  ];
+  return { $or: or };
+}
+
+// GET /api/orders — list orders with FLEXIBLE matching. Accepts the store
+// reference from the query string (`store_slug` / `storeSlug` / `store_id` /
+// `merchant_id` / `merchantId` / `storeRef` / `slug`). When NO reference is
+// supplied the handler returns ALL orders (the authenticated merchant's full
+// list) instead of silently filtering everything out.
+// Degrades to [] on any failure so it never surfaces a 5xx.
 app.get('/api/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -1902,9 +2059,30 @@ app.get('/api/orders', async (req, res) => {
       return res.status(200).json([]);
     }
     if (mongoose.connection.readyState !== 1) return res.status(200).json([]);
+
+    const storeRef = String(
+      (req.query.store_slug as string) ||
+      (req.query.storeSlug as string) ||
+      (req.query.store_id as string) ||
+      (req.query.storeId as string) ||
+      (req.query.merchant_id as string) ||
+      (req.query.merchantId as string) ||
+      (req.query.storeRef as string) ||
+      (req.query.slug as string) ||
+      ''
+    ).trim();
+
+    // No filter → return ALL orders for the authenticated merchant.
+    const query = await buildOrderQuery(storeRef);
+
     let orders: any[] = [];
     try {
-      orders = await (Order as any).find({}).sort({ created_at: -1 }).limit(500).lean();
+      // @ts-ignore — query is a plain Mongo filter object.
+      orders = await (Order as any)
+        .find(query || {})
+        .sort({ created_at: -1 })
+        .limit(500)
+        .lean();
     } catch (queryErr: any) {
       console.warn('[Server] GET /api/orders query warning:', queryErr?.message || queryErr);
       orders = [];
@@ -1916,9 +2094,10 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
-// GET /api/orders/:storeRef — fetch orders for a store from MongoDB.
+// GET /api/orders/:storeRef — fetch orders for a store from MongoDB. Shares the
+// same flexible matcher as the collection endpoint above.
 app.get('/api/orders/:storeRef', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
+ res.setHeader('Content-Type', 'application/json');
   try {
     if (!MONGODB_URI) return res.status(200).json([]);
     try {
@@ -1929,20 +2108,20 @@ app.get('/api/orders/:storeRef', async (req, res) => {
       return res.status(200).json([]);
     }
     const raw = String(req.params.storeRef || '').trim();
-    if (!raw) return res.status(200).json([]);
+    // No reference → return the full merchant list rather than an empty array.
+    const query = await buildOrderQuery(raw);
 
-    let storeId = raw;
-    if (!isUuidLike(raw)) {
-      storeId = await resolveStoreIdBySlug(raw) || raw;
-    }
-
-    // @ts-ignore
-    const queryStoreId: any = { store_id: storeId };
-    let orders = await (Order as any).find(queryStoreId).sort({ created_at: -1 }).lean();
-    if (!Array.isArray(orders) || orders.length === 0) {
-      // @ts-ignore
-      const queryOr: any = { $or: [{ store_slug: raw }, { merchant_id: raw }] };
-      orders = await (Order as any).find(queryOr).sort({ created_at: -1 }).lean();
+    let orders: any[] = [];
+    try {
+      // @ts-ignore — query is a plain Mongo filter object.
+      orders = await (Order as any)
+        .find(query || {})
+        .sort({ created_at: -1 })
+        .limit(500)
+        .lean();
+    } catch (queryErr: any) {
+      console.warn('[Server] GET /api/orders/:storeRef query warning:', queryErr?.message || queryErr);
+      orders = [];
     }
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
@@ -1981,14 +2160,31 @@ app.post('/api/orders', async (req, res) => {
         order.storeCode || order.store_code || order.storeId || order.store_id ||
         order.merchantId || order.merchant_id || order.storeSlug || order.store_slug || ''
       ).trim();
-      const slug = String(merchantRef).split(':')[0].trim().toLowerCase() || 'bd';
+
+      // The EXPLICIT slug from the checkout payload is authoritative — it is what
+      // the merchant dashboard filters on, so it must never be dropped.
+      const explicitSlug = String(order.storeSlug || order.store_slug || '')
+        .split(':')[0]
+        .trim()
+        .toLowerCase();
+      const slug = String(explicitSlug || merchantRef).split(':')[0].trim().toLowerCase() || 'bd';
       let storeId = isUuidLike(merchantRef) ? merchantRef : (await resolveStoreIdBySlug(slug));
       if (!storeId) storeId = merchantRef || slug;
 
+      // merchant_id keys the dashboard's order query — never persist an empty
+      // string, otherwise a 200 checkout still shows 0 orders in the dashboard.
+      const merchantId = String(
+        order.merchantId || order.merchant_id || storeId || slug
+      ).trim();
+
       const record: any = {
         store_id: storeId,
-        store_slug: slug || order.storeSlug || order.store_slug || '',
-        merchant_id: order.merchantId || order.merchant_id || '',
+        // Persist BOTH snake_case (read path) and camelCase (client payload)
+        // spellings so legacy readers and new callers both match.
+        store_slug: slug,
+        storeSlug: slug,
+        merchant_id: merchantId,
+        merchantId,
         order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
         customer_name: order.customerName || order.customer_name || 'Customer',
         customer_phone: order.customerPhone || order.customer_phone || '',

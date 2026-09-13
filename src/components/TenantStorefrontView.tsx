@@ -918,13 +918,29 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
     (newOrder as any).storeId = storeId;
 
+    // Persist EVERY store identifier explicitly so the merchant dashboard's
+    // order query can always find this order: the merchant layer keys off
+    // `merchantId`, the order layer off `store_slug`, and the permanent record
+    // off `store_id`/`store_code`. A successful POST that stored only one of
+    // these is exactly what made a placed order appear as 0 in the dashboard.
+    const orderPayload = {
+      ...newOrder,
+      storeId,
+      store_id: storeId,
+      storeSlug: effectiveStoreSlug,
+      store_slug: effectiveStoreSlug,
+      merchantId: (newOrder as any).merchantId || (merchant as any)?.id || storeId || effectiveStoreSlug,
+      storeCode: resolvedStoreCode || (merchant as any)?.storeCode || '',
+      store_code: resolvedStoreCode || (merchant as any)?.store_code || '',
+    };
+
     // Save order to backend API (MongoDB-backed). Non-blocking: log failures
     // but NEVER alert or return early.
     try {
       await fetch(`${window.location.origin}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([newOrder]),
+        body: JSON.stringify([orderPayload]),
       }).catch(err => console.warn('[Checkout] Order API warning:', err));
     } catch (e) {
       console.warn('[Checkout] Order API warning:', e);

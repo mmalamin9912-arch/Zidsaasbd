@@ -374,9 +374,15 @@ export default function App() {
       }
     });
 
-    // Orders
-    safeFetch(`/api/orders/${merchantId}`).then(data => {
-      if (isMounted && Array.isArray(data) && data.length > 0) {
+    // Orders — query via the flexible collection endpoint so the server can
+    // match on store_id OR store_slug OR merchant_id. Passing BOTH the merchant
+    // id and the slug means a checkout that only knew the slug is still found.
+    const ordersQuery = new URLSearchParams();
+    if (merchant?.id) ordersQuery.set('merchant_id', String(merchant.id));
+    if (merchant?.storeSlug) ordersQuery.set('store_slug', String(merchant.storeSlug));
+    if (!merchant?.id && !merchant?.storeSlug && merchantId) ordersQuery.set('storeRef', String(merchantId));
+    safeFetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`).then(data => {
+      if (isMounted && Array.isArray(data)) {
         setOrders(data);
       }
     });
@@ -1410,6 +1416,7 @@ export default function App() {
                 orders={orders}
                 onUpdateOrders={handleUpdateOrders}
                 merchantId={merchant?.id}
+                storeSlug={merchant?.storeSlug}
               />
             )}
 
