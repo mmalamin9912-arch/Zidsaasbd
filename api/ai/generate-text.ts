@@ -13,7 +13,10 @@ type VercelResponse = {
   end: () => void;
 };
 
-import { ZID_AI_SYSTEM_INSTRUCTION } from '../../src/lib/aiService';
+// Explicit '.js' extension required: package.json sets "type": "module", so
+// Vercel's Node ESM resolver rejects extensionless relative specifiers with
+// ERR_MODULE_NOT_FOUND ('/var/task/src/lib/aiService'). Vercel emits aiService.js.
+import { ZID_AI_SYSTEM_INSTRUCTION } from '../../src/lib/aiService.js';
 
 /**
  * POST /api/ai/generate-text

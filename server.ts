@@ -3,7 +3,12 @@ import path from 'path';
 import fs from 'fs/promises';
 import { createServer as createViteServer } from 'vite';
 import mongoose from 'mongoose';
-import { connectToDatabase, getMongoDb, getMongoUri, DB_NAME } from './lib/db';
+// NOTE: the explicit '.js' extension is REQUIRED. package.json declares
+// "type": "module", so Vercel's Node ESM resolver rejects extensionless
+// relative specifiers with ERR_MODULE_NOT_FOUND ('/var/task/lib/db').
+// Vercel emits the compiled sibling as lib/db.js, which this resolves to;
+// bundlers (vite/esbuild) and tsx map it back to lib/db.ts.
+import { connectToDatabase, getMongoDb, getMongoUri, DB_NAME } from './lib/db.js';
 
 const app = express();
 app.use(express.json());
