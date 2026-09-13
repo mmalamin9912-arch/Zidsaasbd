@@ -2209,6 +2209,26 @@ app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 // but all order reads/writes go to MongoDB to avoid Supabase schema mismatches.
 
 
+/** Coerce any incoming amount to a finite number (defaults to `fallback`). */
+function toNumeric(value: unknown, fallback = 0): number {
+  const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Coerce any incoming date to a valid `Date`. A missing/invalid value falls
+ * back to "now" so the stored document ALWAYS has a renderable timestamp —
+ * the dashboard renders this field and an undefined one used to crash it.
+ */
+function toValidDate(value: unknown): Date {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (value !== null && value !== undefined && value !== '') {
+    const parsed = new Date(value as string);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
 /**
  * Build the { $or: [...] } filter the dashboard's order list is matched with.
  *
@@ -2452,13 +2472,21 @@ app.post('/api/orders', async (req, res) => {
         customer_phone: order.customerPhone || order.customer_phone || '',
         customer_city: order.customerCity || order.customer_city || '',
         shipping_address: String(order.address || order.shipping_address || '').trim(),
+        // `items` is persisted as a JSON string; keep normalizing here so readers
+        // always get a parseable value rather than a raw object/undefined.
         items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []),
-        total_price: order.totalBDT ?? order.total_amount ?? order.total ?? 0,
+        // Amounts are ALWAYS finite numbers. A string/undefined total would make
+        // the dashboard render `undefined.toLocaleString()` and blank the app.
+        total_price: toNumeric(order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total, 0),
+        subtotal_bdt: toNumeric(order.subtotalBDT ?? order.subtotal_bdt, 0),
+        delivery_charge: toNumeric(order.deliveryCharge ?? order.delivery_charge, 0),
+        cod_amount: toNumeric(order.totalBDT ?? order.total_price ?? order.cod_amount, 0),
         payment_method: order.paymentMethod || order.payment_method || 'COD',
         payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
         transaction_id: order.transactionId || order.transaction_id || null,
         status: order.status || 'New',
-        created_at: new Date(),
+        // Explicit, valid creation timestamp for the dashboard's date column.
+        created_at: toValidDate(order.createdAt ?? order.created_at ?? order.date),
       };
 
       // Write through the native driver so the record always lands in

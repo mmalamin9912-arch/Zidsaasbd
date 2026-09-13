@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, OrderItem } from '../../types';
+import { safeAmount, safeDate, toNumber, normalizeOrders } from '../../utils/orderUtils';
 import {
   ShoppingBag,
   Search,
@@ -135,9 +136,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         const res = await fetch(`/api/orders${params.toString() ? `?${params.toString()}` : ''}`);
         const data = await res.json();
         // Apply the authoritative server list even when empty, so a deleted or
-        // reassigned order does not linger in the dashboard view.
+        // reassigned order does not linger in the dashboard view. Normalize
+        // raw Mongo rows into the UI `Order` shape first — otherwise the table
+        // renders `undefined.toLocaleString()` and blanks the whole app.
         if (Array.isArray(data)) {
-          onUpdateOrders(data);
+          onUpdateOrders(normalizeOrders(data));
         }
       } catch (err) {
         console.warn('Error fetching live orders:', err);
@@ -400,9 +403,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       return true;
     }).sort((a, b) => {
       if (sortBy === 'newest') return b.id.localeCompare(a.id);
-      if (sortBy === 'oldest') return a.id.localeCompare(b.id);
-      if (sortBy === 'amount_high') return b.totalBDT - a.totalBDT;
-      if (sortBy === 'amount_low') return a.totalBDT - b.totalBDT;
+      if (sortBy === 'oldest') return String(a.id ?? '').localeCompare(String(b.id ?? ''));
+      if (sortBy === 'amount_high') return toNumber(b.totalBDT) - toNumber(a.totalBDT);
+      if (sortBy === 'amount_low') return toNumber(a.totalBDT) - toNumber(b.totalBDT);
       return 0;
     });
   }, [orders, subMenu, statusTab, searchQuery, filterSource, filterPlatform, filterPaymentMethod, filterPaymentStatus, filterCourier, sortBy]);
@@ -515,10 +518,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       o.paymentMethod,
       o.paymentStatus,
       o.courierName || 'Unassigned',
-      o.status || 'New',
-      o.totalBDT,
-      o.createdAt
-    ]);
+        o.status || 'New',
+        toNumber(o?.totalBDT),
+        safeDate(o?.createdAt, '')
+      ]);
 
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
@@ -555,7 +558,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           o.paymentStatus,
           o.status || 'New',
           o.courierName || 'Unassigned',
-          o.createdAt
+          safeDate(o?.createdAt, '')
         ]);
       });
     });
@@ -1252,7 +1255,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
                             {/* Total Amount */}
                             <td className="p-3.5 font-extrabold text-[#00D68F] text-xs">
-                              ৳{ord.totalBDT.toLocaleString()} BDT
+                              ৳{safeAmount(ord?.totalBDT)} BDT
                             </td>
 
                             {/* Order Status Inline Interactive Dropdown */}
@@ -1273,7 +1276,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                   <span className="text-[10px] text-slate-500 italic">No tags</span>
                                 )}
                               </div>
-                              <div className="text-[10px] text-slate-400 font-mono">{ord.createdAt}</div>
+                              <div className="text-[10px] text-slate-400 font-mono">{safeDate(ord?.createdAt)}</div>
                             </td>
 
                             {/* Expand Row Details */}
@@ -1298,7 +1301,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                       <span className="text-xs font-mono font-bold text-[#00D68F] bg-[#00D68F]/10 px-2.5 py-1 rounded border border-[#00D68F]/20">
                                         Order Details: {ord.orderNumber}
                                       </span>
-                                      <span className="text-xs text-slate-400">Created {ord.createdAt}</span>
+                                      <span className="text-xs text-slate-400">Created {safeDate(ord?.createdAt)}</span>
                                     </div>
 
                                     {/* Quick Actions */}
@@ -1345,8 +1348,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                               <div className="text-[11px] text-slate-400">Variant: {it.variant}</div>
                                             </div>
                                             <div className="text-right">
-                                              <div className="font-mono text-xs text-[#00D68F] font-bold">৳{it.unitPriceBDT.toLocaleString()} x {it.quantity}</div>
-                                              <div className="text-[11px] text-slate-300 font-bold">Subtotal: ৳{(it.unitPriceBDT * it.quantity).toLocaleString()} BDT</div>
+                                              <div className="font-mono text-xs text-[#00D68F] font-bold">৳{safeAmount(it?.unitPriceBDT)} x {it?.quantity ?? 0}</div>
+                                              <div className="text-[11px] text-slate-300 font-bold">Subtotal: ৳{safeAmount(toNumber(it?.unitPriceBDT) * toNumber(it?.quantity, 0))} BDT</div>
                                             </div>
                                           </div>
                                         ))}
@@ -1496,7 +1499,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <span className="text-xs font-bold text-slate-200">{cart.name}</span>
                     <span className="text-[11px] text-slate-400 font-mono">({cart.phone})</span>
                   </div>
-                  <p className="text-xs text-slate-300 mt-1">Item: {cart.item} (৳{cart.price.toLocaleString()} BDT)</p>
+                  <p className="text-xs text-slate-300 mt-1">Item: {cart.item} (৳{safeAmount(cart?.price)} BDT)</p>
                   <p className="text-[11px] text-amber-400 mt-0.5 font-semibold">{cart.stage} • Left {cart.leftTime}</p>
                 </div>
 
@@ -1643,7 +1646,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                           <div class="right">
                             <span class="tax-badge">TAX INVOICE</span>
                             <p class="order-num">${ord.orderNumber}</p>
-                            <p class="date">${ord.createdAt}</p>
+                            <p class="date">${safeDate(ord?.createdAt)}</p>
                           </div>
                         </div>
 
@@ -1678,8 +1681,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                 <td><b>${it.productName}</b></td>
                                 <td>${it.variant}</td>
                                 <td class="center">${it.quantity}</td>
-                                <td class="right">৳${it.unitPriceBDT.toLocaleString()}</td>
-                                <td class="right"><b>৳${(it.quantity * it.unitPriceBDT).toLocaleString()}</b></td>
+                                <td class="right">৳${safeAmount(it?.unitPriceBDT)}</td>
+                                <td class="right"><b>৳${safeAmount(toNumber(it?.quantity) * toNumber(it?.unitPriceBDT))}</b></td>
                               </tr>
                             `).join('')}
                           </tbody>
@@ -1689,7 +1692,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                           <span class="thank-you">Thank you for shopping with My Store Zid Store!</span>
                           <div class="right">
                             <span class="grand-label">Grand Total BDT:</span>
-                            <span class="grand-total">৳${ord.totalBDT.toLocaleString()} BDT</span>
+                            <span class="grand-total">৳${safeAmount(ord?.totalBDT)} BDT</span>
                           </div>
                         </div>
                       </div>
@@ -1880,7 +1883,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <div className="text-right">
                       <span className="px-3 py-1 bg-slate-900 text-white font-mono text-xs font-bold rounded-lg uppercase">TAX INVOICE</span>
                       <p className="text-sm font-mono font-bold text-slate-900 mt-1">{ord.orderNumber}</p>
-                      <p className="text-xs text-slate-500">{ord.createdAt}</p>
+                      <p className="text-xs text-slate-500">{safeDate(ord?.createdAt)}</p>
                     </div>
                   </div>
 
@@ -1915,8 +1918,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                           <td className="py-2.5 font-bold text-slate-900">{it.productName}</td>
                           <td className="py-2.5 text-slate-600">{it.variant}</td>
                           <td className="py-2.5 text-center font-mono">{it.quantity}</td>
-                          <td className="py-2.5 text-right font-mono">৳{it.unitPriceBDT.toLocaleString()}</td>
-                          <td className="py-2.5 text-right font-mono font-bold">৳{(it.quantity * it.unitPriceBDT).toLocaleString()}</td>
+                          <td className="py-2.5 text-right font-mono">৳{safeAmount(it?.unitPriceBDT)}</td>
+                          <td className="py-2.5 text-right font-mono font-bold">৳{safeAmount(toNumber(it?.quantity) * toNumber(it?.unitPriceBDT))}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1926,7 +1929,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <span className="text-slate-500 italic">Thank you for shopping with My Store Zid Store!</span>
                     <div className="text-right">
                       <span className="text-slate-500 font-bold mr-2">Grand Total BDT:</span>
-                      <span className="text-base font-black text-slate-900 font-mono">৳{ord.totalBDT.toLocaleString()} BDT</span>
+                      <span className="text-base font-black text-slate-900 font-mono">৳{safeAmount(ord?.totalBDT)} BDT</span>
                     </div>
                   </div>
                 </div>
@@ -1959,14 +1962,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <div className="bg-[#181B26] p-3.5 rounded-xl border border-[#2E3548]">
                 <p className="text-slate-400 font-bold uppercase text-[10px]">Total Revenue (BDT)</p>
                 <p className="text-2xl font-black text-[#00D68F] font-mono mt-1">
-                  ৳{selectedOrders.reduce((sum, o) => sum + o.totalBDT, 0).toLocaleString()}
+                  ৳{safeAmount(selectedOrders.reduce((sum, o) => sum + toNumber(o?.totalBDT), 0))}
                 </p>
               </div>
 
               <div className="bg-[#181B26] p-3.5 rounded-xl border border-[#2E3548]">
                 <p className="text-slate-400 font-bold uppercase text-[10px]">Average Order Value</p>
                 <p className="text-lg font-black text-amber-400 font-mono mt-1">
-                  ৳{Math.round(selectedOrders.reduce((sum, o) => sum + o.totalBDT, 0) / (selectedOrders.length || 1)).toLocaleString()} BDT
+                  ৳{safeAmount(Math.round(selectedOrders.reduce((sum, o) => sum + toNumber(o?.totalBDT), 0) / (selectedOrders.length || 1)))} BDT
                 </p>
               </div>
 
@@ -2033,7 +2036,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       <div class="label-box">
                         <div class="header">
                           <span class="courier">${ord.courierName || 'Steadfast Express'}</span>
-                          <span class="cod">COD ৳${ord.totalBDT.toLocaleString()} BDT</span>
+                          <span class="cod">COD ৳${safeAmount(ord?.totalBDT)} BDT</span>
                         </div>
 
                         <div class="recipient">
@@ -2201,7 +2204,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   <div className="flex justify-between items-center border-b-2 border-slate-900 pb-2">
                     <span className="font-black text-sm uppercase tracking-wider">{ord.courierName || 'Steadfast Express'}</span>
                     <span className="font-mono font-bold text-xs bg-slate-900 text-white px-2 py-0.5 rounded">
-                      COD ৳{ord.totalBDT.toLocaleString()} BDT
+                      COD ৳{safeAmount(ord?.totalBDT)} BDT
                     </span>
                   </div>
 
@@ -2588,7 +2591,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               </div>
               <div className="flex justify-between text-slate-300">
                 <span>Total Collectable BDT:</span>
-                <span className="font-extrabold text-[#00D68F]">৳{selectedOrderForCourier.totalBDT.toLocaleString()} BDT</span>
+                <span className="font-extrabold text-[#00D68F]">৳{safeAmount(selectedOrderForCourier?.totalBDT)} BDT</span>
               </div>
             </div>
 

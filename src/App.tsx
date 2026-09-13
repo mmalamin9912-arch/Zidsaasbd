@@ -37,6 +37,7 @@ import { StorefrontPreviewModal } from './components/StorefrontPreviewModal';
 import { TenantStorefrontView } from './components/TenantStorefrontView';
 import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
+import { normalizeOrders } from './utils/orderUtils';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -383,7 +384,10 @@ export default function App() {
     if (!merchant?.id && !merchant?.storeSlug && merchantId) ordersQuery.set('storeRef', String(merchantId));
     safeFetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`).then(data => {
       if (isMounted && Array.isArray(data)) {
-        setOrders(data);
+        // API rows are raw Mongo documents (total_price / created_at / items as
+        // a JSON string). Normalize them into the UI `Order` shape so the
+        // dashboard never renders `.toLocaleString()` on an undefined field.
+        setOrders(normalizeOrders(data));
       }
     });
 
@@ -946,7 +950,7 @@ export default function App() {
         if (parsed.bankAccounts) setBankAccounts(parsed.bankAccounts);
         if (parsed.mobileBanking) setMobileBanking(parsed.mobileBanking);
         if (parsed.codConfig) setCodConfig(parsed.codConfig);
-        if (parsed.orders) setOrders(parsed.orders);
+        if (parsed.orders) setOrders(normalizeOrders(parsed.orders));
         if (parsed.themes) setThemes(parsed.themes);
       } else {
         // Fallback or fresh merchant setup
