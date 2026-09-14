@@ -58,8 +58,16 @@ interface RegisteredUser {
 
 export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerchant, onAdminAccess, initialMode = 'login' }) => {
   const { t } = useLanguage();
-  // Top level auth mode: 'login' (Sign In with password) vs 'signup' (Sign Up with OTP)
-  const [mode, setMode] = useState<'login' | 'signup'>(initialMode);
+  // Top level auth mode: 'login' (Sign In with password), 'signup' (Sign Up with
+  // OTP) or '2fa' (second-factor challenge after a correct password).
+  const [mode, setMode] = useState<'login' | 'signup' | '2fa'>(initialMode);
+
+  // Second-factor (2FA) challenge state. `pendingTwoFactor` holds the profile
+  // whose password already checked out — the session is only issued once the
+  // WhatsApp OTP in `twoFactorCode` is verified.
+  const [pendingTwoFactor, setPendingTwoFactor] = useState<MerchantProfile | null>(null);
+  const [twoFactorPhone, setTwoFactorPhone] = useState('');
+  const [twoFactorCode, setTwoFactorCode] = useState('');
 
   // Sign Up Flow Steps
   const [signupStep, setSignupStep] = useState<'email' | 'otp' | 'register'>('email');
@@ -195,7 +203,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           userId: session.user.id,
           email: cleanEmail
         }).then((storeProfile) => {
-          if (storeProfile) finishLogin({ ...storeProfile, email: storeProfile.email || cleanEmail });
+          if (storeProfile) void finishLogin({ ...storeProfile, email: storeProfile.email || cleanEmail });
         });
 
         const registeredList = getRegisteredUsers();
@@ -264,9 +272,11 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     return profile;
   };
 
-  const finishLogin = (profile: MerchantProfile) => {
-    const enrichedProfile = enhanceWithPrepayment(profile);
-
+  /**
+   * Issues the session and hands the profile to the dashboard. Split out of
+   * `finishLogin` so the 2FA gate can call it only AFTER the OTP is verified.
+   */
+  const completeLogin = (enrichedProfile: MerchantProfile) => {
     localStorage.setItem('zid_auth_session', JSON.stringify({
       email: enrichedProfile.email,
       loggedInAt: new Date().toISOString(),
@@ -286,11 +296,146 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     onLoginSuccess(enrichedProfile);
   };
 
+  /**
+   * Resolve the store slug used for the security lookup. The login form only
+   * knows the email, so we consult the same backend lookup the dashboard uses.
+   */
+  const resolveSecuritySlug = async (profile: MerchantProfile, emailFallback: string): Promise<string> => {
+    const direct = profile.storeSlug || profile.storeCode || profile.store_code || profile.id;
+    if (direct) return direct;
+    try {
+      const res = await fetch(`/api/stores/check/${encodeURIComponent(emailFallback)}`);
+      const data = await safeParseJson(res, null);
+      return data?.store_slug || data?.storeSlug || data?.merchant?.store_slug || '';
+    } catch {
+      return '';
+    }
+  };
+
+  /**
+   * LOGIN ENTRY POINT (with 2FA enforcement).
+   *
+   * When the merchant has Two-Factor Authentication enabled, the password check
+   * alone is NOT enough: we send a WhatsApp OTP and hold the login in
+   * `pendingTwoFactor` until `verifyOtp` succeeds. Only then is the session
+   * issued. When 2FA is off (or the store cannot be resolved) the original
+   * behaviour is preserved exactly.
+   */
+  const finishLogin = async (profile: MerchantProfile) => {
+    const enrichedProfile = enhanceWithPrepayment(profile);
+    const emailFallback = enrichedProfile.email || email.trim().toLowerCase();
+
+    let twoFactorRequired = false;
+    try {
+      const slug = await resolveSecuritySlug(enrichedProfile, emailFallback);
+      if (slug) {
+        const res = await fetch(`/api/security/settings?store_slug=${encodeURIComponent(slug)}`);
+        const data = await safeParseJson(res, null);
+        twoFactorRequired = data?.ok === true && data?.security?.twoFactorEnabled === true;
+      }
+    } catch (err) {
+      // A failed lookup must never lock a merchant out of their own dashboard.
+      console.warn('2FA status lookup warning:', err);
+      twoFactorRequired = false;
+    }
+
+    if (!twoFactorRequired) {
+      completeLogin(enrichedProfile);
+      return;
+    }
+
+    const phone = enrichedProfile.whatsappNumber || enrichedProfile.phone || '';
+    if (!phone) {
+      setErrorMsg('Two-factor authentication is enabled but no WhatsApp number is on file. Please contact support.');
+      setIsLoading(false);
+      return;
+    }
+
+    // Park the login and ask the backend to dispatch the OTP.
+    setPendingTwoFactor(enrichedProfile);
+    setTwoFactorPhone(phone);
+    setTwoFactorCode('');
+    setMode('2fa');
+    setErrorMsg('');
+
+    try {
+      await fetch('/api/auth/whatsapp-otp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, userType: 'merchant' }),
+      });
+      setInfoNotice(`A 6-digit verification code was sent to ${phone} on WhatsApp.`);
+    } catch (err) {
+      console.warn('2FA OTP dispatch warning:', err);
+      setInfoNotice(`Enter the 6-digit code sent to ${phone} on WhatsApp.`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  /** Verify the 2FA code, then finish the parked login. */
+  const handleTwoFactorVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+
+    if (!pendingTwoFactor) {
+      setMode('login');
+      return;
+    }
+    if (twoFactorCode.trim().length < 6) {
+      setErrorMsg('Please enter the complete 6-digit code.');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await fetch('/api/auth/whatsapp-otp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: twoFactorPhone, code: twoFactorCode.trim() }),
+      });
+      const data = await safeParseJson(res, null);
+
+      if (data?.verified === true) {
+        const profile = pendingTwoFactor;
+        setPendingTwoFactor(null);
+        setTwoFactorCode('');
+        setIsLoading(false);
+        completeLogin(profile);
+        return;
+      }
+
+      setIsLoading(false);
+      setErrorMsg(data?.error || 'Invalid or expired code. Please try again.');
+    } catch (err: any) {
+      setIsLoading(false);
+      setErrorMsg(err?.message || 'Could not verify the code. Please try again.');
+    }
+  };
+
+  /** Re-send the 2FA code for the parked login. */
+  const handleTwoFactorResend = async () => {
+    setErrorMsg('');
+    setInfoNotice(null);
+    try {
+      await fetch('/api/auth/whatsapp-otp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: twoFactorPhone, userType: 'merchant' }),
+      });
+      setInfoNotice(`A new code was sent to ${twoFactorPhone} on WhatsApp.`);
+    } catch {
+      setErrorMsg('Could not resend the code. Please try again.');
+    }
+  };
+
   // Switch between Login and Signup modes cleanly
   const handleSwitchMode = (newMode: 'login' | 'signup') => {
     setMode(newMode);
     setErrorMsg('');
     setInfoNotice(null);
+    setPendingTwoFactor(null);
+    setTwoFactorCode('');
     if (newMode === 'signup') {
       setSignupStep('email');
       setOtp('');
@@ -367,7 +512,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                 logoUrl: defaultMerchant.logoUrl || '',
               });
 
-          finishLogin(userProfile);
+          await finishLogin(userProfile);
           return;
         }
       } catch (err) {
@@ -401,7 +546,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
               logoUrl: existingUser?.logoUrl || defaultMerchant.logoUrl || '',
             });
 
-        finishLogin(userProfile);
+        await finishLogin(userProfile);
         return;
       } else {
         setIsLoading(false);
@@ -493,8 +638,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           subscriptionPlan: 'free_trial',
         });
 
-    setIsLoading(false);
-    finishLogin(userProfile);
+    await finishLogin(userProfile);
   };
 
   const handleAdminGatewaySubmit = (e: React.FormEvent) => {
@@ -715,7 +859,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
         };
 
-        finishLogin(userProfile);
+        await finishLogin(userProfile);
       } else {
         // New User Setup
         setSignupStep('register');
@@ -913,7 +1057,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       }
     }
 
-    finishLogin(newUserProfile);
+    await finishLogin(newUserProfile);
   };
 
   return (
@@ -949,8 +1093,9 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           </p>
         </div>
 
-        {/* MODE SWITCH TABS: Sign In (Password) vs Sign Up (OTP) */}
-        <div className="grid grid-cols-2 p-1 bg-[#161923] border border-[#2E3548] rounded-2xl text-xs font-bold">
+        {/* MODE SWITCH TABS: Sign In (Password) vs Sign Up (OTP).
+            Hidden during the 2FA challenge so the merchant cannot bypass it. */}
+        <div className={`grid grid-cols-2 p-1 bg-[#161923] border-[#2E3548] rounded-2xl text-xs font-bold ${mode === '2fa' ? 'hidden' : ''}`}>
           <button
             type="button"
             onClick={() => {
@@ -1012,6 +1157,76 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
             <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
             <span>{infoNotice}</span>
           </div>
+        )}
+
+        {/* ========================================================
+            MODE: TWO-FACTOR CHALLENGE (after a correct password)
+            The session is only issued once this OTP verifies.
+        ======================================================== */}
+        {mode === '2fa' && (
+          <form onSubmit={handleTwoFactorVerify} className="space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="text-center space-y-2">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-[#D4AF37]/10 border-[#D4AF37]/30 flex items-center justify-center">
+                <ShieldCheck className="w-7 h-7 text-[#D4AF37]" />
+              </div>
+              <h3 className="text-base font-black text-white">Two-Factor Verification</h3>
+              <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
+                Enter the 6-digit code we sent to <span className="text-slate-200 font-semibold">{twoFactorPhone}</span> on WhatsApp to finish signing in.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                Verification code
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={6}
+                value={twoFactorCode}
+                onChange={(e) => setTwoFactorCode(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="• •"
+                className="w-full text-center text-2xl font-mono font-bold tracking-[0.4em] bg-slate-900/90 border-[#3A435E] focus:border-[#D4AF37] rounded-xl py-3 text-white outline-none transition placeholder:text-slate-600 placeholder:tracking-widest"
+                autoFocus
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLoading || twoFactorCode.trim().length < 6}
+              className="w-full py-3 bg-[#D4AF37] hover:bg-[#FCF6BA] disabled:opacity-50 text-slate-950 font-extrabold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-[#D4AF37]/20"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Verifying Code...</span>
+                </>
+              ) : (
+                <>
+                  <span>Verify &amp; Sign In</span>
+                  <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+                </>
+              )}
+            </button>
+
+            <div className="flex items-center justify-between text-xs px-1">
+              <button
+                type="button"
+                onClick={handleTwoFactorResend}
+                className="text-[#D4AF37] hover:underline font-medium cursor-pointer"
+              >
+                Resend code
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSwitchMode('login')}
+                className="text-slate-400 hover:text-white font-medium cursor-pointer"
+              >
+                Back to sign in
+              </button>
+            </div>
+          </form>
         )}
 
         {/* ========================================================
@@ -1166,7 +1381,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                   <button
                     type="button"
                     disabled={isLoading}
-                    onClick={() => {
+                    onClick={async () => {
                       setErrorMsg('');
                       setInfoNotice(null);
                       const cleanEmail = email.trim().toLowerCase();
@@ -1187,7 +1402,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                           storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : 'mystore',
                           logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
                         };
-                        finishLogin(userProfile);
+                        await finishLogin(userProfile);
                       } else {
                         setMode('signup');
                         setSignupStep('register');

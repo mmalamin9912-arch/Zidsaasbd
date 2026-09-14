@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { MerchantProfile, SettingsSubTab } from '../../types';
 import { 
   Settings as SettingsIcon, 
@@ -75,9 +75,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
-  const [apiKey, setApiKey] = useState('sk_live_9f8d7c6b5a41234567890');
-  const [webhookSecret, setWebhookSecret] = useState('whsec_a1b2c3d4e5f6g7h8i9j0');
+  const [apiKey, setApiKey] = useState('');
+  const [webhookSecret, setWebhookSecret] = useState('');
   const [copiedKey, setCopiedKey] = useState('');
+
+  // Live security state loaded from the backend (2FA · sessions · credentials).
+  const [securityLoading, setSecurityLoading] = useState(false);
+  const [securityBusy, setSecurityBusy] = useState<string>('');
+  const [securityNotice, setSecurityNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+  const [activeSessions, setActiveSessions] = useState<Array<{ id: string; device: string; ip: string; lastActiveAt: string; createdAt?: string }>>([]);
+  const [currentSessionId, setCurrentSessionId] = useState('');
 
   // Checkout Tab State
   const [checkoutAnnouncement, setCheckoutAnnouncement] = useState('');
@@ -174,10 +181,221 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [showLegalLinks, setShowLegalLinks] = useState(true);
 
   const handleCopy = (text: string, type: string) => {
+    if (!text) return;
     navigator.clipboard.writeText(text);
     setCopiedKey(type);
     setTimeout(() => setCopiedKey(''), 2000);
   };
+
+  // ── Live security settings ──────────────────
+  // The store reference the backend expects (slug, code or UUID all resolve).
+  const storeRef = merchant?.storeSlug || merchant?.storeCode || merchant?.store_code || merchant?.id || '';
+
+  /**
+   * Session id for THIS browser tab. Kept in sessionStorage so each tab is its
+   * own device entry and "Log Out All Other Devices" can preserve the current.
+   */
+  const ensureSessionId = () => {
+    try {
+      let id = sessionStorage.getItem('zid_merchant_session_id');
+      if (!id) {
+        id = `sess_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+        sessionStorage.setItem('zid_merchant_session_id', id);
+      }
+      return id;
+    } catch {
+      return `sess_tmp_${Date.now().toString(36)}`;
+    }
+  };
+
+  const helper = (device: string) => {
+    if (/iPhone|iPad|iPod/i.test(device)) return Smartphone;
+    if (/Android/i.test(device)) return Smartphone;
+    if (/macOS|Windows|Linux/i.test(device)) return Laptop;
+    return Monitor;
+  };
+
+  /** Reload 2FA flag, credentials and device list from the backend. */
+  const loadSecuritySettings = useCallback(async () => {
+    if (!storeRef) return;
+    setSecurityLoading(true);
+    try {
+      const res = await fetch(`/api/security/settings?store_slug=${encodeURIComponent(storeRef)}`);
+      const data = await res.json();
+      if (data?.ok && data.security) {
+        setTwoFactorEnabled(Boolean(data.security.twoFactorEnabled));
+        if (data.security.merchantApiKey) setApiKey(data.security.merchantApiKey);
+        if (data.security.webhookSecret) setWebhookSecret(data.security.webhookSecret);
+        setActiveSessions(Array.isArray(data.security.sessions) ? data.security.sessions : []);
+      }
+    } catch (err) {
+      console.warn('Security settings load warning:', err);
+    } finally {
+      setSecurityLoading(false);
+    }
+  }, [storeRef]);
+
+  // Load on mount and whenever the Security tab is opened.
+  useEffect(() => {
+    if (activeSubTab === 'settings_security') loadSecuritySettings();
+  }, [activeSubTab, loadSecuritySettings]);
+
+  /** Register this browser as an active device and refresh the list. */
+  const registerCurrentSession = useCallback(async () => {
+    if (!storeRef) return;
+    const sessionId = ensureSessionId();
+    setCurrentSessionId(sessionId);
+    try {
+      const res = await fetch('/api/security/sessions/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, sessionId }),
+      });
+      const data = await res.json();
+      if (data?.ok && data.security?.sessions) {
+        setActiveSessions(data.security.sessions);
+      }
+    } catch (err) {
+      console.warn('Session register warning:', err);
+    }
+  }, [storeRef]);
+
+  useEffect(() => {
+    if (activeSubTab === 'settings_security') registerCurrentSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSubTab, storeRef]);
+
+  /** Flip 2FA on/off. Turning it ON requires a verified WhatsApp OTP. */
+  const handleToggleTwoFactor = async () => {
+    if (!storeRef) {
+      setSecurityNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    const next = !twoFactorEnabled;
+
+    // Enabling 2FA: collect the merchant's WhatsApp number + OTP first.
+    if (next) {
+      const phone = merchant?.whatsappNumber || merchant?.phone || '';
+      if (!phone) {
+        setSecurityNotice({ type: 'error', text: 'Add a WhatsApp number in Account settings before enabling 2FA.' });
+        return;
+      }
+      const code = window.prompt(`Enter the 6-digit WhatsApp OTP sent to ${phone}.\n(A code will be sent now if you have not received one.)`);
+
+      setSecurityBusy('2fa');
+      try {
+        if (!code) {
+          // No code entered — ask the backend to send one, then stop.
+          await fetch('/api/auth/whatsapp-otp/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone, userType: 'merchant' }),
+          });
+          setSecurityNotice({ type: 'ok', text: `OTP sent to ${phone}. Click the toggle again and enter the code.` });
+          return;
+        }
+
+        const res = await fetch('/api/security/2fa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ store_slug: storeRef, enabled: true, phone, code }),
+        });
+        const data = await res.json();
+        if (!data?.ok) {
+          setSecurityNotice({ type: 'error', text: data?.error || 'Could not enable 2FA.' });
+          return;
+        }
+        setTwoFactorEnabled(true);
+        setSecurityNotice({ type: 'ok', text: data.message || 'Two-factor authentication enabled.' });
+      } catch (err: any) {
+        setSecurityNotice({ type: 'error', text: err?.message || 'Could not enable 2FA.' });
+      } finally {
+        setSecurityBusy('');
+      }
+      return;
+    }
+
+    // Disabling 2FA needs no OTP.
+    setSecurityBusy('2fa');
+    try {
+      const res = await fetch('/api/security/2fa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, enabled: false }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setSecurityNotice({ type: 'error', text: data?.error || 'Could not disable 2FA.' });
+        return;
+      }
+      setTwoFactorEnabled(false);
+      setSecurityNotice({ type: 'ok', text: data.message || 'Two-factor authentication disabled.' });
+    } catch (err: any) {
+      setSecurityNotice({ type: 'error', text: err?.message || 'Could not disable 2FA.' });
+    } finally {
+      setSecurityBusy('');
+    }
+  };
+
+  /** Mint a brand-new API key / webhook secret and persist it server-side. */
+  const handleRegenerateCredentials = async (type: 'api' | 'webhook' | 'both') => {
+    if (!storeRef) {
+      setSecurityNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    setSecurityBusy(type);
+    try {
+      const res = await fetch('/api/security/credentials/regenerate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, type }),
+      });
+      const data = await res.json();
+      if (!data?.ok || !data.security) {
+        setSecurityNotice({ type: 'error', text: data?.error || 'Could not regenerate credentials.' });
+        return;
+      }
+      if (data.security.merchantApiKey) setApiKey(data.security.merchantApiKey);
+      if (data.security.webhookSecret) setWebhookSecret(data.security.webhookSecret);
+      setSecurityNotice({ type: 'ok', text: data.message || 'Credentials regenerated.' });
+    } catch (err: any) {
+      setSecurityNotice({ type: 'error', text: err?.message || 'Could not regenerate credentials.' });
+    } finally {
+      setSecurityBusy('');
+    }
+  };
+
+  /** Revoke every other device, keeping this browser signed in. */
+  const handleLogoutOtherDevices = async () => {
+    if (!storeRef) return;
+    const sessionId = currentSessionId || ensureSessionId();
+    setSecurityBusy('sessions');
+    try {
+      const res = await fetch('/api/security/sessions/logout-others', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, sessionId }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setSecurityNotice({ type: 'error', text: data?.error || 'Could not log out other devices.' });
+        return;
+      }
+      setActiveSessions(data.security?.sessions || []);
+      setSecurityNotice({ type: 'ok', text: data.message || 'Other devices logged out.' });
+    } catch (err: any) {
+      setSecurityNotice({ type: 'error', text: err?.message || 'Could not log out other devices.' });
+    } finally {
+      setSecurityBusy('');
+    }
+  };
+
+  // Auto-dismiss the security toast.
+  useEffect(() => {
+    if (!securityNotice) return;
+    const timer = setTimeout(() => setSecurityNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [securityNotice]);
 
   const PlanRestrictionBanner = () => (
     <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 flex items-center justify-between mb-6">
@@ -766,32 +984,46 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
               </div>
 
+              {/* Security feedback toast (success / error) */}
+              {securityNotice && (
+                <div className={`rounded-xl px-4 py-3 text-sm font-medium border ${securityNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                  {securityNotice.text}
+                </div>
+              )}
+
               {/* Two-Factor Authentication */}
-              <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6 flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
                     <Smartphone className="w-5 h-5 text-[#00D68F]" />
                     Two-Factor Authentication (2FA)
                   </h3>
-                  <p className="text-sm text-slate-400">Add an extra layer of security to your account using SMS or an Authenticator app.</p>
+                  <p className="text-sm text-slate-400">Add an extra layer of security to your account using a WhatsApp OTP code.</p>
                   <div className="mt-2 flex items-center gap-2">
                     <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Status:</span>
                     <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${twoFactorEnabled ? 'bg-[#00D68F]/10 text-[#00D68F]' : 'bg-red-500/10 text-red-500'}`}>
                       {twoFactorEnabled ? 'Enabled' : 'Disabled'}
                     </span>
+                    {securityLoading && (
+                      <span className="text-[11px] text-slate-500">Loading…</span>
+                    )}
                   </div>
+                  {!merchant?.whatsappNumber && !merchant?.phone && (
+                    <p className="text-xs text-amber-500 mt-2">Add a WhatsApp number in Account settings to enable 2FA.</p>
+                  )}
                 </div>
                 <button
                   type="button"
-                  onClick={() => setTwoFactorEnabled(!twoFactorEnabled)}
-                  className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${twoFactorEnabled ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
+                  onClick={handleToggleTwoFactor}
+                  disabled={securityBusy === '2fa'}
+                  className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${twoFactorEnabled ? 'bg-[#00D68F]' : 'bg-slate-600'} ${securityBusy === '2fa' ? 'opacity-60 cursor-wait' : ''}`}
                 >
                   <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${twoFactorEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
                 </button>
               </div>
 
               {/* Active Sessions */}
-              <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6">
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
                   <div>
                     <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
@@ -800,43 +1032,53 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </h3>
                     <p className="text-sm text-slate-400">Manage devices currently logged into your merchant account.</p>
                   </div>
-                  <button type="button" className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 font-bold rounded-xl text-xs transition border border-red-500/20 whitespace-nowrap">
-                    Log Out All Other Devices
+                  <button
+                    type="button"
+                    onClick={handleLogoutOtherDevices}
+                    disabled={securityBusy === 'sessions' || activeSessions.length <= 1}
+                    className={`px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 font-bold rounded-xl text-xs transition border-red-500/20 whitespace-nowrap ${securityBusy === 'sessions' || activeSessions.length <= 1 ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    {securityBusy === 'sessions' ? 'Signing out…' : 'Log Out All Other Devices'}
                   </button>
                 </div>
-                
+
                 <div className="space-y-3">
-                  {/* Current Device */}
-                  <div className="flex items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#00D68F]/30">
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-full bg-[#00D68F]/10 flex items-center justify-center text-[#00D68F]">
-                        <Laptop className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <div className="font-bold text-white text-sm flex items-center gap-2">
-                          Mac OS • Chrome
-                          <span className="text-[10px] bg-[#00D68F] text-slate-950 px-1.5 py-0.5 rounded-sm font-black uppercase">Current</span>
+                  {activeSessions.length === 0 && (
+                    <div className="p-4 bg-[#161B28] rounded-xl border-[#2E3852] text-sm text-slate-400">
+                      No active device sessions found yet.
+                    </div>
+                  )}
+
+                  {activeSessions.map((device) => {
+                    const DeviceIcon = helper(device.device || "");
+                    const isCurrent = device.id === currentSessionId;
+                    return (
+                      <div
+                        key={device.id}
+                        className={`flex items-center justify-between p-4 bg-[#161B28] rounded-xl border ${isCurrent ? 'border-[#00D68F]/30' : 'border-[#2E3852]'}`}
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center ${isCurrent ? 'bg-[#00D68F]/10 text-[#00D68F]' : 'bg-slate-800 text-slate-400'}`}>
+                            <DeviceIcon className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <div className="font-bold text-white text-sm flex items-center gap-2">
+                              {device.device || "Unknown device"}
+                              {isCurrent && (
+                                <span className="text-[10px] bg-[#00D68F] text-slate-950 px-1.5 py-0.5 rounded-sm font-black uppercase">Current</span>
+                              )}
+                            </div>
+                            <div className="text-xs text-slate-400 mt-0.5">
+                              IP: {device.ip || "Unknown"} • Last Active:{" "}
+                              {device.lastActiveAt ? new Date(device.lastActiveAt).toLocaleString() : "N/A"}
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-xs text-slate-400 mt-0.5">IP: 192.168.1.1 • Last Active: Just now</div>
                       </div>
-                    </div>
-                  </div>
-                  
-                  {/* Other Device */}
-                  <div className="flex items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852]">
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center text-slate-400">
-                        <Smartphone className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <div className="font-bold text-white text-sm">iOS 17 • Safari</div>
-                        <div className="text-xs text-slate-400 mt-0.5">IP: 103.112.54.12 • Last Active: 2 hours ago</div>
-                      </div>
-                    </div>
-                  </div>
+                    );
+                  })}
                 </div>
               </div>
-
               {/* API & Webhook Credentials */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6">
                 <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
@@ -865,7 +1107,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           {copiedKey === 'api' ? <Check className="w-4 h-4 text-[#00D68F]" /> : <Copy className="w-4 h-4" />}
                         </button>
                       </div>
-                      <button type="button" onClick={() => setApiKey(`sk_live_${Math.random().toString(36).substr(2, 20)}`)} className="px-4 py-2.5 bg-[#2E3852] hover:bg-[#3B4662] text-white font-bold rounded-xl text-sm transition flex items-center gap-2 whitespace-nowrap">
+                      <button type="button" onClick={() => handleRegenerateCredentials('api')} className="px-4 py-2.5 bg-[#2E3852] hover:bg-[#3B4662] text-white font-bold rounded-xl text-sm transition flex items-center gap-2 whitespace-nowrap">
                         <RefreshCw className="w-4 h-4" />
                         Regenerate
                       </button>
@@ -891,7 +1133,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           {copiedKey === 'webhook' ? <Check className="w-4 h-4 text-[#00D68F]" /> : <Copy className="w-4 h-4" />}
                         </button>
                       </div>
-                      <button type="button" onClick={() => setWebhookSecret(`whsec_${Math.random().toString(36).substr(2, 20)}`)} className="px-4 py-2.5 bg-[#2E3852] hover:bg-[#3B4662] text-white font-bold rounded-xl text-sm transition flex items-center gap-2 whitespace-nowrap">
+                      <button type="button" onClick={() => handleRegenerateCredentials('webhook')} className="px-4 py-2.5 bg-[#2E3852] hover:bg-[#3B4662] text-white font-bold rounded-xl text-sm transition flex items-center gap-2 whitespace-nowrap">
                         <RefreshCw className="w-4 h-4" />
                         Regenerate
                       </button>

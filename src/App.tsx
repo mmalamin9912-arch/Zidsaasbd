@@ -926,6 +926,26 @@ export default function App() {
     setIsAuthenticated(true);
     setShowLanding(false);
 
+    // Record this browser as an active device so Security settings can show a
+    // real session list and "Log Out All Other Devices" has something to revoke.
+    try {
+      const storeRef = userProfile.storeSlug || userProfile.storeCode || userProfile.store_code || userProfile.id;
+      if (storeRef) {
+        let sessionId = sessionStorage.getItem('zid_merchant_session_id');
+        if (!sessionId) {
+          sessionId = `sess_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+          sessionStorage.setItem('zid_merchant_session_id', sessionId);
+        }
+        fetch('/api/security/sessions/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ store_slug: storeRef, sessionId }),
+        }).catch(err => console.warn('Session register warning:', err));
+      }
+    } catch (err) {
+      console.warn('Session register warning:', err);
+    }
+
     // Explicit Dashboard Navigation
     const slug = userProfile.storeSlug || 'my-store';
     window.history.pushState({}, '', `/dashboard/${slug}`);
