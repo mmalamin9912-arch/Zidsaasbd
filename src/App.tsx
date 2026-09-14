@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { NavigationTab, ProductSubTab, CustomerSubTab, StoreSubTab, MerchantProfile, BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig, CourierService, Order, Product, Customer, AdminPaymentGatewayConfig, SubscriptionRequest, ThemeConfig, ThemePurchaseRequest, SubscriptionPlan, PlatformTheme, SupportTicket, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from './types';
+import { NavigationTab, ProductSubTab, CustomerSubTab, StoreSubTab, SettingsSubTab, MerchantProfile, BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig, CourierService, Order, Product, Customer, AdminPaymentGatewayConfig, SubscriptionRequest, ThemeConfig, ThemePurchaseRequest, SubscriptionPlan, PlatformTheme, SupportTicket, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from './types';
 
 import {
   initialMerchant,
@@ -70,6 +70,10 @@ export default function App() {
   const [productSubTab, setProductSubTab] = useState<ProductSubTab>('all_products');
   const [customerSubTab, setCustomerSubTab] = useState<CustomerSubTab>('all_customers');
   const [storeSubTab, setStoreSubTab] = useState<StoreSubTab>('themes');
+  // Selected Settings sub-tab. Lifted here so the sidebar's "Checkout page
+  // options" entry actually opens that panel instead of leaving SettingsView on
+  // its own default sub-tab.
+  const [settingsSubTab, setSettingsSubTab] = useState<SettingsSubTab>('settings_general');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isPremiumPlan, setIsPremiumPlan] = useState<boolean>(false); // Placeholder for testing premium features
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -1394,6 +1398,8 @@ export default function App() {
           onSelectCustomerSubTab={setCustomerSubTab}
           storeSubTab={storeSubTab}
           onSelectStoreSubTab={setStoreSubTab}
+          settingsSubTab={settingsSubTab}
+          onSelectSettingsSubTab={setSettingsSubTab}
           isOpenMobile={isMobileSidebarOpen}
           onCloseMobile={() => setIsMobileSidebarOpen(false)}
           ordersBadgeCount={orders.length}
@@ -1539,6 +1545,7 @@ export default function App() {
               <SettingsView
                 merchant={merchant}
                 onUpdateMerchant={setMerchant}
+                initialSubTab={settingsSubTab}
               />
             )}
 

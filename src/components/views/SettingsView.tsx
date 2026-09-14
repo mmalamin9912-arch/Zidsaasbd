@@ -48,6 +48,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   initialSubTab = 'settings_account',
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<SettingsSubTab>(initialSubTab);
+
+  // The sidebar can change the requested sub-tab while this view is mounted
+  // (it stays mounted across Settings sub-navigation), so follow the prop too.
+  useEffect(() => {
+    if (initialSubTab) setActiveSubTab(initialSubTab);
+  }, [initialSubTab]);
   const [isCommExpanded, setIsCommExpanded] = useState(true);
   const [isStoreExpanded, setIsStoreExpanded] = useState(true);
   
@@ -86,13 +92,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [activeSessions, setActiveSessions] = useState<Array<{ id: string; device: string; ip: string; lastActiveAt: string; createdAt?: string }>>([]);
   const [currentSessionId, setCurrentSessionId] = useState('');
 
-  // Checkout Tab State
-  const [checkoutAnnouncement, setCheckoutAnnouncement] = useState('');
-  const [minOrderAmount, setMinOrderAmount] = useState('');
-  const [guestCheckout, setGuestCheckout] = useState(true);
-  const [requirePhone, setRequirePhone] = useState(true);
-  const [customField1, setCustomField1] = useState('');
-  const [customField2, setCustomField2] = useState('');
+  // Checkout Tab State — seeded from the store record, saved via the API below.
+  const [checkoutAnnouncement, setCheckoutAnnouncement] = useState(merchant?.checkoutConfig?.announcement || '');
+  const [minOrderAmount, setMinOrderAmount] = useState(
+    merchant?.checkoutConfig?.minOrderAmount != null ? String(merchant.checkoutConfig.minOrderAmount) : ''
+  );
+  const [guestCheckout, setGuestCheckout] = useState(merchant?.checkoutConfig?.guestCheckout ?? true);
+  const [requirePhone, setRequirePhone] = useState(merchant?.checkoutConfig?.requirePhone ?? true);
+  const [customField1, setCustomField1] = useState(merchant?.checkoutConfig?.customField1 || '');
+  const [customField2, setCustomField2] = useState(merchant?.checkoutConfig?.customField2 || '');
+
+  // Live checkout settings (loaded from the backend, not just component state).
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [checkoutSaving, setCheckoutSaving] = useState(false);
+  const [checkoutNotice, setCheckoutNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // Gift Tab State
   const [enableGiftWrap, setEnableGiftWrap] = useState(false);
@@ -396,6 +409,93 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const timer = setTimeout(() => setSecurityNotice(null), 5000);
     return () => clearTimeout(timer);
   }, [securityNotice]);
+
+  // ── Checkout page options ────────────────────
+
+  /** Apply a checkoutConfig payload to the form fields. */
+  const applyCheckoutConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setCheckoutAnnouncement(typeof cfg.announcement === 'string' ? cfg.announcement : '');
+    setMinOrderAmount(cfg.minOrderAmount != null && cfg.minOrderAmount !== '' ? String(cfg.minOrderAmount) : '');
+    setGuestCheckout(cfg.guestCheckout !== false);
+    setRequirePhone(cfg.requirePhone !== false);
+    setCustomField1(typeof cfg.customField1 === 'string' ? cfg.customField1 : '');
+    setCustomField2(typeof cfg.customField2 === 'string' ? cfg.customField2 : '');
+  }, []);
+
+  /** Load the saved checkout options from the backend. */
+  const loadCheckoutSettings = useCallback(async () => {
+    if (!storeRef) return;
+    setCheckoutLoading(true);
+    try {
+      const res = await fetch(`/api/store/checkout-settings?store_slug=${encodeURIComponent(storeRef)}`);
+      const data = await res.json();
+      if (data?.ok && data.checkoutConfig) applyCheckoutConfig(data.checkoutConfig);
+    } catch (err) {
+      console.warn('Checkout settings load warning:', err);
+    } finally {
+      setCheckoutLoading(false);
+    }
+  }, [storeRef, applyCheckoutConfig]);
+
+  // Load whenever the Checkout tab is opened.
+  useEffect(() => {
+    if (activeSubTab === 'settings_checkout') loadCheckoutSettings();
+  }, [activeSubTab, loadCheckoutSettings]);
+
+  /**
+   * Persist the checkout options. Sends the explicit payload (not the whole
+   * merchant object) so a slow profile autosave cannot clobber these values.
+   */
+  const handleSaveCheckout = async () => {
+    if (!storeRef) {
+      setCheckoutNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+
+    const trimmedMin = minOrderAmount.trim();
+    const payload = {
+      announcement: checkoutAnnouncement,
+      minOrderAmount: trimmedMin === '' ? null : Number(trimmedMin),
+      guestCheckout,
+      requirePhone,
+      customField1,
+      customField2,
+    };
+
+    if (trimmedMin !== '' && (!Number.isFinite(Number(trimmedMin)) || Number(trimmedMin) < 0)) {
+      setCheckoutNotice({ type: 'error', text: 'Minimum order amount must be a positive number.' });
+      return;
+    }
+
+    setCheckoutSaving(true);
+    try {
+      const res = await fetch('/api/store/checkout-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, checkoutConfig: payload }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setCheckoutNotice({ type: 'error', text: data?.error || 'Could not save checkout settings.' });
+        return;
+      }
+      // Reflect exactly what the server stored (normalised values).
+      applyCheckoutConfig(data.checkoutConfig);
+      setCheckoutNotice({ type: 'ok', text: data.message || 'Checkout settings saved.' });
+    } catch (err: any) {
+      setCheckoutNotice({ type: 'error', text: err?.message || 'Could not save checkout settings.' });
+    } finally {
+      setCheckoutSaving(false);
+    }
+  };
+
+  // Auto-dismiss the checkout toast.
+  useEffect(() => {
+    if (!checkoutNotice) return;
+    const timer = setTimeout(() => setCheckoutNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [checkoutNotice]);
 
   const PlanRestrictionBanner = () => (
     <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 flex items-center justify-between mb-6">
@@ -1145,7 +1245,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           )}
 
           {activeSubTab === 'settings_checkout' && (
-            <div className="space-y-8">
+            <div className="space-y-8" data-testid="checkout-panel">
+              {/* Checkout feedback toast */}
+              {checkoutNotice && (
+                <div
+                  data-testid="checkout-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${checkoutNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {checkoutNotice.text}
+                </div>
+              )}
+
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
@@ -1160,6 +1270,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <label className="block text-slate-300 font-bold mb-1.5">Checkout Announcement Notice</label>
                     <input
                       type="text"
+                      data-testid="checkout-announcement"
                       value={checkoutAnnouncement}
                       onChange={(e) => setCheckoutAnnouncement(e.target.value)}
                       placeholder="যেমন: ঢাকার বাইরে ডেলিভারি চার্জ ১৩০ টাকা অগ্রিম পরিশোধ করতে হবে। কাস্টমার কেয়ার: 017XXXXXXXX"
@@ -1172,6 +1283,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <label className="block text-slate-300 font-bold mb-1.5">Minimum Order Amount</label>
                     <input
                       type="number"
+                      data-testid="checkout-min-order"
                       value={minOrderAmount}
                       onChange={(e) => setMinOrderAmount(e.target.value)}
                       placeholder="e.g. 500"
@@ -1183,7 +1295,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-4">Checkout Fields & Rules</h3>
-                
+
                 <div className="space-y-4">
                   <div className="flex items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852]">
                     <div>
@@ -1192,6 +1304,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="checkout-guest-toggle"
+                      aria-pressed={guestCheckout}
                       onClick={() => setGuestCheckout(!guestCheckout)}
                       className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${guestCheckout ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
@@ -1206,6 +1320,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="checkout-phone-toggle"
+                      aria-pressed={requirePhone}
                       onClick={() => setRequirePhone(!requirePhone)}
                       className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${requirePhone ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
@@ -1216,11 +1332,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
                 <div className="pt-6 border-t border-[#2E3852] space-y-4">
                   <h4 className="text-sm font-bold text-white mb-2">Custom Fields (Optional)</h4>
-                  
+
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Custom Field 1 Label</label>
                     <input
                       type="text"
+                      data-testid="checkout-custom-field-1"
                       value={customField1}
                       onChange={(e) => setCustomField1(e.target.value)}
                       placeholder="e.g. Special Instructions or Gift Message"
@@ -1232,12 +1349,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Custom Field 2 Label</label>
                     <input
                       type="text"
+                      data-testid="checkout-custom-field-2"
                       value={customField2}
                       onChange={(e) => setCustomField2(e.target.value)}
                       placeholder="e.g. Delivery Time Preference"
                       className="w-full max-w-md bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
                     />
                   </div>
+                </div>
+
+                <div className="pt-4 border-t border-[#2E3852] flex items-center justify-end gap-3">
+                  {checkoutLoading && <span className="text-xs text-slate-500">Loading…</span>}
+                  <button
+                    type="button"
+                    data-testid="checkout-save"
+                    onClick={handleSaveCheckout}
+                    disabled={checkoutSaving}
+                    className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{checkoutSaving ? 'Saving…' : 'Save Checkout Settings'}</span>
+                  </button>
                 </div>
               </div>
             </div>

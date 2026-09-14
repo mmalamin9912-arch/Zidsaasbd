@@ -2384,6 +2384,147 @@ app.post('/api/security/sessions/logout-others', async (req, res) => {
   }
 });
 
+// ── Checkout page options ────────────────────
+//
+// Persisted on the store record as `checkoutConfig`. Same durability strategy
+// as the security block: MongoDB is the source of truth, with an in-memory
+// cache so the values survive reads when MONGODB_URI is unset (local dev).
+
+/** Sanitise an incoming checkout settings patch. */
+function normalizeCheckoutConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  const announcement = typeof src.announcement === 'string'
+    ? src.announcement
+    : (typeof fallback.announcement === 'string' ? fallback.announcement : '');
+
+  // An empty minimum means "no minimum" -> store null rather than NaN/0.
+  let minOrderAmount: number | null;
+  if (src.minOrderAmount === null || src.minOrderAmount === '' || src.minOrderAmount === undefined) {
+    minOrderAmount = src.minOrderAmount === undefined
+      ? (fallback.minOrderAmount ?? null)
+      : null;
+  } else {
+    const n = Number(src.minOrderAmount);
+    minOrderAmount = Number.isFinite(n) && n >= 0 ? n : (fallback.minOrderAmount ?? null);
+  }
+
+  const bool = (v: any, fb: any) => (typeof v === 'boolean' ? v : (typeof fb === 'boolean' ? fb : false));
+  const str = (v: any, fb: any) => (typeof v === 'string' ? v : (typeof fb === 'string' ? fb : ''));
+
+  return {
+    announcement,
+    minOrderAmount,
+    guestCheckout: bool(src.guestCheckout, fallback.guestCheckout),
+    requirePhone: bool(src.requirePhone, fallback.requirePhone),
+    customField1: str(src.customField1, fallback.customField1),
+    customField2: str(src.customField2, fallback.customField2),
+  };
+}
+
+const checkoutCache = new Map<string, Record<string, any>>();
+
+async function readCheckoutConfig(storeRef: string) {
+  const slug = cleanStoreRef(storeRef);
+  const cached = checkoutCache.get(slug) || {};
+
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = (record?.checkoutConfig || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Server] readCheckoutConfig lookup warning:', err?.message || err);
+  }
+
+  const merged = normalizeCheckoutConfig(stored, cached);
+  checkoutCache.set(slug, merged);
+  return merged;
+}
+
+async function writeCheckoutConfig(storeRef: string, patch: any) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readCheckoutConfig(slug);
+  const next = normalizeCheckoutConfig(patch, current);
+
+  checkoutCache.set(slug, next);
+
+  // 1. Durable copy on the store record.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = { $set: { checkoutConfig: next, updated_at: new Date().toISOString() } };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] checkoutConfig mongo persist warning:', err?.message || err);
+  }
+
+  // 2. Best-effort mirror into the local payload file.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      payload.merchant.checkoutConfig = next;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return next;
+}
+
+/** GET /api/store/checkout-settings?store_slug=… */
+app.get('/api/store/checkout-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const checkoutConfig = await readCheckoutConfig(storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, checkoutConfig });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/checkout-settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load checkout settings.' });
+  }
+});
+
+/** POST /api/store/checkout-settings — save the checkout page options. */
+app.post('/api/store/checkout-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const checkoutConfig = await writeCheckoutConfig(storeRef, body.checkoutConfig || body);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      checkoutConfig,
+      message: 'Checkout settings saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/checkout-settings error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save checkout settings.' });
+  }
+});
+
 // Steadfast Courier 1-Click Booking API
 app.post('/api/courier/steadfast', async (req, res) => {
   try {

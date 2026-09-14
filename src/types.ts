@@ -205,6 +205,23 @@ export interface MerchantProfile {
     type: 'flat' | 'free' | 'advance';
     fee: number;
   };
+  /**
+   * Checkout page options, edited in Settings -> Checkout.
+   * Persisted on the store record as `checkoutConfig`.
+   */
+  checkoutConfig?: {
+    /** Notice shown at the top of the customer checkout page. */
+    announcement?: string;
+    /** Orders below this value (BDT) are blocked. 0 / empty disables the rule. */
+    minOrderAmount?: number | null;
+    /** Allow checkout without creating an account. */
+    guestCheckout?: boolean;
+    /** Make the phone number field mandatory. */
+    requirePhone?: boolean;
+    /** Optional custom field labels rendered on the checkout form. */
+    customField1?: string;
+    customField2?: string;
+  };
   paymentMethods?: {
     cod: boolean;
     bkash: boolean;
