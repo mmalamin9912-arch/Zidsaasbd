@@ -1797,6 +1797,336 @@ app.post('/api/auth/whatsapp-otp/verify', async (req, res) => {
   }
 });
 
+// ── Merchant security settings (2FA · sessions · API credentials) ─────────────
+//
+// Mirrors the routes in api/server.ts. This file is a SEPARATE Express app used
+// only by the local dev bootstrap (`npm run dev` via tsx); Vercel deploys
+// api/server.ts. Both must expose the same /api/security/* surface or the UI
+// works in production and 404s locally.
+
+function generateSecureToken(prefix: string): string {
+  const bytes = new Uint8Array(24);
+  try {
+    globalThis.crypto.getRandomValues(bytes);
+  } catch {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return `${prefix}${Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function cleanStoreRef(raw: unknown): string {
+  return String(raw || '').split(':')[0].trim().toLowerCase();
+}
+
+function platformOf(userAgent: string): string {
+  const ua = userAgent || '';
+  if (/iPhone|iPad|iPod/i.test(ua)) return 'iOS';
+  if (/Android/i.test(ua)) return 'Android';
+  if (/Mac OS X/i.test(ua)) return 'macOS';
+  if (/Windows/i.test(ua)) return 'Windows';
+  if (/Linux/i.test(ua)) return 'Linux';
+  return 'Unknown OS';
+}
+
+function browserOf(userAgent: string): string {
+  const ua = userAgent || '';
+  if (/Edg\//i.test(ua)) return 'Edge';
+  if (/OPR\//i.test(ua)) return 'Opera';
+  if (/Chrome\//i.test(ua)) return 'Chrome';
+  if (/Safari\//i.test(ua)) return 'Safari';
+  if (/Firefox\//i.test(ua)) return 'Firefox';
+  return 'Unknown browser';
+}
+
+/** In-memory session registry (the durable copy lives on the store record). */
+const merchantSessions = new Map<string, Array<Record<string, any>>>();
+
+/**
+ * Cache of the whole security block. MongoDB is the durable store but may be
+ * unreachable (MONGODB_URI unset locally, or a cold/down cluster); without this
+ * a read would mint a NEW api key every request and a regenerated key would
+ * look like it never saved.
+ */
+const merchantSecurityCache = new Map<string, Record<string, any>>();
+
+async function readMerchantSecurity(storeRef: string) {
+  const slug = cleanStoreRef(storeRef);
+  const cached = merchantSecurityCache.get(slug) || {};
+
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = (record?.security || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Server] readMerchantSecurity lookup warning:', err?.message || err);
+  }
+
+  const merchantApiKey = (typeof stored.merchantApiKey === 'string' && stored.merchantApiKey)
+    || cached.merchantApiKey
+    || generateSecureToken('sk_live_');
+  const webhookSecret = (typeof stored.webhookSecret === 'string' && stored.webhookSecret)
+    || cached.webhookSecret
+    || generateSecureToken('whsec_');
+
+  const twoFactorEnabled = typeof stored.twoFactorEnabled === 'boolean'
+    ? stored.twoFactorEnabled
+    : cached.twoFactorEnabled === true;
+
+  const sessions = (Array.isArray(stored.sessions) && stored.sessions.length)
+    ? stored.sessions
+    : (Array.isArray(cached.sessions) && cached.sessions.length
+      ? cached.sessions
+      : (merchantSessions.get(slug) || []));
+
+  const security = {
+    twoFactorEnabled,
+    merchantApiKey,
+    webhookSecret,
+    credentialsUpdatedAt: (typeof stored.credentialsUpdatedAt === 'string' && stored.credentialsUpdatedAt)
+      || cached.credentialsUpdatedAt
+      || '',
+    sessions,
+  };
+
+  merchantSecurityCache.set(slug, security);
+  return security;
+}
+
+async function writeMerchantSecurity(storeRef: string, patch: Record<string, any>) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readMerchantSecurity(slug);
+  const next = {
+    twoFactorEnabled: typeof patch.twoFactorEnabled === 'boolean' ? patch.twoFactorEnabled : current.twoFactorEnabled,
+    merchantApiKey: typeof patch.merchantApiKey === 'string' && patch.merchantApiKey ? patch.merchantApiKey : current.merchantApiKey,
+    webhookSecret: typeof patch.webhookSecret === 'string' && patch.webhookSecret ? patch.webhookSecret : current.webhookSecret,
+    credentialsUpdatedAt: new Date().toISOString(),
+    sessions: Array.isArray(patch.sessions) ? patch.sessions : current.sessions,
+  };
+
+  merchantSecurityCache.set(slug, next);
+  if (next.sessions.length) {
+    merchantSessions.set(slug, next.sessions);
+  } else {
+    merchantSessions.delete(slug);
+  }
+
+  // 1. Durable copy on the store record so the value survives a cold start.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = { $set: { security: next, updated_at: new Date().toISOString() } };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] security mongo persist warning:', err?.message || err);
+  }
+
+  // 2. Best-effort mirror into the local payload file.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      payload.merchant.security = next;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return next;
+}
+
+app.get('/api/security/settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const security = await readMerchantSecurity(storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, security });
+  } catch (err: any) {
+    console.error('[Server] GET /api/security/settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load security settings.' });
+  }
+});
+
+app.post('/api/security/2fa', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { store_slug, storeSlug, enabled, phone, code, countryCode } = req.body || {};
+    const storeRef = cleanStoreRef(store_slug || storeSlug);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const turnOn = enabled === true;
+    let verified = false;
+
+    if (turnOn && phone && code) {
+      const cleanPhone = normalizeServerPhone(String(phone), countryCode);
+      const rawDigits = String(phone).trim().replace(/[^\d+]/g, '');
+      const cleanCode = String(code).trim();
+      const session = whatsappOtpSessions.get(cleanPhone) || whatsappOtpSessions.get(rawDigits);
+
+      if (!session || session.code !== cleanCode || session.expiresAt <= Date.now()) {
+        return res.status(400).json({
+          ok: false,
+          verified: false,
+          error: 'Invalid or expired OTP. Request a new code and try again.'
+        });
+      }
+      session.status = 'verified';
+      whatsappOtpSessions.set(cleanPhone, session);
+      verified = true;
+    }
+
+    const security = await writeMerchantSecurity(storeRef, { twoFactorEnabled: turnOn });
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      verified,
+      security,
+      message: turnOn
+        ? (verified ? 'Two-factor authentication enabled and your number is verified.' : 'Two-factor authentication enabled.')
+        : 'Two-factor authentication disabled.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/security/2fa error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not update 2FA.' });
+  }
+});
+
+app.post('/api/security/credentials/regenerate', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { store_slug, storeSlug, type } = req.body || {};
+    const storeRef = cleanStoreRef(store_slug || storeSlug);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const which = String(type || 'api').toLowerCase();
+    const patch: Record<string, any> = {};
+    if (which === 'api' || which === 'both') patch.merchantApiKey = generateSecureToken('sk_live_');
+    if (which === 'webhook' || which === 'both') patch.webhookSecret = generateSecureToken('whsec_');
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ ok: false, error: "type must be 'api', 'webhook' or 'both'." });
+    }
+
+    const security = await writeMerchantSecurity(storeRef, patch);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      security,
+      message: which === 'both' ? 'API key and webhook secret regenerated.' : `${which === 'api' ? 'API key' : 'Webhook secret'} regenerated.`,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/security/credentials/regenerate error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not regenerate credentials.' });
+  }
+});
+
+app.post('/api/security/sessions/register', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { store_slug, storeSlug, sessionId } = req.body || {};
+    const storeRef = cleanStoreRef(store_slug || storeSlug);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const userAgent = String(req.headers['user-agent'] || '');
+    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const ip = forwarded || req.socket?.remoteAddress || 'Unknown';
+    const now = new Date().toISOString();
+    const id = String(sessionId || generateSecureToken('sess_'));
+
+    const current = await readMerchantSecurity(storeRef);
+    const existing = Array.isArray(current.sessions) ? current.sessions : [];
+    const match = existing.find((s: any) => s && s.id === id);
+
+    const session = {
+      id,
+      device: `${platformOf(userAgent)} • ${browserOf(userAgent)}`,
+      ip,
+      userAgent,
+      createdAt: (match && match.createdAt) || now,
+      lastActiveAt: now,
+    };
+
+    const sessions = [session, ...existing.filter((s: any) => s && s.id !== id)].slice(0, 20);
+    const security = await writeMerchantSecurity(storeRef, { sessions });
+
+    return res.status(200).json({ ok: true, store_slug: storeRef, sessionId: id, security });
+  } catch (err: any) {
+    console.error('[Server] POST /api/security/sessions/register error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not register session.' });
+  }
+});
+
+app.get('/api/security/sessions', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const security = await readMerchantSecurity(storeRef);
+    const sessions = [...(security.sessions || [])]
+      .sort((a: any, b: any) => String(b?.lastActiveAt || '').localeCompare(String(a?.lastActiveAt || '')));
+    return res.status(200).json({ ok: true, store_slug: storeRef, sessions });
+  } catch (err: any) {
+    console.error('[Server] GET /api/security/sessions error:', err);
+    return res.status(200).json({ ok: false, sessions: [], error: err?.message || 'Could not load sessions.' });
+  }
+});
+
+app.post('/api/security/sessions/logout-others', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { store_slug, storeSlug, sessionId, keepCurrent } = req.body || {};
+    const storeRef = cleanStoreRef(store_slug || storeSlug);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const current = await readMerchantSecurity(storeRef);
+    const existing = Array.isArray(current.sessions) ? current.sessions : [];
+    const keepId = keepCurrent === false ? '' : String(sessionId || '');
+    const kept = keepId ? existing.filter((s: any) => s && s.id === keepId) : [];
+    const revoked = existing.length - kept.length;
+
+    const security = await writeMerchantSecurity(storeRef, { sessions: kept });
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      revoked,
+      security,
+      message: revoked > 0
+        ? `Logged out ${revoked} other device${revoked === 1 ? '' : 's'}.`
+        : 'No other active devices were found.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/security/sessions/logout-others error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not log out other devices.' });
+  }
+});
+
 // Steadfast Courier 1-Click Booking API
 app.post('/api/courier/steadfast', async (req, res) => {
   try {

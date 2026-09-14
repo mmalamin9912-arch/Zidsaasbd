@@ -2058,29 +2058,67 @@ function browserOf(userAgent: string): string {
  */
 const merchantSessions = new Map<string, Array<Record<string, any>>>();
 
+/**
+ * In-memory cache of the whole security block, keyed by store slug.
+ *
+ * MongoDB is the durable store, but it is not always reachable: `MONGODB_URI`
+ * may be unset (local dev) or the cluster may be down. Without this cache a
+ * read would regenerate a BRAND NEW api key on every request, so a key shown in
+ * the UI would silently change under the merchant and a regenerated key would
+ * appear to "not save". Sessions already had this fallback; credentials and the
+ * 2FA flag need it just as much.
+ */
+const merchantSecurityCache = new Map<string, Record<string, any>>();
+
+/**
+ * Read a store's security block, preferring the durable MongoDB copy and
+ * falling back to the in-memory cache. Generated values are memoised into the
+ * cache so they stay stable for as long as the instance lives.
+ */
 async function readMerchantSecurity(storeRef: string) {
   const slug = cleanStoreRef(storeRef);
-  const record = slug ? await resolveStoreRecordFlexible(slug) : null;
-  const stored = (record?.security || {}) as Record<string, any>;
+  const cached = merchantSecurityCache.get(slug) || {};
 
-  const merchantApiKey = typeof stored.merchantApiKey === 'string' && stored.merchantApiKey
-    ? stored.merchantApiKey
-    : generateSecureToken('sk_live_');
-  const webhookSecret = typeof stored.webhookSecret === 'string' && stored.webhookSecret
-    ? stored.webhookSecret
-    : generateSecureToken('whsec_');
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = (record?.security || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Server] readMerchantSecurity lookup warning:', err?.message || err);
+  }
 
-  const sessions = Array.isArray(stored.sessions) && stored.sessions.length
+  // Precedence: live Mongo value > in-memory cache > freshly generated.
+  const merchantApiKey = (typeof stored.merchantApiKey === 'string' && stored.merchantApiKey)
+    || cached.merchantApiKey
+    || generateSecureToken('sk_live_');
+  const webhookSecret = (typeof stored.webhookSecret === 'string' && stored.webhookSecret)
+    || cached.webhookSecret
+    || generateSecureToken('whsec_');
+
+  const twoFactorEnabled = typeof stored.twoFactorEnabled === 'boolean'
+    ? stored.twoFactorEnabled
+    : cached.twoFactorEnabled === true;
+
+  const sessions = (Array.isArray(stored.sessions) && stored.sessions.length)
     ? stored.sessions
-    : (merchantSessions.get(slug) || []);
+    : (Array.isArray(cached.sessions) && cached.sessions.length
+      ? cached.sessions
+      : (merchantSessions.get(slug) || []));
 
-  return {
-    twoFactorEnabled: stored.twoFactorEnabled === true,
+  const security = {
+    twoFactorEnabled,
     merchantApiKey,
     webhookSecret,
-    credentialsUpdatedAt: typeof stored.credentialsUpdatedAt === 'string' ? stored.credentialsUpdatedAt : '',
+    credentialsUpdatedAt: (typeof stored.credentialsUpdatedAt === 'string' && stored.credentialsUpdatedAt)
+      || cached.credentialsUpdatedAt
+      || '',
     sessions,
   };
+
+  // Remember what we handed out so the next read returns the same values even
+  // when Mongo is unavailable.
+  merchantSecurityCache.set(slug, security);
+  return security;
 }
 
 async function writeMerchantSecurity(storeRef: string, patch: Record<string, any>) {
@@ -2095,6 +2133,10 @@ async function writeMerchantSecurity(storeRef: string, patch: Record<string, any
     credentialsUpdatedAt: new Date().toISOString(),
     sessions: Array.isArray(patch.sessions) ? patch.sessions : current.sessions,
   };
+
+  // Always keep the in-memory copy current — it is the read path's fallback
+  // whenever MongoDB is unreachable.
+  merchantSecurityCache.set(slug, next);
 
   if (next.sessions.length) {
     merchantSessions.set(slug, next.sessions);

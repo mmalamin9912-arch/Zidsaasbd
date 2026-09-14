@@ -297,19 +297,58 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   };
 
   /**
-   * Resolve the store slug used for the security lookup. The login form only
-   * knows the email, so we consult the same backend lookup the dashboard uses.
+   * Every store identifier we can associate with this login.
+   *
+   * `profile.storeSlug` alone is NOT enough: it is frequently a slug DERIVED
+   * from the email (or a cached/edited display slug) and can differ from the
+   * slug the security settings were saved under. Relying on it made 2FA silently
+   * skip stores that had it enabled, so we collect all candidates and let the
+   * backend tell us which one actually has 2FA on.
    */
-  const resolveSecuritySlug = async (profile: MerchantProfile, emailFallback: string): Promise<string> => {
-    const direct = profile.storeSlug || profile.storeCode || profile.store_code || profile.id;
-    if (direct) return direct;
+  const resolveSecuritySlugs = async (profile: MerchantProfile, emailFallback: string): Promise<string[]> => {
+    const candidates: string[] = [];
+    const push = (v?: string | null) => {
+      const clean = String(v || '').split(':')[0].trim().toLowerCase();
+      if (clean && !candidates.includes(clean)) candidates.push(clean);
+    };
+
+    // The authoritative record first, then the local/derived fallbacks.
     try {
       const res = await fetch(`/api/stores/check/${encodeURIComponent(emailFallback)}`);
       const data = await safeParseJson(res, null);
-      return data?.store_slug || data?.storeSlug || data?.merchant?.store_slug || '';
+      const record = data?.merchant || data;
+      push(record?.store_slug);
+      push(record?.storeSlug);
+      push(record?.store_code);
+      push(record?.id);
     } catch {
-      return '';
+      // A lookup failure must not block login; the local candidates still apply.
     }
+
+    push(profile.storeCode);
+    push(profile.store_code);
+    push(profile.storeSlug);
+    push(profile.id);
+
+    return candidates;
+  };
+
+  /**
+   * Ask the backend whether 2FA is enabled for ANY identifier we know of.
+   * Returns the slug it matched (so the OTP step can name the right store).
+   */
+  const findTwoFactorStore = async (profile: MerchantProfile, emailFallback: string): Promise<string | null> => {
+    const slugs = await resolveSecuritySlugs(profile, emailFallback);
+    for (const slug of slugs) {
+      try {
+        const res = await fetch(`/api/security/settings?store_slug=${encodeURIComponent(slug)}`);
+        const data = await safeParseJson(res, null);
+        if (data?.ok === true && data?.security?.twoFactorEnabled === true) return slug;
+      } catch {
+        // Try the next candidate.
+      }
+    }
+    return null;
   };
 
   /**
@@ -325,28 +364,35 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const enrichedProfile = enhanceWithPrepayment(profile);
     const emailFallback = enrichedProfile.email || email.trim().toLowerCase();
 
-    let twoFactorRequired = false;
+    let matchedTwoFactorSlug: string | null = null;
     try {
-      const slug = await resolveSecuritySlug(enrichedProfile, emailFallback);
-      if (slug) {
-        const res = await fetch(`/api/security/settings?store_slug=${encodeURIComponent(slug)}`);
-        const data = await safeParseJson(res, null);
-        twoFactorRequired = data?.ok === true && data?.security?.twoFactorEnabled === true;
-      }
+      matchedTwoFactorSlug = await findTwoFactorStore(enrichedProfile, emailFallback);
     } catch (err) {
       // A failed lookup must never lock a merchant out of their own dashboard.
       console.warn('2FA status lookup warning:', err);
-      twoFactorRequired = false;
+      matchedTwoFactorSlug = null;
     }
 
-    if (!twoFactorRequired) {
+    if (!matchedTwoFactorSlug) {
       completeLogin(enrichedProfile);
       return;
     }
 
-    const phone = enrichedProfile.whatsappNumber || enrichedProfile.phone || '';
+    // The WhatsApp number may live on the store record rather than in the local
+    // profile (the 2FA-enabled store is not always the locally-cached one).
+    let phone = enrichedProfile.whatsappNumber || enrichedProfile.phone || '';
     if (!phone) {
-      setErrorMsg('Two-factor authentication is enabled but no WhatsApp number is on file. Please contact support.');
+      try {
+        const res = await fetch(`/api/stores/slug/${encodeURIComponent(matchedTwoFactorSlug)}`);
+        const data = await safeParseJson(res, null);
+        const record = data?.merchant || {};
+        phone = record.whatsappNumber || record.phone || record.whatsapp_number || '';
+      } catch {
+        // Fall through to the error below.
+      }
+    }
+    if (!phone) {
+      setErrorMsg('Two-factor authentication is enabled but no WhatsApp number is on file. Please contact support to recover your account.');
       setIsLoading(false);
       return;
     }
