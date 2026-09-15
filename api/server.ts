@@ -2660,6 +2660,38 @@ function normalizeTaxConfig(raw: any, fallback: Record<string, any> = {}) {
 }
 
 /**
+ * Sanitise the API integrations edited in Settings -> API.
+ *
+ * Credentials are stored server-side and never echoed back to the browser; the
+ * route layer redacts them (see `redactIntegrationSecrets`) and treats an
+ * omitted secret as "keep the existing value".
+ */
+function normalizeIntegrationsConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  const courierProvider = cfgStr(src.courierProvider, fallback.courierProvider);
+
+  return {
+    courierProvider: ['Steadfast Courier', 'Pathao Courier', 'RedX', 'Paperfly'].includes(courierProvider)
+      ? courierProvider
+      : (fallback.courierProvider || 'Steadfast Courier'),
+    courierApiKey: cfgStr(src.courierApiKey, fallback.courierApiKey),
+    courierSecretToken: cfgStr(src.courierSecretToken, fallback.courierSecretToken),
+
+    fbPixelId: cfgStr(src.fbPixelId, fallback.fbPixelId),
+    fbCapiToken: cfgStr(src.fbCapiToken, fallback.fbCapiToken),
+    ga4MeasurementId: cfgStr(src.ga4MeasurementId, fallback.ga4MeasurementId),
+    ga4ApiSecret: cfgStr(src.ga4ApiSecret, fallback.ga4ApiSecret),
+
+    smsApiKey: cfgStr(src.smsApiKey, fallback.smsApiKey),
+    smsSenderId: cfgStr(src.smsSenderId, fallback.smsSenderId),
+
+    orderWebhookUrl: cfgStr(src.orderWebhookUrl, fallback.orderWebhookUrl),
+    webhookSecret: cfgStr(src.webhookSecret, fallback.webhookSecret),
+  };
+}
+
+/**
  * Sanitise the inventory / order properties edited in Settings -> Properties.
  *
  * Quantity guards are stored as null when unset so "no limit" is distinct from
@@ -2717,6 +2749,7 @@ const storeConfigs = {
   nbr: { key: 'nbrConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeNbrConfig },
   inventory: { key: 'inventoryConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInventoryConfig },
   tax: { key: 'taxConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeTaxConfig },
+  integrations: { key: 'integrationsConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeIntegrationsConfig },
 } as const;
 
 type StoreConfigName = keyof typeof storeConfigs;
@@ -2813,12 +2846,34 @@ function redactSecrets(config: Record<string, any>) {
   return { ...config, apiSecret: config.apiSecret ? '••' : '' };
 }
 
+/**
+ * Redact every write-only credential on the integrations config.
+ *
+ * The browser needs to know a secret is *set* (so it can show "saved"), but not
+ * its value — so each one is replaced with a placeholder. Non-secret identifiers
+ * (pixel IDs, sender IDs, provider name, webhook URL) are returned as-is.
+ */
+function redactIntegrationSecrets(config: Record<string, any>) {
+  if (!config) return config;
+  const marker = (v: any) => (v ? '••' : '');
+  return {
+    ...config,
+    courierApiKey: marker(config.courierApiKey),
+    courierSecretToken: marker(config.courierSecretToken),
+    fbCapiToken: marker(config.fbCapiToken),
+    ga4ApiSecret: marker(config.ga4ApiSecret),
+    smsApiKey: marker(config.smsApiKey),
+    webhookSecret: marker(config.webhookSecret),
+  };
+}
+
 const CONFIG_ROUTES: Array<{ name: StoreConfigName; path: string; label: string }> = [
   { name: 'gift', path: 'gift-settings', label: 'Gift options' },
   { name: 'invoice', path: 'invoice-settings', label: 'Invoice settings' },
   { name: 'nbr', path: 'nbr-settings', label: 'NBR e-invoicing settings' },
   { name: 'inventory', path: 'inventory-settings', label: 'Inventory & order properties' },
   { name: 'tax', path: 'tax-settings', label: 'Tax settings' },
+  { name: 'integrations', path: 'integration-settings', label: 'API integrations' },
 ];
 
 for (const route of CONFIG_ROUTES) {
@@ -2837,7 +2892,11 @@ for (const route of CONFIG_ROUTES) {
     return rest;
   };
 
-  const serialize = (config: any) => (name === 'nbr' ? redactSecrets(config) : config);
+  const serialize = (config: any) => {
+    if (name === 'nbr') return redactSecrets(config);
+    if (name === 'integrations') return redactIntegrationSecrets(config);
+    return config;
+  };
 
   /** GET /api/store/<config>-settings?store_slug=… */
   app.get(`/api/store/${path}`, async (req, res) => {
@@ -3002,6 +3061,157 @@ const saveTaxProperties = async (req: any, res: any) => {
 
 app.post('/api/store/tax-properties', saveTaxProperties);
 app.put('/api/store/tax-properties', saveTaxProperties);
+
+// Friendly REST alias for the API integrations panel.
+app.get('/api/store/integration-properties', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    const integrationsConfig = await readStoreConfig('integrations', storeRef);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      integrationsConfig: redactIntegrationSecrets(integrationsConfig),
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/integration-properties error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load API integrations.' });
+  }
+});
+
+const saveIntegrationProperties = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    // Drop redaction placeholders so a save that round-trips what the UI
+    // displayed cannot overwrite the real secret with '••'.
+    const patch: Record<string, any> = { ...(body.integrationsConfig || body.integrations || body) };
+    for (const key of Object.keys(patch)) {
+      if (patch[key] === '••') delete patch[key];
+    }
+
+    const current = await readStoreConfig('integrations', storeRef) as Record<string, any>;
+    const normalized = normalizeIntegrationsConfig(patch, current);
+    const integrationsConfig = await writeStoreConfig('integrations', storeRef, {
+      ...normalized,
+      // Preserve any secret the client did not resend.
+      ...Object.fromEntries(
+        ['courierApiKey', 'courierSecretToken', 'fbCapiToken', 'ga4ApiSecret', 'smsApiKey', 'webhookSecret']
+          .filter((k) => !(k in patch))
+          .map((k) => [k, current[k] || '']),
+      ),
+    });
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      integrationsConfig: redactIntegrationSecrets(integrationsConfig),
+      message: 'API integrations saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/integration-properties error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save API integrations.' });
+  }
+};
+
+app.post('/api/store/integration-properties', saveIntegrationProperties);
+app.put('/api/store/integration-properties', saveIntegrationProperties);
+
+/**
+ * POST /api/store/test-webhook — send a real JSON ping to the merchant's URL.
+ *
+ * Runs server-side so the request is not blocked by the browser's CORS policy,
+ * and reports the upstream status so the merchant can diagnose a misconfigured
+ * endpoint. A non-2xx response is a failure, not a thrown error.
+ */
+app.post('/api/store/test-webhook', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const started = Date.now();
+  try {
+    const body = req.body || {};
+    let targetUrl = typeof body.url === 'string' ? body.url.trim() : '';
+
+    // Fall back to the stored webhook URL when only the store is provided.
+    if (!targetUrl) {
+      const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+      if (storeRef) {
+        const cfg = await readStoreConfig('integrations', storeRef) as Record<string, any>;
+        targetUrl = cfg.orderWebhookUrl || '';
+      }
+    }
+
+    if (!targetUrl) {
+      return res.status(400).json({ ok: false, error: 'No webhook URL provided.' });
+    }
+
+    // Only allow http(s) so the endpoint cannot be pointed at file:/ or similar.
+    let parsed: URL;
+    try {
+      parsed = new URL(targetUrl);
+    } catch {
+      return res.status(400).json({ ok: false, error: 'That is not a valid URL.' });
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return res.status(400).json({ ok: false, error: 'Webhook URL must start with http:// or https://.' });
+    }
+
+    const payload = {
+      event: 'webhook.test',
+      store_slug: cleanStoreRef(body.store_slug || body.storeSlug || '') || null,
+      sent_at: new Date().toISOString(),
+      sample: {
+        order_number: '#TEST-1234',
+        total_bdt: 1250,
+        customer_name: 'Test Customer',
+        payment_method: 'COD',
+        status: 'New',
+      },
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    let upstreamStatus = 0;
+    let upstreamBody = '';
+    try {
+      const upstream = await fetch(parsed.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'ZidBD-WebhookTester/1.0' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      upstreamStatus = upstream.status;
+      upstreamBody = (await upstream.text().catch(() => '')).slice(0, 300);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const ok = upstreamStatus >= 200 && upstreamStatus < 300;
+    return res.status(200).json({
+      ok,
+      delivered: ok,
+      status: upstreamStatus,
+      duration_ms: Date.now() - started,
+      response_preview: upstreamBody,
+      error: ok ? undefined : `Endpoint responded with HTTP ${upstreamStatus}.`,
+      message: ok
+        ? `Test ping delivered successfully (HTTP ${upstreamStatus}).`
+        : `Endpoint responded with HTTP ${upstreamStatus}.`,
+    });
+  } catch (err: any) {
+    const aborted = err?.name === 'AbortError';
+    return res.status(200).json({
+      ok: false,
+      delivered: false,
+      duration_ms: Date.now() - started,
+      error: aborted ? 'The endpoint did not respond within 10 seconds.' : (err?.message || 'Could not reach the endpoint.'),
+    });
+  }
+});
 
 // Steadfast Courier 1-Click Booking API
 app.post('/api/courier/steadfast', async (req, res) => {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { MerchantProfile, SettingsSubTab } from '../../types';
+import { isPaidSubscriptionActive } from '../../utils/subscriptionUtils';
 import SafeImage from '../SafeImage';
 import {
   Settings as SettingsIcon,
@@ -201,22 +202,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [playDashboardSound, setPlayDashboardSound] = useState(true);
   const [notifyCancellation, setNotifyCancellation] = useState(true);
 
-  // API Tab State
-  const [courierProvider, setCourierProvider] = useState('Steadfast Courier');
+  // API Tab State — seeded from the store record, saved via the API below.
+  // Secret fields start empty: the server returns a '••' placeholder, never the
+  // value, and an empty field leaves the stored secret untouched on save.
+  const intCfg = merchant?.integrationsConfig;
+  const [courierProvider, setCourierProvider] = useState(intCfg?.courierProvider || 'Steadfast Courier');
   const [courierApiKey, setCourierApiKey] = useState('');
   const [courierSecret, setCourierSecret] = useState('');
-  const [fbPixelId, setFbPixelId] = useState('');
+  const [fbPixelId, setFbPixelId] = useState(intCfg?.fbPixelId || '');
   const [fbCapiToken, setFbCapiToken] = useState('');
-  const [ga4Id, setGa4Id] = useState('');
+  const [ga4Id, setGa4Id] = useState(intCfg?.ga4MeasurementId || '');
   const [smsApiKey, setSmsApiKey] = useState('');
-  const [smsSenderId, setSmsSenderId] = useState('');
-  const [webhookUrl, setWebhookUrl] = useState('');
+  const [smsSenderId, setSmsSenderId] = useState(intCfg?.smsSenderId || '');
+  const [webhookUrl, setWebhookUrl] = useState(intCfg?.orderWebhookUrl || '');
+
+  // Which secrets are already stored server-side (drives the "saved" hint).
+  const [storedSecrets, setStoredSecrets] = useState<Record<string, boolean>>({
+    courierApiKey: Boolean(intCfg?.courierApiKey),
+    courierSecretToken: Boolean(intCfg?.courierSecretToken),
+    fbCapiToken: Boolean(intCfg?.fbCapiToken),
+    smsApiKey: Boolean(intCfg?.smsApiKey),
+  });
+
+  // Webhook connectivity test feedback.
+  const [webhookTesting, setWebhookTesting] = useState(false);
+  const [webhookTestResult, setWebhookTestResult] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // Domain Tab State
   const [domainName, setDomainName] = useState('');
   const [forceHttps, setForceHttps] = useState(true);
   const [primaryDomain, setPrimaryDomain] = useState('yourstore.com');
-  const [userPlan, setUserPlan] = useState('free');
+
+  // ── Plan verification ────────────────────────
+  //
+  // The active plan is read from the store record and confirmed as an active
+  // (non-expired) paid subscription. Only Pro/Enterprise unlock the advanced
+  // integration and domain panels; everything else is gated below.
+  const userPlan = String(
+    merchant?.subscriptionPlan || (merchant as any)?.plan || 'free'
+  ).toLowerCase();
+
+  const planIsPaid = isPaidSubscriptionActive(merchant as any);
+  const planIsProTier = ['pro', 'business', 'enterprise', 'premium', 'growth'].some(
+    (tier) => userPlan.includes(tier)
+  );
+  /** Pro/Enterprise with a live subscription — unlocks the gated panels. */
+  const hasProAccess = planIsPaid && planIsProTier;
 
   // AI FAQ State
   const [generatedFaq, setGeneratedFaq] = useState<any>(null);
@@ -527,6 +558,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setSeparateTaxBreakdown(cfg.showTaxBreakdown !== false);
   }, []);
 
+  const applyIntegrationsConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setCourierProvider(cfg.courierProvider || 'Steadfast Courier');
+    setFbPixelId(typeof cfg.fbPixelId === 'string' ? cfg.fbPixelId : '');
+    setGa4Id(typeof cfg.ga4MeasurementId === 'string' ? cfg.ga4MeasurementId : '');
+    setSmsSenderId(typeof cfg.smsSenderId === 'string' ? cfg.smsSenderId : '');
+    setWebhookUrl(typeof cfg.orderWebhookUrl === 'string' ? cfg.orderWebhookUrl : '');
+
+    // Secrets come back as a placeholder — record only whether one is set, and
+    // keep the input blank so the merchant does not accidentally resubmit it.
+    setStoredSecrets({
+      courierApiKey: Boolean(cfg.courierApiKey),
+      courierSecretToken: Boolean(cfg.courierSecretToken),
+      fbCapiToken: Boolean(cfg.fbCapiToken),
+      smsApiKey: Boolean(cfg.smsApiKey),
+    });
+    setCourierApiKey('');
+    setCourierSecret('');
+    setFbCapiToken('');
+    setSmsApiKey('');
+  }, []);
+
   const applyInventoryConfig = useCallback((cfg: any) => {
     if (!cfg || typeof cfg !== 'object') return;
     setHideOutOfStock(cfg.hideOutOfStock === true);
@@ -552,6 +605,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       settings_nbr: { url: '/api/store/nbr-settings', key: 'nbrConfig', apply: applyNbrConfig },
       settings_properties: { url: '/api/store/inventory-properties', key: 'inventoryConfig', apply: applyInventoryConfig },
       settings_tax: { url: '/api/store/tax-properties', key: 'taxConfig', apply: applyTaxConfig },
+      settings_api: { url: '/api/store/integration-properties', key: 'integrationsConfig', apply: applyIntegrationsConfig },
     };
 
     const target = endpointByTab[activeSubTab];
@@ -569,7 +623,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     })();
 
     return () => { cancelled = true; };
-  }, [activeSubTab, storeRef, applyGiftConfig, applyInvoiceConfig, applyNbrConfig, applyInventoryConfig, applyTaxConfig]);
+  }, [activeSubTab, storeRef, applyGiftConfig, applyInvoiceConfig, applyNbrConfig, applyInventoryConfig, applyTaxConfig, applyIntegrationsConfig]);
 
   /**
    * Persist the checkout options. Sends the explicit payload (not the whole
@@ -631,7 +685,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // matching `/api/store/<config>-settings` endpoint (MongoDB is the source of
   // truth) and re-seed the form from the server's normalised response.
 
-  type RemoteConfigName = 'giftOptions' | 'invoiceConfig' | 'nbrConfig' | 'inventoryConfig' | 'taxConfig';
+  type RemoteConfigName = 'giftOptions' | 'invoiceConfig' | 'nbrConfig' | 'inventoryConfig' | 'taxConfig' | 'integrationsConfig';
 
   const configEndpoints: Record<RemoteConfigName, string> = {
     giftOptions: '/api/store/gift-options',
@@ -639,6 +693,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     nbrConfig: '/api/store/nbr-settings',
     inventoryConfig: '/api/store/inventory-properties',
     taxConfig: '/api/store/tax-properties',
+    integrationsConfig: '/api/store/integration-properties',
   };
 
   /**
@@ -743,6 +798,86 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
     if (saved) applyTaxConfig(saved);
   };
+
+  const handleSaveIntegrations = async () => {
+    // Gated panels are read-only, so there is nothing to persist.
+    if (!hasProAccess) {
+      setConfigNotice({ type: 'error', text: 'API integrations require an active Pro or Enterprise plan.' });
+      return;
+    }
+
+    const trimmedWebhook = webhookUrl.trim();
+    if (trimmedWebhook && !/^https?:\/\//i.test(trimmedWebhook)) {
+      setConfigNotice({ type: 'error', text: 'Webhook URL must start with http:// or https://.' });
+      return;
+    }
+
+    // Only send secrets the merchant actually typed — omitted keys are kept.
+    const payload: Record<string, unknown> = {
+      courierProvider,
+      fbPixelId: fbPixelId.trim(),
+      ga4MeasurementId: ga4Id.trim(),
+      smsSenderId: smsSenderId.trim(),
+      orderWebhookUrl: trimmedWebhook,
+    };
+    if (courierApiKey.trim()) payload.courierApiKey = courierApiKey.trim();
+    if (courierSecret.trim()) payload.courierSecretToken = courierSecret.trim();
+    if (fbCapiToken.trim()) payload.fbCapiToken = fbCapiToken.trim();
+    if (smsApiKey.trim()) payload.smsApiKey = smsApiKey.trim();
+
+    const saved = await saveRemoteConfig('integrationsConfig', payload, 'API integrations');
+    if (saved) applyIntegrationsConfig(saved);
+  };
+
+  /**
+   * Send a real JSON ping to the merchant's webhook URL.
+   *
+   * Performed server-side so the request is not subject to browser CORS rules.
+   */
+  const handleTestWebhook = async () => {
+    if (!hasProAccess) {
+      setWebhookTestResult({ type: 'error', text: 'Webhook testing requires an active Pro or Enterprise plan.' });
+      return;
+    }
+
+    const target = webhookUrl.trim();
+    if (!target) {
+      setWebhookTestResult({ type: 'error', text: 'Enter a webhook URL first.' });
+      return;
+    }
+    if (!/^https?:\/\//i.test(target)) {
+      setWebhookTestResult({ type: 'error', text: 'Webhook URL must start with http:// or https://.' });
+      return;
+    }
+
+    setWebhookTesting(true);
+    setWebhookTestResult(null);
+    try {
+      const res = await fetch('/api/store/test-webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, url: target }),
+      });
+      const data = await res.json();
+      setWebhookTestResult({
+        type: data?.ok ? 'ok' : 'error',
+        text: data?.ok
+          ? (data.message || 'Test ping delivered successfully.')
+          : (data?.error || 'The endpoint could not be reached.'),
+      });
+    } catch (err: any) {
+      setWebhookTestResult({ type: 'error', text: err?.message || 'The endpoint could not be reached.' });
+    } finally {
+      setWebhookTesting(false);
+    }
+  };
+
+  // Auto-dismiss the webhook test result.
+  useEffect(() => {
+    if (!webhookTestResult) return;
+    const timer = setTimeout(() => setWebhookTestResult(null), 8000);
+    return () => clearTimeout(timer);
+  }, [webhookTestResult]);
 
   /** Parse an optional positive integer field, or return null when blank. */
   const optionalNumber = (value: string) => {
@@ -2378,14 +2513,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'settings_export' && (
             <div className="space-y-8">
-              {userPlan === 'free' && <PlanRestrictionBanner />}
+              {!hasProAccess && <PlanRestrictionBanner />}
               {/* Data Export Request Form */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
                     <Download className="w-5 h-5 text-[#00D68F]" />
                     Data Export Request Form
-                    {userPlan === 'free' && <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/20 px-1.5 py-0.5 rounded">Pro</span>}
+                    {!hasProAccess && <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/20 px-1.5 py-0.5 rounded">Pro</span>}
                   </h3>
                   <p className="text-sm text-slate-400">Select the data you wish to export and specify the date range.</p>
                 </div>
@@ -2454,14 +2589,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'store_domains' && (
             <div className="space-y-8">
-              {userPlan === 'free' && <PlanRestrictionBanner />}
+              {!hasProAccess && <PlanRestrictionBanner />}
               {/* Add Custom Domain Form */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
                     <Globe className="w-5 h-5 text-[#00D68F]" />
                     Add Custom Domain
-                    {userPlan === 'free' && <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/20 px-1.5 py-0.5 rounded">Pro</span>}
+                    {!hasProAccess && <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/20 px-1.5 py-0.5 rounded">Pro</span>}
                   </h3>
                   <p className="text-sm text-slate-400">Connect your own domain to your store.</p>
                 </div>
@@ -2542,14 +2677,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'settings_api' && (
             <div className="space-y-8">
-              {userPlan === 'free' && <PlanRestrictionBanner />}
+              {/* Config feedback toast */}
+              {configNotice && (
+                <div
+                  data-testid="api-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${configNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {configNotice.text}
+                </div>
+              )}
+
+              {/* Webhook test result toast */}
+              {webhookTestResult && (
+                <div
+                  data-testid="webhook-test-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${webhookTestResult.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {webhookTestResult.text}
+                </div>
+              )}
+
+              {/* Plan gate: locked below Pro/Enterprise. */}
+              {!hasProAccess && <PlanRestrictionBanner />}
               {/* Courier Service */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
                     <Truck className="w-5 h-5 text-[#00D68F]" />
                     Courier Service Integration
-                    {userPlan === 'free' && <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/20 px-1.5 py-0.5 rounded">Pro</span>}
+                    {!hasProAccess && <span className="text-[10px] bg-amber-500/10 text-amber-500 border border-amber-500/20 px-1.5 py-0.5 rounded">Pro</span>}
                   </h3>
                   <p className="text-sm text-slate-400">Manage your primary shipping provider settings.</p>
                 </div>
@@ -2558,7 +2714,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Select Primary Courier Provider</label>
                     <select
-                      value={courierProvider}
+                      disabled={!hasProAccess}
                       onChange={(e) => setCourierProvider(e.target.value)}
                       className="w-full max-w-sm bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
                     >
@@ -2574,6 +2730,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <div className="relative">
                         <input
                           type="text"
+                           disabled={!hasProAccess}
+                           data-testid="courier-api-key"
                           value={courierApiKey}
                           onChange={(e) => setCourierApiKey(e.target.value)}
                           placeholder="যেমন: api_key_steadfast_12345"
@@ -2587,6 +2745,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <div className="relative">
                         <input
                           type="password"
+                           disabled={!hasProAccess}
+                           data-testid="courier-secret-token"
                           value={courierSecret}
                           onChange={(e) => setCourierSecret(e.target.value)}
                           placeholder="যেমন: secret_token_98765"
@@ -2607,6 +2767,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Facebook Pixel ID</label>
                     <input
                       type="text"
+                       disabled={!hasProAccess}
+                       data-testid="fb-pixel-id"
                       value={fbPixelId}
                       onChange={(e) => setFbPixelId(e.target.value)}
                       placeholder="যেমন: 123456789012345"
@@ -2617,6 +2779,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Facebook Conversions API Token</label>
                     <input
                       type="password"
+                       disabled={!hasProAccess}
+                       data-testid="fb-capi-token"
                       value={fbCapiToken}
                       onChange={(e) => setFbCapiToken(e.target.value)}
                       placeholder="যেমন: EAAG..."
@@ -2627,6 +2791,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Google Analytics (GA4) Tracking ID</label>
                     <input
                       type="text"
+                       disabled={!hasProAccess}
+                       data-testid="ga4-measurement-id"
                       value={ga4Id}
                       onChange={(e) => setGa4Id(e.target.value)}
                       placeholder="যেমন: G-XXXXXXXXXX"
@@ -2645,6 +2811,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">SMS Gateway API Key / Token</label>
                       <input
                         type="password"
+                         disabled={!hasProAccess}
+                         data-testid="sms-api-key"
                         value={smsApiKey}
                         onChange={(e) => setSmsApiKey(e.target.value)}
                         placeholder="যেমন: sms_api_token_bd_123"
@@ -2655,6 +2823,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">SMS Sender ID / Masking Name</label>
                       <input
                         type="text"
+                         disabled={!hasProAccess}
+                         data-testid="sms-sender-id"
                         value={smsSenderId}
                         onChange={(e) => setSmsSenderId(e.target.value)}
                         placeholder="যেমন: ZidBook"
@@ -2674,15 +2844,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <div className="flex gap-2">
                       <input
                         type="url"
+                         disabled={!hasProAccess}
+                         data-testid="order-webhook-url"
                         value={webhookUrl}
                         onChange={(e) => setWebhookUrl(e.target.value)}
                         placeholder="যেমন: https://yourdomain.com/api/webhooks/order"
                         className="flex-grow bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
                       />
-                      <button type="button" className="px-4 py-2 bg-[#2E3852] hover:bg-[#3D4766] text-white rounded-xl text-xs">Test Connection</button>
+                      <button type="button" data-testid="webhook-test" onClick={handleTestWebhook} disabled={webhookTesting || !hasProAccess} className="px-4 py-2 bg-[#2E3852] hover:bg-[#3D4766] disabled:opacity-50 text-white rounded-xl text-xs whitespace-nowrap">{webhookTesting ? "Testing..." : "Test Connection"}</button>
                     </div>
                   </div>
                 </div>
+              </div>
+              <div className="pt-4 flex items-center justify-end gap-3">
+                {!hasProAccess && (
+                  <span className="text-xs text-amber-500">Upgrade to Pro to edit these integrations.</span>
+                )}
+                <button
+                  type="button"
+                  data-testid="api-save"
+                  onClick={handleSaveIntegrations}
+                  disabled={configSaving || !hasProAccess}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{configSaving ? "Saving..." : "Save API Integrations"}</span>
+                </button>
               </div>
             </div>
           )}

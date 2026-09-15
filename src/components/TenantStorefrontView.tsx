@@ -8,6 +8,7 @@ import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidS
 import { resolveActiveStoreSlug } from '../lib/activeStore';
 import { LanguageToggle } from './LanguageToggle';
 import SafeImage from './SafeImage';
+import { useStorefrontTracking } from '../hooks/useStorefrontTracking';
 
 function mapSupabaseProduct(p: any): Product {
   const title = p.title || p.name || 'Untitled Product';
@@ -481,6 +482,15 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // Inventory rules (Settings -> Orders and products properties).
   const [inventoryConfig, setInventoryConfig] = useState<MerchantProfile['inventoryConfig']>(storefrontMerchant.inventoryConfig);
   const [taxConfig, setTaxConfig] = useState<MerchantProfile['taxConfig']>(storefrontMerchant.taxConfig);
+
+  // Marketing pixels (Settings -> API integrations). Loaded from the server so
+  // the storefront reflects saved IDs without a rebuild.
+  const [integrationsConfig, setIntegrationsConfig] = useState<MerchantProfile['integrationsConfig']>(
+    storefrontMerchant.integrationsConfig
+  );
+
+  // Injects Meta Pixel + GA4 once the IDs are known.
+  useStorefrontTracking(integrationsConfig);
   const hideOutOfStock = inventoryConfig?.hideOutOfStock === true;
   const merchantAllowPreOrder = inventoryConfig?.allowPreOrder === true;
   const minOrderQty = Number(inventoryConfig?.minOrderQty) || 1;
@@ -669,11 +679,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           fetch(`/api/store/gift-options?store_slug=${encodeURIComponent(ref)}`),
           fetch(`/api/store/checkout-settings?store_slug=${encodeURIComponent(ref)}`),
         ]);
-        const [giftData, checkoutData, inventoryData, taxData] = await Promise.all([
+        const [giftData, checkoutData, inventoryData, taxData, integrationsData] = await Promise.all([
           giftRes.json(),
           checkoutRes.json(),
           fetch(`/api/store/inventory-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
           fetch(`/api/store/tax-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
+          fetch(`/api/store/integration-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
         ]);
         if (cancelled) return;
         const giftPayload = giftData?.giftOptions || giftData?.giftConfig;
@@ -681,6 +692,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         if (checkoutData?.ok && checkoutData.checkoutConfig) setStoreCheckoutConfig(checkoutData.checkoutConfig);
         if (inventoryData?.ok && inventoryData.inventoryConfig) setInventoryConfig(inventoryData.inventoryConfig);
         if (taxData?.ok && taxData.taxConfig) setTaxConfig(taxData.taxConfig);
+        if (integrationsData?.ok && integrationsData.integrationsConfig) {
+          setIntegrationsConfig(integrationsData.integrationsConfig);
+        }
       } catch (err) {
         console.warn('Storefront checkout config load warning:', err);
       }
@@ -1108,6 +1122,37 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     onPlaceOrder(newOrder);
     setCheckoutStep('success');
     setCart([]);
+
+    // Report the conversion to whichever pixels the merchant configured.
+    // Guarded so a missing/blocked script can never break the checkout flow.
+    try {
+      const w = window as unknown as {
+        fbq?: (...a: any[]) => void;
+        gtag?: (...a: any[]) => void;
+      };
+      const items = (newOrder.items || []).map((i) => ({
+        id: i.id,
+        quantity: i.quantity,
+      }));
+
+      if (typeof w.fbq === 'function') {
+        w.fbq('track', 'Purchase', {
+          value: total,
+          currency: 'BDT',
+          num_items: items.length,
+        });
+      }
+      if (typeof w.gtag === 'function') {
+        w.gtag('event', 'purchase', {
+          transaction_id: orderNum.replace('#', ''),
+          value: total,
+          currency: 'BDT',
+          items,
+        });
+      }
+    } catch {
+      /* analytics must never disrupt a completed order */
+    }
   };
 
   // ------------------------------------------------------------------

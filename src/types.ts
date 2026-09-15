@@ -249,6 +249,31 @@ export interface MerchantProfile {
    */
   giftConfig?: MerchantProfile['giftOptions'];
   /**
+   * API integrations, edited in Settings -> API.
+   * Persisted on the store record as `integrationsConfig`.
+   *
+   * Every `*Key` / `*Token` / `*Secret` field below is write-only: the API
+   * accepts them on save but returns a `'••'` placeholder instead of the value.
+   */
+  integrationsConfig?: {
+    // Courier
+    courierProvider?: string;
+    courierApiKey?: string;
+    courierSecretToken?: string;
+    // Meta / Facebook tracking
+    fbPixelId?: string;
+    fbCapiToken?: string;
+    // Google Analytics 4
+    ga4MeasurementId?: string;
+    ga4ApiSecret?: string;
+    // SMS gateway
+    smsApiKey?: string;
+    smsSenderId?: string;
+    // Webhooks
+    orderWebhookUrl?: string;
+    webhookSecret?: string;
+  };
+  /**
    * Tax settings, edited in Settings -> Tax.
    * Persisted on the store record as `taxConfig`.
    */
