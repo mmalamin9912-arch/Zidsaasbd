@@ -480,6 +480,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   // Inventory rules (Settings -> Orders and products properties).
   const [inventoryConfig, setInventoryConfig] = useState<MerchantProfile['inventoryConfig']>(storefrontMerchant.inventoryConfig);
+  const [taxConfig, setTaxConfig] = useState<MerchantProfile['taxConfig']>(storefrontMerchant.taxConfig);
   const hideOutOfStock = inventoryConfig?.hideOutOfStock === true;
   const merchantAllowPreOrder = inventoryConfig?.allowPreOrder === true;
   const minOrderQty = Number(inventoryConfig?.minOrderQty) || 1;
@@ -668,16 +669,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           fetch(`/api/store/gift-options?store_slug=${encodeURIComponent(ref)}`),
           fetch(`/api/store/checkout-settings?store_slug=${encodeURIComponent(ref)}`),
         ]);
-        const [giftData, checkoutData, inventoryData] = await Promise.all([
+        const [giftData, checkoutData, inventoryData, taxData] = await Promise.all([
           giftRes.json(),
           checkoutRes.json(),
           fetch(`/api/store/inventory-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
+          fetch(`/api/store/tax-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
         ]);
         if (cancelled) return;
         const giftPayload = giftData?.giftOptions || giftData?.giftConfig;
         if (giftData?.ok && giftPayload) setGiftConfig(giftPayload);
         if (checkoutData?.ok && checkoutData.checkoutConfig) setStoreCheckoutConfig(checkoutData.checkoutConfig);
         if (inventoryData?.ok && inventoryData.inventoryConfig) setInventoryConfig(inventoryData.inventoryConfig);
+        if (taxData?.ok && taxData.taxConfig) setTaxConfig(taxData.taxConfig);
       } catch (err) {
         console.warn('Storefront checkout config load warning:', err);
       }
@@ -740,7 +743,46 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   const cartTotal = (cart || []).reduce((sum, item) => sum + ((item.product?.priceBDT ?? 0) * item.quantity), 0);
   const itemsSubtotal = (cart || []).length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0);
-  const baseTotalAmount = itemsSubtotal + shippingFee + giftWrapFee;
+
+  // ── VAT (Settings -> Tax) ──────────────────────────────
+  //
+  // `includeTaxInPrices` decides whether the listed product prices already
+  // contain the tax or whether it is added on top. `applyTaxToDelivery` extends
+  // the taxable base to the shipping and gift-wrapping charges.
+  const taxPercent = Number(taxConfig?.defaultTaxRate) || 0;
+  const taxIncludedInPrices = taxConfig?.includeTaxInPrices === true;
+  const taxOnDelivery = taxConfig?.applyTaxToDelivery === true;
+  const showTaxBreakdown = taxConfig?.showTaxBreakdown === true;
+
+  // Charges that sit alongside the goods (delivery, gift wrap).
+  const extraCharges = shippingFee + giftWrapFee;
+  const taxableExtra = taxOnDelivery ? extraCharges : 0;
+
+  const taxRateFraction = taxPercent / 100;
+  let taxAmount: number;
+  let netBeforeTax: number;
+
+  if (taxPercent <= 0) {
+    taxAmount = 0;
+    netBeforeTax = itemsSubtotal + extraCharges;
+  } else if (taxIncludedInPrices) {
+    // Prices already include VAT — extract it rather than adding it, so the
+    // customer pays exactly the listed price.
+    const gross = itemsSubtotal + taxableExtra;
+    netBeforeTax = Math.round(gross / (1 + taxRateFraction));
+    taxAmount = gross - netBeforeTax;
+  } else {
+    // Prices exclude VAT — tax is charged on the goods and any taxable extras.
+    netBeforeTax = itemsSubtotal + extraCharges;
+    taxAmount = Math.round((itemsSubtotal + taxableExtra) * taxRateFraction);
+  }
+
+  // Pre-tax subtotal shown in the breakdown (excludes the tax portion).
+  const displayNetGoods = taxIncludedInPrices && taxPercent > 0
+    ? Math.round(itemsSubtotal / (1 + taxRateFraction))
+    : itemsSubtotal;
+
+  const baseTotalAmount = netBeforeTax + taxAmount;
 
   // Merchant-defined guard rails, enforced live as the cart changes.
   const minOrderShortfall = checkoutMinOrder > 0 && itemsSubtotal < checkoutMinOrder
@@ -923,7 +965,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       image: selectedProduct.image,
     }] : [];
 
-    const total = (cart.length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0)) + giftWrapFee;
+    // `baseTotalAmount` is already the goods + charges + VAT, so the recorded
+    // total matches exactly what the customer was shown and charged.
+    const total = baseTotalAmount;
 
     // Gift selections are attached to the order so the merchant can fulfil them
     // and the invoice can hide the price when `hideInvoicePriceTag` is set.
@@ -956,6 +1000,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       storeSlug: effectiveStoreSlug,
       merchantId: (merchant as any)?.id || '',
       items,
+      // Tax captured at time of order so the receipt stays accurate even if the
+      // merchant later changes the rate.
+      taxRate: taxPercent,
+      taxBDT: taxAmount,
+      netBeforeTaxBDT: netBeforeTax,
+      taxInclusive: taxIncludedInPrices,
+      vatNumber: taxConfig?.vatNumber || undefined,
       ...(giftDetails ? { notes: `GIFT: ${JSON.stringify(giftDetails)}` } : {}),
     };
 
@@ -2525,6 +2576,30 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         <span>Shipping Fee ({custCity || 'Dhaka'}):</span>
                         <span className="font-semibold text-slate-900">৳{shippingFee}</span>
                       </div>
+                      {/* Tax breakdown (Settings -> Tax) */}
+                      {showTaxBreakdown && taxPercent > 0 && (
+                        <>
+                          {taxIncludedInPrices && (
+                            <div className="flex justify-between text-slate-600">
+                              <span>Net (VAT exclusive):</span>
+                              <span className="font-semibold text-slate-900">
+                                ৳{(displayNetGoods + (taxOnDelivery ? extraCharges - giftWrapFee : 0)).toLocaleString()}
+                              </span>
+                            </div>
+                          )}
+                          <div
+                            data-testid="store-tax-line"
+                            className="flex justify-between text-slate-600"
+                          >
+                            <span>
+                              VAT ({taxPercent}%{taxOnDelivery ? ' incl. delivery' : ''}):
+                            </span>
+                            <span className="font-semibold text-slate-900">
+                              {taxIncludedInPrices ? 'Included — ' : '+'}৳{taxAmount.toLocaleString()}
+                            </span>
+                          </div>
+                        </>
+                      )}
                       {giftWrapFee > 0 && (
                         <div className="flex justify-between text-emerald-600 font-medium">
                           <span>Gift Wrapping:</span>
@@ -2714,6 +2789,34 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     : confirmedOrderNum
                 }</span>
               </div>
+              {/* Tax breakdown on the receipt (Settings -> Tax). */}
+              {showTaxBreakdown && taxPercent > 0 && (
+                <div
+                  data-testid="store-receipt-tax"
+                  className="pt-2 mt-1 border-t border-slate-200 text-[11px] text-slate-600 space-y-0.5"
+                >
+                  <div className="flex justify-between">
+                    <span>Net amount:</span>
+                    <span className="font-mono">৳{netBeforeTax.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>VAT ({taxPercent}%):</span>
+                    <span className="font-mono">
+                      {taxIncludedInPrices ? '৳' + taxAmount.toLocaleString() + ' (included)' : '+' + '৳' + taxAmount.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between font-bold text-slate-900">
+                    <span>Total:</span>
+                    <span className="font-mono">৳{baseTotalAmount.toLocaleString()}</span>
+                  </div>
+                  {taxConfig?.vatNumber && (
+                    <div className="text-[10px] text-slate-500 font-mono pt-0.5">
+                      VAT Reg: {taxConfig.vatNumber}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Price tag hidden on the packed invoice (Settings -> Gift options). */}
               {hideInvoicePriceTag && (
                 <div

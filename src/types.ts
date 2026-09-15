@@ -249,6 +249,22 @@ export interface MerchantProfile {
    */
   giftConfig?: MerchantProfile['giftOptions'];
   /**
+   * Tax settings, edited in Settings -> Tax.
+   * Persisted on the store record as `taxConfig`.
+   */
+  taxConfig?: {
+    /** Business VAT / TIN registration number shown on invoices. */
+    vatNumber?: string;
+    /** Default VAT percentage applied to orders (0-100). */
+    defaultTaxRate?: number;
+    /** Product prices already include VAT (true) or VAT is added on top. */
+    includeTaxInPrices?: boolean;
+    /** Also charge VAT on delivery/shipping fees. */
+    applyTaxToDelivery?: boolean;
+    /** Show the Net + VAT = Total breakdown on checkout and receipts. */
+    showTaxBreakdown?: boolean;
+  };
+  /**
    * Inventory & order properties, edited in Settings -> Orders and products
    * properties. Persisted on the store record as `inventoryConfig`.
    */
@@ -511,6 +527,16 @@ export interface Order {
   platform?: 'Mobile web' | 'iOS App' | 'Android App' | 'Desktop Web' | 'POS';
   subtotalBDT?: number;
   deliveryCharge?: number;
+  /** VAT percentage applied to this order. */
+  taxRate?: number;
+  /** VAT amount charged (inclusive or added on top, per store settings). */
+  taxBDT?: number;
+  /** Net amount before VAT, recorded for the printed breakdown. */
+  netBeforeTaxBDT?: number;
+  /** Whether the price already contained VAT. */
+  taxInclusive?: boolean;
+  /** Business VAT number captured at time of order. */
+  vatNumber?: string;
   totalBDT: number;
   paymentMethod: 'bKash' | 'Nagad' | 'Rocket' | 'Bank Transfer' | 'COD';
   paymentStatus: 'Paid' | 'Partially paid' | 'Unpaid' | 'Voided' | 'Pending Verification';

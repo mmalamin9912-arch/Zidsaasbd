@@ -2340,6 +2340,28 @@ function normalizeInvoiceConfig(raw: any, fallback: Record<string, any> = {}) {
 }
 
 /**
+ * Sanitise the tax settings edited in Settings -> Tax.
+ *
+ * `defaultTaxRate` is a percentage; it is clamped to 0-100 so a typo cannot
+ * produce an absurd invoice.
+ */
+function normalizeTaxConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  let defaultTaxRate = cfgNumOrNull(src.defaultTaxRate, fallback.defaultTaxRate, { min: 0, max: 100 });
+  // A blank rate means "no tax configured"; anything else must be within range.
+  if (defaultTaxRate == null) defaultTaxRate = 0;
+
+  return {
+    vatNumber: cfgStr(src.vatNumber, fallback.vatNumber),
+    defaultTaxRate,
+    includeTaxInPrices: cfgBool(src.includeTaxInPrices, fallback.includeTaxInPrices),
+    applyTaxToDelivery: cfgBool(src.applyTaxToDelivery, fallback.applyTaxToDelivery),
+    showTaxBreakdown: cfgBool(src.showTaxBreakdown, fallback.showTaxBreakdown),
+  };
+}
+
+/**
  * Sanitise the inventory / order properties edited in Settings -> Properties.
  *
  * Quantity guards are stored as null when unset so "no limit" is distinct from
@@ -2396,6 +2418,7 @@ const storeConfigs = {
   invoice: { key: 'invoiceConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInvoiceConfig },
   nbr: { key: 'nbrConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeNbrConfig },
   inventory: { key: 'inventoryConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInventoryConfig },
+  tax: { key: 'taxConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeTaxConfig },
 } as const;
 
 type StoreConfigName = keyof typeof storeConfigs;
@@ -2497,6 +2520,7 @@ const CONFIG_ROUTES: Array<{ name: StoreConfigName; path: string; label: string 
   { name: 'invoice', path: 'invoice-settings', label: 'Invoice settings' },
   { name: 'nbr', path: 'nbr-settings', label: 'NBR e-invoicing settings' },
   { name: 'inventory', path: 'inventory-settings', label: 'Inventory & order properties' },
+  { name: 'tax', path: 'tax-settings', label: 'Tax settings' },
 ];
 
 for (const route of CONFIG_ROUTES) {
@@ -2642,6 +2666,44 @@ const saveInventoryProperties = async (req: any, res: any) => {
 
 app.post('/api/store/inventory-properties', saveInventoryProperties);
 app.put('/api/store/inventory-properties', saveInventoryProperties);
+
+// Friendly REST alias for the Tax settings panel.
+app.get('/api/store/tax-properties', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    const taxConfig = await readStoreConfig('tax', storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, taxConfig });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/tax-properties error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load tax settings.' });
+  }
+});
+
+const saveTaxProperties = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const payload = body.taxConfig || body.tax || body;
+    const taxConfig = await writeStoreConfig('tax', storeRef, payload);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      taxConfig,
+      message: 'Tax settings saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/tax-properties error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save tax settings.' });
+  }
+};
+
+app.post('/api/store/tax-properties', saveTaxProperties);
+app.put('/api/store/tax-properties', saveTaxProperties);
 
 // Steadfast Courier 1-Click Booking API
 app.post('/api/courier/steadfast', async (req, res) => {

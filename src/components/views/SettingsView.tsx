@@ -73,7 +73,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const [currency, setCurrency] = useState(merchant?.currency || 'BDT');
   const [language, setLanguage] = useState(merchant?.language || 'en');
-  const [taxRate, setTaxRate] = useState('15%');
   const [savedSuccess, setSavedSuccess] = useState(false);
 
   // Security Tab State
@@ -164,10 +163,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [disableCodForSale, setDisableCodForSale] = useState(false);
   const [expressMobileBankingOnly, setExpressMobileBankingOnly] = useState(false);
 
-  // Tax Tab State
-  const [includeTaxInPrices, setIncludeTaxInPrices] = useState(true);
-  const [taxOnDelivery, setTaxOnDelivery] = useState(false);
-  const [separateTaxBreakdown, setSeparateTaxBreakdown] = useState(true);
+  // Tax Tab State — seeded from the store record, saved via the API below.
+  const taxCfg = merchant?.taxConfig;
+  const [vatNumber, setVatNumber] = useState(taxCfg?.vatNumber || '');
+  const [taxRate, setTaxRate] = useState(
+    taxCfg?.defaultTaxRate != null ? String(taxCfg.defaultTaxRate) : '15'
+  );
+  const [includeTaxInPrices, setIncludeTaxInPrices] = useState(taxCfg?.includeTaxInPrices ?? true);
+  const [taxOnDelivery, setTaxOnDelivery] = useState(taxCfg?.applyTaxToDelivery ?? false);
+  const [separateTaxBreakdown, setSeparateTaxBreakdown] = useState(taxCfg?.showTaxBreakdown ?? true);
 
   // NBR Integration State — seeded from the store record, saved via the API below.
   const [binNumber, setBinNumber] = useState(merchant?.nbrConfig?.binNumber || '');
@@ -500,6 +504,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setNbrSecretStored(Boolean(cfg.apiSecret));
   }, []);
 
+  const applyTaxConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setVatNumber(typeof cfg.vatNumber === 'string' ? cfg.vatNumber : '');
+    setTaxRate(cfg.defaultTaxRate != null && cfg.defaultTaxRate !== '' ? String(cfg.defaultTaxRate) : '0');
+    setIncludeTaxInPrices(cfg.includeTaxInPrices !== false);
+    setTaxOnDelivery(cfg.applyTaxToDelivery === true);
+    setSeparateTaxBreakdown(cfg.showTaxBreakdown !== false);
+  }, []);
+
   const applyInventoryConfig = useCallback((cfg: any) => {
     if (!cfg || typeof cfg !== 'object') return;
     setHideOutOfStock(cfg.hideOutOfStock === true);
@@ -524,6 +537,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       settings_invoices: { url: '/api/store/invoice-settings', key: 'invoiceConfig', apply: applyInvoiceConfig },
       settings_nbr: { url: '/api/store/nbr-settings', key: 'nbrConfig', apply: applyNbrConfig },
       settings_properties: { url: '/api/store/inventory-properties', key: 'inventoryConfig', apply: applyInventoryConfig },
+      settings_tax: { url: '/api/store/tax-properties', key: 'taxConfig', apply: applyTaxConfig },
     };
 
     const target = endpointByTab[activeSubTab];
@@ -541,7 +555,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     })();
 
     return () => { cancelled = true; };
-  }, [activeSubTab, storeRef, applyGiftConfig, applyInvoiceConfig, applyNbrConfig, applyInventoryConfig]);
+  }, [activeSubTab, storeRef, applyGiftConfig, applyInvoiceConfig, applyNbrConfig, applyInventoryConfig, applyTaxConfig]);
 
   /**
    * Persist the checkout options. Sends the explicit payload (not the whole
@@ -603,13 +617,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // matching `/api/store/<config>-settings` endpoint (MongoDB is the source of
   // truth) and re-seed the form from the server's normalised response.
 
-  type RemoteConfigName = 'giftOptions' | 'invoiceConfig' | 'nbrConfig' | 'inventoryConfig';
+  type RemoteConfigName = 'giftOptions' | 'invoiceConfig' | 'nbrConfig' | 'inventoryConfig' | 'taxConfig';
 
   const configEndpoints: Record<RemoteConfigName, string> = {
     giftOptions: '/api/store/gift-options',
     invoiceConfig: '/api/store/invoice-settings',
     nbrConfig: '/api/store/nbr-settings',
     inventoryConfig: '/api/store/inventory-properties',
+    taxConfig: '/api/store/tax-properties',
   };
 
   /**
@@ -694,6 +709,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setInvoiceFooterNote(saved.footerNote || '');
       setPrintFormat(saved.printFormat || 'Standard A4 / PDF');
     }
+  };
+
+  const handleSaveTaxSettings = async () => {
+    const trimmedRate = taxRate.trim();
+    const rate = trimmedRate === '' ? 0 : Number(trimmedRate);
+    if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+      setConfigNotice({ type: 'error', text: 'Default VAT rate must be between 0 and 100.' });
+      return;
+    }
+
+    const saved = await saveRemoteConfig('taxConfig', {
+      vatNumber: vatNumber.trim(),
+      defaultTaxRate: rate,
+      includeTaxInPrices,
+      applyTaxToDelivery: taxOnDelivery,
+      showTaxBreakdown: separateTaxBreakdown,
+    }, 'Tax settings');
+
+    if (saved) applyTaxConfig(saved);
   };
 
   /** Parse an optional positive integer field, or return null when blank. */
@@ -1222,6 +1256,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'settings_tax' && (
             <div className="space-y-8">
+              {/* Config feedback toast */}
+              {configNotice && (
+                <div
+                  data-testid="tax-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${configNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {configNotice.text}
+                </div>
+              )}
               {/* Tax Identification Number */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
@@ -1236,9 +1279,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <label className="block text-slate-300 font-bold mb-1.5 text-sm">VAT / Tax Registration Number</label>
                   <input
                     type="text"
-                    value={vatRegistrationNumber}
-                    onChange={(e) => setVatRegistrationNumber(e.target.value)}
-                    placeholder="যেমন: 300000000000003"
+                    data-testid="tax-vat-number"
+                    value={vatNumber}
+                    onChange={(e) => setVatNumber(e.target.value)}
                     className="w-full max-w-sm bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500 font-mono"
                   />
                 </div>
@@ -1247,19 +1290,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {/* Flexible VAT Rate & Calculation Modes */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Flexible VAT Rate & Calculation Modes</h3>
-                
+
                 <div className="space-y-4">
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Standard VAT / Tax Rate (%)</label>
                     <input
                       type="number"
+                      data-testid="tax-rate"
                       value={taxRate}
                       onChange={(e) => setTaxRate(e.target.value)}
                       placeholder="যেমন: ১৫"
                       className="w-full max-w-xs bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
                     />
                   </div>
-                  
+
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852] gap-4">
                     <div>
                       <div className="font-bold text-white text-sm mb-0.5">Include Tax in Displayed Product Prices</div>
@@ -1267,6 +1311,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="tax-include-in-prices"
+                      aria-pressed={includeTaxInPrices}
                       onClick={() => setIncludeTaxInPrices(!includeTaxInPrices)}
                       className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${includeTaxInPrices ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
@@ -1281,6 +1327,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="tax-on-delivery"
+                      aria-pressed={taxOnDelivery}
                       onClick={() => setTaxOnDelivery(!taxOnDelivery)}
                       className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${taxOnDelivery ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
@@ -1293,7 +1341,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {/* Tax Invoice Display Rule */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Tax Invoice Display Rule</h3>
-                
+
                 <div className="space-y-4">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852] gap-4">
                     <div>
@@ -1302,6 +1350,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="tax-show-breakdown"
+                      aria-pressed={separateTaxBreakdown}
                       onClick={() => setSeparateTaxBreakdown(!separateTaxBreakdown)}
                       className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${separateTaxBreakdown ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
@@ -1309,6 +1359,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </button>
                   </div>
                 </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  data-testid="tax-save"
+                  onClick={handleSaveTaxSettings}
+                  disabled={configSaving}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{configSaving ? 'Saving…' : 'Save Tax Settings'}</span>
+                </button>
               </div>
             </div>
           )}
