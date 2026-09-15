@@ -108,19 +108,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [checkoutSaving, setCheckoutSaving] = useState(false);
   const [checkoutNotice, setCheckoutNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
-  // Gift Tab State
-  const [enableGiftWrap, setEnableGiftWrap] = useState(false);
-  const [giftWrapFee, setGiftWrapFee] = useState('');
-  const [allowGiftMessage, setAllowGiftMessage] = useState(false);
-  const [hidePriceTag, setHidePriceTag] = useState(false);
+  // Gift Tab State — seeded from the store record, saved via the API below.
+  const [enableGiftWrap, setEnableGiftWrap] = useState(merchant?.giftConfig?.enableGiftPackaging ?? false);
+  const [giftWrapFee, setGiftWrapFee] = useState(
+    merchant?.giftConfig?.giftPackagingFee != null ? String(merchant.giftConfig.giftPackagingFee) : ''
+  );
+  const [allowGiftMessage, setAllowGiftMessage] = useState(merchant?.giftConfig?.allowGiftMessage ?? false);
+  const [hidePriceTag, setHidePriceTag] = useState(merchant?.giftConfig?.hideInvoicePrice ?? false);
 
   // Invoice Tab State
-  const [showInvoiceLogo, setShowInvoiceLogo] = useState(true);
-  const [invoiceTitle, setInvoiceTitle] = useState('');
-  const [invoicePrefix, setInvoicePrefix] = useState('');
-  const [vatRegistrationNumber, setVatRegistrationNumber] = useState('');
-  const [invoiceFooterNote, setInvoiceFooterNote] = useState('');
-  const [printFormat, setPrintFormat] = useState('Standard A4 / PDF');
+  const [showInvoiceLogo, setShowInvoiceLogo] = useState(merchant?.invoiceConfig?.showLogo ?? true);
+  const [invoiceTitle, setInvoiceTitle] = useState(merchant?.invoiceConfig?.title || '');
+  const [invoicePrefix, setInvoicePrefix] = useState(merchant?.invoiceConfig?.prefix || '');
+  const [vatRegistrationNumber, setVatRegistrationNumber] = useState(merchant?.invoiceConfig?.vatRegistrationNumber || '');
+  const [invoiceFooterNote, setInvoiceFooterNote] = useState(merchant?.invoiceConfig?.footerNote || '');
+  const [printFormat, setPrintFormat] = useState(merchant?.invoiceConfig?.printFormat || 'Standard A4 / PDF');
 
   // Properties Tab State
   const [hideOutOfStock, setHideOutOfStock] = useState(false);
@@ -150,11 +152,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [taxOnDelivery, setTaxOnDelivery] = useState(false);
   const [separateTaxBreakdown, setSeparateTaxBreakdown] = useState(true);
 
-  // NBR Integration State
-  const [binNumber, setBinNumber] = useState('');
-  const [autoGenerateMushak, setAutoGenerateMushak] = useState(false);
+  // NBR Integration State — seeded from the store record, saved via the API below.
+  const [binNumber, setBinNumber] = useState(merchant?.nbrConfig?.binNumber || '');
+  const [autoGenerateMushak, setAutoGenerateMushak] = useState(merchant?.nbrConfig?.autoGenerateMushak ?? false);
   const [nbrApiSecret, setNbrApiSecret] = useState('');
-  const [showBinOnReceipt, setShowBinOnReceipt] = useState(false);
+  const [nbrSecretStored, setNbrSecretStored] = useState(Boolean(merchant?.nbrConfig?.apiSecret));
+  const [showBinOnReceipt, setShowBinOnReceipt] = useState(merchant?.nbrConfig?.showBinOnReceipt ?? false);
+
+  // Shared save/feedback state for the gift / invoice / NBR tabs.
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configNotice, setConfigNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // Notification Tab State
   const [sendEmailAlert, setSendEmailAlert] = useState(true);
@@ -444,6 +451,64 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     if (activeSubTab === 'settings_checkout') loadCheckoutSettings();
   }, [activeSubTab, loadCheckoutSettings]);
 
+  /** Apply a gift/invoice/NBR payload to the matching form fields. */
+  const applyGiftConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setEnableGiftWrap(cfg.enableGiftPackaging === true);
+    setGiftWrapFee(cfg.giftPackagingFee != null && cfg.giftPackagingFee !== '' ? String(cfg.giftPackagingFee) : '');
+    setAllowGiftMessage(cfg.allowGiftMessage === true);
+    setHidePriceTag(cfg.hideInvoicePrice === true);
+  }, []);
+
+  const applyInvoiceConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setShowInvoiceLogo(cfg.showLogo !== false);
+    setInvoiceTitle(typeof cfg.title === 'string' ? cfg.title : '');
+    setInvoicePrefix(typeof cfg.prefix === 'string' ? cfg.prefix : '');
+    setVatRegistrationNumber(typeof cfg.vatRegistrationNumber === 'string' ? cfg.vatRegistrationNumber : '');
+    setInvoiceFooterNote(typeof cfg.footerNote === 'string' ? cfg.footerNote : '');
+    if (typeof cfg.printFormat === 'string' && cfg.printFormat) setPrintFormat(cfg.printFormat);
+  }, []);
+
+  const applyNbrConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setBinNumber(typeof cfg.binNumber === 'string' ? cfg.binNumber : '');
+    setAutoGenerateMushak(cfg.autoGenerateMushak === true);
+    setShowBinOnReceipt(cfg.showBinOnReceipt === true);
+    // The API only ever returns a redacted placeholder for the secret.
+    setNbrSecretStored(Boolean(cfg.apiSecret));
+  }, []);
+
+  //
+  // Load the saved gift / invoice / NBR settings when their tab is opened, so
+  // the form always reflects what is actually stored on the server rather than
+  // whatever happened to be hydrated into the merchant object at boot.
+  //
+  useEffect(() => {
+    if (!storeRef) return;
+    const endpointByTab: Record<string, { url: string; key: string; apply: (cfg: any) => void }> = {
+      settings_gift: { url: '/api/store/gift-settings', key: 'giftConfig', apply: applyGiftConfig },
+      settings_invoices: { url: '/api/store/invoice-settings', key: 'invoiceConfig', apply: applyInvoiceConfig },
+      settings_nbr: { url: '/api/store/nbr-settings', key: 'nbrConfig', apply: applyNbrConfig },
+    };
+
+    const target = endpointByTab[activeSubTab];
+    if (!target) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${target.url}?store_slug=${encodeURIComponent(storeRef)}`);
+        const data = await res.json();
+        if (!cancelled && data?.ok && data[target.key]) target.apply(data[target.key]);
+      } catch (err) {
+        console.warn(`${target.key} load warning:`, err);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [activeSubTab, storeRef, applyGiftConfig, applyInvoiceConfig, applyNbrConfig]);
+
   /**
    * Persist the checkout options. Sends the explicit payload (not the whole
    * merchant object) so a slow profile autosave cannot clobber these values.
@@ -497,6 +562,138 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const timer = setTimeout(() => setCheckoutNotice(null), 5000);
     return () => clearTimeout(timer);
   }, [checkoutNotice]);
+
+  // ── Gift options / invoice / NBR e-invoicing ──
+  //
+  // These three tabs share one save path: POST the explicit payload to the
+  // matching `/api/store/<config>-settings` endpoint (MongoDB is the source of
+  // truth) and re-seed the form from the server's normalised response.
+
+  type RemoteConfigName = 'giftConfig' | 'invoiceConfig' | 'nbrConfig';
+
+  const configEndpoints: Record<RemoteConfigName, string> = {
+    giftConfig: '/api/store/gift-settings',
+    invoiceConfig: '/api/store/invoice-settings',
+    nbrConfig: '/api/store/nbr-settings',
+  };
+
+  /**
+   * Persist one remote config block.
+   *
+   * @returns the saved config, or `null` when the request failed (in which case
+   *          a toast has already been surfaced to the merchant).
+   */
+  const saveRemoteConfig = async (
+    name: RemoteConfigName,
+    payload: Record<string, unknown>,
+    label: string,
+  ): Promise<Record<string, any> | null> => {
+    if (!storeRef) {
+      setConfigNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return null;
+    }
+
+    setConfigSaving(true);
+    try {
+      const res = await fetch(configEndpoints[name], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, [name]: payload }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setConfigNotice({ type: 'error', text: data?.error || `Could not save ${label}.` });
+        return null;
+      }
+
+      // Keep the in-memory merchant in step so other tabs/views see the change.
+      const saved = data[name] || {};
+      onUpdateMerchant({ ...merchant, [name]: saved });
+      setConfigNotice({ type: 'ok', text: data.message || `${label} saved.` });
+      return saved;
+    } catch (err: any) {
+      setConfigNotice({ type: 'error', text: err?.message || `Could not save ${label}.` });
+      return null;
+    } finally {
+      setConfigSaving(false);
+    }
+  };
+
+  const handleSaveGiftOptions = async () => {
+    const trimmedFee = giftWrapFee.trim();
+    if (enableGiftWrap && trimmedFee !== '' && (!Number.isFinite(Number(trimmedFee)) || Number(trimmedFee) < 0)) {
+      setConfigNotice({ type: 'error', text: 'Gift wrapping fee must be a positive number.' });
+      return;
+    }
+
+    const saved = await saveRemoteConfig('giftConfig', {
+      enableGiftPackaging: enableGiftWrap,
+      giftPackagingFee: enableGiftWrap && trimmedFee !== '' ? Number(trimmedFee) : null,
+      allowGiftMessage,
+      hideInvoicePrice: hidePriceTag,
+    }, 'Gift options');
+
+    if (saved) {
+      setEnableGiftWrap(!!saved.enableGiftPackaging);
+      setGiftWrapFee(saved.giftPackagingFee != null ? String(saved.giftPackagingFee) : '');
+      setAllowGiftMessage(!!saved.allowGiftMessage);
+      setHidePriceTag(!!saved.hideInvoicePrice);
+    }
+  };
+
+  const handleSaveInvoiceSettings = async () => {
+    const saved = await saveRemoteConfig('invoiceConfig', {
+      showLogo: showInvoiceLogo,
+      title: invoiceTitle,
+      prefix: invoicePrefix,
+      vatRegistrationNumber,
+      footerNote: invoiceFooterNote,
+      printFormat,
+    }, 'Invoice settings');
+
+    if (saved) {
+      setShowInvoiceLogo(saved.showLogo !== false);
+      setInvoiceTitle(saved.title || '');
+      setInvoicePrefix(saved.prefix || '');
+      setVatRegistrationNumber(saved.vatRegistrationNumber || '');
+      setInvoiceFooterNote(saved.footerNote || '');
+      setPrintFormat(saved.printFormat || 'Standard A4 / PDF');
+    }
+  };
+
+  const handleSaveNbrSettings = async () => {
+    const trimmedBin = binNumber.trim();
+    if (trimmedBin !== '' && !/^\d{9}$|^\d{13}$/.test(trimmedBin)) {
+      setConfigNotice({ type: 'error', text: 'BIN must be 9 or 13 digits.' });
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      binNumber: trimmedBin,
+      autoGenerateMushak,
+      showBinOnReceipt,
+    };
+    // Only send the secret when the merchant actually typed a new one —
+    // otherwise the stored value would be wiped by an empty string.
+    if (nbrApiSecret.trim() !== '') payload.apiSecret = nbrApiSecret.trim();
+
+    const saved = await saveRemoteConfig('nbrConfig', payload, 'NBR e-invoicing settings');
+
+    if (saved) {
+      setBinNumber(saved.binNumber || '');
+      setAutoGenerateMushak(!!saved.autoGenerateMushak);
+      setShowBinOnReceipt(!!saved.showBinOnReceipt);
+      setNbrApiSecret('');
+      setNbrSecretStored(Boolean(saved.apiSecret));
+    }
+  };
+
+  // Auto-dismiss the gift/invoice/NBR toast.
+  useEffect(() => {
+    if (!configNotice) return;
+    const timer = setTimeout(() => setConfigNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [configNotice]);
 
   const PlanRestrictionBanner = () => (
     <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 flex items-center justify-between mb-6">
@@ -1038,6 +1235,107 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           )}
 
+          {activeSubTab === 'settings_nbr' && (
+            <div className="space-y-8">
+              {/* Config feedback toast */}
+              {configNotice && (
+                <div
+                  data-testid="nbr-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${configNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {configNotice.text}
+                </div>
+              )}
+
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6 space-y-6">
+                <div>
+                  <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
+                    <CheckCircle className="w-5 h-5 text-[#00D68F]" />
+                    NBR VAT & E-Invoicing Integration
+                  </h3>
+                  <p className="text-sm text-slate-400">
+                    Connect your National Board of Revenue (NBR) Business Identification Number to issue compliant Mushak e-invoices.
+                  </p>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Business Identification Number (BIN)</label>
+                    <input
+                      type="text"
+                      data-testid="nbr-bin"
+                      value={binNumber}
+                      onChange={(e) => setBinNumber(e.target.value)}
+                      placeholder="9 or 13 digit BIN, e.g. 003456789-0101"
+                      className="w-full max-w-sm bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500 font-mono"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">Must be 9 or 13 digits (hyphens are ignored).</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">NBR API Secret Key</label>
+                    <input
+                      type="password"
+                      data-testid="nbr-api-secret"
+                      value={nbrApiSecret}
+                      onChange={(e) => setNbrApiSecret(e.target.value)}
+                      placeholder={nbrSecretStored ? '•• (saved — type to replace)' : 'Paste your NBR API secret key'}
+                      className="w-full max-w-md bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500 font-mono"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Stored securely on the server and never displayed again. Leave blank to keep the current key.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border-[#2E3852] gap-4">
+                    <div>
+                      <div className="font-bold text-white text-sm mb-0.5">Automatically Generate Mushak 6.3 E-Invoice</div>
+                      <div className="text-xs text-slate-400">Create and submit a compliant e-invoice for every confirmed order.</div>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="nbr-auto-mushak"
+                      onClick={() => setAutoGenerateMushak(!autoGenerateMushak)}
+                      aria-pressed={autoGenerateMushak}
+                      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${autoGenerateMushak ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
+                    >
+                      <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${autoGenerateMushak ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border-[#2E3852] gap-4">
+                    <div>
+                      <div className="font-bold text-white text-sm mb-0.5">Print BIN on Customer Receipt</div>
+                      <div className="text-xs text-slate-400">Show your BIN at the bottom of the customer's receipt for VAT compliance.</div>
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="nbr-show-bin"
+                      onClick={() => setShowBinOnReceipt(!showBinOnReceipt)}
+                      aria-pressed={showBinOnReceipt}
+                      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${showBinOnReceipt ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
+                    >
+                      <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${showBinOnReceipt ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="pt-4 border-t flex items-center justify-end">
+                  <button
+                    type="button"
+                    data-testid="nbr-save"
+                    onClick={handleSaveNbrSettings}
+                    disabled={configSaving}
+                    className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{configSaving ? 'Saving…' : 'Save NBR Settings'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {activeSubTab === 'settings_security' && (
             <div className="space-y-8">
               {/* Change Password */}
@@ -1378,6 +1676,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'settings_gift' && (
             <div className="space-y-8">
+              {/* Config feedback toast */}
+              {configNotice && (
+                <div
+                  data-testid="gift-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${configNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {configNotice.text}
+                </div>
+              )}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
@@ -1396,7 +1703,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="gift-enable-packaging"
                       onClick={() => setEnableGiftWrap(!enableGiftWrap)}
+                      aria-pressed={enableGiftWrap}
                       className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${enableGiftWrap ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
                       <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${enableGiftWrap ? 'translate-x-6' : 'translate-x-1'}`} />
@@ -1408,6 +1717,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">Gift Wrapping Fee (৳)</label>
                       <input
                         type="number"
+                        data-testid="gift-packaging-fee"
                         value={giftWrapFee}
                         onChange={(e) => setGiftWrapFee(e.target.value)}
                         placeholder="যেমন: ৫০"
@@ -1425,13 +1735,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="gift-allow-message"
                       onClick={() => setAllowGiftMessage(!allowGiftMessage)}
+                      aria-pressed={allowGiftMessage}
                       className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${allowGiftMessage ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
                       <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${allowGiftMessage ? 'translate-x-6' : 'translate-x-1'}`} />
                     </button>
                   </div>
-                  
+
                   {allowGiftMessage && (
                     <div className="pl-4 sm:pl-6 border-l-2 border-[#2E3852]">
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">Sample Preview (What customers see)</label>
@@ -1449,13 +1761,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </div>
                     <button
                       type="button"
+                      data-testid="gift-hide-invoice-price"
                       onClick={() => setHidePriceTag(!hidePriceTag)}
+                      aria-pressed={hidePriceTag}
                       className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${hidePriceTag ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
                       <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${hidePriceTag ? 'translate-x-6' : 'translate-x-1'}`} />
                     </button>
                   </div>
-                  
+
+                </div>
+
+                <div className="pt-4 border-t border-[#2E3852] flex items-center justify-end">
+                  <button
+                    type="button"
+                    data-testid="gift-save"
+                    onClick={handleSaveGiftOptions}
+                    disabled={configSaving}
+                    className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{configSaving ? 'Saving…' : 'Save Gift Options'}</span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -1463,6 +1790,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'settings_invoices' && (
             <div className="space-y-8">
+              {/* Config feedback toast */}
+              {configNotice && (
+                <div
+                  data-testid="invoice-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${configNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {configNotice.text}
+                </div>
+              )}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
@@ -1547,6 +1883,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Print Format</label>
                     <select
+                      data-testid="invoice-print-format"
                       value={printFormat}
                       onChange={(e) => setPrintFormat(e.target.value)}
                       className="w-full max-w-sm bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
@@ -1556,6 +1893,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </select>
                   </div>
                 </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  data-testid="invoice-save"
+                  onClick={handleSaveInvoiceSettings}
+                  disabled={configSaving}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{configSaving ? 'Saving…' : 'Save Invoice Settings'}</span>
+                </button>
               </div>
             </div>
           )}

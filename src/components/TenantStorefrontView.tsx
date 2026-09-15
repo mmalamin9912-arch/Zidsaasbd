@@ -637,6 +637,43 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     } catch (e) { /* ignore quota / privacy errors */ }
   }, [customerReviews, storeSlug]);
 
+  // ── Merchant-configured checkout & gift options ──
+  // These are owned by the merchant in Settings -> Checkout / Gift options and
+  // stored server-side, so the storefront loads them rather than hard-coding.
+  const [giftConfig, setGiftConfig] = useState<MerchantProfile['giftConfig']>(storefrontMerchant.giftConfig);
+  const [storeCheckoutConfig, setStoreCheckoutConfig] = useState<MerchantProfile['checkoutConfig']>(storefrontMerchant.checkoutConfig);
+
+  useEffect(() => {
+    const ref = String(effectiveStoreSlug || '').split(':')[0].trim();
+    if (!ref) return;
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const [giftRes, checkoutRes] = await Promise.all([
+          fetch(`/api/store/gift-settings?store_slug=${encodeURIComponent(ref)}`),
+          fetch(`/api/store/checkout-settings?store_slug=${encodeURIComponent(ref)}`),
+        ]);
+        const [giftData, checkoutData] = await Promise.all([giftRes.json(), checkoutRes.json()]);
+        if (cancelled) return;
+        if (giftData?.ok && giftData.giftConfig) setGiftConfig(giftData.giftConfig);
+        if (checkoutData?.ok && checkoutData.checkoutConfig) setStoreCheckoutConfig(checkoutData.checkoutConfig);
+      } catch (err) {
+        console.warn('Storefront checkout config load warning:', err);
+      }
+    };
+
+    load();
+    return () => { cancelled = true; };
+  }, [effectiveStoreSlug]);
+
+  // Gift selection made by the customer on the checkout form.
+  const [wantGiftWrap, setWantGiftWrap] = useState(false);
+  const [giftMessage, setGiftMessage] = useState('');
+
+  const checkoutMinOrder = Number(storeCheckoutConfig?.minOrderAmount) || 0;
+  const giftWrapFee = wantGiftWrap ? (Number(giftConfig?.giftPackagingFee) || 0) : 0;
+
   // Checkout Form State
   const [custName, setCustName] = useState('');
   const [custPhone, setCustPhone] = useState('');
@@ -673,7 +710,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   const cartTotal = (cart || []).reduce((sum, item) => sum + ((item.product?.priceBDT ?? 0) * item.quantity), 0);
   const itemsSubtotal = (cart || []).length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0);
-  const baseTotalAmount = itemsSubtotal + shippingFee;
+  const baseTotalAmount = itemsSubtotal + shippingFee + giftWrapFee;
+
+  // Merchant-defined guard rails, enforced live as the cart changes.
+  const minOrderShortfall = checkoutMinOrder > 0 && itemsSubtotal < checkoutMinOrder
+    ? checkoutMinOrder - itemsSubtotal
+    : 0;
 
   const mobileChargePercent = selectedMobileMethod?.chargePercentage || 0;
   const mobileCashOutFee = Math.round(baseTotalAmount * (mobileChargePercent / 100));
@@ -813,6 +855,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Enforce the merchant's minimum order rule (Settings -> Checkout).
+    if (minOrderShortfall > 0) return;
+
     const orderNum = '#' + Math.floor(100000 + Math.random() * 900000);
 
     const items: OrderItem[] = (cart || []).length > 0 ? (cart || []).map((c, i) => ({
@@ -831,7 +877,16 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       image: selectedProduct.image,
     }] : [];
 
-    const total = cart.length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0);
+    const total = (cart.length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0)) + giftWrapFee;
+
+    // Gift selections are attached to the order so the merchant can fulfil them
+    // and the invoice can hide the price when `hideInvoicePrice` is set.
+    const giftDetails = (wantGiftWrap || giftMessage.trim()) ? {
+      giftWrapping: wantGiftWrap,
+      giftWrapFee,
+      giftMessage: giftMessage.trim() || undefined,
+      hideInvoicePrice: !!giftConfig?.hideInvoicePrice,
+    } : undefined;
 
     const newOrder: Order = {
       id: `ord-${Date.now()}`,
@@ -855,6 +910,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       storeSlug: effectiveStoreSlug,
       merchantId: (merchant as any)?.id || '',
       items,
+      ...(giftDetails ? { notes: `GIFT: ${JSON.stringify(giftDetails)}` } : {}),
     };
 
     // ---------------------------------------------------------------------
@@ -2198,6 +2254,26 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 </div>
               </div>
 
+              {/* Merchant announcement (Settings -> Checkout) */}
+              {storeCheckoutConfig?.announcement && (
+                <div
+                  data-testid="store-announcement"
+                  className="rounded-xl px-3.5 py-2.5 bg-amber-500/10 border-amber-500/30 text-amber-300 text-xs font-medium"
+                >
+                  {storeCheckoutConfig.announcement}
+                </div>
+              )}
+
+              {/* Minimum order guard (Settings -> Checkout) */}
+              {minOrderShortfall > 0 && (
+                <div
+                  data-testid="store-min-order-notice"
+                  className="rounded-xl px-3.5 py-2.5 bg-red-500/10 border-red-500/30 text-red-300 text-xs font-medium"
+                >
+                  Minimum order is ৳{checkoutMinOrder.toLocaleString()}. Add ৳{minOrderShortfall.toLocaleString()} more to continue.
+                </div>
+              )}
+
               <form onSubmit={handleCheckoutSubmit} className="space-y-4">
                 <div className="space-y-3">
                   <div>
@@ -2235,6 +2311,43 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       <option value="Sylhet">Sylhet (Outside Dhaka - ৳150)</option>
                     </select>
                   </div>
+
+                  {/* Gift options (Settings -> Gift options) */}
+                  {(giftConfig?.enableGiftPackaging || giftConfig?.allowGiftMessage) && (
+                    <div className="pt-3 border-t border-slate-800 space-y-3">
+                      {giftConfig?.enableGiftPackaging && (
+                        <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-950 border-slate-800 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            data-testid="store-gift-wrap"
+                            checked={wantGiftWrap}
+                            onChange={(e) => setWantGiftWrap(e.target.checked)}
+                            className="w-4 h-4 accent-amber-400"
+                          />
+                          <span className="text-xs text-slate-100 font-semibold">
+                            Add gift wrapping
+                            {Number(giftConfig.giftPackagingFee) > 0
+                              ? ` (+\u09F3${Number(giftConfig.giftPackagingFee).toLocaleString()})`
+                              : ' (free)'}
+                          </span>
+                        </label>
+                      )}
+
+                      {giftConfig?.allowGiftMessage && (
+                        <div>
+                          <label className="block mb-1 font-bold text-xs text-slate-300">Gift Message</label>
+                          <textarea
+                            data-testid="store-gift-message"
+                            value={giftMessage}
+                            onChange={(e) => setGiftMessage(e.target.value)}
+                            rows={2}
+                            placeholder="Write a message for the recipient…"
+                            className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400 resize-none"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div>
                     <label className="block mb-1 font-bold text-xs text-slate-300">Detailed Address</label>
                     <input
@@ -2355,6 +2468,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         <span>Shipping Fee ({custCity || 'Dhaka'}):</span>
                         <span className="font-semibold text-slate-900">৳{shippingFee}</span>
                       </div>
+                      {giftWrapFee > 0 && (
+                        <div className="flex justify-between text-emerald-600 font-medium">
+                          <span>Gift Wrapping:</span>
+                          <span className="font-bold">+৳{giftWrapFee.toLocaleString()}</span>
+                        </div>
+                      )}
                       {mobileChargePercent > 0 && (
                         <div className="flex justify-between text-pink-600 font-medium">
                           <span>Cash-out / Charge Fee ({mobileChargePercent}%):</span>
@@ -2490,7 +2609,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 <div className="pt-2">
                   <button
                     type="submit"
-                    className="w-full py-3.5 bg-[#00D68F] text-slate-950 font-black rounded-xl text-sm hover:bg-[#00E699] transition cursor-pointer shadow-lg"
+                    data-testid="checkout-submit"
+                    disabled={minOrderShortfall > 0}
+                    className="w-full py-3.5 bg-[#00D68F] text-slate-950 font-black rounded-xl text-sm hover:bg-[#00E699] disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer shadow-lg"
                   >
                     Confirm Order • ৳{
                       ['bkash', 'nagad', 'rocket'].includes(payMethod)
@@ -2516,13 +2637,35 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             <h3 className="text-2xl font-black text-slate-900 tracking-tight mb-2">Order Placed Successfully!</h3>
 
             <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-3 mb-6">
+              {/* Invoice header text comes from Settings -> Invoices. */}
+              {storefrontMerchant.invoiceConfig?.title && (
+                <div
+                  data-testid="store-invoice-title"
+                  className="text-center text-sm font-black text-slate-900"
+                >
+                  {storefrontMerchant.invoiceConfig.title}
+                </div>
+              )}
               <p className="text-xs text-slate-600">
                 Thank you <strong className="text-slate-900">{custName}</strong>. Your order has been placed.
               </p>
               <div className="flex justify-center items-center gap-1.5 text-xs font-mono">
                 <span className="text-slate-500">ORDER:</span>
-                <span className="bg-[#00D68F] text-white px-2 py-0.5 rounded font-bold">{confirmedOrderNum}</span>
+                <span className="bg-[#00D68F] text-white px-2 py-0.5 rounded font-bold">{
+                  storefrontMerchant.invoiceConfig?.prefix
+                    ? `${storefrontMerchant.invoiceConfig.prefix}${confirmedOrderNum.replace('#', '')}`
+                    : confirmedOrderNum
+                }</span>
               </div>
+              {/* BIN on receipt (Settings -> NBR e-invoicing). */}
+              {storefrontMerchant.nbrConfig?.showBinOnReceipt && storefrontMerchant.nbrConfig?.binNumber && (
+                <div
+                  data-testid="store-receipt-bin"
+                  className="text-center text-[10px] text-slate-500 font-mono"
+                >
+                  BIN: {storefrontMerchant.nbrConfig.binNumber}
+                </div>
+              )}
             </div>
 
             <button

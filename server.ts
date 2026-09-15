@@ -2263,6 +2263,208 @@ app.post('/api/store/checkout-settings', async (req, res) => {
   }
 });
 
+// ── Gift options, invoice & NBR e-invoicing ──
+//
+// Same durability strategy as `checkoutConfig`: MongoDB is the source of truth
+// (stored as `giftConfig`, `invoiceConfig` and `nbrConfig` on the store record),
+// with an in-memory cache so values survive reads when MONGODB_URI is unset.
+
+/** Shared scalar coercers used by every store config sanitiser. */
+const cfgBool = (v: any, fb: any) => (typeof v === 'boolean' ? v : (typeof fb === 'boolean' ? fb : false));
+const cfgStr = (v: any, fb: any) => (typeof v === 'string' ? v : (typeof fb === 'string' ? fb : ''));
+
+/**
+ * Sanitise a numeric money/quantity field. An empty string or null means
+ * "unset" and is stored as null rather than NaN/0.
+ */
+function cfgNumOrNull(v: any, fb: any, { min = 0, max = Number.MAX_SAFE_INTEGER }: { min?: number; max?: number } = {}) {
+  if (v === null || v === '' || v === undefined) {
+    return v === undefined ? (typeof fb === 'number' ? fb : null) : null;
+  }
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < min || n > max) return typeof fb === 'number' ? fb : null;
+  return n;
+}
+
+/** Sanitise the gift options edited in Settings -> Gift options. */
+function normalizeGiftConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const enableGiftPackaging = cfgBool(src.enableGiftPackaging, fallback.enableGiftPackaging);
+
+  return {
+    enableGiftPackaging,
+    // A fee only makes sense while packaging is offered; ignore it otherwise.
+    giftPackagingFee: enableGiftPackaging ? cfgNumOrNull(src.giftPackagingFee, fallback.giftPackagingFee) : null,
+    allowGiftMessage: cfgBool(src.allowGiftMessage, fallback.allowGiftMessage),
+    hideInvoicePrice: cfgBool(src.hideInvoicePrice, fallback.hideInvoicePrice),
+  };
+}
+
+/** Sanitise the invoice branding/numbering edited in Settings -> Invoices. */
+function normalizeInvoiceConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const printFormat = cfgStr(src.printFormat, fallback.printFormat);
+
+  return {
+    showLogo: cfgBool(src.showLogo, fallback.showLogo),
+    title: cfgStr(src.title, fallback.title),
+    prefix: cfgStr(src.prefix, fallback.prefix),
+    vatRegistrationNumber: cfgStr(src.vatRegistrationNumber, fallback.vatRegistrationNumber),
+    footerNote: cfgStr(src.footerNote, fallback.footerNote),
+    printFormat: ['Standard A4 / PDF', '3-Inch Thermal Receipt Printer (POS)'].includes(printFormat)
+      ? printFormat
+      : (fallback.printFormat || 'Standard A4 / PDF'),
+  };
+}
+
+/** Sanitise the NBR VAT & e-invoicing integration settings. */
+function normalizeNbrConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    binNumber: cfgStr(src.binNumber, fallback.binNumber),
+    autoGenerateMushak: cfgBool(src.autoGenerateMushak, fallback.autoGenerateMushak),
+    // Secrets are stored but never echoed back to the client (see redactSecrets).
+    apiSecret: cfgStr(src.apiSecret, fallback.apiSecret),
+    showBinOnReceipt: cfgBool(src.showBinOnReceipt, fallback.showBinOnReceipt),
+  };
+}
+
+/**
+ * Generic per-store config store. Each entry declares how to read/write one key
+ * on the store record, so gift/invoice/NBR share the same tested code path as
+ * the checkout settings instead of duplicating the Mongo dance three times.
+ */
+const storeConfigs = {
+  gift: { key: 'giftConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeGiftConfig },
+  invoice: { key: 'invoiceConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInvoiceConfig },
+  nbr: { key: 'nbrConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeNbrConfig },
+} as const;
+
+type StoreConfigName = keyof typeof storeConfigs;
+
+async function readStoreConfig(name: StoreConfigName, storeRef: string) {
+  const { key, cache, normalize } = storeConfigs[name];
+  const slug = cleanStoreRef(storeRef);
+  const cached = cache.get(slug) || {};
+
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = ((record as any)?.[key] || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn(`[Server] read ${key} lookup warning:`, err?.message || err);
+  }
+
+  const merged = normalize(stored, cached);
+  cache.set(slug, merged);
+  return merged;
+}
+
+async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: any) {
+  const { key, cache, normalize } = storeConfigs[name];
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readStoreConfig(name, slug);
+  const next = normalize(patch, current);
+  cache.set(slug, next);
+
+  // 1. Durable copy on the store record.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: slug },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = { $set: { [key]: next, updated_at: new Date().toISOString() } };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Server] ${key} mongo persist warning:`, err?.message || err);
+  }
+
+  // 2. Best-effort mirror into the local payload file.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      (payload.merchant as any)[key] = next;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return next;
+}
+
+/** Never echo stored API secrets back to the browser. */
+function redactSecrets(config: Record<string, any>) {
+  if (!config) return config;
+  return { ...config, apiSecret: config.apiSecret ? '••' : '' };
+}
+
+const CONFIG_ROUTES: Array<{ name: StoreConfigName; path: string; label: string }> = [
+  { name: 'gift', path: 'gift-settings', label: 'Gift options' },
+  { name: 'invoice', path: 'invoice-settings', label: 'Invoice settings' },
+  { name: 'nbr', path: 'nbr-settings', label: 'NBR e-invoicing settings' },
+];
+
+for (const route of CONFIG_ROUTES) {
+  const { name, path, label } = route;
+  const field = storeConfigs[name].key;
+
+  /** GET /api/store/<config>-settings?store_slug=… */
+  app.get(`/api/store/${path}`, async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+      if (!storeRef) {
+        return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+      }
+      const config = await readStoreConfig(name, storeRef);
+      return res.status(200).json({
+        ok: true,
+        store_slug: storeRef,
+        [field]: name === 'nbr' ? redactSecrets(config) : config,
+      });
+    } catch (err: any) {
+      console.error(`[Server] GET /api/store/${path} error:`, err);
+      return res.status(200).json({ ok: false, error: err?.message || `Could not load ${label.toLowerCase()}.` });
+    }
+  });
+
+  /** POST /api/store/<config>-settings — save the settings. */
+  app.post(`/api/store/${path}`, async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const body = req.body || {};
+      const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+      if (!storeRef) {
+        return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+      }
+
+      const config = await writeStoreConfig(name, storeRef, body[field] || body);
+      return res.status(200).json({
+        ok: true,
+        store_slug: storeRef,
+        [field]: name === 'nbr' ? redactSecrets(config as any) : config,
+        message: `${label} saved.`,
+      });
+    } catch (err: any) {
+      console.error(`[Server] POST /api/store/${path} error:`, err);
+      return res.status(500).json({ ok: false, error: err?.message || `Could not save ${label.toLowerCase()}.` });
+    }
+  });
+}
+
 // Steadfast Courier 1-Click Booking API
 app.post('/api/courier/steadfast', async (req, res) => {
   try {

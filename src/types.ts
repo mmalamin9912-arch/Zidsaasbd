@@ -222,6 +222,53 @@ export interface MerchantProfile {
     customField1?: string;
     customField2?: string;
   };
+  /**
+   * Gift options, edited in Settings -> Gift options.
+   * Persisted on the store record as `giftConfig`.
+   */
+  giftConfig?: {
+    /** Offer gift wrapping as a checkout add-on. */
+    enableGiftPackaging?: boolean;
+    /** Extra charge (BDT) for gift wrapping. `null` means free. */
+    giftPackagingFee?: number | null;
+    /** Let the customer attach a personalised gift message. */
+    allowGiftMessage?: boolean;
+    /** Omit the price from the invoice packed with the parcel. */
+    hideInvoicePrice?: boolean;
+  };
+  /**
+   * Invoice branding & numbering, edited in Settings -> Invoices.
+   * Persisted on the store record as `invoiceConfig`.
+   */
+  invoiceConfig?: {
+    /** Print the store logo at the top of the invoice. */
+    showLogo?: boolean;
+    /** Header text / title printed on the invoice. */
+    title?: string;
+    /** Prefix prepended to generated invoice numbers. */
+    prefix?: string;
+    /** Business VAT / Tax registration number shown on the invoice. */
+    vatRegistrationNumber?: string;
+    /** Footer note, typically the return policy and support contact. */
+    footerNote?: string;
+    /** Paper format used when printing. */
+    printFormat?: 'Standard A4 / PDF' | '3-Inch Thermal Receipt Printer (POS)';
+  };
+  /**
+   * NBR VAT & E-Invoicing integration, edited in Settings -> NBR.
+   * Persisted on the store record as `nbrConfig`. `apiSecret` is write-only:
+   * the API returns a redacted placeholder rather than the stored value.
+   */
+  nbrConfig?: {
+    /** 9 or 13 digit Business Identification Number. */
+    binNumber?: string;
+    /** Automatically generate Mushak 6.3 e-invoices for each order. */
+    autoGenerateMushak?: boolean;
+    /** NBR API secret — never returned by the API once saved. */
+    apiSecret?: string;
+    /** Print the BIN on the customer receipt. */
+    showBinOnReceipt?: boolean;
+  };
   paymentMethods?: {
     cod: boolean;
     bkash: boolean;
