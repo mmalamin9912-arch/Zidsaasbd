@@ -640,7 +640,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // ── Merchant-configured checkout & gift options ──
   // These are owned by the merchant in Settings -> Checkout / Gift options and
   // stored server-side, so the storefront loads them rather than hard-coding.
-  const [giftConfig, setGiftConfig] = useState<MerchantProfile['giftConfig']>(storefrontMerchant.giftConfig);
+  const [giftConfig, setGiftConfig] = useState<MerchantProfile['giftOptions']>(
+    storefrontMerchant.giftOptions || storefrontMerchant.giftConfig
+  );
   const [storeCheckoutConfig, setStoreCheckoutConfig] = useState<MerchantProfile['checkoutConfig']>(storefrontMerchant.checkoutConfig);
 
   useEffect(() => {
@@ -656,7 +658,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         ]);
         const [giftData, checkoutData] = await Promise.all([giftRes.json(), checkoutRes.json()]);
         if (cancelled) return;
-        if (giftData?.ok && giftData.giftConfig) setGiftConfig(giftData.giftConfig);
+        const giftPayload = giftData?.giftOptions || giftData?.giftConfig;
+        if (giftData?.ok && giftPayload) setGiftConfig(giftPayload);
         if (checkoutData?.ok && checkoutData.checkoutConfig) setStoreCheckoutConfig(checkoutData.checkoutConfig);
       } catch (err) {
         console.warn('Storefront checkout config load warning:', err);
@@ -673,6 +676,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   const checkoutMinOrder = Number(storeCheckoutConfig?.minOrderAmount) || 0;
   const giftWrapFee = wantGiftWrap ? (Number(giftConfig?.giftPackagingFee) || 0) : 0;
+
+  // Resolve the gift toggles, canonical names first with legacy fallbacks.
+  const giftPackagingEnabled = giftConfig?.enableGiftPackaging === true;
+  const giftCardMessageAllowed = (giftConfig?.allowGiftCardMessage ?? giftConfig?.allowGiftMessage) === true;
+  const hideInvoicePriceTag = (giftConfig?.hideInvoicePriceTag ?? giftConfig?.hideInvoicePrice) === true;
 
   // Checkout Form State
   const [custName, setCustName] = useState('');
@@ -880,12 +888,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     const total = (cart.length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0)) + giftWrapFee;
 
     // Gift selections are attached to the order so the merchant can fulfil them
-    // and the invoice can hide the price when `hideInvoicePrice` is set.
+    // and the invoice can hide the price when `hideInvoicePriceTag` is set.
     const giftDetails = (wantGiftWrap || giftMessage.trim()) ? {
       giftWrapping: wantGiftWrap,
       giftWrapFee,
       giftMessage: giftMessage.trim() || undefined,
-      hideInvoicePrice: !!giftConfig?.hideInvoicePrice,
+      hideInvoicePriceTag,
     } : undefined;
 
     const newOrder: Order = {
@@ -2313,9 +2321,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   </div>
 
                   {/* Gift options (Settings -> Gift options) */}
-                  {(giftConfig?.enableGiftPackaging || giftConfig?.allowGiftMessage) && (
+                  {(giftPackagingEnabled || giftCardMessageAllowed) && (
                     <div className="pt-3 border-t border-slate-800 space-y-3">
-                      {giftConfig?.enableGiftPackaging && (
+                      {giftPackagingEnabled && (
                         <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-950 border-slate-800 cursor-pointer">
                           <input
                             type="checkbox"
@@ -2333,9 +2341,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         </label>
                       )}
 
-                      {giftConfig?.allowGiftMessage && (
+                      {giftCardMessageAllowed && (
                         <div>
-                          <label className="block mb-1 font-bold text-xs text-slate-300">Gift Message</label>
+                          <label className="block mb-1 font-bold text-xs text-slate-300">Gift Card Message</label>
                           <textarea
                             data-testid="store-gift-message"
                             value={giftMessage}
@@ -2657,6 +2665,15 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     : confirmedOrderNum
                 }</span>
               </div>
+              {/* Price tag hidden on the packed invoice (Settings -> Gift options). */}
+              {hideInvoicePriceTag && (
+                <div
+                  data-testid="store-price-hidden-notice"
+                  className="text-center text-[10px] text-emerald-600 font-medium"
+                >
+                  Price on the enclosed invoice has been hidden for gifting.
+                </div>
+              )}
               {/* BIN on receipt (Settings -> NBR e-invoicing). */}
               {storefrontMerchant.nbrConfig?.showBinOnReceipt && storefrontMerchant.nbrConfig?.binNumber && (
                 <div

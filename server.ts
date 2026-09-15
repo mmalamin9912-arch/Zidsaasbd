@@ -2266,7 +2266,7 @@ app.post('/api/store/checkout-settings', async (req, res) => {
 // ── Gift options, invoice & NBR e-invoicing ──
 //
 // Same durability strategy as `checkoutConfig`: MongoDB is the source of truth
-// (stored as `giftConfig`, `invoiceConfig` and `nbrConfig` on the store record),
+// (stored as `giftOptions`, `invoiceConfig` and `nbrConfig` on the store record),
 // with an in-memory cache so values survive reads when MONGODB_URI is unset.
 
 /** Shared scalar coercers used by every store config sanitiser. */
@@ -2286,7 +2286,29 @@ function cfgNumOrNull(v: any, fb: any, { min = 0, max = Number.MAX_SAFE_INTEGER 
   return n;
 }
 
-/** Sanitise the gift options edited in Settings -> Gift options. */
+/**
+ * Resolve a boolean that may arrive under either its current name or a legacy
+ * alias, so records written before a rename keep working.
+ */
+function cfgBoolAlias(src: any, fallback: any, keys: string[]) {
+  const pick = (o: any) => {
+    if (!o || typeof o !== 'object') return undefined;
+    for (const k of keys) if (typeof o[k] === 'boolean') return o[k];
+    return undefined;
+  };
+  const fresh = pick(src);
+  if (fresh !== undefined) return fresh;
+  const prev = pick(fallback);
+  return prev !== undefined ? prev : false;
+}
+
+/**
+ * Sanitise the gift options edited in Settings -> Gift options.
+ *
+ * Canonical field names are `enableGiftPackaging`, `allowGiftCardMessage` and
+ * `hideInvoicePriceTag`; the shorter `allowGiftMessage` / `hideInvoicePrice`
+ * spellings are accepted as legacy aliases for records saved before the rename.
+ */
 function normalizeGiftConfig(raw: any, fallback: Record<string, any> = {}) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const enableGiftPackaging = cfgBool(src.enableGiftPackaging, fallback.enableGiftPackaging);
@@ -2295,8 +2317,8 @@ function normalizeGiftConfig(raw: any, fallback: Record<string, any> = {}) {
     enableGiftPackaging,
     // A fee only makes sense while packaging is offered; ignore it otherwise.
     giftPackagingFee: enableGiftPackaging ? cfgNumOrNull(src.giftPackagingFee, fallback.giftPackagingFee) : null,
-    allowGiftMessage: cfgBool(src.allowGiftMessage, fallback.allowGiftMessage),
-    hideInvoicePrice: cfgBool(src.hideInvoicePrice, fallback.hideInvoicePrice),
+    allowGiftCardMessage: cfgBoolAlias(src, fallback, ['allowGiftCardMessage', 'allowGiftMessage']),
+    hideInvoicePriceTag: cfgBoolAlias(src, fallback, ['hideInvoicePriceTag', 'hideInvoicePrice']),
   };
 }
 
@@ -2335,24 +2357,45 @@ function normalizeNbrConfig(raw: any, fallback: Record<string, any> = {}) {
  * the checkout settings instead of duplicating the Mongo dance three times.
  */
 const storeConfigs = {
-  gift: { key: 'giftConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeGiftConfig },
+  gift: {
+    key: 'giftOptions',
+    // Records saved before the rename live under `giftConfig`. Read them too so
+    // existing merchants do not silently lose their settings.
+    legacyKeys: ['giftConfig'],
+    cache: new Map<string, Record<string, any>>(),
+    normalize: normalizeGiftConfig,
+  },
   invoice: { key: 'invoiceConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInvoiceConfig },
   nbr: { key: 'nbrConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeNbrConfig },
 } as const;
 
 type StoreConfigName = keyof typeof storeConfigs;
 
+/** Every storage key a config may live under, canonical first. */
+function configKeys(name: StoreConfigName): string[] {
+  const entry = storeConfigs[name] as { key: string; legacyKeys?: readonly string[] };
+  return [entry.key, ...(entry.legacyKeys || [])];
+}
+
 async function readStoreConfig(name: StoreConfigName, storeRef: string) {
-  const { key, cache, normalize } = storeConfigs[name];
+  const { cache, normalize } = storeConfigs[name];
+  const keys = configKeys(name);
   const slug = cleanStoreRef(storeRef);
   const cached = cache.get(slug) || {};
 
   let stored: Record<string, any> = {};
   try {
     const record = slug ? await resolveStoreRecordFlexible(slug) : null;
-    stored = ((record as any)?.[key] || {}) as Record<string, any>;
+    // Prefer the canonical key; fall back to a legacy one when it is absent.
+    for (const k of keys) {
+      const value = (record as any)?.[k];
+      if (value && typeof value === 'object') {
+        stored = value as Record<string, any>;
+        break;
+      }
+    }
   } catch (err: any) {
-    console.warn(`[Server] read ${key} lookup warning:`, err?.message || err);
+    console.warn(`[Server] read ${keys[0]} lookup warning:`, err?.message || err);
   }
 
   const merged = normalize(stored, cached);
@@ -2361,7 +2404,9 @@ async function readStoreConfig(name: StoreConfigName, storeRef: string) {
 }
 
 async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: any) {
-  const { key, cache, normalize } = storeConfigs[name];
+  const { cache, normalize } = storeConfigs[name];
+  const keys = configKeys(name);
+  const key = keys[0];
   const slug = cleanStoreRef(storeRef);
   if (!slug) return null;
 
@@ -2380,7 +2425,13 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
       ];
       if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
 
-      const update = { $set: { [key]: next, updated_at: new Date().toISOString() } };
+      // Write the canonical key and drop any legacy duplicate in one update.
+      const $set: Record<string, any> = { [key]: next, updated_at: new Date().toISOString() };
+      const $unset: Record<string, ''> = {};
+      for (const old of keys.slice(1)) $unset[old] = '';
+
+      const update: Record<string, any> = { $set };
+      if (Object.keys($unset).length) update.$unset = $unset;
       const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
         .updateOne({ $or: orClauses }, update);
 
@@ -2393,11 +2444,12 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
     console.warn(`[Server] ${key} mongo persist warning:`, err?.message || err);
   }
 
-  // 2. Best-effort mirror into the local payload file.
+  // 2. Best-effort mirror into the local payload file, keeping the legacy key
+  // in step so anything still reading it stays correct.
   try {
     const payload = await readStorePayload();
     if (payload.merchant) {
-      (payload.merchant as any)[key] = next;
+      for (const k of keys) (payload.merchant as any)[k] = next;
       await writeStorePayload(payload);
     }
   } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
@@ -2421,6 +2473,20 @@ for (const route of CONFIG_ROUTES) {
   const { name, path, label } = route;
   const field = storeConfigs[name].key;
 
+  /** Pull the config payload out of the request body, tolerating legacy keys. */
+  const extractConfig = (body: any) => {
+    if (!body || typeof body !== 'object') return {};
+    for (const k of [field, ...configKeys(name).slice(1)]) {
+      if (body[k] && typeof body[k] === 'object') return body[k];
+    }
+    // No wrapper object — treat the body itself as the config (ignoring the
+    // routing fields) so a flat payload still works.
+    const { store_slug, storeSlug, storeId, ...rest } = body;
+    return rest;
+  };
+
+  const serialize = (config: any) => (name === 'nbr' ? redactSecrets(config) : config);
+
   /** GET /api/store/<config>-settings?store_slug=… */
   app.get(`/api/store/${path}`, async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -2433,7 +2499,9 @@ for (const route of CONFIG_ROUTES) {
       return res.status(200).json({
         ok: true,
         store_slug: storeRef,
-        [field]: name === 'nbr' ? redactSecrets(config) : config,
+        // Return the config under both the canonical and any alias key so older
+        // clients keep working during the rename.
+        ...Object.fromEntries(configKeys(name).map((k) => [k, serialize(config)])),
       });
     } catch (err: any) {
       console.error(`[Server] GET /api/store/${path} error:`, err);
@@ -2441,8 +2509,8 @@ for (const route of CONFIG_ROUTES) {
     }
   });
 
-  /** POST /api/store/<config>-settings — save the settings. */
-  app.post(`/api/store/${path}`, async (req, res) => {
+  /** POST (and PUT) /api/store/<config>-settings — save the settings. */
+  const saveConfigHandler = async (req: any, res: any) => {
     res.setHeader('Content-Type', 'application/json');
     try {
       const body = req.body || {};
@@ -2451,19 +2519,61 @@ for (const route of CONFIG_ROUTES) {
         return res.status(400).json({ ok: false, error: 'store_slug is required.' });
       }
 
-      const config = await writeStoreConfig(name, storeRef, body[field] || body);
+      const config = await writeStoreConfig(name, storeRef, extractConfig(body));
       return res.status(200).json({
         ok: true,
         store_slug: storeRef,
-        [field]: name === 'nbr' ? redactSecrets(config as any) : config,
+        ...Object.fromEntries(configKeys(name).map((k) => [k, serialize(config)])),
         message: `${label} saved.`,
       });
     } catch (err: any) {
       console.error(`[Server] POST /api/store/${path} error:`, err);
       return res.status(500).json({ ok: false, error: err?.message || `Could not save ${label.toLowerCase()}.` });
     }
-  });
+  };
+
+  app.post(`/api/store/${path}`, saveConfigHandler);
+  app.put(`/api/store/${path}`, saveConfigHandler);
 }
+
+// Friendly REST alias for the gift options tab: /api/store/gift-options
+app.get('/api/store/gift-options', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    const giftOptions = await readStoreConfig('gift', storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, giftOptions, giftConfig: giftOptions });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/gift-options error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load gift options.' });
+  }
+});
+
+const saveGiftOptions = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const payload = body.giftOptions || body.giftConfig || body;
+    const giftOptions = await writeStoreConfig('gift', storeRef, payload);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      giftOptions,
+      giftConfig: giftOptions,
+      message: 'Gift options updated successfully.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/gift-options error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save gift options.' });
+  }
+};
+
+app.post('/api/store/gift-options', saveGiftOptions);
+app.put('/api/store/gift-options', saveGiftOptions);
 
 // Steadfast Courier 1-Click Booking API
 app.post('/api/courier/steadfast', async (req, res) => {

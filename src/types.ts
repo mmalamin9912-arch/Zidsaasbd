@@ -224,18 +224,30 @@ export interface MerchantProfile {
   };
   /**
    * Gift options, edited in Settings -> Gift options.
-   * Persisted on the store record as `giftConfig`.
+   * Persisted on the store record as `giftOptions`.
    */
-  giftConfig?: {
+  giftOptions?: {
     /** Offer gift wrapping as a checkout add-on. */
     enableGiftPackaging?: boolean;
     /** Extra charge (BDT) for gift wrapping. `null` means free. */
     giftPackagingFee?: number | null;
-    /** Let the customer attach a personalised gift message. */
-    allowGiftMessage?: boolean;
+    /** Let the customer attach a personalised gift card message. */
+    allowGiftCardMessage?: boolean;
     /** Omit the price from the invoice packed with the parcel. */
+    hideInvoicePriceTag?: boolean;
+    // ── Legacy spellings ──
+    // Accepted on read for records saved before the rename. The API always
+    // responds with the canonical names above.
+    /** @deprecated Use `allowGiftCardMessage`. */
+    allowGiftMessage?: boolean;
+    /** @deprecated Use `hideInvoicePriceTag`. */
     hideInvoicePrice?: boolean;
   };
+  /**
+   * @deprecated Legacy storage key for {@link giftOptions}. Still read by the
+   * API so merchants who saved settings before the rename keep them.
+   */
+  giftConfig?: MerchantProfile['giftOptions'];
   /**
    * Invoice branding & numbering, edited in Settings -> Invoices.
    * Persisted on the store record as `invoiceConfig`.

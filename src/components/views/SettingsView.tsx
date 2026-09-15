@@ -109,12 +109,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [checkoutNotice, setCheckoutNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // Gift Tab State — seeded from the store record, saved via the API below.
-  const [enableGiftWrap, setEnableGiftWrap] = useState(merchant?.giftConfig?.enableGiftPackaging ?? false);
+  const merchantGiftOptions = merchant?.giftOptions || merchant?.giftConfig;
+  const [enableGiftWrap, setEnableGiftWrap] = useState(merchantGiftOptions?.enableGiftPackaging ?? false);
   const [giftWrapFee, setGiftWrapFee] = useState(
-    merchant?.giftConfig?.giftPackagingFee != null ? String(merchant.giftConfig.giftPackagingFee) : ''
+    merchantGiftOptions?.giftPackagingFee != null ? String(merchantGiftOptions.giftPackagingFee) : ''
   );
-  const [allowGiftMessage, setAllowGiftMessage] = useState(merchant?.giftConfig?.allowGiftMessage ?? false);
-  const [hidePriceTag, setHidePriceTag] = useState(merchant?.giftConfig?.hideInvoicePrice ?? false);
+  const [allowGiftMessage, setAllowGiftMessage] = useState(
+    merchantGiftOptions?.allowGiftCardMessage ?? merchantGiftOptions?.allowGiftMessage ?? false
+  );
+  const [hidePriceTag, setHidePriceTag] = useState(
+    merchantGiftOptions?.hideInvoicePriceTag ?? merchantGiftOptions?.hideInvoicePrice ?? false
+  );
 
   // Invoice Tab State
   const [showInvoiceLogo, setShowInvoiceLogo] = useState(merchant?.invoiceConfig?.showLogo ?? true);
@@ -454,10 +459,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   /** Apply a gift/invoice/NBR payload to the matching form fields. */
   const applyGiftConfig = useCallback((cfg: any) => {
     if (!cfg || typeof cfg !== 'object') return;
+    // Canonical names first, then the legacy spellings.
+    const cardMessage = cfg.allowGiftCardMessage ?? cfg.allowGiftMessage;
+    const hidePrice = cfg.hideInvoicePriceTag ?? cfg.hideInvoicePrice;
+
     setEnableGiftWrap(cfg.enableGiftPackaging === true);
     setGiftWrapFee(cfg.giftPackagingFee != null && cfg.giftPackagingFee !== '' ? String(cfg.giftPackagingFee) : '');
-    setAllowGiftMessage(cfg.allowGiftMessage === true);
-    setHidePriceTag(cfg.hideInvoicePrice === true);
+    setAllowGiftMessage(cardMessage === true);
+    setHidePriceTag(hidePrice === true);
   }, []);
 
   const applyInvoiceConfig = useCallback((cfg: any) => {
@@ -487,7 +496,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   useEffect(() => {
     if (!storeRef) return;
     const endpointByTab: Record<string, { url: string; key: string; apply: (cfg: any) => void }> = {
-      settings_gift: { url: '/api/store/gift-settings', key: 'giftConfig', apply: applyGiftConfig },
+      settings_gift: { url: '/api/store/gift-options', key: 'giftOptions', apply: applyGiftConfig },
       settings_invoices: { url: '/api/store/invoice-settings', key: 'invoiceConfig', apply: applyInvoiceConfig },
       settings_nbr: { url: '/api/store/nbr-settings', key: 'nbrConfig', apply: applyNbrConfig },
     };
@@ -569,10 +578,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // matching `/api/store/<config>-settings` endpoint (MongoDB is the source of
   // truth) and re-seed the form from the server's normalised response.
 
-  type RemoteConfigName = 'giftConfig' | 'invoiceConfig' | 'nbrConfig';
+  type RemoteConfigName = 'giftOptions' | 'invoiceConfig' | 'nbrConfig';
 
   const configEndpoints: Record<RemoteConfigName, string> = {
-    giftConfig: '/api/store/gift-settings',
+    giftOptions: '/api/store/gift-options',
     invoiceConfig: '/api/store/invoice-settings',
     nbrConfig: '/api/store/nbr-settings',
   };
@@ -626,18 +635,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       return;
     }
 
-    const saved = await saveRemoteConfig('giftConfig', {
+    const saved = await saveRemoteConfig('giftOptions', {
       enableGiftPackaging: enableGiftWrap,
       giftPackagingFee: enableGiftWrap && trimmedFee !== '' ? Number(trimmedFee) : null,
-      allowGiftMessage,
-      hideInvoicePrice: hidePriceTag,
+      allowGiftCardMessage: allowGiftMessage,
+      hideInvoicePriceTag: hidePriceTag,
     }, 'Gift options');
 
     if (saved) {
       setEnableGiftWrap(!!saved.enableGiftPackaging);
       setGiftWrapFee(saved.giftPackagingFee != null ? String(saved.giftPackagingFee) : '');
-      setAllowGiftMessage(!!saved.allowGiftMessage);
-      setHidePriceTag(!!saved.hideInvoicePrice);
+      setAllowGiftMessage(!!(saved.allowGiftCardMessage ?? saved.allowGiftMessage));
+      setHidePriceTag(!!(saved.hideInvoicePriceTag ?? saved.hideInvoicePrice));
     }
   };
 
