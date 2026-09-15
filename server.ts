@@ -2303,6 +2303,22 @@ function cfgBoolAlias(src: any, fallback: any, keys: string[]) {
 }
 
 /**
+ * Resolve a string that may arrive under either its current name or a legacy
+ * alias, so records written before a rename keep working.
+ */
+function cfgStrAlias(src: any, fallback: any, keys: string[]) {
+  const pick = (o: any) => {
+    if (!o || typeof o !== 'object') return undefined;
+    for (const k of keys) if (typeof o[k] === 'string') return o[k];
+    return undefined;
+  };
+  const fresh = pick(src);
+  if (fresh !== undefined) return fresh;
+  const prev = pick(fallback);
+  return prev !== undefined ? prev : '';
+}
+
+/**
  * Sanitise the gift options edited in Settings -> Gift options.
  *
  * Canonical field names are `enableGiftPackaging`, `allowGiftCardMessage` and
@@ -2342,21 +2358,40 @@ function normalizeInvoiceConfig(raw: any, fallback: Record<string, any> = {}) {
 /**
  * Sanitise the tax settings edited in Settings -> Tax.
  *
- * `defaultTaxRate` is a percentage; it is clamped to 0-100 so a typo cannot
+ * `standardTaxRate` is a percentage; it is clamped to 0-100 so a typo cannot
  * produce an absurd invoice.
+ *
+ * Canonical field names are `vatRegistrationNumber`, `standardTaxRate`,
+ * `isTaxInclusive`, `applyTaxOnShipping` and `showTaxBreakdown`. The earlier
+ * `vatNumber` / `defaultTaxRate` / `includeTaxInPrices` / `applyTaxToDelivery`
+ * spellings are accepted as legacy aliases for records saved before the rename.
  */
 function normalizeTaxConfig(raw: any, fallback: Record<string, any> = {}) {
   const src = raw && typeof raw === 'object' ? raw : {};
 
-  let defaultTaxRate = cfgNumOrNull(src.defaultTaxRate, fallback.defaultTaxRate, { min: 0, max: 100 });
+  const pickNum = (keys: string[]) => {
+    for (const o of [src, fallback]) {
+      if (!o || typeof o !== 'object') continue;
+      for (const k of keys) {
+        if (o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k];
+      }
+    }
+    return undefined;
+  };
+
+  let standardTaxRate = cfgNumOrNull(
+    pickNum(['standardTaxRate', 'defaultTaxRate']),
+    typeof fallback.standardTaxRate === 'number' ? fallback.standardTaxRate : fallback.defaultTaxRate,
+    { min: 0, max: 100 },
+  );
   // A blank rate means "no tax configured"; anything else must be within range.
-  if (defaultTaxRate == null) defaultTaxRate = 0;
+  if (standardTaxRate == null) standardTaxRate = 0;
 
   return {
-    vatNumber: cfgStr(src.vatNumber, fallback.vatNumber),
-    defaultTaxRate,
-    includeTaxInPrices: cfgBool(src.includeTaxInPrices, fallback.includeTaxInPrices),
-    applyTaxToDelivery: cfgBool(src.applyTaxToDelivery, fallback.applyTaxToDelivery),
+    vatRegistrationNumber: cfgStrAlias(src, fallback, ['vatRegistrationNumber', 'vatNumber']),
+    standardTaxRate,
+    isTaxInclusive: cfgBoolAlias(src, fallback, ['isTaxInclusive', 'includeTaxInPrices']),
+    applyTaxOnShipping: cfgBoolAlias(src, fallback, ['applyTaxOnShipping', 'applyTaxToDelivery']),
     showTaxBreakdown: cfgBool(src.showTaxBreakdown, fallback.showTaxBreakdown),
   };
 }

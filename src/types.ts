@@ -253,16 +253,27 @@ export interface MerchantProfile {
    * Persisted on the store record as `taxConfig`.
    */
   taxConfig?: {
-    /** Business VAT / TIN registration number shown on invoices. */
-    vatNumber?: string;
-    /** Default VAT percentage applied to orders (0-100). */
-    defaultTaxRate?: number;
-    /** Product prices already include VAT (true) or VAT is added on top. */
-    includeTaxInPrices?: boolean;
+    /** Business VAT / TIN registration number shown on tax documents. */
+    vatRegistrationNumber?: string;
+    /** Standard VAT percentage applied to orders (0-100). */
+    standardTaxRate?: number;
+    /** Listed prices already include VAT (true) or VAT is added on top. */
+    isTaxInclusive?: boolean;
     /** Also charge VAT on delivery/shipping fees. */
-    applyTaxToDelivery?: boolean;
+    applyTaxOnShipping?: boolean;
     /** Show the Net + VAT = Total breakdown on checkout and receipts. */
     showTaxBreakdown?: boolean;
+    // ── Legacy spellings ──
+    // Accepted on read for records saved before the rename. The API always
+    // responds with the canonical names above.
+    /** @deprecated Use `vatRegistrationNumber`. */
+    vatNumber?: string;
+    /** @deprecated Use `standardTaxRate`. */
+    defaultTaxRate?: number;
+    /** @deprecated Use `isTaxInclusive`. */
+    includeTaxInPrices?: boolean;
+    /** @deprecated Use `applyTaxOnShipping`. */
+    applyTaxToDelivery?: boolean;
   };
   /**
    * Inventory & order properties, edited in Settings -> Orders and products

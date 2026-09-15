@@ -746,13 +746,16 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   // ── VAT (Settings -> Tax) ──────────────────────────────
   //
-  // `includeTaxInPrices` decides whether the listed product prices already
-  // contain the tax or whether it is added on top. `applyTaxToDelivery` extends
-  // the taxable base to the shipping and gift-wrapping charges.
-  const taxPercent = Number(taxConfig?.defaultTaxRate) || 0;
-  const taxIncludedInPrices = taxConfig?.includeTaxInPrices === true;
-  const taxOnDelivery = taxConfig?.applyTaxToDelivery === true;
+  // `isTaxInclusive` decides whether the listed product prices already contain
+  // the tax or whether it is added on top. `applyTaxOnShipping` extends the
+  // taxable base to the shipping and gift-wrapping charges.
+  // Canonical spec names first, then the legacy spellings so a store saved
+  // before the rename still calculates correctly.
+  const taxPercent = Number(taxConfig?.standardTaxRate ?? taxConfig?.defaultTaxRate) || 0;
+  const taxIncludedInPrices = (taxConfig?.isTaxInclusive ?? taxConfig?.includeTaxInPrices) === true;
+  const taxOnDelivery = (taxConfig?.applyTaxOnShipping ?? taxConfig?.applyTaxToDelivery) === true;
   const showTaxBreakdown = taxConfig?.showTaxBreakdown === true;
+  const taxRegistrationNumber = taxConfig?.vatRegistrationNumber || taxConfig?.vatNumber || '';
 
   // Charges that sit alongside the goods (delivery, gift wrap).
   const extraCharges = shippingFee + giftWrapFee;
@@ -1006,7 +1009,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       taxBDT: taxAmount,
       netBeforeTaxBDT: netBeforeTax,
       taxInclusive: taxIncludedInPrices,
-      vatNumber: taxConfig?.vatNumber || undefined,
+      vatNumber: taxRegistrationNumber || undefined,
       ...(giftDetails ? { notes: `GIFT: ${JSON.stringify(giftDetails)}` } : {}),
     };
 
@@ -2809,9 +2812,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     <span>Total:</span>
                     <span className="font-mono">৳{baseTotalAmount.toLocaleString()}</span>
                   </div>
-                  {taxConfig?.vatNumber && (
+                  {taxRegistrationNumber && (
                     <div className="text-[10px] text-slate-500 font-mono pt-0.5">
-                      VAT Reg: {taxConfig.vatNumber}
+                      VAT Reg: {taxRegistrationNumber}
                     </div>
                   )}
                 </div>

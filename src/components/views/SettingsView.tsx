@@ -165,12 +165,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   // Tax Tab State — seeded from the store record, saved via the API below.
   const taxCfg = merchant?.taxConfig;
-  const [vatNumber, setVatNumber] = useState(taxCfg?.vatNumber || '');
-  const [taxRate, setTaxRate] = useState(
-    taxCfg?.defaultTaxRate != null ? String(taxCfg.defaultTaxRate) : '15'
+  const [vatNumber, setVatNumber] = useState(
+    taxCfg?.vatRegistrationNumber || taxCfg?.vatNumber || ''
   );
-  const [includeTaxInPrices, setIncludeTaxInPrices] = useState(taxCfg?.includeTaxInPrices ?? true);
-  const [taxOnDelivery, setTaxOnDelivery] = useState(taxCfg?.applyTaxToDelivery ?? false);
+  const [taxRate, setTaxRate] = useState(
+    taxCfg?.standardTaxRate != null
+      ? String(taxCfg.standardTaxRate)
+      : (taxCfg?.defaultTaxRate != null ? String(taxCfg.defaultTaxRate) : '15')
+  );
+  const [includeTaxInPrices, setIncludeTaxInPrices] = useState(
+    taxCfg?.isTaxInclusive ?? taxCfg?.includeTaxInPrices ?? true
+  );
+  const [taxOnDelivery, setTaxOnDelivery] = useState(
+    taxCfg?.applyTaxOnShipping ?? taxCfg?.applyTaxToDelivery ?? false
+  );
   const [separateTaxBreakdown, setSeparateTaxBreakdown] = useState(taxCfg?.showTaxBreakdown ?? true);
 
   // NBR Integration State — seeded from the store record, saved via the API below.
@@ -506,10 +514,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const applyTaxConfig = useCallback((cfg: any) => {
     if (!cfg || typeof cfg !== 'object') return;
-    setVatNumber(typeof cfg.vatNumber === 'string' ? cfg.vatNumber : '');
-    setTaxRate(cfg.defaultTaxRate != null && cfg.defaultTaxRate !== '' ? String(cfg.defaultTaxRate) : '0');
-    setIncludeTaxInPrices(cfg.includeTaxInPrices !== false);
-    setTaxOnDelivery(cfg.applyTaxToDelivery === true);
+    // Canonical names first, then the legacy spellings.
+    const vat = cfg.vatRegistrationNumber ?? cfg.vatNumber;
+    const rate = cfg.standardTaxRate ?? cfg.defaultTaxRate;
+    const inclusive = cfg.isTaxInclusive ?? cfg.includeTaxInPrices;
+    const onShipping = cfg.applyTaxOnShipping ?? cfg.applyTaxToDelivery;
+
+    setVatNumber(typeof vat === 'string' ? vat : '');
+    setTaxRate(rate != null && rate !== '' ? String(rate) : '0');
+    setIncludeTaxInPrices(inclusive !== false);
+    setTaxOnDelivery(onShipping === true);
     setSeparateTaxBreakdown(cfg.showTaxBreakdown !== false);
   }, []);
 
@@ -720,10 +734,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
 
     const saved = await saveRemoteConfig('taxConfig', {
-      vatNumber: vatNumber.trim(),
-      defaultTaxRate: rate,
-      includeTaxInPrices,
-      applyTaxToDelivery: taxOnDelivery,
+      vatRegistrationNumber: vatNumber.trim(),
+      standardTaxRate: rate,
+      isTaxInclusive: includeTaxInPrices,
+      applyTaxOnShipping: taxOnDelivery,
       showTaxBreakdown: separateTaxBreakdown,
     }, 'Tax settings');
 
