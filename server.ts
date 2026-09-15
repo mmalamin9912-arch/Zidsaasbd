@@ -2339,6 +2339,34 @@ function normalizeInvoiceConfig(raw: any, fallback: Record<string, any> = {}) {
   };
 }
 
+/**
+ * Sanitise the inventory / order properties edited in Settings -> Properties.
+ *
+ * Quantity guards are stored as null when unset so "no limit" is distinct from
+ * a limit of zero.
+ */
+function normalizeInventoryConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  const minOrderQty = cfgNumOrNull(src.minOrderQty, fallback.minOrderQty, { min: 1 });
+  // A maximum below the minimum is contradictory — fall back rather than store it.
+  const rawMax = cfgNumOrNull(src.maxOrderQty, fallback.maxOrderQty, { min: 1 });
+  const maxOrderQty = (rawMax != null && minOrderQty != null && rawMax < minOrderQty)
+    ? (typeof fallback.maxOrderQty === 'number' ? fallback.maxOrderQty : null)
+    : rawMax;
+
+  return {
+    hideOutOfStock: cfgBool(src.hideOutOfStock, fallback.hideOutOfStock),
+    allowPreOrder: cfgBool(src.allowPreOrder, fallback.allowPreOrder),
+    lowStockThreshold: cfgNumOrNull(src.lowStockThreshold, fallback.lowStockThreshold, { min: 0 }),
+    minOrderQty,
+    maxOrderQty,
+    unpaidAutoCancelHours: cfgNumOrNull(src.unpaidAutoCancelHours, fallback.unpaidAutoCancelHours, { min: 0 }),
+    skuPrefix: cfgStr(src.skuPrefix, fallback.skuPrefix),
+    enableAiRecommendations: cfgBool(src.enableAiRecommendations, fallback.enableAiRecommendations),
+  };
+}
+
 /** Sanitise the NBR VAT & e-invoicing integration settings. */
 function normalizeNbrConfig(raw: any, fallback: Record<string, any> = {}) {
   const src = raw && typeof raw === 'object' ? raw : {};
@@ -2367,6 +2395,7 @@ const storeConfigs = {
   },
   invoice: { key: 'invoiceConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInvoiceConfig },
   nbr: { key: 'nbrConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeNbrConfig },
+  inventory: { key: 'inventoryConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInventoryConfig },
 } as const;
 
 type StoreConfigName = keyof typeof storeConfigs;
@@ -2467,6 +2496,7 @@ const CONFIG_ROUTES: Array<{ name: StoreConfigName; path: string; label: string 
   { name: 'gift', path: 'gift-settings', label: 'Gift options' },
   { name: 'invoice', path: 'invoice-settings', label: 'Invoice settings' },
   { name: 'nbr', path: 'nbr-settings', label: 'NBR e-invoicing settings' },
+  { name: 'inventory', path: 'inventory-settings', label: 'Inventory & order properties' },
 ];
 
 for (const route of CONFIG_ROUTES) {
@@ -2574,6 +2604,44 @@ const saveGiftOptions = async (req: any, res: any) => {
 
 app.post('/api/store/gift-options', saveGiftOptions);
 app.put('/api/store/gift-options', saveGiftOptions);
+
+// Friendly REST alias for the Orders & products properties panel.
+app.get('/api/store/inventory-properties', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    const inventoryConfig = await readStoreConfig('inventory', storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, inventoryConfig });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/inventory-properties error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load inventory properties.' });
+  }
+});
+
+const saveInventoryProperties = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const payload = body.inventoryConfig || body.inventory || body;
+    const inventoryConfig = await writeStoreConfig('inventory', storeRef, payload);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      inventoryConfig,
+      message: 'Inventory & order properties saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/inventory-properties error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save inventory properties.' });
+  }
+};
+
+app.post('/api/store/inventory-properties', saveInventoryProperties);
+app.put('/api/store/inventory-properties', saveInventoryProperties);
 
 // Steadfast Courier 1-Click Booking API
 app.post('/api/courier/steadfast', async (req, res) => {

@@ -478,9 +478,20 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         ? liveStoreData.categories
         : []);
 
+  // Inventory rules (Settings -> Orders and products properties).
+  const [inventoryConfig, setInventoryConfig] = useState<MerchantProfile['inventoryConfig']>(storefrontMerchant.inventoryConfig);
+  const hideOutOfStock = inventoryConfig?.hideOutOfStock === true;
+  const merchantAllowPreOrder = inventoryConfig?.allowPreOrder === true;
+  const minOrderQty = Number(inventoryConfig?.minOrderQty) || 1;
+  const maxOrderQty = Number(inventoryConfig?.maxOrderQty) || 0;
+
   const allActiveProducts = (storefrontProducts || []).filter(p => {
     const status = (p.status || 'active').toLowerCase();
-    return status === 'active' || status === 'published';
+    if (status !== 'active' && status !== 'published') return false;
+    // Hide sold-out products unless the merchant takes pre-orders.
+    const stock = Number(p.stock ?? 0);
+    if (hideOutOfStock && stock <= 0 && !merchantAllowPreOrder) return false;
+    return true;
   });
 
   // Dynamically compute category product counts based on retrieved Supabase products
@@ -645,6 +656,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   );
   const [storeCheckoutConfig, setStoreCheckoutConfig] = useState<MerchantProfile['checkoutConfig']>(storefrontMerchant.checkoutConfig);
 
+
   useEffect(() => {
     const ref = String(effectiveStoreSlug || '').split(':')[0].trim();
     if (!ref) return;
@@ -653,14 +665,19 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     const load = async () => {
       try {
         const [giftRes, checkoutRes] = await Promise.all([
-          fetch(`/api/store/gift-settings?store_slug=${encodeURIComponent(ref)}`),
+          fetch(`/api/store/gift-options?store_slug=${encodeURIComponent(ref)}`),
           fetch(`/api/store/checkout-settings?store_slug=${encodeURIComponent(ref)}`),
         ]);
-        const [giftData, checkoutData] = await Promise.all([giftRes.json(), checkoutRes.json()]);
+        const [giftData, checkoutData, inventoryData] = await Promise.all([
+          giftRes.json(),
+          checkoutRes.json(),
+          fetch(`/api/store/inventory-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
+        ]);
         if (cancelled) return;
         const giftPayload = giftData?.giftOptions || giftData?.giftConfig;
         if (giftData?.ok && giftPayload) setGiftConfig(giftPayload);
         if (checkoutData?.ok && checkoutData.checkoutConfig) setStoreCheckoutConfig(checkoutData.checkoutConfig);
+        if (inventoryData?.ok && inventoryData.inventoryConfig) setInventoryConfig(inventoryData.inventoryConfig);
       } catch (err) {
         console.warn('Storefront checkout config load warning:', err);
       }
@@ -675,6 +692,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [giftMessage, setGiftMessage] = useState('');
 
   const checkoutMinOrder = Number(storeCheckoutConfig?.minOrderAmount) || 0;
+
+  /** True when the cart violates the merchant's per-line quantity limits. */
+  const qtyLimitBreached = cart.some(
+    item => item.quantity < minOrderQty || (maxOrderQty > 0 && item.quantity > maxOrderQty)
+  );
   const giftWrapFee = wantGiftWrap ? (Number(giftConfig?.giftPackagingFee) || 0) : 0;
 
   // Resolve the gift toggles, canonical names first with legacy fallbacks.
@@ -836,17 +858,25 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     setIsCartOpen(false);
   };
 
+  /** Clamp a quantity to the merchant's configured min/max (max 0 = unlimited). */
+  const clampQty = (qty: number) => {
+    const floor = Math.max(1, minOrderQty);
+    const ceiling = maxOrderQty > 0 ? Math.max(floor, maxOrderQty) : Number.MAX_SAFE_INTEGER;
+    return Math.min(Math.max(qty, floor), ceiling);
+  };
+
   const handleAddToCart = (product: Product, variant = 'Default') => {
     setCart(prev => {
       const next = prev || [];
       const existing = next.find(item => item.product.id === product.id && item.variant === variant);
       if (existing) {
         return next.map(item => item.product.id === product.id && item.variant === variant
-          ? { ...item, quantity: item.quantity + 1 }
+          ? { ...item, quantity: clampQty(item.quantity + 1) }
           : item
         );
       }
-      return [...next, { product, quantity: 1, variant }];
+      // A freshly added line starts at the minimum order quantity.
+      return [...next, { product, quantity: clampQty(1), variant }];
     });
     setIsCartOpen(true);
   };
@@ -854,7 +884,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const handleUpdateCartQty = (productId: string, delta: number) => {
     setCart(prev => (prev || []).map(item => {
       if (item.product.id === productId) {
-        const newQty = item.quantity + delta;
+        const newQty = clampQty(item.quantity + delta);
         return newQty > 0 ? { ...item, quantity: newQty } : null;
       }
       return item;
@@ -866,6 +896,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
     // Enforce the merchant's minimum order rule (Settings -> Checkout).
     if (minOrderShortfall > 0) return;
+
+    // Enforce per-line quantity limits (Settings -> Orders and products
+    // properties). The cart is clamped on entry, but a limit tightened after
+    // items were added must still block the order.
+    if (cart.some(item => item.quantity < minOrderQty || (maxOrderQty > 0 && item.quantity > maxOrderQty))) {
+      setCart(prev => (prev || []).map(item => ({ ...item, quantity: clampQty(item.quantity) })));
+      return;
+    }
 
     const orderNum = '#' + Math.floor(100000 + Math.random() * 900000);
 
@@ -2272,6 +2310,17 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 </div>
               )}
 
+              {/* Quantity limit guard (Settings -> Properties) */}
+              {qtyLimitBreached && (
+                <div
+                  data-testid="store-qty-limit-notice"
+                  className="rounded-xl px-3.5 py-2.5 bg-red-500/10 border-red-500/30 text-red-300 text-xs font-medium"
+                >
+                  Quantity limits apply: minimum {minOrderQty} per item
+                  {maxOrderQty > 0 ? `, maximum ${maxOrderQty} per order` : ''}. Please adjust your cart.
+                </div>
+              )}
+
               {/* Minimum order guard (Settings -> Checkout) */}
               {minOrderShortfall > 0 && (
                 <div
@@ -2618,7 +2667,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   <button
                     type="submit"
                     data-testid="checkout-submit"
-                    disabled={minOrderShortfall > 0}
+                    disabled={minOrderShortfall > 0 || qtyLimitBreached}
                     className="w-full py-3.5 bg-[#00D68F] text-slate-950 font-black rounded-xl text-sm hover:bg-[#00E699] disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer shadow-lg"
                   >
                     Confirm Order • ৳{

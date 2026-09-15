@@ -129,17 +129,29 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [invoiceFooterNote, setInvoiceFooterNote] = useState(merchant?.invoiceConfig?.footerNote || '');
   const [printFormat, setPrintFormat] = useState(merchant?.invoiceConfig?.printFormat || 'Standard A4 / PDF');
 
-  // Properties Tab State
-  const [hideOutOfStock, setHideOutOfStock] = useState(false);
-  const [allowPreOrder, setAllowPreOrder] = useState(false);
-  const [lowStockThreshold, setLowStockThreshold] = useState('');
-  const [minQtyPerProduct, setMinQtyPerProduct] = useState('');
-  const [maxQtyPerOrder, setMaxQtyPerOrder] = useState('');
-  const [autoCancelHours, setAutoCancelHours] = useState('');
-  const [skuPrefix, setSkuPrefix] = useState('');
+  // Properties Tab State — seeded from the store record, saved via the API below.
+  const invCfg = merchant?.inventoryConfig;
+  const [hideOutOfStock, setHideOutOfStock] = useState(invCfg?.hideOutOfStock ?? false);
+  const [allowPreOrder, setAllowPreOrder] = useState(invCfg?.allowPreOrder ?? false);
+  const [lowStockThreshold, setLowStockThreshold] = useState(
+    invCfg?.lowStockThreshold != null ? String(invCfg.lowStockThreshold) : ''
+  );
+  const [minQtyPerProduct, setMinQtyPerProduct] = useState(
+    invCfg?.minOrderQty != null ? String(invCfg.minOrderQty) : ''
+  );
+  const [maxQtyPerOrder, setMaxQtyPerOrder] = useState(
+    invCfg?.maxOrderQty != null ? String(invCfg.maxOrderQty) : ''
+  );
+  const [autoCancelHours, setAutoCancelHours] = useState(
+    invCfg?.unpaidAutoCancelHours != null ? String(invCfg.unpaidAutoCancelHours) : ''
+  );
+  const [skuPrefix, setSkuPrefix] = useState(invCfg?.skuPrefix || '');
 
-  // AI Recommendations
-  const [aiRecommendationsEnabled, setAiRecommendationsEnabled] = useState(merchant.themeConfig?.aiRecommendationsEnabled || false);
+  // AI Recommendations — persisted on inventoryConfig, with the older
+  // themeConfig flag honoured as a fallback for stores that set it there.
+  const [aiRecommendationsEnabled, setAiRecommendationsEnabled] = useState(
+    invCfg?.enableAiRecommendations ?? merchant.themeConfig?.aiRecommendationsEnabled ?? false
+  );
 
   // Shipping & constraints tab state
   const [enableCod, setEnableCod] = useState(true);
@@ -488,6 +500,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setNbrSecretStored(Boolean(cfg.apiSecret));
   }, []);
 
+  const applyInventoryConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setHideOutOfStock(cfg.hideOutOfStock === true);
+    setAllowPreOrder(cfg.allowPreOrder === true);
+    setLowStockThreshold(cfg.lowStockThreshold != null && cfg.lowStockThreshold !== '' ? String(cfg.lowStockThreshold) : '');
+    setMinQtyPerProduct(cfg.minOrderQty != null && cfg.minOrderQty !== '' ? String(cfg.minOrderQty) : '');
+    setMaxQtyPerOrder(cfg.maxOrderQty != null && cfg.maxOrderQty !== '' ? String(cfg.maxOrderQty) : '');
+    setAutoCancelHours(cfg.unpaidAutoCancelHours != null && cfg.unpaidAutoCancelHours !== '' ? String(cfg.unpaidAutoCancelHours) : '');
+    setSkuPrefix(typeof cfg.skuPrefix === 'string' ? cfg.skuPrefix : '');
+    setAiRecommendationsEnabled(cfg.enableAiRecommendations === true);
+  }, []);
+
   //
   // Load the saved gift / invoice / NBR settings when their tab is opened, so
   // the form always reflects what is actually stored on the server rather than
@@ -499,6 +523,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       settings_gift: { url: '/api/store/gift-options', key: 'giftOptions', apply: applyGiftConfig },
       settings_invoices: { url: '/api/store/invoice-settings', key: 'invoiceConfig', apply: applyInvoiceConfig },
       settings_nbr: { url: '/api/store/nbr-settings', key: 'nbrConfig', apply: applyNbrConfig },
+      settings_properties: { url: '/api/store/inventory-properties', key: 'inventoryConfig', apply: applyInventoryConfig },
     };
 
     const target = endpointByTab[activeSubTab];
@@ -516,7 +541,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     })();
 
     return () => { cancelled = true; };
-  }, [activeSubTab, storeRef, applyGiftConfig, applyInvoiceConfig, applyNbrConfig]);
+  }, [activeSubTab, storeRef, applyGiftConfig, applyInvoiceConfig, applyNbrConfig, applyInventoryConfig]);
 
   /**
    * Persist the checkout options. Sends the explicit payload (not the whole
@@ -578,12 +603,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // matching `/api/store/<config>-settings` endpoint (MongoDB is the source of
   // truth) and re-seed the form from the server's normalised response.
 
-  type RemoteConfigName = 'giftOptions' | 'invoiceConfig' | 'nbrConfig';
+  type RemoteConfigName = 'giftOptions' | 'invoiceConfig' | 'nbrConfig' | 'inventoryConfig';
 
   const configEndpoints: Record<RemoteConfigName, string> = {
     giftOptions: '/api/store/gift-options',
     invoiceConfig: '/api/store/invoice-settings',
     nbrConfig: '/api/store/nbr-settings',
+    inventoryConfig: '/api/store/inventory-properties',
   };
 
   /**
@@ -668,6 +694,49 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setInvoiceFooterNote(saved.footerNote || '');
       setPrintFormat(saved.printFormat || 'Standard A4 / PDF');
     }
+  };
+
+  /** Parse an optional positive integer field, or return null when blank. */
+  const optionalNumber = (value: string) => {
+    const trimmed = value.trim();
+    return trimmed === '' ? null : Number(trimmed);
+  };
+
+  const handleSaveInventorySettings = async () => {
+    const min = optionalNumber(minQtyPerProduct);
+    const max = optionalNumber(maxQtyPerOrder);
+
+    const invalid = [
+      [lowStockThreshold, 'Low stock threshold'],
+      [minQtyPerProduct, 'Minimum quantity per product'],
+      [maxQtyPerOrder, 'Maximum quantity per order'],
+      [autoCancelHours, 'Auto-cancellation hours'],
+    ].find(([raw]) => {
+      const t = String(raw).trim();
+      return t !== '' && (!Number.isFinite(Number(t)) || Number(t) < 0);
+    });
+    if (invalid) {
+      setConfigNotice({ type: 'error', text: `${invalid[1]} must be a positive number.` });
+      return;
+    }
+
+    if (min != null && max != null && max < min) {
+      setConfigNotice({ type: 'error', text: 'Maximum quantity per order cannot be less than the minimum.' });
+      return;
+    }
+
+    const saved = await saveRemoteConfig('inventoryConfig', {
+      hideOutOfStock,
+      allowPreOrder,
+      lowStockThreshold: optionalNumber(lowStockThreshold),
+      minOrderQty: min,
+      maxOrderQty: max,
+      unpaidAutoCancelHours: optionalNumber(autoCancelHours),
+      skuPrefix: skuPrefix.trim(),
+      enableAiRecommendations: aiRecommendationsEnabled,
+    }, 'Inventory & order properties');
+
+    if (saved) applyInventoryConfig(saved);
   };
 
   const handleSaveNbrSettings = async () => {
@@ -1921,6 +1990,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'settings_properties' && (
             <div className="space-y-8">
+              {/* Config feedback toast */}
+              {configNotice && (
+                <div
+                  data-testid="inventory-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${configNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {configNotice.text}
+                </div>
+              )}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
@@ -1974,7 +2052,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Order Quantity & Limits</h3>
-                
+
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
@@ -2003,7 +2081,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Order Automation & SKUs</h3>
-                
+
                 <div className="space-y-4">
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Unpaid Order Auto-Cancellation (Hours)</label>
@@ -2047,12 +2125,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </div>
                   <button
                     type="button"
+                    data-testid="inventory-ai-recs"
+                    aria-pressed={aiRecommendationsEnabled}
                     onClick={() => setAiRecommendationsEnabled(!aiRecommendationsEnabled)}
                     className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${aiRecommendationsEnabled ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                   >
                     <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${aiRecommendationsEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
                   </button>
                 </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  data-testid="inventory-save"
+                  onClick={handleSaveInventorySettings}
+                  disabled={configSaving}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{configSaving ? 'Saving…' : 'Save Inventory Properties'}</span>
+                </button>
               </div>
             </div>
           )}

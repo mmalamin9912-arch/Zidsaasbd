@@ -249,6 +249,28 @@ export interface MerchantProfile {
    */
   giftConfig?: MerchantProfile['giftOptions'];
   /**
+   * Inventory & order properties, edited in Settings -> Orders and products
+   * properties. Persisted on the store record as `inventoryConfig`.
+   */
+  inventoryConfig?: {
+    /** Hide products with zero stock from the storefront catalog. */
+    hideOutOfStock?: boolean;
+    /** Allow ordering out-of-stock products as a pre-order. */
+    allowPreOrder?: boolean;
+    /** Stock level at or below which the merchant is warned. */
+    lowStockThreshold?: number | null;
+    /** Minimum quantity per product at checkout. `null` means no minimum. */
+    minOrderQty?: number | null;
+    /** Maximum quantity allowed per order. `null` means no maximum. */
+    maxOrderQty?: number | null;
+    /** Hours before an unpaid order is auto-cancelled. `null` disables. */
+    unpaidAutoCancelHours?: number | null;
+    /** Prefix prepended to auto-generated product SKUs. */
+    skuPrefix?: string;
+    /** Show AI 'frequently bought together' recommendations. */
+    enableAiRecommendations?: boolean;
+  };
+  /**
    * Invoice branding & numbering, edited in Settings -> Invoices.
    * Persisted on the store record as `invoiceConfig`.
    */

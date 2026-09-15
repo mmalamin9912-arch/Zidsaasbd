@@ -144,7 +144,21 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const [compareAtPriceBDT, setCompareAtPriceBDT] = useState<string | number>(initialData?.compareAtPriceBDT ?? '');
 
   // 3. SKU, Weight & Category State
-  const [sku, setSku] = useState(initialData?.sku || `SKU-${Math.floor(10000 + Math.random() * 90000)}`);
+  //
+  // Auto-generated SKUs honour the merchant's configured prefix
+  // (Settings -> Orders and products properties), falling back to `SKU-`.
+  const skuPrefix = (merchant?.inventoryConfig?.skuPrefix || '').trim() || 'SKU-';
+  const generateSku = () => `${skuPrefix}${Math.floor(10000 + Math.random() * 90000)}`;
+
+  const [sku, setSku] = useState(initialData?.sku || '');
+
+  // New products (no saved SKU yet) get an auto-generated prefixed one. Existing
+  // products keep theirs. Only runs when the prefix is known, so it never
+  // overwrites a SKU the merchant has already typed.
+  useEffect(() => {
+    if (!initialData?.sku && !sku) setSku(generateSku());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skuPrefix]);
   const [weightKg, setWeightKg] = useState<number | string>(initialData?.weightKg ?? '');
   const [weightUnit, setWeightUnit] = useState<'kg' | 'lb' | 'g'>('kg');
   const [category, setCategory] = useState(initialData?.category || '');
@@ -623,7 +637,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   };
 
   const handleGenerateSku = () => {
-    setSku(`SKU-${Math.floor(10000 + Math.random() * 90000)}`);
+    setSku(generateSku());
   };
 
   // Device File Upload Handlers
