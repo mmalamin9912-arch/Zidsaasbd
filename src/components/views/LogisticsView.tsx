@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { CourierService, MerchantProfile, CodConfig } from '../../types';
+import SafeImage from '../SafeImage';
 import { 
   Truck, 
   Key, 
@@ -180,7 +181,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
                 <div className="flex justify-between items-start mb-2">
                   <div className="w-10 h-10 rounded-xl bg-[#181B26] border border-[#2E3548] overflow-hidden p-1 flex items-center justify-center">
                     {c?.logo ? (
-                      <img src={c.logo} alt={c.name} className="w-full h-full object-cover rounded-lg" />
+                      <SafeImage src={c.logo} alt={c.name} className="w-full h-full object-cover rounded-lg" />
                     ) : (
                       <span className="text-white font-bold text-xs">{c?.name?.charAt(0) || 'C'}</span>
                     )}
@@ -330,7 +331,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-[#181B26] border border-[#2E3548] overflow-hidden p-1 flex items-center justify-center">
                 {currentCourier?.logo ? (
-                  <img src={currentCourier.logo} alt={currentCourier.name} className="w-full h-full object-cover rounded-lg" />
+                  <SafeImage src={currentCourier.logo} alt={currentCourier.name} className="w-full h-full object-cover rounded-lg" />
                 ) : (
                   <span className="text-white font-bold text-xs">{currentCourier?.name?.charAt(0) || 'C'}</span>
                 )}

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Product, ProductSubTab, ProductType, MerchantProfile } from '../../types';
 import { buildProductDbPayload, mapApiProduct, postCatalogJson, upsertProductToSupabase } from '../../utils/catalogPayload';
 import { resolveActiveStoreSlug } from '../../lib/activeStore';
+import SafeImage from '../SafeImage';
 import {
   Boxes,
   Clock,
@@ -544,7 +545,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                         <tr key={p.id} className="hover:bg-[#252B3B] transition">
                           <td className="p-4">
                             <div className="flex items-center gap-3">
-                              <img
+                              <SafeImage
                                 src={p.image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'}
                                 alt={p.title}
                                 className="w-12 h-12 object-cover rounded-xl border border-[#3A435E] bg-[#181B26]"
@@ -657,7 +658,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                   className="bg-[#202533] border border-[#2E3548] hover:border-[#00D68F]/50 rounded-2xl p-4 transition-all space-y-3 group relative shadow-lg"
                 >
                   <div className="relative aspect-square w-full rounded-xl overflow-hidden bg-[#181B26]">
-                    <img src={p.image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={p.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                    <SafeImage src={p.image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={p.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
 
                     <span className={`absolute top-2 left-2 text-[9px] font-black px-2 py-0.5 rounded-full ${
                       p.status === 'Active' ? 'bg-[#00D68F] text-slate-950' : 'bg-slate-700 text-slate-300'

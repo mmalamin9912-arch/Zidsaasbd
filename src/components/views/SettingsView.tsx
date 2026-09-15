@@ -1,28 +1,29 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { MerchantProfile, SettingsSubTab } from '../../types';
-import { 
-  Settings as SettingsIcon, 
-  User, 
-  ShieldCheck, 
-  Globe, 
-  ShoppingCart, 
-  Gift, 
-  FileText, 
-  Sliders, 
-  Truck, 
-  Percent, 
-  CheckCircle, 
-  Bell, 
-  Key, 
-  Download, 
-  ChevronDown, 
-  ChevronRight, 
-  MessageSquare, 
-  Smartphone, 
-  Mail, 
-  Store, 
-  Link, 
-  BookOpen, 
+import SafeImage from '../SafeImage';
+import {
+  Settings as SettingsIcon,
+  User,
+  ShieldCheck,
+  Globe,
+  ShoppingCart,
+  Gift,
+  FileText,
+  Sliders,
+  Truck,
+  Percent,
+  CheckCircle,
+  Bell,
+  Key,
+  Download,
+  ChevronDown,
+  ChevronRight,
+  MessageSquare,
+  Smartphone,
+  Mail,
+  Store,
+  Link,
+  BookOpen,
   Save,
   Sparkles,
   Check,
@@ -56,7 +57,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   }, [initialSubTab]);
   const [isCommExpanded, setIsCommExpanded] = useState(true);
   const [isStoreExpanded, setIsStoreExpanded] = useState(true);
-  
+
   // Local state for forms
   const [storeName, setStoreName] = useState(merchant?.storeName || '');
   const [storeSlug, setStoreSlug] = useState(merchant?.storeSlug || '');
@@ -69,7 +70,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [facebookUrl, setFacebookUrl] = useState(merchant?.facebookUrl || '');
   const [instagramUrl, setInstagramUrl] = useState(merchant?.instagramUrl || '');
   const [tiktokUrl, setTiktokUrl] = useState(merchant?.tiktokUrl || '');
-  
+
   const [currency, setCurrency] = useState(merchant?.currency || 'BDT');
   const [language, setLanguage] = useState(merchant?.language || 'en');
   const [taxRate, setTaxRate] = useState('15%');
@@ -606,7 +607,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   return (
     <div className="grid grid-cols-[280px_1fr] gap-6 min-h-[calc(100vh-140px)] items-start">
-      
+
       {/* Left Zid-Style Settings Sidebar Navigation Panel */}
       <aside className="w-[280px] bg-[#161B28] border border-[#272F45] rounded-3xl p-4 shrink-0 shadow-xl space-y-6 sticky top-24">
         <div>
@@ -617,7 +618,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         <div className="space-y-6">
-          
+
           {/* Group 1: General */}
           <div className="space-y-1">
             <div className="text-[10px] uppercase font-bold tracking-wider text-slate-500 px-3 pb-1">
@@ -741,7 +742,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         {/* Form Body for Active Tab */}
         <form onSubmit={handleSave} className="space-y-6 text-xs">
-          
+
           {(activeSubTab === 'settings_general' || activeSubTab === 'settings_account' || activeSubTab === 'store_details') && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -816,7 +817,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <div className="flex items-start gap-6">
                   <div className="w-24 h-24 shrink-0 rounded-2xl bg-[#101420] border border-[#2E3852] overflow-hidden flex items-center justify-center">
                     {logoUrl ? (
-                      <img src={logoUrl} alt="Store Logo" className="w-full h-full object-contain p-2" />
+                      <SafeImage src={logoUrl} alt="Store Logo" className="w-full h-full object-contain p-2" />
                     ) : (
                       <ImageIcon className="w-8 h-8 text-slate-600" />
                     )}

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { BrandLogo } from './BrandLogo';
+import SafeImage from './SafeImage';
 import {
   ShieldAlert,
   DollarSign,
@@ -1860,7 +1861,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                     <div className="p-5 border-b border-[#2E3548] flex items-center justify-between bg-[#181B26]/50">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 rounded-xl bg-indigo-500/20 flex items-center justify-center text-indigo-400 shadow-lg">
-                          {gateway.logoUrl ? <img src={gateway.logoUrl} className="w-6 h-6 object-contain" alt="" /> : <CreditCard className="w-5 h-5" />}
+                          {gateway.logoUrl ? <SafeImage src={gateway.logoUrl} className="w-6 h-6 object-contain" alt="" /> : <CreditCard className="w-5 h-5" />}
                         </div>
                         <h4 className="font-bold text-white text-sm">{gateway.name}</h4>
                       </div>
@@ -2623,7 +2624,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                             className="text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-[#2E3548] file:text-white hover:file:bg-[#3A435E] cursor-pointer"
                           />
                           {settingsForm.logoUrl && (
-                            <img src={settingsForm.logoUrl} alt="Logo Preview" className="w-10 h-10 rounded-lg object-contain border border-[#2E3548]" />
+                            <SafeImage src={settingsForm.logoUrl} alt="Logo Preview" className="w-10 h-10 rounded-lg object-contain border border-[#2E3548]" />
                           )}
                         </div>
                       </div>
@@ -2646,7 +2647,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                             className="text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-[#2E3548] file:text-white hover:file:bg-[#3A435E] cursor-pointer"
                           />
                           {settingsForm.faviconUrl && (
-                            <img src={settingsForm.faviconUrl} alt="Favicon Preview" className="w-8 h-8 rounded-full object-contain border border-[#2E3548]" />
+                            <SafeImage src={settingsForm.faviconUrl} alt="Favicon Preview" className="w-8 h-8 rounded-full object-contain border border-[#2E3548]" />
                           )}
                         </div>
                       </div>
@@ -3635,7 +3636,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
               {platformThemes.map((theme) => (
                 <div key={theme.id} className="bg-[#181B26] border border-[#2E3548] rounded-2xl overflow-hidden group hover:border-indigo-500/50 transition-all duration-300 shadow-xl">
                   <div className="aspect-video w-full relative overflow-hidden bg-[#202533]">
-                    <img
+                    <SafeImage
                       src={theme.thumbnailUrl || 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?auto=format&fit=crop&w=400&q=80'}
                       alt={theme.name}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"

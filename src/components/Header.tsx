@@ -3,6 +3,7 @@ import { MerchantProfile, SubscriptionRequest } from '../types';
 import { calculateRemainingDays, getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { BrandLogo } from './BrandLogo';
+import SafeImage from './SafeImage';
 import {
   Sparkles,
   ExternalLink,
@@ -912,7 +913,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="flex items-center gap-2.5 pl-2.5 border-l border-[#2E3548]">
             <div className="w-8 h-8 rounded-xl bg-[#252B3B] border border-[#3A435E] flex items-center justify-center text-slate-200 font-bold text-xs shrink-0 overflow-hidden shadow-sm">
               {merchant?.logoUrl ? (
-                <img src={merchant.logoUrl} alt={merchant?.storeName || 'Store'} className="w-full h-full object-cover" />
+                <SafeImage src={merchant.logoUrl} alt={merchant?.storeName || 'Store'} className="w-full h-full object-cover" />
               ) : (
                 (merchant?.storeName || 'S').charAt(0).toUpperCase()
               )}

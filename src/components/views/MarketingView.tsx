@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { DiscountCoupon, Customer, MerchantProfile, AdminPaymentGatewayConfig } from '../../types';
 import { initialCoupons, initialCustomers } from '../../data/initialData';
 import { ProFeaturePaymentModal } from '../marketing/ProFeaturePaymentModal';
+import SafeImage from '../SafeImage';
 import { 
   Megaphone, 
   Plus, 
@@ -972,7 +973,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                   </div>
 
                   {t.headerType === 'Image' && t.headerText && (
-                    <img src={t.headerText} alt="Header" className="w-full h-32 object-cover rounded-xl" />
+                    <SafeImage src={t.headerText} alt="Header" className="w-full h-32 object-cover rounded-xl" />
                   )}
                   {t.headerType === 'Text' && t.headerText && (
                     <div className="font-bold text-white text-sm">{t.headerText}</div>

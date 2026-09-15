@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../types';
 import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug, upsertCategoryToSupabase } from '../../utils/catalogPayload';
 import { readZidStoreData } from '../../lib/storeData';
+import SafeImage from '../SafeImage';
 import { generateAiText, aiErrorMessage } from '../../lib/aiService';
 import {
   ArrowLeft,
@@ -871,7 +872,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
               <div className="relative group border-2 border-dashed border-[#00D68F]/50 hover:border-[#00D68F] rounded-xl p-2 bg-[#181B26] flex flex-col items-center justify-center min-h-[110px] text-center transition">
                 {image ? (
                   <>
-                    <img src={image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt="Main thumbnail" className="w-full h-24 object-cover rounded-lg" />
+                    <SafeImage src={image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt="Main thumbnail" className="w-full h-24 object-cover rounded-lg" />
                     <span className="absolute bottom-3 left-3 bg-black/70 text-[#00D68F] font-black text-[9px] px-1.5 py-0.5 rounded">MAIN</span>
                     <div className="absolute top-2 right-2 flex items-center gap-1">
                       <button
@@ -915,7 +916,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
               {/* Additional Images */}
               {additionalImages.map((imgUrl, idx) => (
                 <div key={idx} className="relative group border border-[#2E3548] rounded-xl p-2 bg-[#181B26] flex items-center justify-center h-28">
-                  <img src={imgUrl || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={`Gallery ${idx}`} className="w-full h-full object-cover rounded-lg" />
+                  <SafeImage src={imgUrl || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={`Gallery ${idx}`} className="w-full h-full object-cover rounded-lg" />
                   <button
                     type="button"
                     onClick={() => setAdditionalImages(additionalImages.filter((_, i) => i !== idx))}
@@ -1685,7 +1686,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                                   {color}
                                 </span>
                                 {currentUrl && (
-                                  <img src={currentUrl} alt={color} className="w-8 h-8 object-cover rounded-md border border-[#2E3548]" />
+                                  <SafeImage src={currentUrl} alt={color} className="w-8 h-8 object-cover rounded-md border border-[#2E3548]" />
                                 )}
                               </div>
                               <div className="flex gap-1">
@@ -1788,7 +1789,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                                 <td className="p-2.5">
                                   <div className="flex items-center gap-2">
                                     {v.image ? (
-                                      <img src={v.image} alt={v.name} className="w-8 h-8 object-cover rounded-lg border border-[#2E3548]" />
+                                      <SafeImage src={v.image} alt={v.name} className="w-8 h-8 object-cover rounded-lg border border-[#2E3548]" />
                                     ) : (
                                       <div className="w-8 h-8 rounded-lg bg-[#202533] border border-[#2E3548] flex items-center justify-center text-slate-500">
                                         <ImageIcon className="w-4 h-4" />
@@ -2297,7 +2298,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
             <div className="bg-[#181B26] border border-[#2E3548] rounded-xl p-3 overflow-hidden shadow-inner space-y-3">
               <div className="relative aspect-square w-full rounded-lg overflow-hidden bg-[#202533]">
                 {image ? (
-                  <img src={image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={title} className="w-full h-full object-cover" />
+                  <SafeImage src={image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={title} className="w-full h-full object-cover" />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-slate-500 text-xs">
                     No image uploaded
@@ -2466,7 +2467,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                       className="group relative cursor-pointer bg-[#181B26] border border-[#2E3548] hover:border-[#00D68F] rounded-xl overflow-hidden transition"
                     >
                       <div className="aspect-square w-full bg-slate-900 overflow-hidden">
-                        <img
+                        <SafeImage
                           src={img.url || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'}
                           alt={img.name}
                           className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
@@ -2498,7 +2499,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                   {customUrl && (
                     <div className="border border-[#2E3548] rounded-xl p-2 bg-[#181B26] max-w-xs mx-auto">
                       <p className="text-[10px] text-slate-400 mb-2 text-center font-semibold">URL Preview</p>
-                      <img src={customUrl} alt="Preview" className="w-full h-32 object-cover rounded-lg" onError={(e) => { (e.target as any).src = 'https://images.unsplash.com/photo-1531403009284-440f080d1e12?w=600' }} />
+                      <SafeImage src={customUrl} alt="Preview" className="w-full h-32 object-cover rounded-lg" />
                     </div>
                   )}
                   <button

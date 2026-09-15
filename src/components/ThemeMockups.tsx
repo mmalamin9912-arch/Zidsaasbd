@@ -1,5 +1,6 @@
 import React from 'react';
 import { Search, Menu, ShoppingCart, ChevronRight, Star, Heart, User, ArrowRight } from 'lucide-react';
+import SafeImage from './SafeImage';
 
 export const SupermarketTechMockup: React.FC = () => {
   return (
@@ -15,7 +16,7 @@ export const SupermarketTechMockup: React.FC = () => {
               <div className="w-10 h-10 bg-[#00D68F] rounded-xl flex items-center justify-center text-slate-950 font-black text-xl">S</div>
               <span className="font-extrabold text-xl hidden sm:block tracking-tight text-slate-900">MegaMart</span>
             </div>
-            
+
             <div className="flex-1 max-w-2xl hidden md:flex">
               <div className="relative w-full flex items-center">
                 <input type="text" placeholder="Search for groceries, tech, appliances..." className="w-full bg-slate-100 border-2 border-transparent focus:border-[#00D68F] focus:bg-white rounded-xl py-2.5 px-4 pr-12 text-sm transition-all outline-none" readOnly />
@@ -55,7 +56,7 @@ export const SupermarketTechMockup: React.FC = () => {
         <div className="flex-1 min-w-0 space-y-8">
           {/* Hero Banner */}
           <section className="bg-slate-900 rounded-3xl overflow-hidden relative min-h-[300px] flex items-center">
-            <img src="https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=1200&q=80" alt="Supermarket Hero" className="absolute inset-0 w-full h-full object-cover opacity-40 mix-blend-overlay" />
+            <SafeImage src="https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=1200&q=80" alt="Supermarket Hero" className="absolute inset-0 w-full h-full object-cover opacity-40 mix-blend-overlay" />
             <div className="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-900/80 to-transparent" />
             <div className="relative z-10 p-8 sm:p-12 max-w-xl">
               <span className="inline-block px-3 py-1 bg-[#00D68F] text-slate-950 font-black text-xs rounded-full mb-4">WEEKEND SPECIAL</span>
@@ -71,7 +72,7 @@ export const SupermarketTechMockup: React.FC = () => {
               <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">Flash Deals</h2>
               <button className="text-sm font-bold text-[#00D68F] hover:underline cursor-pointer">View All</button>
             </div>
-            
+
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
               {[
                 { title: 'Organic Apples (1kg)', price: '250', oldPrice: '350', img: 'https://images.unsplash.com/photo-1619566636858-adf3ef46400b?auto=format&fit=crop&w=400&q=80', badge: '-28%' },
@@ -82,7 +83,7 @@ export const SupermarketTechMockup: React.FC = () => {
                 <div key={i} className="bg-white rounded-2xl p-3 border border-slate-200 hover:shadow-lg transition-all relative group flex flex-col justify-between">
                   <div className="absolute top-2 left-2 z-10 bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-md">{prod.badge}</div>
                   <div className="aspect-square bg-slate-50 rounded-xl overflow-hidden mb-3 relative">
-                    <img src={prod.img} alt={prod.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-300 mix-blend-multiply" />
+                    <SafeImage src={prod.img} alt={prod.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-300 mix-blend-multiply" />
                   </div>
                   <div className="flex-1 flex flex-col justify-between">
                     <h4 className="font-semibold text-sm text-slate-900 line-clamp-2 mb-2">{prod.title}</h4>
@@ -114,11 +115,11 @@ export const ElegantFashionMockup: React.FC = () => {
       <header className="bg-white border-b border-slate-100 sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
           <button className="sm:hidden p-2"><Menu className="w-5 h-5" /></button>
-          
+
           <div className="text-xl sm:text-2xl font-serif font-black tracking-widest uppercase text-slate-900">
             AURA
           </div>
-          
+
           <nav className="hidden sm:flex items-center gap-6">
             {['New Arrivals', 'Women', 'Men', 'Accessories', 'Sale'].map(item => (
               <a key={item} href="#" onClick={e => e.preventDefault()} className="text-xs font-bold text-slate-600 hover:text-slate-900 uppercase tracking-widest transition">
@@ -152,7 +153,7 @@ export const ElegantFashionMockup: React.FC = () => {
             <div key={i} className="flex flex-col items-center gap-2 cursor-pointer group">
               <div className="w-16 h-16 rounded-full border-2 border-slate-200 group-hover:border-slate-900 p-0.5 transition-all">
                 <div className="w-full h-full rounded-full overflow-hidden">
-                  <img src={cat.img} alt={cat.name} className="w-full h-full object-cover group-hover:scale-110 transition duration-500" />
+                  <SafeImage src={cat.img} alt={cat.name} className="w-full h-full object-cover group-hover:scale-110 transition duration-500" />
                 </div>
               </div>
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-600">{cat.name}</span>
@@ -164,7 +165,7 @@ export const ElegantFashionMockup: React.FC = () => {
       <main className="flex-1 max-w-7xl mx-auto w-full p-4 sm:p-6 lg:p-8 space-y-12">
         {/* Minimal Hero */}
         <section className="relative h-[60vh] sm:h-[70vh] rounded-[2rem] overflow-hidden bg-slate-900 flex items-center justify-center text-center">
-          <img src="https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&w=1600&q=80" alt="Fashion Hero" className="absolute inset-0 w-full h-full object-cover opacity-60 mix-blend-overlay" />
+          <SafeImage src="https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&w=1600&q=80" alt="Fashion Hero" className="absolute inset-0 w-full h-full object-cover opacity-60 mix-blend-overlay" />
           <div className="absolute inset-0 bg-black/20" />
           <div className="relative z-10 p-6 flex flex-col items-center">
             <h2 className="text-4xl sm:text-6xl font-serif text-white mb-6 max-w-2xl leading-tight">The Summer Collection</h2>
@@ -181,7 +182,7 @@ export const ElegantFashionMockup: React.FC = () => {
             <h2 className="text-xl font-serif text-slate-900">Trending Now</h2>
             <a href="#" className="text-sm font-bold text-slate-500 hover:text-slate-900 border-b border-transparent hover:border-slate-900 transition">View All</a>
           </div>
-          
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
             {[
               { title: 'Linen Wrap Dress', price: '4,500', img: 'https://images.unsplash.com/photo-1515372039744-b8f02a3ae446?auto=format&fit=crop&w=600&q=80' },
@@ -191,7 +192,7 @@ export const ElegantFashionMockup: React.FC = () => {
             ].map((prod, i) => (
               <div key={i} className="group cursor-pointer">
                 <div className="aspect-[3/4] bg-slate-100 overflow-hidden relative mb-4">
-                  <img src={prod.img} alt={prod.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-700" />
+                  <SafeImage src={prod.img} alt={prod.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-700" />
                   <div className="absolute inset-x-0 bottom-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity bg-gradient-to-t from-black/50 to-transparent flex justify-center">
                     <button className="w-full bg-white text-slate-900 font-bold text-xs py-3 uppercase tracking-widest hover:bg-slate-100 transition">
                       Quick Add

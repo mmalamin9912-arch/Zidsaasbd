@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, OrderItem } from '../../types';
 import { safeAmount, safeDate, toNumber, normalizeOrders } from '../../utils/orderUtils';
+import SafeImage from '../SafeImage';
 import {
   ShoppingBag,
   Search,
@@ -1342,7 +1343,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                       <div className="space-y-2">
                                         {ord.items.map((it) => (
                                           <div key={it.id} className="flex items-center gap-3 bg-[#181B26] p-2.5 rounded-xl border border-[#2E3548]">
-                                            <img src={it.image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={it.productName} className="w-12 h-12 rounded-lg object-cover" />
+                                            <SafeImage src={it.image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={it.productName} className="w-12 h-12 rounded-lg object-cover" />
                                             <div className="flex-1 min-w-0">
                                               <div className="font-bold text-white text-xs truncate">{it.productName}</div>
                                               <div className="text-[11px] text-slate-400">Variant: {it.variant}</div>

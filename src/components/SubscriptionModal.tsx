@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { MerchantProfile, SubscriptionPlan, SubscriptionRequest, AdminPaymentGatewayConfig } from '../types';
 import { subscriptionPlans } from '../data/initialData';
 import { calculateRemainingDays, getPlanDisplayName, isPaidSubscriptionActive } from '../utils/subscriptionUtils';
+import SafeImage from './SafeImage';
 import {
   X,
   Check,
@@ -351,7 +352,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                       }`}
                     >
                       {gateway.logoUrl ? (
-                        <img src={gateway.logoUrl} alt="" className="w-5 h-5 object-contain" />
+                        <SafeImage src={gateway.logoUrl} alt="" className="w-5 h-5 object-contain" />
                       ) : (
                         <CreditCard className="w-5 h-5 text-indigo-400" />
                       )}
@@ -471,7 +472,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
 
                     {adminPaymentConfig.qrImageUrl ? (
                       <div className="mx-auto w-48 h-48 p-2 bg-white rounded-2xl shadow-xl">
-                        <img src={adminPaymentConfig.qrImageUrl} alt="QR Code" className="w-full h-full object-contain" />
+                        <SafeImage src={adminPaymentConfig.qrImageUrl} alt="QR Code" className="w-full h-full object-contain" />
                       </div>
                     ) : (
                       <div className="mx-auto w-48 h-48 bg-[#202533] border border-dashed border-[#3A435E] rounded-2xl flex items-center justify-center text-slate-500 text-xs italic">
@@ -497,7 +498,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                     {gateway.qrCodeUrl && (
                       <div className="space-y-3 text-center">
                         <div className="mx-auto w-40 h-40 p-2 bg-white rounded-xl shadow-lg">
-                          <img src={gateway.qrCodeUrl} alt="Custom QR" className="w-full h-full object-contain" />
+                          <SafeImage src={gateway.qrCodeUrl} alt="Custom QR" className="w-full h-full object-contain" />
                         </div>
                         <p className="text-[10px] text-slate-500 uppercase font-black">Scan to Pay</p>
                       </div>

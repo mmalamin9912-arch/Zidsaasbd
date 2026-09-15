@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { MerchantProfile, Order, Product } from '../../types';
+import SafeImage from '../SafeImage';
 import { 
   TrendingUp, 
   ShoppingBag, 
@@ -440,7 +441,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="space-y-4">
           {topProducts.map((p) => (
             <div key={p.id} className="flex items-center gap-4 p-3 bg-[#1C1814] rounded-xl border border-[#3E342B]">
-              <img src={p.image} alt={p.title} className="w-12 h-12 rounded-lg object-cover" />
+              <SafeImage src={p.image} alt={p.title} className="w-12 h-12 rounded-lg object-cover" />
               <div className="flex-1">
                 <div className="text-sm font-bold text-white">{p.title}</div>
                 <div className="text-xs text-slate-400">Sales: {p.salesCount}</div>
@@ -712,7 +713,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
               {tempInput && (
                 <div className="flex items-center gap-3 bg-[#1C1814] p-2 rounded-xl border border-[#3E342B]">
-                  <img src={tempInput} alt="Preview" className="w-10 h-10 rounded-lg object-cover" />
+                  <SafeImage src={tempInput} alt="Preview" className="w-10 h-10 rounded-lg object-cover" />
                   <span className="text-[11px] text-slate-400">Logo Image Preview</span>
                 </div>
               )}

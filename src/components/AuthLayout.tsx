@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Bot, Truck, CreditCard, FileText } from 'lucide-react';
 import { LanguageToggle } from './LanguageToggle';
 import { useLanguage } from '../lib/i18n';
+import { PLACEHOLDER_IMAGE, loadBackgroundImage } from '../utils/imageFallback';
 
 const AuthLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentSlide, setCurrentSlide] = useState(0);
@@ -24,7 +25,7 @@ const AuthLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
       titleKey: 'auth_slide_checkout_title',
       descKey: 'auth_slide_checkout_desc',
       icon: CreditCard,
-      imageUrl: "https://images.unsplash.com/photo-1556742049-0a67f572d312?auto=format&fit=crop&w=800&q=80"
+      imageUrl: "https://images.unsplash.com/photo-1563013544-824ae1b704d3?auto=format&fit=crop&w=800&q=80"
     },
     {
       titleKey: 'auth_slide_nbr_title',
@@ -34,6 +35,21 @@ const AuthLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     }
   ];
 
+
+  // Background images are applied via CSS, so they can't carry an `onError`
+  // handler. Preload each slide's image and swap in the local placeholder if the
+  // remote host fails, instead of leaving a blank panel and a failed request.
+  const [slideImage, setSlideImage] = useState(PLACEHOLDER_IMAGE);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadBackgroundImage(slides[currentSlide].imageUrl).then((url) => {
+      if (!cancelled) setSlideImage(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSlide]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -68,7 +84,7 @@ const AuthLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
             >
               <div
                 className="absolute inset-0 bg-cover bg-center transition-transform duration-700 hover:scale-105"
-                style={{ backgroundImage: `url(${slides[currentSlide].imageUrl})` }}
+                style={{ backgroundImage: `url(${slideImage})` }}
               >
                 <div className="absolute inset-0 bg-gradient-to-t from-[#0B0F17] via-[#0B0F17]/75 to-transparent" />
               </div>

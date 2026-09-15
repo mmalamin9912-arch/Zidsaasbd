@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Product } from '../../types';
 import { Warehouse, Search, Plus, Minus, AlertTriangle, RefreshCw, Layers } from 'lucide-react';
+import SafeImage from '../SafeImage';
 
 interface InventoryViewProps {
   products: Product[];
@@ -99,7 +100,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ products, onUpdate
                 return (
                   <tr key={p.id} className="hover:bg-[#252B3B]">
                     <td className="p-3.5 flex items-center gap-3">
-                      <img src={p.image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={p.title} className="w-10 h-10 object-cover rounded-lg border border-[#3A435E]" />
+                      <SafeImage src={p.image || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'} alt={p.title} className="w-10 h-10 object-cover rounded-lg border border-[#3A435E]" />
                       <div>
                         <div className="font-bold text-white">{p.title}</div>
                         <div className="text-[10px] text-slate-400">{p.category}</div>

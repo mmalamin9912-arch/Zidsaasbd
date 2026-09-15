@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StoreSubTab, MerchantProfile, AdminPaymentGatewayConfig, ThemePurchaseRequest } from '../../types';
 import { ThemeCustomizerModal } from '../ThemeCustomizerModal';
 import { StorefrontPreviewModal } from '../StorefrontPreviewModal';
+import SafeImage from '../SafeImage';
 import { 
   Palette, 
   Globe, 
@@ -411,7 +412,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row gap-5 items-center">
               {/* Theme Preview Image Thumbnail */}
               <div className="relative w-full md:w-64 h-40 rounded-xl overflow-hidden border border-[#2E3548] shrink-0 group">
-                <img
+                <SafeImage
                   src={currentActiveTheme.previewUrl}
                   alt={currentActiveTheme.name}
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
@@ -515,7 +516,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                     return (
                       <tr key={t.id} className="hover:bg-[#202533]/50 transition">
                         <td className="p-3">
-                          <img 
+                          <SafeImage 
                             src={t.previewUrl} 
                             alt={t.name} 
                             className="w-16 h-10 object-cover rounded-lg border border-[#2E3548]"
@@ -758,7 +759,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <div className="flex items-center gap-4">
                 <div className="w-16 h-16 rounded-xl bg-[#202533] border border-[#2E3548] flex items-center justify-center overflow-hidden">
                   {storeLogo ? (
-                    <img src={storeLogo} alt="Logo" className="w-full h-full object-contain" />
+                    <SafeImage src={storeLogo} alt="Logo" className="w-full h-full object-contain" />
                   ) : (
                     <ImageIcon className="w-6 h-6 text-slate-600" />
                   )}
@@ -790,7 +791,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <div className="flex items-center gap-4">
                 <div className="w-10 h-10 rounded-lg bg-[#202533] border border-[#2E3548] flex items-center justify-center overflow-hidden">
                   {storeFavicon ? (
-                    <img src={storeFavicon} alt="Favicon" className="w-full h-full object-contain" />
+                    <SafeImage src={storeFavicon} alt="Favicon" className="w-full h-full object-contain" />
                   ) : (
                     <Globe className="w-5 h-5 text-slate-600" />
                   )}
@@ -924,7 +925,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 <div key={post.id} className="p-4 bg-[#181B26] border border-[#2E3548] rounded-xl flex items-center justify-between text-xs transition hover:border-[#00D68F]/30 group">
                   <div className="flex items-center gap-4">
                     {post.coverImage ? (
-                      <img src={post.coverImage} className="w-12 h-12 rounded-lg object-cover border border-[#2E3548]" alt="" />
+                      <SafeImage src={post.coverImage} className="w-12 h-12 rounded-lg object-cover border border-[#2E3548]" alt="" />
                     ) : (
                       <div className="w-12 h-12 rounded-lg bg-[#202533] border border-[#2E3548] flex items-center justify-center text-slate-600">
                         <ImageIcon className="w-6 h-6" />
@@ -1129,7 +1130,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 >
                   {ogImage ? (
                     <>
-                      <img src={ogImage} className="w-full h-full object-cover" alt="OG Preview" />
+                      <SafeImage src={ogImage} className="w-full h-full object-cover" alt="OG Preview" />
                       <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition flex items-center justify-center">
                         <span className="text-[10px] font-bold text-white bg-black/50 px-2 py-1 rounded">Change Image</span>
                       </div>
@@ -1350,7 +1351,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   <div key={item.id} className="bg-[#181B26] border border-[#2E3548] rounded-2xl overflow-hidden space-y-3 p-3 flex flex-col justify-between">
                     <div className="space-y-2">
                       <div className="relative h-36 rounded-xl overflow-hidden border border-[#2E3548]">
-                        <img src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
+                        <SafeImage src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
                         <div className="absolute top-2 left-2 bg-black/80 text-indigo-300 font-bold text-[10px] px-2 py-0.5 rounded border border-indigo-500/30">
                           {item.isFree ? 'FREE' : 'PREMIUM'}
                         </div>
@@ -1720,7 +1721,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                     >
                       {blogForm.coverImage ? (
                         <>
-                          <img src={blogForm.coverImage} className="w-full h-full object-cover" alt="" />
+                          <SafeImage src={blogForm.coverImage} className="w-full h-full object-cover" alt="" />
                           <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition flex items-center justify-center">
                             <span className="text-[10px] font-bold text-white bg-black/50 px-2 py-1 rounded">Change Image</span>
                           </div>

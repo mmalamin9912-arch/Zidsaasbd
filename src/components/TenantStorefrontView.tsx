@@ -7,6 +7,7 @@ import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
 import { resolveActiveStoreSlug } from '../lib/activeStore';
 import { LanguageToggle } from './LanguageToggle';
+import SafeImage from './SafeImage';
 
 function mapSupabaseProduct(p: any): Product {
   const title = p.title || p.name || 'Untitled Product';
@@ -1260,7 +1261,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             {/* Hero Banner (Luxury Dark Aesthetic) — themed from Theme Editor settings */}
             {resolvedTheme.showHeroBanner && (
             <div className="w-full h-[220px] relative overflow-hidden bg-slate-950 border-b border-slate-800/80">
-              <img
+              <SafeImage
                 src={activeHeroSlide?.image || resolvedTheme.heroImage || "https://images.unsplash.com/photo-1445205170230-053b83016050?auto=format&fit=crop&w=800&q=80"}
                 alt="Hero Banner"
                 className="w-full h-full object-cover opacity-50 scale-105 transition-transform duration-700 hover:scale-100"
@@ -1373,7 +1374,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       >
                         <div className="relative w-12 h-12 rounded-xl overflow-hidden bg-slate-800 border border-slate-700/80">
                           {image ? (
-                            <img src={image} alt={catName} className="w-full h-full object-cover group-hover:scale-110 transition duration-300" />
+                            <SafeImage src={image} alt={catName} className="w-full h-full object-cover group-hover:scale-110 transition duration-300" />
                           ) : (
                             <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-amber-500/30 to-emerald-500/30 text-amber-300 font-black text-base">
                               {catName.charAt(0) || 'Z'}
@@ -1478,7 +1479,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         className="relative aspect-square bg-slate-950/80 overflow-hidden cursor-pointer"
                         onClick={() => setQuickViewProduct(p)}
                       >
-                        <img
+                        <SafeImage
                           src={p.image || "https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=600&q=80"}
                           alt={p.title}
                           className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500 ease-out opacity-90 group-hover:opacity-100"
@@ -1576,7 +1577,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 <div className="grid grid-cols-2 gap-3">
                   {resolvedTheme.galleryImages.map((img, i) => {
                     const galleryImg = (
-                      <img src={img.url} alt={img.caption || `Gallery ${i + 1}`} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                      <SafeImage src={img.url} alt={img.caption || `Gallery ${i + 1}`} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                     );
                     return img.link && img.link !== '#' ? (
                       <a key={`gal-${i}`} href={img.link} target="_blank" rel="noreferrer" className="group relative rounded-2xl overflow-hidden border border-slate-800/80 aspect-square bg-slate-900">
@@ -1749,7 +1750,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                                 {order.items.slice(0, 3).map((item, idx) => (
                                   <div key={idx} className="flex items-center gap-3 text-xs">
                                     {item.image ? (
-                                      <img src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border border-slate-100" />
+                                      <SafeImage src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border border-slate-100" />
                                     ) : (
                                       <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
                                         <ShoppingBag className="w-4 h-4 text-slate-300" />
@@ -1973,7 +1974,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                                 {order.items.slice(0, 3).map((item, idx) => (
                                   <div key={idx} className="flex items-center gap-3 text-xs">
                                     {item.image ? (
-                                      <img src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border border-slate-100" />
+                                      <SafeImage src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border border-slate-100" />
                                     ) : (
                                       <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
                                         <ShoppingBag className="w-4 h-4 text-slate-300" />
@@ -2173,7 +2174,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 {cart.length > 0 ? (
                   cart.map((item, idx) => (
                     <div key={idx} className="flex items-center gap-3 py-1">
-                      <img src={item.product.image} alt={item.product.title} className="w-12 h-12 object-cover rounded-lg border border-slate-800 shrink-0" />
+                      <SafeImage src={item.product.image} alt={item.product.title} className="w-12 h-12 object-cover rounded-lg border border-slate-800 shrink-0" />
                       <div className="flex-1 min-w-0">
                         <h4 className="font-semibold text-xs text-slate-100 truncate">{item.product.title}</h4>
                         <div className="text-[10px] text-slate-400">Qty: {item.quantity}</div>
@@ -2183,7 +2184,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   ))
                 ) : selectedProduct ? (
                   <div className="flex items-center gap-3 py-1">
-                    <img src={selectedProduct.image} alt={selectedProduct.title} className="w-12 h-12 object-cover rounded-lg border border-slate-800 shrink-0" />
+                    <SafeImage src={selectedProduct.image} alt={selectedProduct.title} className="w-12 h-12 object-cover rounded-lg border border-slate-800 shrink-0" />
                     <div className="flex-1 min-w-0">
                       <h4 className="font-semibold text-xs text-slate-100 truncate">{selectedProduct.title}</h4>
                     </div>
@@ -2761,7 +2762,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             </button>
 
             <div className="relative aspect-square bg-slate-950 overflow-hidden">
-              <img src={quickViewProduct.image} alt={quickViewProduct.title} className="w-full h-full object-cover" />
+              <SafeImage src={quickViewProduct.image} alt={quickViewProduct.title} className="w-full h-full object-cover" />
               <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-transparent to-transparent opacity-80" />
               <div className="absolute bottom-3 left-3 right-3 flex justify-between items-end">
                 <span className="bg-amber-400 text-slate-950 text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full shadow-md">
@@ -2858,7 +2859,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               ) : (
                 cart.map((item, idx) => (
                   <div key={idx} className="flex gap-3.5 p-3.5 border border-slate-800/80 rounded-2xl bg-slate-950/60 relative group">
-                    <img src={item.product.image} alt={item.product.title} className="w-20 h-20 object-cover rounded-xl border border-slate-800 shrink-0" />
+                    <SafeImage src={item.product.image} alt={item.product.title} className="w-20 h-20 object-cover rounded-xl border border-slate-800 shrink-0" />
                     <div className="flex-1 flex flex-col justify-between min-w-0">
                       <div>
                         <div className="flex justify-between items-start gap-2">

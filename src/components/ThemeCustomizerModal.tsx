@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { GalleryImage, MerchantProfile } from '../types';
 import { TenantStorefrontView } from './TenantStorefrontView';
 import { writeZidStoreData } from '../lib/storeData';
+import SafeImage from './SafeImage';
 import { supabase } from '../lib/supabase';
 import {
   ArrowLeft,
@@ -1213,7 +1214,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                         </div>
                         {desktopLogoUrl && (
                           <div className="flex items-center gap-2 p-2 bg-[#202533] border border-[#2E3548] rounded-lg">
-                            <img src={desktopLogoUrl} alt="Desktop Logo Preview" className="h-7 max-w-[100px] object-contain bg-slate-900 p-1 rounded" />
+                            <SafeImage src={desktopLogoUrl} alt="Desktop Logo Preview" className="h-7 max-w-[100px] object-contain bg-slate-900 p-1 rounded" />
                             <button
                               type="button"
                               onClick={() => setDesktopLogoUrl('')}
@@ -1262,7 +1263,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                         </div>
                         {mobileLogoUrl && (
                           <div className="flex items-center gap-2 p-2 bg-[#202533] border border-[#2E3548] rounded-lg">
-                            <img src={mobileLogoUrl} alt="Mobile Logo Preview" className="h-6 max-w-[80px] object-contain bg-slate-900 p-1 rounded" />
+                            <SafeImage src={mobileLogoUrl} alt="Mobile Logo Preview" className="h-6 max-w-[80px] object-contain bg-slate-900 p-1 rounded" />
                             <button
                               type="button"
                               onClick={() => setMobileLogoUrl('')}
@@ -2117,7 +2118,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                           {galleryImages.map((img, idx) => (
                             <div key={idx} className="bg-[#202533] p-2 rounded-lg border border-[#2E3548] space-y-2">
                               <div className="flex items-center gap-2">
-                                <img
+                                <SafeImage
                                   src={img.url}
                                   alt={`Gallery ${idx + 1}`}
                                   className="w-12 h-12 object-cover rounded-lg border border-[#2E3548] cursor-pointer hover:border-[#D4AF37] transition"
@@ -2319,7 +2320,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                         </div>
                         {videoCoverImage && (
                           <div className="mt-2">
-                            <img src={videoCoverImage} alt="Video Thumbnail" className="w-full h-24 object-cover rounded-lg border border-[#2E3548]" />
+                            <SafeImage src={videoCoverImage} alt="Video Thumbnail" className="w-full h-24 object-cover rounded-lg border border-[#2E3548]" />
                           </div>
                         )}
                       </div>
@@ -3750,7 +3751,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                           </div>
                           {videoCoverImage && (
                             <div className="flex items-center gap-2 p-1.5 bg-[#202533] border border-[#2E3548] rounded-lg">
-                              <img src={videoCoverImage} alt="Cover Preview" className="h-8 w-14 object-cover rounded bg-slate-900" />
+                              <SafeImage src={videoCoverImage} alt="Cover Preview" className="h-8 w-14 object-cover rounded bg-slate-900" />
                               <span className="text-[11px] text-slate-300 truncate flex-1">Cover Thumbnail</span>
                             </div>
                           )}

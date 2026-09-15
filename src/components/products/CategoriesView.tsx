@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Product } from '../../types';
 import { readZidStoreData, writeZidStoreData } from '../../lib/storeData';
 import { upsertCategoryToSupabase } from '../../utils/catalogPayload';
+import SafeImage from '../SafeImage';
 import { 
   FolderTree, 
   Plus, 
@@ -624,7 +625,7 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
                 {/* Category Thumbnail */}
                 <div className="relative w-9 h-9 rounded-lg overflow-hidden bg-[#181B26] border border-[#2E3548] shrink-0">
                   {cat.image ? (
-                    <img src={cat.image} alt={cat.name} className="w-full h-full object-cover" />
+                    <SafeImage src={cat.image} alt={cat.name} className="w-full h-full object-cover" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-slate-500">
                       <FolderTree className="w-4 h-4" />
@@ -1080,7 +1081,7 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
                 >
                   {formImage ? (
                     <>
-                      <img src={formImage} alt="Category Avatar" className="w-full h-32 object-cover rounded-xl" />
+                      <SafeImage src={formImage} alt="Category Avatar" className="w-full h-32 object-cover rounded-xl" />
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1111,7 +1112,7 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
                 >
                   {formCoverImage ? (
                     <>
-                      <img src={formCoverImage} alt="Category Cover Banner" className="w-full h-32 object-cover rounded-xl" />
+                      <SafeImage src={formCoverImage} alt="Category Cover Banner" className="w-full h-32 object-cover rounded-xl" />
                       <button
                         type="button"
                         onClick={(e) => {

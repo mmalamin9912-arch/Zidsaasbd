@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { MerchantProfile } from '../types';
 import { supabase } from '../lib/supabase';
 import AuthLayout from './AuthLayout';
+import SafeImage from './SafeImage';
 import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
 import {
@@ -1674,7 +1675,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                     {storeLogo ? (
                       <div className="flex flex-col items-center gap-2">
                         <div className="relative group w-16 h-16 rounded-full border border-[#D4AF37] overflow-hidden bg-slate-800 flex items-center justify-center">
-                          <img
+                          <SafeImage
                             src={storeLogo}
                             alt="Store Logo Preview"
                             className="w-full h-full object-cover"
