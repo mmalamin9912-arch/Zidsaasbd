@@ -370,6 +370,33 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [supabaseCategories, setSupabaseCategories] = useState<any[]>([]);
   const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
 
+  // Legal policies (set in Settings → Legal policies). When `showInFooter` is on,
+  // links to the policies the merchant filled in are auto-injected into the
+  // storefront footer, so the footer adapts dynamically without manual editing.
+  const [storefrontPolicies, setStorefrontPolicies] = useState<{
+    privacyPolicy?: string;
+    termsOfService?: string;
+    returnRefundPolicy?: string;
+    shippingPolicy?: string;
+    showInFooter?: boolean;
+  }>({});
+
+  useEffect(() => {
+    const slug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
+    if (!slug) return;
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch(`/api/store/policies?store_slug=${encodeURIComponent(slug)}`);
+        const data = await res.json();
+        if (active && data?.ok && data.policies) setStorefrontPolicies(data.policies);
+      } catch (e: any) {
+        console.warn('Storefront policies fetch warning:', e?.message || e);
+      }
+    })();
+    return () => { active = false; };
+  }, [storeSlug, merchant]);
+
   useEffect(() => {
     let active = true;
     // Active store slug resolved from prop (route param) or merchant session — never hardcoded.
@@ -3303,16 +3330,28 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           <p className="text-[11px] leading-relaxed text-slate-400 max-w-xs mx-auto">
             {resolvedTheme.footerAboutText || "Bangladesh’s Premier Online Fashion & Lifestyle Destination. Powered by ZID SAAS BD Engine."}
           </p>
-          {resolvedTheme.footerLinks.length > 0 && (
-            <div className="pt-2">
-              <h5 className="text-[10px] font-black uppercase tracking-widest text-slate-300 mb-2">{resolvedTheme.footerLinksTitle}</h5>
-              <ul className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
-                {resolvedTheme.footerLinks.map((linkLabel, i) => (
-                  <li key={`flink-${i}`} className="text-[11px] text-slate-400 hover:text-amber-400 transition cursor-pointer">{linkLabel}</li>
-                ))}
-              </ul>
-            </div>
-          )}
+          {(() => {
+            // Auto-inject links only for policies that actually contain text, and
+            // only when the merchant enabled the footer-links setting.
+            const policyLinks: string[] = storefrontPolicies.showInFooter === false ? [] : [
+              storefrontPolicies.privacyPolicy?.trim() ? 'Privacy Policy' : '',
+              storefrontPolicies.termsOfService?.trim() ? 'Terms of Service' : '',
+              storefrontPolicies.returnRefundPolicy?.trim() ? 'Return & Refund Policy' : '',
+              storefrontPolicies.shippingPolicy?.trim() ? 'Shipping Policy' : '',
+            ].filter(Boolean) as string[];
+            const allLinks = [...resolvedTheme.footerLinks, ...policyLinks.filter((l) => !resolvedTheme.footerLinks.includes(l))];
+            if (allLinks.length === 0) return null;
+            return (
+              <div className="pt-2" data-testid="storefront-footer-links">
+                <h5 className="text-[10px] font-black uppercase tracking-widest text-slate-300 mb-2">{resolvedTheme.footerLinksTitle}</h5>
+                <ul className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
+                  {allLinks.map((linkLabel, i) => (
+                    <li key={`flink-${i}`} className="text-[11px] text-slate-400 hover:text-amber-400 transition cursor-pointer">{linkLabel}</li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })()}
           {(resolvedTheme.contactPhone || resolvedTheme.contactEmail || resolvedTheme.dhakaAddress) && (
             <div className="pt-2 space-y-1">
               {resolvedTheme.contactPhone && (

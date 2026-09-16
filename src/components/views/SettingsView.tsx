@@ -324,6 +324,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [returnPolicy, setReturnPolicy] = useState('');
   const [shippingPolicy, setShippingPolicy] = useState('');
   const [showLegalLinks, setShowLegalLinks] = useState(true);
+  // Backend-synced legal-policy persistence state.
+  const [policiesLoading, setPoliciesLoading] = useState(false);
+  const [policiesSaving, setPoliciesSaving] = useState(false);
+  const [policiesNotice, setPoliciesNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+  const [faqNotice, setFaqNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   const handleCopy = (text: string, type: string) => {
     if (!text) return;
@@ -1509,13 +1514,122 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setSavedSuccess(false), 3000);
   };
 
+  // ── Legal policies persistence ───────────────
+
+  /** Apply a policies payload to the form fields. */
+  const applyPolicies = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setPrivacyPolicy(typeof cfg.privacyPolicy === 'string' ? cfg.privacyPolicy : '');
+    setTermsOfService(typeof cfg.termsOfService === 'string' ? cfg.termsOfService : '');
+    setReturnPolicy(typeof cfg.returnRefundPolicy === 'string' ? cfg.returnRefundPolicy : '');
+    setShippingPolicy(typeof cfg.shippingPolicy === 'string' ? cfg.shippingPolicy : '');
+    setShowLegalLinks(cfg.showInFooter !== false);
+  }, []);
+
+  /** Load the saved legal policies from the backend. */
+  const loadPolicies = useCallback(async () => {
+    if (!storeRef) return;
+    setPoliciesLoading(true);
+    try {
+      const res = await fetch(`/api/store/policies?store_slug=${encodeURIComponent(storeRef)}`);
+      const data = await res.json();
+      if (data?.ok && data.policies) applyPolicies(data.policies);
+    } catch (err) {
+      console.warn('Policies load warning:', err);
+    } finally {
+      setPoliciesLoading(false);
+    }
+  }, [storeRef, applyPolicies]);
+
+  // Load whenever the Legal policies tab is opened.
+  useEffect(() => {
+    if (activeSubTab === 'store_policies') loadPolicies();
+  }, [activeSubTab, loadPolicies]);
+
+  /** Persist the legal policies + footer toggle to MongoDB. */
+  const handleSavePolicies = async () => {
+    if (!storeRef) {
+      setPoliciesNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    setPoliciesSaving(true);
+    try {
+      const res = await fetch('/api/store/policies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeRef,
+          policies: {
+            privacyPolicy,
+            termsOfService,
+            returnRefundPolicy: returnPolicy,
+            shippingPolicy,
+            showInFooter: showLegalLinks,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setPoliciesNotice({ type: 'error', text: data?.error || 'Could not save legal policies.' });
+        return;
+      }
+      applyPolicies(data.policies);
+      setPoliciesNotice({ type: 'ok', text: data.message || 'Legal policies saved.' });
+    } catch (err: any) {
+      setPoliciesNotice({ type: 'error', text: err?.message || 'Could not save legal policies.' });
+    } finally {
+      setPoliciesSaving(false);
+    }
+  };
+
+  /** Toggle the footer-links setting and persist it immediately. */
+  const handleToggleLegalLinks = async () => {
+    const next = !showLegalLinks;
+    setShowLegalLinks(next);
+    if (!storeRef) return;
+    try {
+      const res = await fetch('/api/store/policies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, policies: { showInFooter: next } }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setShowLegalLinks(!next); // revert
+        setPoliciesNotice({ type: 'error', text: data?.error || 'Could not update the footer setting.' });
+        return;
+      }
+      if (data.policies) applyPolicies(data.policies);
+      setPoliciesNotice({ type: 'ok', text: next ? 'Policy links will show in the storefront footer.' : 'Policy links hidden from the storefront footer.' });
+    } catch (err: any) {
+      setShowLegalLinks(!next);
+      setPoliciesNotice({ type: 'error', text: err?.message || 'Could not update the footer setting.' });
+    }
+  };
+
+  // Auto-dismiss the policies toast.
+  useEffect(() => {
+    if (!policiesNotice) return;
+    const timer = setTimeout(() => setPoliciesNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [policiesNotice]);
+
+  // Auto-dismiss the FAQ toast.
+  useEffect(() => {
+    if (!faqNotice) return;
+    const timer = setTimeout(() => setFaqNotice(null), 6000);
+    return () => clearTimeout(timer);
+  }, [faqNotice]);
+
+  /** Generate FAQ pairs + a script from the filled policy texts. */
   const generateFaqAndChatbot = async () => {
     if (!privacyPolicy && !termsOfService && !returnPolicy && !shippingPolicy) {
-      alert('Please fill in your store policies first so AI can analyze them.');
+      setFaqNotice({ type: 'error', text: 'Fill in at least one policy so the AI can analyse it.' });
       return;
     }
 
     setIsGeneratingFaq(true);
+    setFaqNotice(null);
     try {
       const response = await fetch('/api/ai/generate-faq', {
         method: 'POST',
@@ -1532,11 +1646,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       });
 
       const data = await response.json();
+      if (!response.ok || !Array.isArray(data?.faq)) {
+        setFaqNotice({ type: 'error', text: data?.message || 'Could not generate the FAQ. Please try again.' });
+        return;
+      }
       setGeneratedFaq(data.faq);
-      setChatbotScript(data.chatbotScript);
-    } catch (error) {
-      console.error('AI FAQ Error:', error);
-      alert('Failed to generate AI FAQ & Chatbot script.');
+      setChatbotScript(data.chatbotScript || '');
+      setFaqNotice({ type: 'ok', text: `Generated ${data.faq.length} FAQ pair(s).` });
+    } catch (err: any) {
+      console.error('AI FAQ Error:', err);
+      setFaqNotice({ type: 'error', text: err?.message || 'Failed to generate AI FAQ & Chatbot script.' });
     } finally {
       setIsGeneratingFaq(false);
     }
@@ -3910,6 +4029,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'store_policies' && (
             <div className="space-y-8">
+              {policiesNotice && (
+                <div
+                  data-testid="policies-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${policiesNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {policiesNotice.text}
+                </div>
+              )}
               {/* AI FAQ Generator Tool */}
               <div className="bg-[#00D68F]/5 border border-[#00D68F]/20 rounded-2xl p-6 space-y-4">
                 <div className="flex items-center justify-between">
@@ -3924,6 +4051,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </div>
                   <button
                     type="button"
+                    data-testid="generate-faq"
                     onClick={generateFaqAndChatbot}
                     disabled={isGeneratingFaq}
                     className="px-4 py-2 bg-[#00D68F] text-slate-950 font-black text-xs rounded-xl hover:bg-[#00E699] transition cursor-pointer flex items-center gap-2 disabled:opacity-50"
@@ -3932,6 +4060,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <span>{isGeneratingFaq ? 'Analyzing Policies...' : 'Generate with AI'}</span>
                   </button>
                 </div>
+
+                {faqNotice && (
+                  <div
+                    data-testid="faq-toast"
+                    className={`rounded-xl px-4 py-3 text-sm font-medium border ${faqNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                  >
+                    {faqNotice.text}
+                  </div>
+                )}
 
                 {generatedFaq && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 animate-in fade-in slide-in-from-bottom-2">
@@ -4017,12 +4154,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </div>
                   <button
                     type="button"
-                    onClick={() => setShowLegalLinks(!showLegalLinks)}
+                    data-testid="footer-links-toggle"
+                    onClick={handleToggleLegalLinks}
                     className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${showLegalLinks ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                   >
                     <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${showLegalLinks ? 'translate-x-6' : 'translate-x-1'}`} />
                   </button>
                 </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  data-testid="policies-save"
+                  onClick={handleSavePolicies}
+                  disabled={policiesSaving || policiesLoading}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{policiesSaving ? 'Saving…' : 'Save Changes'}</span>
+                </button>
               </div>
             </div>
           )}

@@ -3203,6 +3203,156 @@ app.post('/api/store/domain-settings', async (req, res) => {
   }
 });
 
+// ── Legal policies ───────────────────────────
+//
+// Persisted on the store record as `policies`:
+//   { privacyPolicy, termsOfService, returnRefundPolicy, shippingPolicy, showInFooter }
+// `showInFooter` drives whether the storefront footer auto-injects policy links.
+
+/** Sanitise the legal-policies payload, merging over a fallback. */
+function normalizePolicies(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  const pick = (key: string): string => {
+    const v = src[key];
+    if (typeof v === 'string') return v;
+    const fb = fallback[key];
+    return typeof fb === 'string' ? fb : '';
+  };
+
+  const showInFooter = typeof src.showInFooter === 'boolean'
+    ? src.showInFooter
+    : (typeof fallback.showInFooter === 'boolean' ? fallback.showInFooter : true);
+
+  return {
+    privacyPolicy: pick('privacyPolicy'),
+    termsOfService: pick('termsOfService'),
+    returnRefundPolicy: pick('returnRefundPolicy'),
+    shippingPolicy: pick('shippingPolicy'),
+    showInFooter,
+  };
+}
+
+const policiesCache = new Map<string, Record<string, any>>();
+
+/** Read the legal policies (Mongo first, in-memory cache fallback). */
+async function readPolicies(storeRef: string) {
+  const slug = cleanStoreRef(storeRef);
+  const cached = policiesCache.get(slug) || {};
+
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = (record?.policies || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Server] readPolicies lookup warning:', err?.message || err);
+  }
+
+  const merged = normalizePolicies(stored, cached);
+  policiesCache.set(slug, merged);
+  return merged;
+}
+
+/** Persist the legal policies on the store record (Mongo → file mirror). */
+async function writePolicies(storeRef: string, patch: any) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readPolicies(slug);
+  const next = normalizePolicies(patch, current);
+
+  policiesCache.set(slug, next);
+
+  // 1. Durable copy on the store record.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = {
+        $set: {
+          policies: next,
+          privacyPolicy: next.privacyPolicy,
+          termsOfService: next.termsOfService,
+          returnRefundPolicy: next.returnRefundPolicy,
+          shippingPolicy: next.shippingPolicy,
+          showInFooter: next.showInFooter,
+          updated_at: new Date().toISOString(),
+        },
+      };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] policies mongo persist warning:', err?.message || err);
+  }
+
+  // 2. Best-effort mirror into the local payload file.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      payload.merchant.policies = next;
+      payload.merchant.privacyPolicy = next.privacyPolicy;
+      payload.merchant.termsOfService = next.termsOfService;
+      payload.merchant.returnRefundPolicy = next.returnRefundPolicy;
+      payload.merchant.shippingPolicy = next.shippingPolicy;
+      payload.merchant.showInFooter = next.showInFooter;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return next;
+}
+
+/** GET /api/store/policies?store_slug=… */
+app.get('/api/store/policies', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const policies = await readPolicies(storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, policies });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/policies error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load legal policies.' });
+  }
+});
+
+/** POST /api/store/policies — save the legal policies + footer toggle. */
+app.post('/api/store/policies', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const policies = await writePolicies(storeRef, body.policies || body);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      policies,
+      message: 'Legal policies saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/policies error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save legal policies.' });
+  }
+});
+
 // ── Gift options, invoice & NBR e-invoicing ──
 //
 // Same durability strategy as `checkoutConfig`: MongoDB is the source of truth
