@@ -114,6 +114,42 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [exportLoading, setExportLoading] = useState(false);
   const [exportNotice, setExportNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
+  // ── Communications (SMS · WhatsApp · Email) ──
+  // One aggregated config, loaded from / saved to `/api/store/communication-settings`.
+  type TriggerMap = Record<string, boolean>;
+  interface EmailTemplate {
+    subject: string;
+    senderName: string;
+    body: string;
+    html: string;
+  }
+  const [smsEnabled, setSmsEnabled] = useState(false);
+  const [commSmsSenderId, setCommSmsSenderId] = useState('');
+  const [smsTriggers, setSmsTriggers] = useState<TriggerMap>(
+    { order_confirmation: true, order_shipped: true, delivery_success: true, otp_verification: true }
+  );
+  const [smsTemplates, setSmsTemplates] = useState<Record<string, string>>({});
+
+  const [waEnabled, setWaEnabled] = useState(false);
+  const [waPhoneNumberId, setWaPhoneNumberId] = useState('');
+  const [waBusinessAccountId, setWaBusinessAccountId] = useState('');
+  const [waAccessToken, setWaAccessToken] = useState('');
+  const [waTriggers, setWaTriggers] = useState<TriggerMap>(
+    { order_placed: true, order_shipped: true, delivery_success: true, abandoned_cart: false }
+  );
+
+  const [emailEnabled, setEmailEnabled] = useState(false);
+  const [emailSenderName, setEmailSenderName] = useState('');
+  const [emailReplyTo, setEmailReplyTo] = useState('');
+  const [emailTemplates, setEmailTemplates] = useState<Record<string, EmailTemplate>>({});
+  const [selectedEmailTemplate, setSelectedEmailTemplate] = useState('order_confirmation');
+  const [testEmailTo, setTestEmailTo] = useState('');
+  const [testEmailSending, setTestEmailSending] = useState(false);
+
+  const [commLoading, setCommLoading] = useState(false);
+  const [commSaving, setCommSaving] = useState(false);
+  const [commNotice, setCommNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+
   // Checkout Tab State — seeded from the store record, saved via the API below.
   const [checkoutAnnouncement, setCheckoutAnnouncement] = useState(merchant?.checkoutConfig?.announcement || '');
   const [minOrderAmount, setMinOrderAmount] = useState(
@@ -601,6 +637,173 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     a.click();
     document.body.removeChild(a);
   };
+
+  // ── Communications (SMS · WhatsApp · Email) ──
+
+  const SMS_TRIGGER_DEFS = [
+    { key: 'order_confirmation', label: 'Order Confirmation' },
+    { key: 'order_shipped', label: 'Order Shipped' },
+    { key: 'delivery_success', label: 'Delivery Success' },
+    { key: 'otp_verification', label: 'OTP Verification' },
+  ];
+  const WHATSAPP_TRIGGER_DEFS = [
+    { key: 'order_placed', label: 'Instant New Order Alert' },
+    { key: 'order_shipped', label: 'Order Shipped' },
+    { key: 'delivery_success', label: 'Delivery Success' },
+    { key: 'abandoned_cart', label: 'Abandoned Cart' },
+  ];
+  const EMAIL_TEMPLATE_DEFS = [
+    { key: 'order_confirmation', label: 'Order Confirmation Email' },
+    { key: 'shipping_update', label: 'Shipping Update Email' },
+    { key: 'abandoned_cart', label: 'Abandoned Cart Email' },
+  ];
+  /** Quick-insert variable tags offered under each template editor. */
+  const SMS_VARIABLES = ['{order_id}', '{customer_name}', '{tracking_url}', '{store_name}', '{amount}'];
+
+  /** Apply a communicationConfig payload to the form fields. */
+  const applyCommunicationConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    const sms = cfg.sms && typeof cfg.sms === 'object' ? cfg.sms : {};
+    const wa = cfg.whatsapp && typeof cfg.whatsapp === 'object' ? cfg.whatsapp : {};
+    const email = cfg.email && typeof cfg.email === 'object' ? cfg.email : {};
+
+    setSmsEnabled(sms.enabled === true);
+    setCommSmsSenderId(typeof sms.senderId === 'string' ? sms.senderId : '');
+    if (sms.triggers && typeof sms.triggers === 'object') setSmsTriggers((prev) => ({ ...prev, ...sms.triggers }));
+    if (sms.templates && typeof sms.templates === 'object') setSmsTemplates((prev) => ({ ...prev, ...sms.templates }));
+
+    setWaEnabled(wa.enabled === true);
+    setWaPhoneNumberId(typeof wa.phoneNumberId === 'string' ? wa.phoneNumberId : '');
+    setWaBusinessAccountId(typeof wa.businessAccountId === 'string' ? wa.businessAccountId : '');
+    setWaAccessToken(typeof wa.accessToken === 'string' ? wa.accessToken : '');
+    if (wa.triggers && typeof wa.triggers === 'object') setWaTriggers((prev) => ({ ...prev, ...wa.triggers }));
+
+    setEmailEnabled(email.enabled === true);
+    setEmailSenderName(typeof email.senderName === 'string' ? email.senderName : '');
+    setEmailReplyTo(typeof email.replyTo === 'string' ? email.replyTo : '');
+    if (email.templates && typeof email.templates === 'object') {
+      setEmailTemplates((prev) => ({ ...prev, ...email.templates }));
+    }
+  }, []);
+
+  /** Load the saved communications config from the backend. */
+  const loadCommunicationSettings = useCallback(async () => {
+    if (!storeRef) return;
+    setCommLoading(true);
+    try {
+      const res = await fetch(`/api/store/communication-settings?store_slug=${encodeURIComponent(storeRef)}`);
+      const data = await res.json();
+      if (data?.ok && data.communicationConfig) applyCommunicationConfig(data.communicationConfig);
+    } catch (err) {
+      console.warn('Communication settings load warning:', err);
+    } finally {
+      setCommLoading(false);
+    }
+  }, [storeRef, applyCommunicationConfig]);
+
+  // Load whenever one of the three Communications tabs is opened.
+  useEffect(() => {
+    if (activeSubTab === 'comm_sms' || activeSubTab === 'comm_whatsapp' || activeSubTab === 'comm_email') {
+      loadCommunicationSettings();
+    }
+  }, [activeSubTab, loadCommunicationSettings]);
+
+  /** Persist the SIMPLE (non-Pro) communications config. */
+  const handleSaveCommunications = async () => {
+    if (!storeRef) {
+      setCommNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    setCommSaving(true);
+    try {
+      const res = await fetch('/api/store/communication-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeRef,
+          communicationConfig: {
+            sms: { enabled: smsEnabled, senderId: commSmsSenderId, triggers: smsTriggers, templates: smsTemplates },
+            whatsapp: {
+              enabled: waEnabled,
+              phoneNumberId: waPhoneNumberId,
+              businessAccountId: waBusinessAccountId,
+              accessToken: waAccessToken,
+              triggers: waTriggers,
+            },
+            email: {
+              enabled: emailEnabled,
+              senderName: emailSenderName,
+              replyTo: emailReplyTo,
+              templates: emailTemplates,
+            },
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setCommNotice({ type: 'error', text: data?.error || 'Could not save communication settings.' });
+        return;
+      }
+      applyCommunicationConfig(data.communicationConfig);
+      setCommNotice({ type: 'ok', text: data.message || 'Communication settings saved.' });
+    } catch (err: any) {
+      setCommNotice({ type: 'error', text: err?.message || 'Could not save communication settings.' });
+    } finally {
+      setCommSaving(false);
+    }
+  };
+
+  /** Update a single field of the currently-selected email template. */
+  const updateEmailTemplate = (field: keyof EmailTemplate, value: string) => {
+    setEmailTemplates((prev) => {
+      const current = prev[selectedEmailTemplate] || { subject: '', senderName: '', body: '', html: '' };
+      return { ...prev, [selectedEmailTemplate]: { ...current, [field]: value } };
+    });
+  };
+
+  /** Send a test email for the selected template. */
+  const handleSendTestEmail = async () => {
+    if (!storeRef) {
+      setCommNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(testEmailTo.trim())) {
+      setCommNotice({ type: 'error', text: 'Enter a valid recipient email address first.' });
+      return;
+    }
+    setTestEmailSending(true);
+    try {
+      const tpl = emailTemplates[selectedEmailTemplate] || { subject: '', body: '', html: '' };
+      const res = await fetch('/api/store/test-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeRef,
+          to: testEmailTo.trim(),
+          templateId: selectedEmailTemplate,
+          subject: tpl.subject,
+          body: tpl.body,
+          html: tpl.html,
+        }),
+      });
+      const data = await res.json();
+      setCommNotice({
+        type: data?.ok ? 'ok' : 'error',
+        text: data?.message || data?.error || 'Test email request completed.',
+      });
+    } catch (err: any) {
+      setCommNotice({ type: 'error', text: err?.message || 'Could not send the test email.' });
+    } finally {
+      setTestEmailSending(false);
+    }
+  };
+
+  // Auto-dismiss the communications toast.
+  useEffect(() => {
+    if (!commNotice) return;
+    const timer = setTimeout(() => setCommNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [commNotice]);
 
   // ── Checkout page options ────────────────────
 
@@ -1501,7 +1704,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5">Default Store Language</label>
-                    <select 
+                    <select
                       value={language}
                       onChange={(e) => setLanguage(e.target.value as any)}
                       className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
@@ -1899,7 +2102,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   API & Webhook Security Credentials
                 </h3>
                 <p className="text-sm text-slate-400 mb-6">Manage your secret keys for third-party integrations and webhooks. Do not share these.</p>
-                
+
                 <div className="space-y-4 max-w-2xl">
                   {/* API Key */}
                   <div>
@@ -1912,9 +2115,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           readOnly
                           className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-slate-300 outline-none font-mono text-sm"
                         />
-                        <button 
-                          type="button" 
-                          onClick={() => handleCopy(apiKey, 'api')} 
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(apiKey, 'api')}
                           className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-white bg-[#101420] rounded-lg border border-[#2E3852]"
                         >
                           {copiedKey === 'api' ? <Check className="w-4 h-4 text-[#00D68F]" /> : <Copy className="w-4 h-4" />}
@@ -1938,9 +2141,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           readOnly
                           className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-slate-300 outline-none font-mono text-sm"
                         />
-                        <button 
-                          type="button" 
-                          onClick={() => handleCopy(webhookSecret, 'webhook')} 
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(webhookSecret, 'webhook')}
                           className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-white bg-[#101420] rounded-lg border border-[#2E3852]"
                         >
                           {copiedKey === 'webhook' ? <Check className="w-4 h-4 text-[#00D68F]" /> : <Copy className="w-4 h-4" />}
@@ -2252,7 +2455,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Invoice Numbering & Business Tax Info</h3>
-                
+
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
@@ -2281,7 +2484,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Invoice Footer & Print Settings</h3>
-                
+
                 <div className="space-y-4">
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Invoice Footer Note / Return Policy</label>
@@ -2525,7 +2728,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           className="w-full max-w-sm bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
                         />
                       </div>
-                      
+
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#1A2033] rounded-xl border border-[#2E3852] gap-4">
                         <div>
                           <div className="font-bold text-white text-sm mb-0.5">Require Advance Delivery Charge Payment for COD Orders</div>
@@ -2560,7 +2763,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {/* Shipping Rates & Free Delivery Rules */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Shipping Rates & Free Delivery Rules</h3>
-                
+
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
@@ -2584,7 +2787,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       />
                     </div>
                   </div>
-                  
+
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Minimum Cart Amount for Free Shipping (৳)</label>
                     <input
@@ -2601,7 +2804,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {/* Payment Method Restrict Controls */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Payment Method Restrict Controls</h3>
-                
+
                 <div className="space-y-4">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852] gap-4">
                     <div>
@@ -2871,7 +3074,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <span className="text-white">yourstore.com</span>
                     <span className="px-2 py-1 rounded bg-green-500/10 text-green-400 text-xs font-bold">Active</span>
                   </div>
-                  
+
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852] gap-4">
                     <div>
                       <div className="font-bold text-white text-sm mb-0.5">Force HTTPS / Auto Free SSL Certificate</div>
@@ -2924,7 +3127,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </h3>
                   <p className="text-sm text-slate-400">Manage your primary shipping provider settings.</p>
                 </div>
-                
+
                 <div className="space-y-4">
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Select Primary Courier Provider</label>
@@ -3084,6 +3287,381 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 >
                   <Save className="w-4 h-4" />
                   <span>{configSaving ? "Saving..." : "Save API Integrations"}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── SMS notifications ─────────────────────────────── */}
+          {activeSubTab === 'comm_sms' && (
+            <div className="space-y-8">
+              {commNotice && (
+                <div className={`rounded-xl px-4 py-3 text-sm font-medium border ${commNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                  {commNotice.text}
+                </div>
+              )}
+
+              {/* Trigger events */}
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6 space-y-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
+                      <Smartphone className="w-5 h-5 text-[#00D68F]" />
+                      SMS Notifications
+                    </h3>
+                    <p className="text-sm text-slate-400">Choose which events send an SMS to your customers.</p>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="sms-enabled-toggle"
+                    onClick={() => setSmsEnabled(!smsEnabled)}
+                    className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${smsEnabled ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
+                  >
+                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${smsEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {SMS_TRIGGER_DEFS.map((t) => (
+                    <label key={t.key} className="flex items-center justify-between gap-3 p-4 bg-[#161B28] rounded-xl border-[#2E3852] cursor-pointer">
+                      <span className="text-white text-sm font-medium">{t.label}</span>
+                      <input
+                        type="checkbox"
+                        data-testid={`sms-trigger-${t.key}`}
+                        checked={smsTriggers[t.key] === true}
+                        onChange={(e) => setSmsTriggers((prev) => ({ ...prev, [t.key]: e.target.checked }))}
+                        className="h-4 w-4 accent-[#00D68F]"
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-bold mb-1.5 text-sm">Sender ID</label>
+                  <input
+                    type="text"
+                    data-testid="sms-sender-id"
+                    value={commSmsSenderId}
+                    onChange={(e) => setCommSmsSenderId(e.target.value)}
+                    placeholder="যেমন: ZidBook"
+                    className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                  />
+                </div>
+              </div>
+
+              {/* Template editor */}
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6 space-y-6">
+                <div>
+                  <h3 className="text-lg font-bold text-white mb-1">Message Templates</h3>
+                  <p className="text-sm text-slate-400">Insert variable tags that are replaced with real order data when the SMS is sent.</p>
+                </div>
+                <div className="space-y-5">
+                  {SMS_TRIGGER_DEFS.map((t) => (
+                    <div key={t.key} className="space-y-2">
+                      <label className="block text-slate-300 font-bold text-sm">{t.label} Template</label>
+                      <textarea
+                        data-testid={`sms-template-${t.key}`}
+                        rows={3}
+                        value={smsTemplates[t.key] || ''}
+                        onChange={(e) => setSmsTemplates((prev) => ({ ...prev, [t.key]: e.target.value }))}
+                        placeholder="Hi {customer_name}, your order {order_id} is confirmed!"
+                        className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-600 font-mono text-sm"
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        {SMS_VARIABLES.map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            onClick={() => setSmsTemplates((prev) => ({ ...prev, [t.key]: `${prev[t.key] || ''}${v}` }))}
+                            className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#161B28] border-[#2E3852] text-[#00D68F] hover:border-[#00D68F] transition"
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  data-testid="comm-save-sms"
+                  onClick={handleSaveCommunications}
+                  disabled={commSaving || commLoading}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{commSaving ? 'Saving...' : 'Save Changes'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── WhatsApp configuration ─────────────────────────── */}
+          {activeSubTab === 'comm_whatsapp' && (
+            <div className="space-y-8">
+              {commNotice && (
+                <div className={`rounded-xl px-4 py-3 text-sm font-medium border ${commNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                  {commNotice.text}
+                </div>
+              )}
+
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6 space-y-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
+                      <MessageSquare className="w-5 h-5 text-[#00D68F]" />
+                      WhatsApp Business Cloud API
+                    </h3>
+                    <p className="text-sm text-slate-400">Connect your WhatsApp Business account to send instant order alerts.</p>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="wa-enabled-toggle"
+                    onClick={() => setWaEnabled(!waEnabled)}
+                    className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${waEnabled ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
+                  >
+                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${waEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Phone Number ID</label>
+                    <input
+                      type="text"
+                      data-testid="wa-phone-number-id"
+                      value={waPhoneNumberId}
+                      onChange={(e) => setWaPhoneNumberId(e.target.value)}
+                      placeholder="যেমন: 102290129340398"
+                      className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">WhatsApp Business Account ID</label>
+                    <input
+                      type="text"
+                      data-testid="wa-business-account-id"
+                      value={waBusinessAccountId}
+                      onChange={(e) => setWaBusinessAccountId(e.target.value)}
+                      placeholder="যেমন: 305910839643859"
+                      className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-bold mb-1.5 text-sm">Access Token</label>
+                  <input
+                    type="password"
+                    data-testid="wa-access-token"
+                    value={waAccessToken}
+                    onChange={(e) => setWaAccessToken(e.target.value)}
+                    placeholder="EAAG..."
+                    className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500 font-mono text-sm"
+                  />
+                  <p className="text-xs text-slate-500 mt-1.5">Stored on your store record. Never shared with your customers.</p>
+                </div>
+
+                <div>
+                  <h4 className="text-sm font-bold text-white mb-3">Notification Triggers</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {WHATSAPP_TRIGGER_DEFS.map((t) => (
+                      <label key={t.key} className="flex items-center justify-between gap-3 p-4 bg-[#161B28] rounded-xl border-[#2E3852] cursor-pointer">
+                        <span className="text-white text-sm font-medium">{t.label}</span>
+                        <input
+                          type="checkbox"
+                          data-testid={`wa-trigger-${t.key}`}
+                          checked={waTriggers[t.key] === true}
+                          onChange={(e) => setWaTriggers((prev) => ({ ...prev, [t.key]: e.target.checked }))}
+                          className="h-4 w-4 accent-[#00D68F]"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  data-testid="comm-save-whatsapp"
+                  onClick={handleSaveCommunications}
+                  disabled={commSaving || commLoading}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{commSaving ? 'Saving...' : 'Save Changes'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Email templates ──────────────────────────────── */}
+          {activeSubTab === 'comm_email' && (
+            <div className="space-y-8">
+              {commNotice && (
+                <div className={`rounded-xl px-4 py-3 text-sm font-medium border ${commNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                  {commNotice.text}
+                </div>
+              )}
+
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6 space-y-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
+                      <Mail className="w-5 h-5 text-[#00D68F]" />
+                      Email Templates
+                    </h3>
+                    <p className="text-sm text-slate-400">Customise the emails your customers receive at each step.</p>
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="email-enabled-toggle"
+                    onClick={() => setEmailEnabled(!emailEnabled)}
+                    className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${emailEnabled ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
+                  >
+                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${emailEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+
+                {/* Template selector as tabs */}
+                <div className="flex flex-wrap gap-2">
+                  {EMAIL_TEMPLATE_DEFS.map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      data-testid={`email-tpl-tab-${t.key}`}
+                      onClick={() => setSelectedEmailTemplate(t.key)}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition border ${selectedEmailTemplate === t.key ? 'bg-[#00D68F] text-slate-950 border-[#00D68F]' : 'bg-[#161B28] text-slate-300 border-[#2E3852] hover:border-[#00D68F]'}`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Email Subject</label>
+                    <input
+                      type="text"
+                      data-testid="email-subject"
+                      value={(emailTemplates[selectedEmailTemplate] || {}).subject || ''}
+                      onChange={(e) => updateEmailTemplate('subject', e.target.value)}
+                      placeholder="Your order {order_id} is confirmed"
+                      className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Sender Name</label>
+                    <input
+                      type="text"
+                      data-testid="email-sender-name"
+                      value={(emailTemplates[selectedEmailTemplate] || {}).senderName || emailSenderName}
+                      onChange={(e) => updateEmailTemplate('senderName', e.target.value)}
+                      placeholder="যেমন: MyStore Team"
+                      className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-bold mb-1.5 text-sm">Reply-To Address</label>
+                  <input
+                    type="email"
+                    data-testid="email-reply-to"
+                    value={emailReplyTo}
+                    onChange={(e) => setEmailReplyTo(e.target.value)}
+                    placeholder="support@yourstore.com"
+                    className="w-full max-w-md bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Plain text body</label>
+                    <textarea
+                      data-testid="email-body"
+                      rows={8}
+                      value={(emailTemplates[selectedEmailTemplate] || {}).body || ''}
+                      onChange={(e) => updateEmailTemplate('body', e.target.value)}
+                      placeholder="Hi {customer_name}, thanks for your order {order_id}..."
+                      className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-600 font-mono text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Custom HTML body</label>
+                    <textarea
+                      data-testid="email-html"
+                      rows={8}
+                      value={(emailTemplates[selectedEmailTemplate] || {}).html || ''}
+                      onChange={(e) => updateEmailTemplate('html', e.target.value)}
+                      placeholder="<h1>Order confirmed</h1><p>Order {order_id}</p>"
+                      className="w-full bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-600 font-mono text-sm"
+                    />
+                  </div>
+                </div>
+
+                {/* Live preview */}
+                {(() => {
+                  const tpl = emailTemplates[selectedEmailTemplate] || { subject: '', html: '', body: '' };
+                  if (!tpl.html && !tpl.body) return null;
+                  return (
+                    <div>
+                      <label className="block text-slate-300 font-bold mb-1.5 text-sm">Preview</label>
+                      <div className="rounded-xl border-[#2E3852] bg-white text-slate-900 overflow-hidden">
+                        <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 text-xs text-slate-600 font-semibold truncate">
+                          {tpl.subject || '(no subject)'}
+                        </div>
+                        {tpl.html ? (
+                          <div className="p-4 prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: tpl.html }} />
+                        ) : (
+                          <pre className="p4 text-sm whitespace-pre-wrap font-sans">{tpl.body}</pre>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Send test email */}
+              <div className="bg-[#101420] border-[#2E3852] rounded-2xl p-6 space-y-4">
+                <h3 className="text-lg font-bold text-white mb-1">Send a Test Email</h3>
+                <p className="text-sm text-slate-400">Deliver the selected template to your inbox to verify formatting.</p>
+                <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+                  <input
+                    type="email"
+                    data-testid="test-email-to"
+                    value={testEmailTo}
+                    onChange={(e) => setTestEmailTo(e.target.value)}
+                    placeholder="you@yourstore.com"
+                    className="flex-grow sm:max-w-sm bg-[#161B28] border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                  />
+                  <button
+                    type="button"
+                    data-testid="send-test-email"
+                    onClick={handleSendTestEmail}
+                    disabled={testEmailSending}
+                    className="px-5 py-2.5 bg-[#2E3852] hover:bg-[#3D4766] disabled:opacity-50 text-white rounded-xl text-sm font-bold transition flex items-center gap-2 whitespace-nowrap"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${testEmailSending ? 'animate-spin' : ''}`} />
+                    {testEmailSending ? 'Sending...' : 'Send Test Email'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  data-testid="comm-save-email"
+                  onClick={handleSaveCommunications}
+                  disabled={commSaving || commLoading}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{commSaving ? 'Saving...' : 'Save Changes'}</span>
                 </button>
               </div>
             </div>

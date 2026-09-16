@@ -2613,6 +2613,263 @@ app.post('/api/store/checkout-settings', async (req, res) => {
   }
 });
 
+// ── Communication settings (SMS · WhatsApp · Email) ─────────────────────────
+//
+// One aggregated config persisted on the store record as `communicationConfig`:
+//   { sms: { enabled, senderId, triggers, templates },
+//     whatsapp: { enabled, phoneNumberId, businessAccountId, accessToken, triggers },
+//     email: { enabled, senderName, replyTo, templates } }
+// Same durability strategy as `checkoutConfig`: MongoDB is the source of truth,
+// with an in-memory cache so reads still work when MONGODB_URI is unset.
+
+/** The SMS trigger events the UI exposes. */
+const SMS_TRIGGER_KEYS = ['order_confirmation', 'order_shipped', 'delivery_success', 'otp_verification'];
+/** The WhatsApp notification triggers the UI exposes. */
+const WHATSAPP_TRIGGER_KEYS = ['order_placed', 'order_shipped', 'delivery_success', 'abandoned_cart'];
+/** The email templates the UI exposes. */
+const EMAIL_TEMPLATE_KEYS = ['order_confirmation', 'shipping_update', 'abandoned_cart'];
+
+/** Coerce an arbitrary value to a plain boolean, optionally defaulting. */
+function asBool(value: any, fallback = false): boolean {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return fallback;
+}
+
+/** Coerce an arbitrary value to a trimmed string. */
+function asStr(value: any, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+/** Build a { triggerKey: boolean } map, defaulting off, from raw input. */
+function normalizeTriggers(raw: any, keys: string[], fallback: Record<string, boolean> = {}): Record<string, boolean> {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out: Record<string, boolean> = {};
+  for (const key of keys) {
+    out[key] = asBool(src[key], fallback[key] ?? false);
+  }
+  return out;
+}
+
+/** Sanitise the whole communication config, merging over a fallback. */
+function normalizeCommunicationConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const fbSms = (fallback.sms && typeof fallback.sms === 'object') ? fallback.sms : {};
+  const fbWa = (fallback.whatsapp && typeof fallback.whatsapp === 'object') ? fallback.whatsapp : {};
+  const fbEmail = (fallback.email && typeof fallback.email === 'object') ? fallback.email : {};
+
+  const srcSms = (src.sms && typeof src.sms === 'object') ? src.sms : {};
+  const srcWa = (src.whatsapp && typeof src.whatsapp === 'object') ? src.whatsapp : {};
+  const srcEmail = (src.email && typeof src.email === 'object') ? src.email : {};
+
+  // SMS templates: keep the known keys, ignore unknown ones.
+  const smsTemplatesIn = (srcSms.templates && typeof srcSms.templates === 'object') ? srcSms.templates : {};
+  const fbSmsTemplates = (fbSms.templates && typeof fbSms.templates === 'object') ? fbSms.templates : {};
+  const smsTemplates: Record<string, string> = {};
+  for (const key of SMS_TRIGGER_KEYS) {
+    smsTemplates[key] = asStr(smsTemplatesIn[key], asStr(fbSmsTemplates[key], ''));
+  }
+
+  // Email templates: each has subject/senderName/body/html.
+  const emailTemplatesIn = (srcEmail.templates && typeof srcEmail.templates === 'object') ? srcEmail.templates : {};
+  const fbEmailTemplates = (fbEmail.templates && typeof fbEmail.templates === 'object') ? fbEmail.templates : {};
+  const emailTemplates: Record<string, any> = {};
+  for (const key of EMAIL_TEMPLATE_KEYS) {
+    const tIn = (emailTemplatesIn[key] && typeof emailTemplatesIn[key] === 'object') ? emailTemplatesIn[key] : {};
+    const tFb = (fbEmailTemplates[key] && typeof fbEmailTemplates[key] === 'object') ? fbEmailTemplates[key] : {};
+    emailTemplates[key] = {
+      subject: asStr(tIn.subject, asStr(tFb.subject, '')),
+      senderName: asStr(tIn.senderName, asStr(tFb.senderName, '')),
+      body: asStr(tIn.body, asStr(tFb.body, '')),
+      html: asStr(tIn.html, asStr(tFb.html, '')),
+    };
+  }
+
+  return {
+    sms: {
+      enabled: asBool(srcSms.enabled, asBool(fbSms.enabled, false)),
+      senderId: asStr(srcSms.senderId, asStr(fbSms.senderId, '')),
+      triggers: normalizeTriggers(srcSms.triggers, SMS_TRIGGER_KEYS, fbSms.triggers),
+      templates: smsTemplates,
+    },
+    whatsapp: {
+      enabled: asBool(srcWa.enabled, asBool(fbWa.enabled, false)),
+      phoneNumberId: asStr(srcWa.phoneNumberId, asStr(fbWa.phoneNumberId, '')),
+      businessAccountId: asStr(srcWa.businessAccountId, asStr(fbWa.businessAccountId, '')),
+      accessToken: asStr(srcWa.accessToken, asStr(fbWa.accessToken, '')),
+      triggers: normalizeTriggers(srcWa.triggers, WHATSAPP_TRIGGER_KEYS, fbWa.triggers),
+    },
+    email: {
+      enabled: asBool(srcEmail.enabled, asBool(fbEmail.enabled, false)),
+      senderName: asStr(srcEmail.senderName, asStr(fbEmail.senderName, '')),
+      replyTo: asStr(srcEmail.replyTo, asStr(fbEmail.replyTo, '')),
+      templates: emailTemplates,
+    },
+  };
+}
+
+const communicationCache = new Map<string, Record<string, any>>();
+
+/** Read the communication config, preferring Mongo and falling back to the cache. */
+async function readCommunicationConfig(storeRef: string) {
+  const slug = cleanStoreRef(storeRef);
+  const cached = communicationCache.get(slug) || {};
+
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = (record?.communicationConfig || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Server] readCommunicationConfig lookup warning:', err?.message || err);
+  }
+
+  const merged = normalizeCommunicationConfig(stored, cached);
+  communicationCache.set(slug, merged);
+  return merged;
+}
+
+/** Persist the communication config on the store record (Mongo → file mirror). */
+async function writeCommunicationConfig(storeRef: string, patch: any) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readCommunicationConfig(slug);
+  const next = normalizeCommunicationConfig(patch, current);
+
+  communicationCache.set(slug, next);
+
+  // 1. Durable copy on the store record.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = { $set: { communicationConfig: next, updated_at: new Date().toISOString() } };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] communicationConfig mongo persist warning:', err?.message || err);
+  }
+
+  // 2. Best-effort mirror into the local payload file.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      payload.merchant.communicationConfig = next;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return next;
+}
+
+/** GET /api/store/communication-settings?store_slug=… */
+app.get('/api/store/communication-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const communicationConfig = await readCommunicationConfig(storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, communicationConfig });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/communication-settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load communication settings.' });
+  }
+});
+
+/** POST /api/store/communication-settings — save SMS/WhatsApp/Email config. */
+app.post('/api/store/communication-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const communicationConfig = await writeCommunicationConfig(
+      storeRef,
+      body.communicationConfig || body
+    );
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      communicationConfig,
+      message: 'Communication settings saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/communication-settings error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save communication settings.' });
+  }
+});
+
+/**
+ * POST /api/store/test-email — dispatch a test email for a template.
+ * Best-effort: if SMTP is not configured the endpoint reports a clear, non-500
+ * result so the UI can surface a helpful message instead of a hard error.
+ */
+app.post('/api/store/test-email', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const to = String(body.to || '').trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+      return res.status(400).json({ ok: false, error: 'A valid recipient email is required.' });
+    }
+    const templateId = String(body.templateId || body.template || 'order_confirmation');
+    const subject = String(body.subject || '').trim() || 'Your store test email';
+
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpUser = process.env.SMTP_USER;
+    if (!smtpHost || !smtpUser) {
+      return res.status(200).json({
+        ok: false,
+        delivered: false,
+        error: 'SMTP is not configured. Set SMTP_HOST / SMTP_USER / SMTP_PASS to send real email.',
+      });
+    }
+
+    // SMTP configured — attempt delivery via nodemailer.
+    try {
+      const nodemailer = await import('nodemailer');
+      const transport = nodemailer.createTransport({
+        host: smtpHost,
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: process.env.SMTP_SECURE === 'true',
+        auth: { user: smtpUser, pass: process.env.SMTP_PASS || '' },
+      });
+      await transport.sendMail({
+        from: process.env.SMTP_FROM || smtpUser,
+        to,
+        subject,
+        text: String(body.body || `This is a test of the "${templateId}" template.`),
+        html: String(body.html || '') || undefined,
+      });
+      return res.status(200).json({ ok: true, delivered: true, message: `Test email sent to ${to}.` });
+    } catch (sendErr: any) {
+      console.warn('[Server] test-email send warning:', sendErr?.message || sendErr);
+      return res.status(200).json({ ok: false, delivered: false, error: sendErr?.message || 'Could not send the test email.' });
+    }
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/test-email error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not send the test email.' });
+  }
+});
+
 // ── Gift options, invoice & NBR e-invoicing ──
 //
 // Same durability strategy as `checkoutConfig`: MongoDB is the source of truth
