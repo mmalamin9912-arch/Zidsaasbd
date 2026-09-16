@@ -316,7 +316,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   }, [storeRef]);
 
-  // Load on mount and whenever the Security tab is opened.
+  // Populate the API key + webhook fields as soon as the panel mounts (so the
+  // values are already in the inputs when the merchant opens the Security tab),
+  // and refresh again whenever the Security tab is (re)opened.
+  useEffect(() => {
+    if (storeRef) loadSecuritySettings();
+  }, [storeRef, loadSecuritySettings]);
+
   useEffect(() => {
     if (activeSubTab === 'settings_security') loadSecuritySettings();
   }, [activeSubTab, loadSecuritySettings]);
@@ -327,7 +333,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const sessionId = ensureSessionId();
     setCurrentSessionId(sessionId);
     try {
-      const res = await fetch('/api/security/sessions/register', {
+      const res = await fetch('/api/security/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ store_slug: storeRef, sessionId }),
@@ -339,6 +345,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     } catch (err) {
       console.warn('Session register warning:', err);
     }
+  }, [storeRef]);
+
+  useEffect(() => {
+    if (storeRef) registerCurrentSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storeRef]);
 
   useEffect(() => {
@@ -426,7 +437,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
     setSecurityBusy(type);
     try {
-      const res = await fetch('/api/security/credentials/regenerate', {
+      const res = await fetch('/api/security/regenerate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ store_slug: storeRef, type }),

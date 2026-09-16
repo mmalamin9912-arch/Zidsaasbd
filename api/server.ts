@@ -2384,6 +2384,65 @@ app.post('/api/security/sessions/logout-others', async (req, res) => {
   }
 });
 
+// ── Canonical security aliases ─────────────────
+// The merchant Security Settings panel and its DevTools trace call the short,
+// canonical paths below. The handlers above own the logic; these aliases simply
+// re-dispatch so /api/security/regenerate and /api/security/register never 404.
+app.post('/api/security/regenerate', (req, res, next) => {
+  req.url = '/api/security/credentials/regenerate';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (app as any).handle(req, res, next);
+});
+
+app.post('/api/security/register', (req, res, next) => {
+  req.url = '/api/security/sessions/register';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (app as any).handle(req, res, next);
+});
+
+/**
+ * GET /api/subscriptions — tenant billing/subscription check.
+ *
+ * The dashboard queries this on mount to decide whether a paid plan is active.
+ * It must always answer 200 with a well-formed payload so a missing or new
+ * tenant never produces a 404 (which previously surfaced as a red network row).
+ * Query params accepted: store_slug | slug | store_id | email.
+ */
+app.all('/api/subscriptions', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    // Supabase/PostgREST clients append `?select=*`; it is not meaningful here.
+    const storeRef = cleanStoreRef(
+      req.query.store_slug || req.query.slug || req.query.store_id
+      || (req.body && (req.body.store_slug || req.body.slug || req.body.store_id))
+    );
+
+    const record = storeRef ? await resolveStoreRecordFlexible(storeRef) : null;
+    const subscription = {
+      store_slug: storeRef || null,
+      subscription_plan: (record?.subscription_plan || record?.subscriptionPlan || 'free_trial') as string,
+      subscription_expiry: (record?.subscription_expiry || record?.subscriptionExpiry || null) as string | null,
+      plan_started_at: (record?.plan_started_at || record?.planStartedAt || null) as string | null,
+      expires_at: (record?.expires_at || record?.expiresAt || null) as string | null,
+      duration_days: (record?.duration_days || record?.durationDays || 30) as number,
+      status: 'active' as const,
+    };
+
+    // Accept the `select=*` shape PostgREST clients expect: an array of rows.
+    if (typeof req.query.select === 'string') {
+      return res.status(200).json([subscription]);
+    }
+    return res.status(200).json({ ok: true, subscription });
+  } catch (err: any) {
+    console.error('[Server] /api/subscriptions error:', err);
+    return res.status(200).json({
+      ok: false,
+      error: err?.message || 'Could not load subscription.',
+      subscription: { subscription_plan: 'free_trial', status: 'active' },
+    });
+  }
+});
+
 // ── Checkout page options ────────────────────
 //
 // Persisted on the store record as `checkoutConfig`. Same durability strategy

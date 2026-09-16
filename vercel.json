@@ -48,6 +48,22 @@
       "destination": "/api/index.ts"
     },
     {
+      "source": "/api/subscriptions",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/subscriptions/:path*",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/security/:path*",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/security",
+      "destination": "/api/index.ts"
+    },
+    {
       "source": "/api/auth/:path*",
       "destination": "/api/index.ts"
     },

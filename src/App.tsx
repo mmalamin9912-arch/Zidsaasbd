@@ -940,7 +940,7 @@ export default function App() {
           sessionId = `sess_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
           sessionStorage.setItem('zid_merchant_session_id', sessionId);
         }
-        fetch('/api/security/sessions/register', {
+        fetch('/api/security/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ store_slug: storeRef, sessionId }),
