@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
+import dns from 'node:dns/promises';
 import { createServer as createViteServer } from 'vite';
 import mongoose from 'mongoose';
 // NOTE: the explicit '.js' extension is REQUIRED. package.json declares
@@ -2605,6 +2606,337 @@ app.post('/api/store/test-email', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] POST /api/store/test-email error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Could not send the test email.' });
+  }
+});
+
+// ── Custom domains (Pro/Enterprise) ──────────────────
+//
+// Persisted on the store record as `domainConfig`:
+//   { customDomain, domainStatus: 'pending'|'verified'|'failed', forceSSL,
+//     verifiedAt, lastCheckedAt, dnsRecords: { a, cname } }
+// Verification performs a REAL DNS lookup (A via dns.resolve4, CNAME via
+// dns.resolveCname) and marks the domain 'verified' only when a record matches.
+
+/** The A/AAAA target every custom domain must point at. */
+const DOMAIN_A_TARGET = process.env.CUSTOM_DOMAIN_A_TARGET || '76.76.21.21';
+/** The CNAME target for `www` / subdomains. */
+const DOMAIN_CNAME_TARGET = process.env.CUSTOM_DOMAIN_CNAME_TARGET || 'cname.zidbd.app';
+
+/** Normalise a user-entered domain: lowercase, strip scheme/path/port/trailing dot. */
+function normalizeDomain(raw: unknown): string {
+  let host = String(raw || '').trim().toLowerCase();
+  host = host.replace(/^https?:\/\//, '');   // strip scheme
+  host = host.replace(/\/.*$/, '');            // strip path
+  host = host.replace(/:\d+$/, '');            // strip port
+  host = host.replace(/^\.+|\.+$/g, '');      // trim stray dots
+  return host;
+}
+
+/** Basic domain-shape validation (must contain a dot, valid label chars). */
+function isValidDomain(host: string): boolean {
+  if (!host || host.length > 253) return false;
+  return /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(host);
+}
+
+/** Coerce domainStatus to one of the three allowed values. */
+function normalizeDomainStatus(raw: unknown, fallback: DomainStatus = 'pending'): DomainStatus {
+  const v = String(raw || '').toLowerCase();
+  if (v === 'verified' || v === 'active' || v === 'success') return 'verified';
+  if (v === 'failed' || v === 'error' || v === 'invalid') return 'failed';
+  if (v === 'pending') return 'pending';
+  return fallback;
+}
+
+type DomainStatus = 'pending' | 'verified' | 'failed';
+
+/** Sanitise a domainConfig payload, merging over a fallback. */
+function normalizeDomainConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  const customDomainRaw = src.customDomain !== undefined ? src.customDomain : fallback.customDomain;
+  const customDomain = customDomainRaw ? normalizeDomain(customDomainRaw) : '';
+
+  const domainStatus = normalizeDomainStatus(
+    src.domainStatus !== undefined ? src.domainStatus : fallback.domainStatus,
+    customDomain ? 'pending' : 'pending'
+  );
+
+  const forceSSL = typeof src.forceSSL === 'boolean'
+    ? src.forceSSL
+    : (typeof src.forceHttps === 'boolean'
+      ? src.forceHttps
+      : (typeof fallback.forceSSL === 'boolean' ? fallback.forceSSL : true));
+
+  return {
+    customDomain,
+    domainStatus,
+    forceSSL,
+    verifiedAt: typeof fallback.verifiedAt === 'string' ? fallback.verifiedAt : '',
+    lastCheckedAt: typeof fallback.lastCheckedAt === 'string' ? fallback.lastCheckedAt : '',
+    dnsRecords: {
+      a: typeof fallback.dnsRecords?.a === 'string' ? fallback.dnsRecords.a : DOMAIN_A_TARGET,
+      cname: typeof fallback.dnsRecords?.cname === 'string' ? fallback.dnsRecords.cname : DOMAIN_CNAME_TARGET,
+    },
+  };
+}
+
+const domainCache = new Map<string, Record<string, any>>();
+
+/** Read the domain config (Mongo first, in-memory cache fallback). */
+async function readDomainConfig(storeRef: string) {
+  const slug = cleanStoreRef(storeRef);
+  const cached = domainCache.get(slug) || {};
+
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = (record?.domainConfig || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Server] readDomainConfig lookup warning:', err?.message || err);
+  }
+
+  const merged = normalizeDomainConfig(stored, cached);
+  domainCache.set(slug, merged);
+  return merged;
+}
+
+/** Last-resort in-memory domain config keyed by store slug. */
+async function writeDomainConfig(storeRef: string, patch: any) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readDomainConfig(slug);
+  const next = normalizeDomainConfig(patch, current);
+
+  domainCache.set(slug, next);
+
+  // 1. Durable copy on the store record.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = { $set: {
+        domainConfig: next,
+        customDomain: next.customDomain,
+        domainStatus: next.domainStatus,
+        forceSSL: next.forceSSL,
+        updated_at: new Date().toISOString(),
+      }};
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] domainConfig mongo persist warning:', err?.message || err);
+  }
+
+  // 2. Best-effort mirror into the local payload file.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      payload.merchant.domainConfig = next;
+      payload.merchant.customDomain = next.customDomain;
+      payload.merchant.domainStatus = next.domainStatus;
+      payload.merchant.forceSSL = next.forceSSL;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return next;
+}
+
+/** GET /api/store/domain-settings?store_slug=… */
+app.get('/api/store/domain-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const domainConfig = await readDomainConfig(storeRef);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      domainConfig,
+      dnsTargets: { a: DOMAIN_A_TARGET, cname: DOMAIN_CNAME_TARGET },
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/domain-settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load domain settings.' });
+  }
+});
+
+/**
+ * POST /api/store/domain-connect — save the pending domain.
+ * Body: { store_slug, customDomain }
+ * Plan-gated: Pro/Enterprise only. Marks the domain 'pending' until verified.
+ */
+app.post('/api/store/domain-connect', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    // Plan authorization — Pro or Enterprise only.
+    let storeRecord: Record<string, any> | null = null;
+    try {
+      storeRecord = (await resolveStoreRecordFlexible(storeRef)) as Record<string, any> | null;
+    } catch (err: any) {
+      console.warn('[Server] domain connect plan lookup warning:', err?.message || err);
+    }
+    if (!isProOrEnterprise(storeRecord)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Custom domains require an active Pro or Enterprise plan.',
+        plan: planIdOfStore(storeRecord),
+      });
+    }
+
+    const customDomain = normalizeDomain(body.customDomain || body.domain);
+    if (!customDomain || !isValidDomain(customDomain)) {
+      return res.status(400).json({ ok: false, error: 'Enter a valid domain, e.g. www.yourstore.com' });
+    }
+
+    const domainConfig = await writeDomainConfig(storeRef, {
+      customDomain,
+      domainStatus: 'pending',
+      verifiedAt: '',
+      lastCheckedAt: '',
+      forceSSL: (await readDomainConfig(storeRef)).forceSSL,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      domainConfig,
+      dnsTargets: { a: DOMAIN_A_TARGET, cname: DOMAIN_CNAME_TARGET },
+      message: `${customDomain} saved. Point your DNS records and verify.`,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/domain-connect error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save the domain.' });
+  }
+});
+
+/**
+ * POST /api/store/domain-verify — perform a REAL DNS lookup and set status.
+ * Body: { store_slug, customDomain? }
+ * A record: dns.resolve4(host); CNAME: dns.resolveCname(host). A stored domain
+ * is 'verified' when EITHER a matching A target OR a matching CNAME target is
+ * found; otherwise it becomes 'failed' with a human-readable reason.
+ */
+app.post('/api/store/domain-verify', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const current = await readDomainConfig(storeRef);
+    const host = normalizeDomain(body.customDomain || body.domain || current.customDomain);
+    if (!host || !isValidDomain(host)) {
+      return res.status(400).json({ ok: false, error: 'Connect a valid domain before verifying.' });
+    }
+
+    // Real DNS resolution. Never throws — a lookup failure is a verification result.
+    let aRecords: string[] = [];
+    let cnameRecords: string[] = [];
+    const errors: string[] = [];
+    try {
+      aRecords = await dns.resolve4(host);
+    } catch (e: any) {
+      errors.push(`A: ${e?.code || e?.message || 'lookup failed'}`);
+    }
+    try {
+      cnameRecords = await dns.resolveCname(host);
+    } catch (e: any) {
+      errors.push(`CNAME: ${e?.code || e?.message || 'lookup failed'}`);
+    }
+
+    const aMatch = aRecords.some((ip) => ip === DOMAIN_A_TARGET);
+    const cnameMatch = cnameRecords.some(
+      (c) => String(c).toLowerCase().replace(/\.$/, '') === DOMAIN_CNAME_TARGET.toLowerCase()
+    );
+    const verified = aMatch || cnameMatch;
+
+    const now = new Date().toISOString();
+    const domainConfig = await writeDomainConfig(storeRef, {
+      customDomain: host,
+      domainStatus: verified ? 'verified' : 'failed',
+      verifiedAt: verified ? now : '',
+      lastCheckedAt: now,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      verified,
+      store_slug: storeRef,
+      domainConfig,
+      resolved: { a: aRecords, cname: cnameRecords },
+      errors,
+      message: verified
+        ? `${host} verified — DNS records point at Zid BD.`
+        : `Could not verify ${host}. Check that your A record points to ${DOMAIN_A_TARGET} or your CNAME points to ${DOMAIN_CNAME_TARGET}.`,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/domain-verify error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not verify DNS records.' });
+  }
+});
+
+/**
+ * POST /api/store/domain-settings — persist all domain config (Force SSL etc.).
+ * Body: { store_slug, domainConfig: { customDomain, domainStatus, forceSSL } }
+ */
+app.post('/api/store/domain-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    // Force-SSL is a Pro/Enterprise capability too.
+    let storeRecord: Record<string, any> | null = null;
+    try {
+      storeRecord = (await resolveStoreRecordFlexible(storeRef)) as Record<string, any> | null;
+    } catch (err: any) {
+      console.warn('[Server] domain save plan lookup warning:', err?.message || err);
+    }
+    if (!isProOrEnterprise(storeRecord)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Custom domains require an active Pro or Enterprise plan.',
+        plan: planIdOfStore(storeRecord),
+      });
+    }
+
+    const domainConfig = await writeDomainConfig(storeRef, body.domainConfig || body);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      domainConfig,
+      message: 'Domain settings saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/domain-settings error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save domain settings.' });
   }
 });
 

@@ -289,6 +289,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [domainName, setDomainName] = useState('');
   const [forceHttps, setForceHttps] = useState(true);
   const [primaryDomain, setPrimaryDomain] = useState('yourstore.com');
+  // Backend-synced domain config (Pro/Enterprise only).
+  const [connectedDomain, setConnectedDomain] = useState('');
+  const [domainStatus, setDomainStatus] = useState<'pending' | 'verified' | 'failed' | ''>('');
+  const [dnsTargets, setDnsTargets] = useState<{ a: string; cname: string }>({ a: '76.76.21.21', cname: 'cname.zidbd.app' });
+  const [domainLoading, setDomainLoading] = useState(false);
+  const [domainBusy, setDomainBusy] = useState<string>('');
+  const [domainNotice, setDomainNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // ── Plan verification ────────────────────────
   //
@@ -804,6 +811,186 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const timer = setTimeout(() => setCommNotice(null), 5000);
     return () => clearTimeout(timer);
   }, [commNotice]);
+
+  // ── Custom domains (Pro/Enterprise) ──────────
+
+  /** Apply a domainConfig payload to the form fields. */
+  const applyDomainConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    setConnectedDomain(typeof cfg.customDomain === 'string' ? cfg.customDomain : '');
+    setDomainName(typeof cfg.customDomain === 'string' ? cfg.customDomain : '');
+    setDomainStatus(
+      cfg.domainStatus === 'verified' || cfg.domainStatus === 'failed' || cfg.domainStatus === 'pending'
+        ? cfg.domainStatus
+        : ''
+    );
+    setForceHttps(cfg.forceSSL !== false);
+  }, []);
+
+  /** Load the saved domain settings from the backend. */
+  const loadDomainSettings = useCallback(async () => {
+    if (!storeRef) return;
+    setDomainLoading(true);
+    try {
+      const res = await fetch(`/api/store/domain-settings?store_slug=${encodeURIComponent(storeRef)}`);
+      const data = await res.json();
+      if (data?.ok && data.domainConfig) applyDomainConfig(data.domainConfig);
+      if (data?.dnsTargets) setDnsTargets(data.dnsTargets);
+    } catch (err) {
+      console.warn('Domain settings load warning:', err);
+    } finally {
+      setDomainLoading(false);
+    }
+  }, [storeRef, applyDomainConfig]);
+
+  // Load whenever the Custom domains tab is opened.
+  useEffect(() => {
+    if (activeSubTab === 'store_domains') loadDomainSettings();
+  }, [activeSubTab, loadDomainSettings]);
+
+  /** Save the pending domain (plan-gated server-side). */
+  const handleConnectDomain = async () => {
+    if (!storeRef) {
+      setDomainNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    if (!hasProAccess) {
+      setDomainNotice({ type: 'error', text: 'Custom domains require an active Pro or Enterprise plan.' });
+      return;
+    }
+    if (!domainName.trim()) {
+      setDomainNotice({ type: 'error', text: 'Enter a domain to connect.' });
+      return;
+    }
+    setDomainBusy('connect');
+    try {
+      const res = await fetch('/api/store/domain-connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, customDomain: domainName.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setDomainNotice({ type: 'error', text: data?.error || 'Could not save the domain.' });
+        return;
+      }
+      applyDomainConfig(data.domainConfig);
+      if (data.dnsTargets) setDnsTargets(data.dnsTargets);
+      setDomainNotice({ type: 'ok', text: data.message || 'Domain saved. Now verify your DNS records.' });
+    } catch (err: any) {
+      setDomainNotice({ type: 'error', text: err?.message || 'Could not save the domain.' });
+    } finally {
+      setDomainBusy('');
+    }
+  };
+
+  /** Run the server-side DNS verification for the connected domain. */
+  const handleVerifyDomain = async () => {
+    if (!storeRef) {
+      setDomainNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    const host = (connectedDomain || domainName).trim();
+    if (!host) {
+      setDomainNotice({ type: 'error', text: 'Connect a domain first, then verify its DNS records.' });
+      return;
+    }
+    setDomainBusy('verify');
+    try {
+      const res = await fetch('/api/store/domain-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, customDomain: host }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setDomainNotice({ type: 'error', text: data?.error || 'Could not verify DNS records.' });
+        return;
+      }
+      if (data.domainConfig) applyDomainConfig(data.domainConfig);
+      setDomainNotice({ type: data.verified ? 'ok' : 'error', text: data.message || 'DNS verification finished.' });
+    } catch (err: any) {
+      setDomainNotice({ type: 'error', text: err?.message || 'Could not verify DNS records.' });
+    } finally {
+      setDomainBusy('');
+    }
+  };
+
+  /** Toggle Force HTTPS and persist it immediately. */
+  const handleToggleForceHttps = async () => {
+    if (!storeRef) {
+      setDomainNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    if (!hasProAccess) {
+      setDomainNotice({ type: 'error', text: 'Force HTTPS requires an active Pro or Enterprise plan.' });
+      return;
+    }
+    const next = !forceHttps;
+    setForceHttps(next);
+    setDomainBusy('ssl');
+    try {
+      const res = await fetch('/api/store/domain-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_slug: storeRef, domainConfig: { forceSSL: next } }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setForceHttps(!next); // revert on failure
+        setDomainNotice({ type: 'error', text: data?.error || 'Could not update HTTPS enforcement.' });
+        return;
+      }
+      if (data.domainConfig) applyDomainConfig(data.domainConfig);
+      setDomainNotice({ type: 'ok', text: next ? 'Force HTTPS enabled.' : 'Force HTTPS disabled.' });
+    } catch (err: any) {
+      setForceHttps(!next);
+      setDomainNotice({ type: 'error', text: err?.message || 'Could not update HTTPS enforcement.' });
+    } finally {
+      setDomainBusy('');
+    }
+  };
+
+  /** Persist the whole domain configuration. */
+  const handleSaveDomainSettings = async () => {
+    if (!storeRef) {
+      setDomainNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    setDomainBusy('save');
+    try {
+      const res = await fetch('/api/store/domain-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeRef,
+          domainConfig: {
+            customDomain: connectedDomain || domainName.trim(),
+            domainStatus: domainStatus || undefined,
+            forceSSL: forceHttps,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setDomainNotice({ type: 'error', text: data?.error || 'Could not save domain settings.' });
+        return;
+      }
+      if (data.domainConfig) applyDomainConfig(data.domainConfig);
+      setDomainNotice({ type: 'ok', text: data.message || 'Domain settings saved.' });
+    } catch (err: any) {
+      setDomainNotice({ type: 'error', text: err?.message || 'Could not save domain settings.' });
+    } finally {
+      setDomainBusy('');
+    }
+  };
+
+  // Auto-dismiss the domain toast.
+  useEffect(() => {
+    if (!domainNotice) return;
+    const timer = setTimeout(() => setDomainNotice(null), 6000);
+    return () => clearTimeout(timer);
+  }, [domainNotice]);
 
   // ── Checkout page options ────────────────────
 
@@ -3008,6 +3195,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           {activeSubTab === 'store_domains' && (
             <div className="space-y-8">
               {!hasProAccess && <PlanRestrictionBanner />}
+              {domainNotice && (
+                <div className={`rounded-xl px-4 py-3 text-sm font-medium border ${domainNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                  {domainNotice.text}
+                </div>
+              )}
               {/* Add Custom Domain Form */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
@@ -3018,16 +3210,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </h3>
                   <p className="text-sm text-slate-400">Connect your own domain to your store.</p>
                 </div>
-                <div className="flex gap-4">
+                <div className="flex flex-col sm:flex-row gap-4">
                   <input
                     type="text"
+                    data-testid="domain-input"
+                    disabled={!hasProAccess}
                     value={domainName}
                     onChange={(e) => setDomainName(e.target.value)}
                     placeholder="যেমন: www.yourdomain.com"
-                    className="flex-grow bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                    className="flex-grow bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500 disabled:opacity-60"
                   />
-                  <button type="button" className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00bf7f] text-slate-950 font-bold rounded-xl text-sm transition">
-                    Connect Domain
+                  <button
+                    type="button"
+                    data-testid="connect-domain"
+                    onClick={handleConnectDomain}
+                    disabled={!hasProAccess || domainBusy === 'connect'}
+                    className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00bf7f] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-bold rounded-xl text-sm transition whitespace-nowrap"
+                  >
+                    {domainBusy === 'connect' ? 'Connecting…' : 'Connect Domain'}
                   </button>
                 </div>
               </div>
@@ -3049,20 +3249,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <tr className="border-t border-[#2E3852]">
                         <td className="py-4 font-mono text-[#00D68F]">A Record</td>
                         <td className="py-4 font-mono">@</td>
-                        <td className="py-4 font-mono">192.0.2.1</td>
-                        <td className="py-4"><button className="text-slate-400 hover:text-white">Copy</button></td>
+                        <td className="py-4 font-mono">{dnsTargets.a}</td>
+                        <td className="py-4">
+                          <button type="button" onClick={() => handleCopy(dnsTargets.a, 'dns-a')} className="text-slate-400 hover:text-white">
+                            {copiedKey === 'dns-a' ? 'Copied' : 'Copy'}
+                          </button>
+                        </td>
                       </tr>
                       <tr className="border-t border-[#2E3852]">
                         <td className="py-4 font-mono text-[#00D68F]">CNAME</td>
                         <td className="py-4 font-mono">www</td>
-                        <td className="py-4 font-mono">dns.yourdomain.com</td>
-                        <td className="py-4"><button className="text-slate-400 hover:text-white">Copy</button></td>
+                        <td className="py-4 font-mono">{dnsTargets.cname}</td>
+                        <td className="py-4">
+                          <button type="button" onClick={() => handleCopy(dnsTargets.cname, 'dns-cname')} className="text-slate-400 hover:text-white">
+                            {copiedKey === 'dns-cname' ? 'Copied' : 'Copy'}
+                          </button>
+                        </td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <button type="button" className="px-5 py-2.5 bg-[#2E3852] hover:bg-[#3D4766] text-white rounded-xl text-sm transition">
-                  Verify DNS Records
+                <button
+                  type="button"
+                  data-testid="verify-dns"
+                  onClick={handleVerifyDomain}
+                  disabled={domainBusy === 'verify' || (!connectedDomain && !domainName.trim())}
+                  className="px-5 py-2.5 bg-[#2E3852] hover:bg-[#3D4766] disabled:opacity-60 disabled:cursor-not-allowed text-white rounded-xl text-sm transition"
+                >
+                  {domainBusy === 'verify' ? 'Verifying…' : 'Verify DNS Records'}
                 </button>
               </div>
 
@@ -3070,25 +3284,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <h3 className="text-lg font-bold text-white mb-1">Connected Domains</h3>
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852]">
-                    <span className="text-white">yourstore.com</span>
-                    <span className="px-2 py-1 rounded bg-green-500/10 text-green-400 text-xs font-bold">Active</span>
+                  <div className="flex items-center justify-between p-4 bg-[#161B28] rounded-xl border-[#2E3852]">
+                    <span className="text-white">{connectedDomain || 'No domain connected yet'}</span>
+                    {domainStatus ? (
+                      <span
+                        data-testid="domain-status"
+                        className={`px-2 py-1 rounded text-xs font-bold capitalize ${domainStatus === 'verified' ? 'bg-green-500/10 text-green-400' : domainStatus === 'failed' ? 'bg-red-500/10 text-red-400' : 'bg-amber-500/10 text-amber-500'}`}
+                      >
+                        {domainStatus}
+                      </span>
+                    ) : (
+                      <span className="px-2 py-1 rounded bg-slate-500/10 text-slate-400 text-xs font-bold">Not connected</span>
+                    )}
                   </div>
 
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border border-[#2E3852] gap-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-[#161B28] rounded-xl border-[#2E3852] gap-4">
                     <div>
                       <div className="font-bold text-white text-sm mb-0.5">Force HTTPS / Auto Free SSL Certificate</div>
                       <div className="text-xs text-slate-400">Ensure secure connection for all visitors.</div>
                     </div>
                     <button
                       type="button"
-                      onClick={() => setForceHttps(!forceHttps)}
-                      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${forceHttps ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
+                      data-testid="force-https-toggle"
+                      onClick={handleToggleForceHttps}
+                      disabled={!hasProAccess || domainBusy === 'ssl'}
+                      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors disabled:opacity-60 ${forceHttps ? 'bg-[#00D68F]' : 'bg-slate-600'}`}
                     >
                       <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${forceHttps ? 'translate-x-6' : 'translate-x-1'}`} />
                     </button>
                   </div>
                 </div>
+              </div>
+
+              <div className="pt-4 flex items-center justify-end gap-3">
+                {!hasProAccess && (
+                  <span className="text-xs text-amber-500">Upgrade to Pro to manage custom domains.</span>
+                )}
+                <button
+                  type="button"
+                  data-testid="domain-save"
+                  onClick={handleSaveDomainSettings}
+                  disabled={!hasProAccess || domainBusy === 'save'}
+                  className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{domainBusy === 'save' ? 'Saving…' : 'Save Changes'}</span>
+                </button>
               </div>
             </div>
           )}
