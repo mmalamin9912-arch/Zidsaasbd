@@ -64,6 +64,14 @@
       "destination": "/api/index.ts"
     },
     {
+      "source": "/api/export/:path*",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/export",
+      "destination": "/api/index.ts"
+    },
+    {
       "source": "/api/auth/:path*",
       "destination": "/api/index.ts"
     },

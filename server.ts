@@ -166,6 +166,35 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.models.Product || mongoose.model('Product', productSchema, 'products');
 
+// Export requests: one document per generated data export so the dashboard can
+// list history and re-download. `downloadUrl` points at GET /api/export/download
+// for the same id; `status` tracks the generation lifecycle.
+const exportHistorySchema = new mongoose.Schema({
+  id: { type: String, required: true, index: true },
+  store_slug: { type: String, index: true },
+  merchant_id: { type: String, index: true },
+  category: { type: String },
+  fileType: { type: String },
+  fileFormat: { type: String },
+  dateRange: {
+    from: { type: String },
+    to: { type: String },
+  },
+  generatedOn: { type: Date, default: Date.now },
+  status: { type: String, default: 'completed' },
+  downloadUrl: { type: String },
+  rowCount: { type: Number, default: 0 },
+  fileName: { type: String },
+  createdAt: { type: Date, default: Date.now },
+}, { strict: false });
+
+const ExportHistory = mongoose.models.ExportHistory || mongoose.model('ExportHistory', exportHistorySchema, 'export_history');
+
+// In-memory mirror of ExportHistory so the list + download routes keep working
+// when MongoDB is unavailable (local dev with no MONGODB_URI). Keyed by export
+// id, plus `__list__<slug>` entries holding a store's recent exports.
+const exportHistoryCache = new Map<string, any>();
+
 /**
  * Shared, global-cached MongoDB connection wrapper. Delegates to lib/db.ts so
  * the connection pool is reused across warm serverless invocations.
@@ -3463,6 +3492,306 @@ app.post('/api/orders', async (req, res) => {
     console.error('[Server] POST /api/orders error:', err);
     // Never surface a 5xx — acknowledge with a well-formed JSON envelope.
     return res.status(200).json({ ok: false, success: false, synced: 0, error: err?.message || 'Order sync failed' });
+  }
+});
+
+// ── Data export (orders · products · customers) ───────────────────────────────
+// Pro/Enterprise only. `POST /api/export/generate` reads the filtered records
+// from MongoDB, serialises them to CSV/JSON, records an ExportHistory document
+// and returns a download URL served by `GET /api/export/download`.
+
+/** Normalise the plan id regardless of which spelling the store record uses. */
+function planIdOfStore(record: Record<string, any> | null): string {
+  if (!record) return 'free_trial';
+  return String(
+    record.subscriptionPlan || record.subscription_plan || record.plan || 'free_trial'
+  ).toLowerCase();
+}
+
+/** Pro/Enterprise gate — mirrors the client's hasProAccess logic. */
+function isProOrEnterprise(record: Record<string, any> | null): boolean {
+  const plan = planIdOfStore(record);
+  if (['free_trial', 'trial', 'free', 'basic', 'starter'].includes(plan)) return false;
+  return ['pro', 'business', 'enterprise', 'premium', 'growth'].some((tier) => plan.includes(tier));
+}
+
+/** Categories the export endpoint understands, keyed to their Mongo collection. */
+const EXPORT_CATEGORIES: Record<string, { label: string; collection: string }> = {
+  orders: { label: 'All Orders', collection: 'orders' },
+  products: { label: 'Product Inventory', collection: 'products' },
+  customers: { label: 'Customer Contact List', collection: 'customers' },
+  sales: { label: 'Sales & Revenue Report', collection: 'orders' },
+};
+
+function resolveExportCategory(rawCategory: string): { key: string; label: string; collection: string } {
+  const raw = String(rawCategory || 'orders').trim().toLowerCase();
+  if (EXPORT_CATEGORIES[raw]) return { key: raw, ...EXPORT_CATEGORIES[raw] };
+  // Tolerate the human labels sent by the UI ('all orders', 'product inventory' …).
+  if (raw.includes('product')) return { key: 'products', ...EXPORT_CATEGORIES.products };
+  if (raw.includes('customer')) return { key: 'customers', ...EXPORT_CATEGORIES.customers };
+  if (raw.includes('revenue') || raw.includes('sales')) return { key: 'sales', ...EXPORT_CATEGORIES.sales };
+  return { key: 'orders', ...EXPORT_CATEGORIES.orders };
+}
+
+/** Escape a single CSV field per RFC 4180. */
+function csvField(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  let str: string;
+  if (typeof value === 'object') {
+    try { str = JSON.stringify(value); } catch { str = String(value); }
+  } else {
+    str = String(value);
+  }
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/** Serialise an array of flat records into CSV text. */
+function toCsv(rows: Record<string, any>[]): string {
+  if (!rows.length) return '';
+  // Union of keys across rows so heterogeneous docs are not truncated.
+  const keySet = new Set<string>();
+  for (const row of rows) {
+    Object.keys(row || {}).forEach((k) => keySet.add(k));
+  }
+  const headers: string[] = Array.from(keySet);
+  const lines = [headers.map(csvField).join(',')];
+  for (const row of rows) {
+    lines.push(headers.map((h) => csvField(row?.[h])).join(','));
+  }
+  return lines.join('\r\n');
+}
+
+/** Build the store-scoped Mongo filter, reusing the shared order matcher. */
+async function buildExportQuery(storeRef: string): Promise<any> {
+  return (await buildOrderQuery(storeRef)) || {};
+}
+
+/** Apply an inclusive ISO date-range filter to a Mongo query on `dateField`. */
+function applyDateRange(query: any, from?: string, to?: string, dateField = 'created_at'): any {
+  const range: Record<string, Date> = {};
+  if (from && !isNaN(new Date(from).getTime())) range.$gte = new Date(from);
+  if (to && !isNaN(new Date(to).getTime())) {
+    const end = new Date(to);
+    // Include the whole end day when only a date (no time) was supplied.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(to))) end.setHours(23, 59, 59, 999);
+    range.$lte = end;
+  }
+  if (!Object.keys(range).length) return query;
+
+  const dateClause = { [dateField]: range };
+  if (query && Object.keys(query).length) {
+    return { $and: [query, dateClause] };
+  }
+  return dateClause;
+}
+
+/** Fetch the filtered records for a category from MongoDB. */
+async function fetchExportRecords(
+  collection: string,
+  storeRef: string,
+  from?: string,
+  to?: string
+): Promise<Record<string, any>[]> {
+  await connectToMongoDB();
+  if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return [];
+
+  const baseQuery = await buildExportQuery(storeRef);
+  const dateField = collection === 'products' ? 'created_at' : 'created_at';
+  const query = applyDateRange(baseQuery, from, to, dateField);
+
+  try {
+    const docs = await (mongoose.connection.db.collection(collection) as any)
+      .find(query)
+      .limit(5000)
+      .toArray();
+    return Array.isArray(docs) ? docs : [];
+  } catch (err: any) {
+    console.warn(`[Server] export fetch warning (${collection}):`, err?.message || err);
+    return [];
+  }
+}
+
+/**
+ * POST /api/export/generate
+ * Body: { store_slug, category, fileFormat|format, from|startDate, to|endDate }
+ * 1. Authorise the plan (Pro/Enterprise). 2. Fetch filtered Mongo data.
+ * 3. Serialise to CSV/JSON. 4. Persist an ExportHistory row. 5. Return it.
+ */
+app.post('/api/export/generate', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = String(
+      body.store_slug || body.storeSlug || body.store_id || body.storeId || req.query.store_slug || ''
+    ).trim();
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    // 1. Plan authorization — Pro or Enterprise only.
+    let storeRecord: Record<string, any> | null = null;
+    try {
+      storeRecord = (await resolveStoreRecordFlexible(storeRef)) as Record<string, any> | null;
+    } catch (err: any) {
+      console.warn('[Server] export plan lookup warning:', err?.message || err);
+    }
+    if (!isProOrEnterprise(storeRecord)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Data export requires an active Pro or Enterprise plan.',
+        plan: planIdOfStore(storeRecord),
+      });
+    }
+
+    const { key: categoryKey, label: categoryLabel, collection } = resolveExportCategory(
+      body.category || body.categoryKey
+    );
+    const format = String(body.fileFormat || body.format || 'csv').toLowerCase().includes('json')
+      ? 'json'
+      : 'csv';
+    const from = String(body.from || body.startDate || '').trim() || undefined;
+    const to = String(body.to || body.endDate || '').trim() || undefined;
+
+    // 2. Fetch the filtered records.
+    const records = await fetchExportRecords(collection, storeRef, from, to);
+
+    // 3. Serialise.
+    const generatedOn = new Date();
+    const id = `exp_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const fileName = `${categoryKey}-export-${generatedOn.toISOString().split('T')[0]}.${format}`;
+    const payload = format === 'json' ? JSON.stringify(records, null, 2) : toCsv(records);
+
+    // 4. Persist the export + its content. The content is stored on the same
+    //    document so GET /api/export/download can stream it back without a
+    //    filesystem (serverless hosts are read-only).
+    const historyRecord = {
+      id,
+      store_slug: storeRef,
+      merchant_id: String(storeRecord?.merchant_id || storeRecord?.merchantId || storeRecord?.id || storeRef),
+      category: categoryKey,
+      categoryLabel,
+      fileType: format.toUpperCase(),
+      fileFormat: format,
+      dateRange: { from: from || null, to: to || null },
+      generatedOn,
+      status: 'completed',
+      downloadUrl: `/api/export/download?id=${encodeURIComponent(id)}`,
+      rowCount: records.length,
+      fileName,
+      content: payload,
+      createdAt: generatedOn,
+    };
+
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        await (ExportHistory as any).updateOne({ id }, { $set: historyRecord }, { upsert: true });
+      }
+    } catch (persistErr: any) {
+      console.warn('[Server] export persist warning:', persistErr?.message || persistErr);
+    }
+    // Also keep a local mirror so the flow works when Mongo is unavailable.
+    exportHistoryCache.set(id, historyRecord);
+    const slugKey = storeRef.split(':')[0].trim().toLowerCase();
+    const list = exportHistoryCache.get(`__list__${slugKey}`) || [];
+    exportHistoryCache.set(`__list__${slugKey}`, [historyRecord, ...list.filter((r: any) => r.id !== id)].slice(0, 50));
+
+    return res.status(200).json({
+      ok: true,
+      export: {
+        id,
+        fileType: historyRecord.fileType,
+        fileFormat: format,
+        category: categoryKey,
+        categoryLabel,
+        dateRange: historyRecord.dateRange,
+        generatedOn: generatedOn.toISOString(),
+        status: historyRecord.status,
+        downloadUrl: historyRecord.downloadUrl,
+        rowCount: historyRecord.rowCount,
+        fileName,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/export/generate error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not generate export.' });
+  }
+});
+
+/** GET /api/export/history?store_slug=… — list past exports for a store. */
+app.get('/api/export/history', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = String(req.query.store_slug || req.query.slug || '').trim();
+    if (!storeRef) return res.status(200).json({ ok: true, exports: [] });
+
+    const slugKey = storeRef.split(':')[0].trim().toLowerCase();
+    let records: any[] = exportHistoryCache.get(`__list__${slugKey}`) || [];
+
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const mongoRecords = await (ExportHistory as any)
+          .find({ $or: [{ store_slug: storeRef }, { store_slug: slugKey }] })
+          .sort({ generatedOn: -1 })
+          .limit(50)
+          .lean();
+        if (Array.isArray(mongoRecords) && mongoRecords.length) {
+          records = mongoRecords;
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Server] export history mongo warning:', err?.message || err);
+    }
+
+    // Never ship the stored file content in the list response.
+    const exports = records.map(({ content, ...rest }: any) => ({
+      ...rest,
+      generatedOn: rest.generatedOn instanceof Date ? rest.generatedOn.toISOString() : rest.generatedOn,
+    }));
+    return res.status(200).json({ ok: true, exports });
+  } catch (err: any) {
+    console.error('[Server] GET /api/export/history error:', err);
+    return res.status(200).json({ ok: false, exports: [], error: err?.message || 'Could not load export history.' });
+  }
+});
+
+/** GET /api/export/download?id=… — stream a previously generated export. */
+app.get('/api/export/download', async (req, res) => {
+  try {
+    const id = String(req.query.id || '').trim();
+    if (!id) return jsonError(res, 400, 'id is required.');
+
+    let record: any = exportHistoryCache.get(id) || null;
+    if (!record) {
+      try {
+        await connectToMongoDB();
+        if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+          record = await (ExportHistory as any).findOne({ id }).lean();
+        }
+      } catch (err: any) {
+        console.warn('[Server] export download mongo warning:', err?.message || err);
+      }
+    }
+    if (!record) return jsonError(res, 404, 'Export not found.');
+
+    const format = record.fileFormat === 'json' ? 'json' : 'csv';
+    const contentType = format === 'json' ? 'application/json' : 'text/csv; charset=utf-8';
+    const fileName = record.fileName || `${record.category || 'export'}.${format}`;
+    const content = typeof record.content === 'string'
+      ? record.content
+      : (format === 'json' ? JSON.stringify(record.rows || [], null, 2) : toCsv(record.rows || []));
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).send(content);
+  } catch (err: any) {
+    console.error('[Server] GET /api/export/download error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not download export.' });
   }
 });
 

@@ -93,6 +93,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [activeSessions, setActiveSessions] = useState<Array<{ id: string; device: string; ip: string; lastActiveAt: string; createdAt?: string }>>([]);
   const [currentSessionId, setCurrentSessionId] = useState('');
 
+  // Export requests (Pro) — form inputs + backend-generated history.
+  interface ExportHistoryRow {
+    id: string;
+    fileType: string;
+    fileFormat?: string;
+    dateRange?: { from?: string | null; to?: string | null };
+    generatedOn: string;
+    status: string;
+    downloadUrl: string;
+    rowCount?: number;
+    fileName?: string;
+  }
+  const [exportCategory, setExportCategory] = useState('orders');
+  const [exportFormat, setExportFormat] = useState('csv');
+  const [exportFrom, setExportFrom] = useState('');
+  const [exportTo, setExportTo] = useState('');
+  const [exportGenerating, setExportGenerating] = useState(false);
+  const [exportHistory, setExportHistory] = useState<ExportHistoryRow[]>([]);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportNotice, setExportNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+
   // Checkout Tab State — seeded from the store record, saved via the API below.
   const [checkoutAnnouncement, setCheckoutAnnouncement] = useState(merchant?.checkoutConfig?.announcement || '');
   const [minOrderAmount, setMinOrderAmount] = useState(
@@ -488,6 +509,98 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const timer = setTimeout(() => setSecurityNotice(null), 5000);
     return () => clearTimeout(timer);
   }, [securityNotice]);
+
+  // ── Export requests (Pro) ────────────────────
+
+  /** Load the merchant's generated export history from the backend. */
+  const loadExportHistory = useCallback(async () => {
+    if (!storeRef) return;
+    setExportLoading(true);
+    try {
+      const res = await fetch(`/api/export/history?store_slug=${encodeURIComponent(storeRef)}`);
+      const data = await res.json();
+      setExportHistory(Array.isArray(data?.exports) ? data.exports : []);
+    } catch (err) {
+      console.warn('Export history load warning:', err);
+    } finally {
+      setExportLoading(false);
+    }
+  }, [storeRef]);
+
+  // Populate history on mount and whenever the Export tab is (re)opened.
+  useEffect(() => {
+    if (storeRef) loadExportHistory();
+  }, [storeRef, loadExportHistory]);
+
+  useEffect(() => {
+    if (activeSubTab === 'settings_export') loadExportHistory();
+  }, [activeSubTab, loadExportHistory]);
+
+  // Auto-dismiss the export toast.
+  useEffect(() => {
+    if (!exportNotice) return;
+    const timer = setTimeout(() => setExportNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [exportNotice]);
+
+  /**
+   * Trigger a new export: POST the filters, then refresh the history table and
+   * surface the new row so the merchant can download it immediately.
+   */
+  const handleGenerateExport = async () => {
+    if (!storeRef) {
+      setExportNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    if (!hasProAccess) {
+      setExportNotice({ type: 'error', text: 'Data export requires an active Pro or Enterprise plan.' });
+      return;
+    }
+    setExportGenerating(true);
+    try {
+      const res = await fetch('/api/export/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeRef,
+          category: exportCategory,
+          fileFormat: exportFormat,
+          from: exportFrom || undefined,
+          to: exportTo || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.ok) {
+        setExportNotice({ type: 'error', text: data?.error || 'Could not generate the export file.' });
+        return;
+      }
+      // Optimistically prepend the new row, then reconcile with the server list.
+      if (data.export) {
+        setExportHistory((prev) => [data.export, ...prev.filter((r) => r.id !== data.export.id)]);
+      }
+      setExportNotice({
+        type: 'ok',
+        text: `Export generated with ${data.export?.rowCount ?? 0} record(s). Download it below.`,
+      });
+      loadExportHistory();
+    } catch (err: any) {
+      setExportNotice({ type: 'error', text: err?.message || 'Could not generate the export file.' });
+    } finally {
+      setExportGenerating(false);
+    }
+  };
+
+  /** Force a browser download of a generated export. */
+  const handleDownloadExport = (row: { downloadUrl: string; fileName?: string }) => {
+    const url = row.downloadUrl || '';
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url;
+    if (row.fileName) a.download = row.fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
 
   // ── Checkout page options ────────────────────
 
@@ -2536,44 +2649,94 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <p className="text-sm text-slate-400">Select the data you wish to export and specify the date range.</p>
                 </div>
 
+                {exportNotice && (
+                  <div className={`text-sm rounded-xl px-4 py-2.5 border ${exportNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+                    {exportNotice.text}
+                  </div>
+                )}
+
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">Export Data Category</label>
-                      <select className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none">
-                        <option>All Orders</option>
-                        <option>Product Inventory</option>
-                        <option>Customer Contact List</option>
-                        <option>Sales & Revenue Report</option>
+                      <select
+                        data-testid="export-category"
+                        disabled={!hasProAccess}
+                        value={exportCategory}
+                        onChange={(e) => setExportCategory(e.target.value)}
+                        className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none disabled:opacity-60"
+                      >
+                        <option value="orders">All Orders</option>
+                        <option value="products">Product Inventory</option>
+                        <option value="customers">Customer Contact List</option>
+                        <option value="sales">Sales &amp; Revenue Report</option>
                       </select>
                     </div>
                     <div>
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">File Format</label>
-                      <select className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none">
-                        <option>CSV (.csv)</option>
-                        <option>Excel (.xlsx)</option>
+                      <select
+                        data-testid="export-format"
+                        disabled={!hasProAccess}
+                        value={exportFormat}
+                        onChange={(e) => setExportFormat(e.target.value)}
+                        className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none disabled:opacity-60"
+                      >
+                        <option value="csv">CSV (.csv)</option>
+                        <option value="json">JSON (.json)</option>
                       </select>
                     </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">Start Date</label>
-                      <input type="date" className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-slate-500 focus:border-[#00D68F] outline-none" placeholder="YYYY-MM-DD" />
+                      <input
+                        type="date"
+                        data-testid="export-from"
+                        disabled={!hasProAccess}
+                        value={exportFrom}
+                        onChange={(e) => setExportFrom(e.target.value)}
+                        className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none disabled:opacity-60"
+                        placeholder="YYYY-MM-DD"
+                      />
                     </div>
                     <div>
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">End Date</label>
-                      <input type="date" className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-slate-500 focus:border-[#00D68F] outline-none" placeholder="YYYY-MM-DD" />
+                      <input
+                        type="date"
+                        data-testid="export-to"
+                        disabled={!hasProAccess}
+                        value={exportTo}
+                        onChange={(e) => setExportTo(e.target.value)}
+                        className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none disabled:opacity-60"
+                        placeholder="YYYY-MM-DD"
+                      />
                     </div>
                   </div>
-                  <button type="button" className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00bf7f] text-slate-950 font-bold rounded-xl text-sm transition">
-                    Generate Export File
+                  <button
+                    type="button"
+                    data-testid="export-generate"
+                    onClick={handleGenerateExport}
+                    disabled={exportGenerating || !hasProAccess}
+                    className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00bf7f] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-bold rounded-xl text-sm transition flex items-center gap-2"
+                  >
+                    {exportGenerating ? 'Generating…' : 'Generate Export File'}
                   </button>
                 </div>
               </div>
 
               {/* Recent Export History & Downloads Section */}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
-                <h3 className="text-lg font-bold text-white mb-1">Recent Export History & Downloads</h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-white mb-1">Recent Export History & Downloads</h3>
+                  <button
+                    type="button"
+                    onClick={loadExportHistory}
+                    disabled={exportLoading}
+                    className="text-xs text-slate-400 hover:text-white transition disabled:opacity-50"
+                  >
+                    {exportLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
                     <thead>
@@ -2585,12 +2748,53 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         <th className="pb-4 font-bold">Action</th>
                       </tr>
                     </thead>
-                    <tbody className="text-white text-sm">
-                      <tr>
-                        <td colSpan={5} className="py-8 text-center text-slate-500">
-                          এখনো কোনো ফাইল এক্সপোর্ট করা হয়নি। নতুন ফাইল তৈরি করতে উপরের ফর্মটি ব্যবহার করুন।
-                        </td>
-                      </tr>
+                                        <tbody className="text-white text-sm">
+                      {exportHistory.length === 0 ? (
+                       <tr>
+                          <td colSpan={5} className="py-8 text-center text-slate-500">
+                            {exportLoading
+                              ? 'Loading export history…'
+                              : 'এখনো কোনো ফাইল এক্সপোর্ট করা হয়নি। নতুন ফাইল তৈরি করতে উপরের ফর্মটি ব্যবহার করুন।'}
+                          </td>
+                       </tr>
+                      ) : (
+                        exportHistory.map((row) => {
+                          const from = row.dateRange?.from;
+                          const to = row.dateRange?.to;
+                          const rangeLabel = from || to ? `${from || '—'} → ${to || '—'}` : 'All time';
+                          const generated = row.generatedOn ? new Date(row.generatedOn) : null;
+                          const generatedLabel = generated && !isNaN(generated.getTime()) ? generated.toLocaleString() : '—';
+                          const statusOk = (row.status || '').toLowerCase() === 'completed';
+                          return (
+                            <tr key={row.id} className="border-t border-[#2E3852]">
+                              <td className="py-4 font-mono text-[#00D68F]">
+                                {row.fileType || (row.fileFormat || 'CSV').toUpperCase()}
+                                {typeof row.rowCount === 'number' && (
+                                  <span className="ml-2 text-[10px] text-slate-500">{row.rowCount} rows</span>
+                                )}
+                              </td>
+                              <td className="py-4 text-slate-300">{rangeLabel}</td>
+                              <td className="py-4 text-slate-300">{generatedLabel}</td>
+                              <td className="py-4">
+                                <span className={`text-[10px] px-2 py-0.5 rounded border uppercase tracking-wider ${statusOk ? 'bg-[#00D68F]/10 text-[#00D68F] border-[#00D68F]/30' : 'bg-amber-500/10 text-amber-500 border-amber-500/30'}`}>
+                                  {row.status || 'pending'}
+                                </span>
+                              </td>
+                              <td className="py-4">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownloadExport(row)}
+                                  disabled={!row.downloadUrl || !statusOk}
+                                  className="text-[#00D68F] hover:text-[#00bf7f] disabled:text-slate-600 disabled:cursor-not-allowed font-bold text-xs flex items-center gap-1"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                  Download
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
                     </tbody>
                   </table>
                 </div>
