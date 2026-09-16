@@ -73,8 +73,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [tiktokUrl, setTiktokUrl] = useState(merchant?.tiktokUrl || '');
 
   const [currency, setCurrency] = useState(merchant?.currency || 'BDT');
-  const [language, setLanguage] = useState(merchant?.language || 'en');
+  const [language, setLanguage] = useState(merchant?.language || 'en-US');
   const [savedSuccess, setSavedSuccess] = useState(false);
+  // Locale persistence state (currency + default language).
+  const [localeSaving, setLocaleSaving] = useState(false);
+  const [localeNotice, setLocaleNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // Security Tab State
   const [currentPassword, setCurrentPassword] = useState('');
@@ -1514,6 +1517,82 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setSavedSuccess(false), 3000);
   };
 
+  // ── Locale / currency persistence (Languages & currencies) ──
+
+  /** Currency code -> display symbol, mirroring the server's table. */
+  const CURRENCY_SYMBOL_BY_CODE: Record<string, string> = { BDT: '৳', USD: '$', SAR: '﷼', EUR: '€', GBP: '£', INR: '₹' };
+
+  /** Apply a localeConfig payload to the form fields. */
+  const applyLocaleConfig = useCallback((cfg: any) => {
+    if (!cfg || typeof cfg !== 'object') return;
+    if (typeof cfg.primaryCurrency === 'string' && cfg.primaryCurrency) setCurrency(cfg.primaryCurrency);
+    const lang = cfg.defaultLanguage === 'bn' ? 'bn' : (cfg.defaultLanguage ? 'en-US' : '');
+    if (lang) setLanguage(lang);
+  }, []);
+
+  /** Load the saved locale settings from the backend. */
+  const loadLocaleSettings = useCallback(async () => {
+    if (!storeRef) return;
+    try {
+      const res = await fetch(`/api/stores/locale?store_slug=${encodeURIComponent(storeRef)}`);
+      const data = await res.json();
+      if (data?.ok && data.localeConfig) applyLocaleConfig(data.localeConfig);
+    } catch (err) {
+      console.warn('Locale settings load warning:', err);
+    }
+  }, [storeRef, applyLocaleConfig]);
+
+  // Load whenever the Languages tab is opened.
+  useEffect(() => {
+    if (activeSubTab === 'settings_languages') loadLocaleSettings();
+  }, [activeSubTab, loadLocaleSettings]);
+
+  /** Persist the selected currency + default language to the store record. */
+  const handleSaveLocale = async () => {
+    if (!storeRef) {
+      setLocaleNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    setLocaleSaving(true);
+    try {
+      const res = await fetch('/api/stores/update-locale', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeRef,
+          localeConfig: {
+            primaryCurrency: currency,
+            currencySymbol: CURRENCY_SYMBOL_BY_CODE[currency] || currency,
+            defaultLanguage: language,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setLocaleNotice({ type: 'error', text: data?.error || 'Could not save language & currency settings.' });
+        return;
+      }
+      const saved = data.localeConfig || {};
+      if (saved.primaryCurrency) setCurrency(saved.primaryCurrency);
+      if (saved.defaultLanguage) setLanguage(saved.defaultLanguage === 'bn' ? 'bn' : 'en-US');
+      applyLocaleConfig(saved);
+      // Keep the in-memory merchant in step so other views see the change.
+      onUpdateMerchant({ ...merchant, currency: saved.primaryCurrency || currency, language: saved.defaultLanguage || language });
+      setLocaleNotice({ type: 'ok', text: data.message || 'Language & currency saved.' });
+    } catch (err: any) {
+      setLocaleNotice({ type: 'error', text: err?.message || 'Could not save language & currency settings.' });
+    } finally {
+      setLocaleSaving(false);
+    }
+  };
+
+  // Auto-dismiss the locale toast.
+  useEffect(() => {
+    if (!localeNotice) return;
+    const timer = setTimeout(() => setLocaleNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [localeNotice]);
+
   // ── Legal policies persistence ───────────────
 
   /** Apply a policies payload to the form fields. */
@@ -1984,6 +2063,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
           {activeSubTab === 'settings_languages' && (
             <div className="space-y-6">
+              {localeNotice && (
+                <div
+                  data-testid="locale-toast"
+                  className={`rounded-xl px-4 py-3 text-sm font-medium border ${localeNotice.type === 'ok' ? 'bg-[#00D68F]/10 border-[#00D68F]/30 text-[#00D68F]' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}
+                >
+                  {localeNotice.text}
+                </div>
+              )}
               <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-6">
                 <div>
                   <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
@@ -2015,9 +2102,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       onChange={(e) => setLanguage(e.target.value as any)}
                       className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
                     >
-                      <option value="ar">Arabic (العربية)</option>
-                      <option value="en">English (US)</option>
-                      <option value="bn">Bengali (বাংলা)</option>
+                      <option value="bn">Bangla / বাংলা (bn)</option>
+                      <option value="en-US">English (US) (en-US)</option>
                     </select>
                     <p className="text-[11px] text-slate-400 mt-1">This language will be used for the storefront and automated communications.</p>
                   </div>
@@ -2026,11 +2112,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
               <div className="flex justify-end pt-4 border-t border-[#272F45]">
                 <button
-                  type="submit"
-                  className="flex items-center gap-2 px-6 py-2.5 bg-[#00D68F] hover:bg-[#00BD7E] text-slate-950 font-bold rounded-xl transition shadow-lg shadow-[#00D68F]/20"
+                  type="button"
+                  data-testid="locale-save"
+                  onClick={handleSaveLocale}
+                  disabled={localeSaving}
+                  className="flex items-center gap-2 px-6 py-2.5 bg-[#00D68F] hover:bg-[#00BD7E] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-bold rounded-xl transition shadow-lg shadow-[#00D68F]/20"
                 >
                   <Save className="w-4 h-4" />
-                  Save Preferences
+                  {localeSaving ? 'Saving…' : 'Save Changes'}
                 </button>
               </div>
             </div>

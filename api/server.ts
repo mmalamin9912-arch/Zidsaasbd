@@ -1559,6 +1559,45 @@ app.all('/api/stores/slug/:slug', async (req, res) => {
   }
 });
 
+/** GET /api/stores/locale?store_slug=… */
+app.get('/api/stores/locale', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const localeConfig = await readLocaleConfig(storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, localeConfig });
+  } catch (err: any) {
+    console.error('[Server] GET /api/stores/locale error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load locale settings.' });
+  }
+});
+
+/** POST /api/stores/update-locale — save currency + default language. */
+app.post('/api/stores/update-locale', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+
+    const localeConfig = await writeLocaleConfig(storeRef, body.localeConfig || body);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      localeConfig,
+      message: 'Language & currency saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/stores/update-locale error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save locale settings.' });
+  }
+});
+
 // Generic store lookup by single slug segment: /api/stores/:slug.
 app.all('/api/stores/:slug', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
@@ -1590,6 +1629,141 @@ app.post('/api/stores/update', async (req, res) => {
     return res.status(200).json({ ok: false, store_slug: '', error: err?.message || String(err) });
   }
 });
+
+// ── Locale / currency (Languages & currencies) ─────
+//
+// Persist primaryCurrency, currencySymbol and defaultLanguage on the store
+// record. `defaultLanguage` accepts the canonical locale codes 'bn' and 'en-US'
+// (legacy 'en'/'ar' are normalised so old records keep working).
+
+/** Currency -> display symbol, used when the caller does not send one. */
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  BDT: '৳',
+  USD: '$',
+  SAR: '﷼',
+  EUR: '€',
+  GBP: '£',
+  INR: '₹',
+};
+
+/** Normalise a language value to a canonical locale code. */
+function normalizeLocale(raw: unknown, fallback: string = 'en-US'): 'bn' | 'en-US' {
+  const v = String(raw || '').trim().toLowerCase();
+  if (v === 'bn' || v === 'bangla' || v === 'bengali' || v.startsWith('bn-')) return 'bn';
+  if (v === 'en' || v === 'en-us' || v === 'english' || v.startsWith('en')) return 'en-US';
+  return fallback === 'bn' || fallback === 'en-US' ? fallback : 'en-US';
+}
+
+/** Normalise a locale payload, merging over a fallback. */
+function normalizeLocaleConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  const currencyRaw = src.primaryCurrency ?? src.currency ?? fallback.primaryCurrency ?? 'BDT';
+  const primaryCurrency = String(currencyRaw || 'BDT').trim().toUpperCase() || 'BDT';
+
+  // Symbol precedence:
+  //   1. an explicitly supplied symbol (caller typed one), else
+  //   2. the symbol for the (possibly new) currency, else
+  //   3. the previously stored symbol, else
+  //   4. the currency code itself.
+  // Step 2 before step 3 is what makes switching BDT -> USD produce '$'
+  // instead of inheriting the old '৳'.
+  const explicitSymbol = (typeof src.currencySymbol === 'string' && src.currencySymbol.trim())
+    ? src.currencySymbol.trim()
+    : '';
+  const currencyChanged = src.primaryCurrency != null || src.currency != null;
+  const currencySymbol = explicitSymbol
+    || (currencyChanged && CURRENCY_SYMBOLS[primaryCurrency])
+    || (typeof fallback.currencySymbol === 'string' && fallback.currencySymbol.trim() ? fallback.currencySymbol.trim() : '')
+    || CURRENCY_SYMBOLS[primaryCurrency]
+    || primaryCurrency;
+
+  const langRaw = src.defaultLanguage ?? src.language ?? fallback.defaultLanguage;
+  const defaultLanguage = normalizeLocale(langRaw, normalizeLocale(fallback.defaultLanguage));
+
+  return { primaryCurrency, currencySymbol, defaultLanguage };
+}
+
+const localeCache = new Map<string, Record<string, any>>();
+
+/** Read the locale config (Mongo first, in-memory cache fallback). */
+async function readLocaleConfig(storeRef: string) {
+  const slug = cleanStoreRef(storeRef);
+  const cached = localeCache.get(slug) || {};
+
+  let stored: Record<string, any> = {};
+  try {
+    const record = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = (record?.localeConfig || record || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Server] readLocaleConfig lookup warning:', err?.message || err);
+  }
+
+  const merged = normalizeLocaleConfig(stored, cached);
+  localeCache.set(slug, merged);
+  return merged;
+}
+
+/** Persist the locale config on the store record (Mongo → file mirror). */
+async function writeLocaleConfig(storeRef: string, patch: any) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readLocaleConfig(slug);
+  const next = normalizeLocaleConfig(patch, current);
+
+  localeCache.set(slug, next);
+
+  // 1. Durable copy on the store record.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = {
+        $set: {
+          localeConfig: next,
+          primaryCurrency: next.primaryCurrency,
+          currencySymbol: next.currencySymbol,
+          defaultLanguage: next.defaultLanguage,
+          currency: next.primaryCurrency,
+          language: next.defaultLanguage,
+          updated_at: new Date().toISOString(),
+        },
+      };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] localeConfig mongo persist warning:', err?.message || err);
+  }
+
+  // 2. Best-effort mirror into the local payload file.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      payload.merchant.localeConfig = next;
+      payload.merchant.primaryCurrency = next.primaryCurrency;
+      payload.merchant.currencySymbol = next.currencySymbol;
+      payload.merchant.defaultLanguage = next.defaultLanguage;
+      payload.merchant.currency = next.primaryCurrency;
+      payload.merchant.language = next.defaultLanguage;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return next;
+}
 
 app.post('/api/subscription/update', async (req, res) => {
   try {

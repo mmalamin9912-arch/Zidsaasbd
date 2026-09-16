@@ -99,7 +99,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // The storefront may be mounted in another route/tab from the editor. Subscribe
   // directly to the shared store so products and published theme changes appear
   // immediately without remounting or refreshing the page.
-  const { t } = useLanguage();
+  const { t, setLanguage } = useLanguage();
   // Effective store slug for cache keys — resolved from prop or the active merchant session.
   // Memoized so the data-load effects below don't re-run on every render (which would
   // otherwise start a new 3s poll + Supabase fetch cascade each time setLiveStoreData fires).
@@ -396,6 +396,33 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     })();
     return () => { active = false; };
   }, [storeSlug, merchant]);
+
+  // Apply the merchant's saved default language ('bn' | 'en-US') so the whole
+  // storefront — cart, checkout, invoices and automated communications — renders
+  // in that language. A visitor's explicit toggle in localStorage still wins
+  // during the session; this only seeds the merchant-selected default.
+  useEffect(() => {
+    const slug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
+    if (!slug) return;
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch(`/api/stores/locale?store_slug=${encodeURIComponent(slug)}`);
+        const data = await res.json();
+        if (!active) return;
+        const savedLang = data?.localeConfig?.defaultLanguage;
+        if (savedLang === 'bn' || savedLang === 'en-US') {
+          let visitorChoice: string | null = null;
+          try { visitorChoice = localStorage.getItem('zid_language'); } catch { /* storage unavailable */ }
+          // Only auto-apply when the visitor has not made an explicit choice.
+          if (!visitorChoice) setLanguage(savedLang === 'bn' ? 'bn' : 'en');
+        }
+      } catch (e: any) {
+        console.warn('Storefront locale fetch warning:', e?.message || e);
+      }
+    })();
+    return () => { active = false; };
+  }, [storeSlug, merchant, setLanguage]);
 
   useEffect(() => {
     let active = true;
