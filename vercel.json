@@ -24,6 +24,18 @@
       "destination": "/api/index.ts"
     },
     {
+      "source": "/api/customers/:path*",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/customers",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/admin/:path*",
+      "destination": "/api/index.ts"
+    },
+    {
       "source": "/api/stores/slug/:slug*",
       "destination": "/api/index.ts"
     },
@@ -77,6 +89,14 @@
     },
     {
       "source": "/api/courier/:path*",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/analytics-summary",
+      "destination": "/api/index.ts"
+    },
+    {
+      "source": "/api/admin-analytics-summary",
       "destination": "/api/index.ts"
     },
     {

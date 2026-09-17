@@ -358,13 +358,15 @@ app.get('/api/admin/analytics', async (req, res) => {
 // POST /api/ai/analytics-summary — local dev mirror of the Vercel function
 // (api/ai/analytics-summary.ts). Turns the numeric platform analytics payload
 // into a short natural-language executive briefing for the admin dashboard.
-app.post('/api/ai/analytics-summary', async (req, res) => {
+//
+// Registered at THREE paths so any of the client URL spellings resolve to the
+// same logic (the admin panel historically probed /api/analytics-summary):
+//   /api/ai/analytics-summary · /api/analytics-summary · /api/admin-analytics-summary
+async function handleAnalyticsSummary(req: express.Request, res: express.Response) {
   res.setHeader('Content-Type', 'application/json');
+  const analyticsData = (req.body && (req.body.analyticsData || req.body)) || {};
   try {
-    const analyticsData = (req.body && (req.body.analyticsData || req.body)) || {};
     const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
-
-    const prompt = buildAnalyticsSummaryPrompt(analyticsData);
 
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       // AI is optional — fall back to a deterministic, human-readable summary
@@ -377,7 +379,7 @@ app.post('/api/ai/analytics-summary', async (req, res) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData) }] }],
         generationConfig: { temperature: 0.6, maxOutputTokens: 600 },
       }),
     });
@@ -391,11 +393,14 @@ app.post('/api/ai/analytics-summary', async (req, res) => {
     const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim();
     return res.status(200).json({ summary: text || buildFallbackSummary(analyticsData), fallback: !text });
   } catch (err: any) {
-    console.error('[Server] POST /api/ai/analytics-summary error:', err);
-    const analyticsData = (req.body && (req.body.analyticsData || req.body)) || {};
+    console.error('[Server] POST analytics-summary error:', err);
     return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
   }
-});
+}
+
+app.post('/api/ai/analytics-summary', handleAnalyticsSummary);
+app.post('/api/analytics-summary', handleAnalyticsSummary);
+app.post('/api/admin-analytics-summary', handleAnalyticsSummary);
 
 app.all('/api/categories', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
@@ -4522,6 +4527,137 @@ app.post('/api/orders', async (req, res) => {
     console.error('[Server] POST /api/orders error:', err);
     // Never surface a 5xx — acknowledge with a well-formed JSON envelope.
     return res.status(200).json({ ok: false, success: false, synced: 0, error: err?.message || 'Order sync failed' });
+  }
+});
+
+// ── Customers ───────────────────────────────
+// GET /api/customers — list every customer for a store (no filter → all rows).
+// GET /api/customers/:storeRef — customers for one store, matched FLEXIBLY on
+//   store_id OR store_slug OR store_code OR merchant_id so a caller that only
+//   knows the slug ('mystore') or the human store code ('ZID-BD-5150') still
+//   resolves. Both registered BEFORE completing the 404-free fallback: an
+//   unknown store yields [] (HTTP 200), never a route-level 404.
+// POST /api/customers — batch upsert the merchant's customer list.
+const CUSTOMERS_COLLECTION = 'customers';
+
+app.get('/api/customers', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    if (!MONGODB_URI) return res.status(200).json([]);
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return res.status(200).json([]);
+      const storeRef = String(
+        (req.query.store_slug as string) ||
+        (req.query.storeSlug as string) ||
+        (req.query.store_id as string) ||
+        (req.query.storeId as string) ||
+        (req.query.store_code as string) ||
+        (req.query.merchant_id as string) ||
+        (req.query.merchantId as string) ||
+        (req.query.storeRef as string) ||
+        (req.query.slug as string) ||
+        ''
+      ).trim();
+      const query = storeRef ? await buildOrderQuery(storeRef) : {};
+      const rows = await (mongoose.connection.db.collection(CUSTOMERS_COLLECTION) as any)
+        .find(query || {})
+        .sort({ created_at: -1 })
+        .limit(1000)
+        .toArray();
+      return res.status(200).json(Array.isArray(rows) ? rows : []);
+    } catch (dbErr: any) {
+      console.warn('[Server] GET /api/customers DB warning:', dbErr?.message || dbErr);
+      return res.status(200).json([]);
+    }
+  } catch (err: any) {
+    console.error('[Server] GET /api/customers error:', err);
+    return res.status(200).json([]);
+  }
+});
+
+// Single-segment store reference, e.g. /api/customers/mystore or /api/customers/ZID-BD-5150.
+app.get('/api/customers/:storeRef', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    if (!MONGODB_URI) return res.status(200).json([]);
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return res.status(200).json([]);
+      const storeRef = String(req.params.storeRef || '').trim();
+      const query = await buildOrderQuery(storeRef);
+      const rows = await (mongoose.connection.db.collection(CUSTOMERS_COLLECTION) as any)
+        .find(query || {})
+        .sort({ created_at: -1 })
+        .limit(1000)
+        .toArray();
+      return res.status(200).json(Array.isArray(rows) ? rows : []);
+    } catch (dbErr: any) {
+      console.warn('[Server] GET /api/customers/:storeRef DB warning:', dbErr?.message || dbErr);
+      return res.status(200).json([]);
+    }
+  } catch (err: any) {
+    console.error('[Server] GET /api/customers/:storeRef error:', err);
+    return res.status(200).json([]);
+  }
+});
+
+app.post('/api/customers', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const arr: any[] = Array.isArray(req.body)
+      ? req.body
+      : Array.isArray((req.body as any)?.customers)
+        ? (req.body as any).customers
+        : [];
+
+    if (!MONGODB_URI) return res.status(200).json({ ok: true, success: true, synced: 0 });
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] POST /api/customers DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json({ ok: true, success: true, synced: 0, message: 'Customer sync deferred (database unavailable)' });
+    }
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(200).json({ ok: true, success: true, synced: 0 });
+    }
+
+    let synced = 0;
+    for (const customer of arr) {
+      if (!customer || typeof customer !== 'object') continue;
+      const merchantRef = String(
+        customer.merchantId || customer.merchant_id || customer.store_id ||
+        customer.storeId || customer.store_slug || customer.storeSlug || customer.storeCode || ''
+      ).trim();
+      const slug = String(customer.store_slug || customer.storeSlug || merchantRef)
+        .split(':')[0].trim().toLowerCase();
+      const storeId = isUuidLike(merchantRef) ? merchantRef : await resolveStoreIdBySlug(slug);
+      const id = String(customer.id || `cust-${Date.now()}-${synced}`);
+      const record: any = {
+        ...customer,
+        id,
+        store_id: storeId || merchantRef || slug,
+        store_slug: slug,
+        storeSlug: slug,
+        merchant_id: merchantRef || slug,
+        merchantId: merchantRef || slug,
+        created_at: customer.created_at || customer.joinedDate || new Date().toISOString(),
+      };
+      try {
+        await (mongoose.connection.db.collection(CUSTOMERS_COLLECTION) as any).updateOne(
+          { id },
+          { $set: record },
+          { upsert: true }
+        );
+        synced += 1;
+      } catch (upsertErr: any) {
+        console.warn('[Server] POST /api/customers upsert warning:', upsertErr?.message || upsertErr);
+      }
+    }
+    return res.status(200).json({ ok: true, success: true, synced });
+  } catch (err: any) {
+    console.error('[Server] POST /api/customers error:', err);
+    return res.status(200).json({ ok: false, success: false, synced: 0, error: err?.message || 'Customer sync failed' });
   }
 });
 

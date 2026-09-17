@@ -218,6 +218,10 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   });
   const [analyticsSummary, setAnalyticsSummary] = useState<string>('');
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  // Set when the AI endpoint could not be reached (e.g. 404 on an older
+  // deployment). The panel then shows a clearly-labelled inline notice instead
+  // of silently printing "Failed to generate summary".
+  const [summaryError, setSummaryError] = useState<string | null>(null);
 
   // Platform-wide analytics fetched from GET /api/admin/analytics. The stat
   // cards, top-stores table and recent-renewals table all read from this single
@@ -666,6 +670,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     fetchPlatformAnalytics();
   }, [fetchPlatformAnalytics]);
 
+
+
   // Derived summary figures. Mongo totals come from the API; merchant fallbacks
   // use the in-memory `allMerchants` list so the cards still show real counts
   // before the first request resolves.
@@ -705,6 +711,63 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     .slice(0, 8);
   const topStores: AdminTopStore[] = apiTopStores.length > 0 ? apiTopStores : localTopStores;
   const recentRenewals: AdminRecentRenewal[] = platformAnalytics?.recentRenewals || [];
+
+  /**
+   * Generate the AI executive summary.
+   *
+   * The endpoint has existed under several paths across deployments
+   * (`/api/ai/analytics-summary`, `/api/analytics-summary`). We try each in
+   * order and treat a 404/405 as "try the next one" rather than a hard failure,
+   * so an older backend never surfaces a bare "Failed to generate summary".
+   */
+  const generateExecutiveSummary = useCallback(async () => {
+    setIsGeneratingSummary(true);
+    setSummaryError(null);
+
+    const analyticsData = platformAnalytics || {
+      overview: {
+        totalPlatformSalesBDT: aggregateMerchantSales,
+        totalOrderVolume,
+        completedOrderCount: totalCompletedOrders,
+        baasSubscriptionRevenueBDT: platformSubscriptionRevenue,
+        activeMerchants: activeMerchantCount,
+        paidMerchants: paidMerchantCount,
+        averageOrderValueBDT,
+      },
+      topStores,
+      recentRenewals,
+    };
+
+    const endpoints = ['/api/ai/analytics-summary', '/api/analytics-summary'];
+    try {
+      for (const endpoint of endpoints) {
+        try {
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ analyticsData }),
+          });
+          // 404/405 means this path is not deployed — try the next spelling.
+          if (response.status === 404 || response.status === 405) continue;
+          if (!response.ok) continue;
+          const data = await response.json();
+          if (data?.summary) {
+            setAnalyticsSummary(data.summary);
+            return;
+          }
+        } catch {
+          // Network error on this endpoint — fall through to the next one.
+        }
+      }
+      // Every endpoint failed: surface an actionable notice rather than a raw
+      // error string, and point the admin at the numbers already on screen.
+      setSummaryError(
+        'The AI summary service is unreachable right now. The platform figures above are current — retry once the backend is redeployed with /api/ai/analytics-summary.'
+      );
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  }, [platformAnalytics, aggregateMerchantSales, totalOrderVolume, totalCompletedOrders, platformSubscriptionRevenue, activeMerchantCount, paidMerchantCount, averageOrderValueBDT, topStores, recentRenewals]);
 
   // Gateway config form state
   const [gatewayForm, setGatewayForm] = useState<AdminPaymentGatewayConfig>(adminPaymentConfig);
@@ -1440,23 +1503,9 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   AI Executive Summary
                 </h3>
                 <button
-                  onClick={async () => {
-                    setIsGeneratingSummary(true);
-                    try {
-                      const response = await fetch('/api/ai/analytics-summary', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ analyticsData: platformAnalytics || { overview: { totalPlatformSalesBDT: aggregateMerchantSales, totalOrderVolume, completedOrderCount: totalCompletedOrders, baasSubscriptionRevenueBDT: platformSubscriptionRevenue, activeMerchants: activeMerchantCount, paidMerchants: paidMerchantCount, averageOrderValueBDT }, topStores, recentRenewals } })
-                      });
-                      const data = await response.json();
-                      setAnalyticsSummary(data.summary);
-                    } catch (e) {
-                      setAnalyticsSummary('Failed to generate summary.');
-                    } finally {
-                      setIsGeneratingSummary(false);
-                    }
-                  }}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition"
+                  onClick={generateExecutiveSummary}
+                  disabled={isGeneratingSummary}
+                  className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition"
                 >
                   {isGeneratingSummary ? 'Analyzing...' : 'Generate Insights'}
                 </button>
@@ -1464,6 +1513,12 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
               {analyticsSummary && (
                 <div className="bg-[#202533] p-4 rounded-xl text-slate-300 text-sm leading-relaxed whitespace-pre-wrap border border-[#2E3548]">
                   {analyticsSummary}
+                </div>
+              )}
+              {!analyticsSummary && summaryError && (
+                <div className="bg-amber-500/10 border-amber-500/30 text-amber-300 p-4 rounded-xl text-xs leading-relaxed flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>{summaryError}</span>
                 </div>
               )}
             </div>
