@@ -32,6 +32,18 @@
       "destination": "/api/index.ts"
     },
     {
+      "source": "/api/admin/merchants/:path*",
+      "destination": "/api/admin/merchants.ts"
+    },
+    {
+      "source": "/api/admin/merchants",
+      "destination": "/api/admin/merchants.ts"
+    },
+    {
+      "source": "/api/admin/analytics",
+      "destination": "/api/admin/analytics.ts"
+    },
+    {
       "source": "/api/admin/:path*",
       "destination": "/api/index.ts"
     },

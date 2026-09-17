@@ -39,6 +39,7 @@ import mongoose from 'mongoose';
 // bundled by Vercel alongside this file (same pattern as lib/faqGenerator).
 // The explicit '.js' extension is required under "type": "module".
 import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary } from '../lib/adminAnalytics.js';
+import { listAdminMerchants, applyMerchantAction, createAdminMerchant } from '../lib/adminMerchants.js';
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
 // Serverless functions are frozen/thawed and modules can be re-evaluated between
@@ -483,6 +484,66 @@ app.get('/api/admin/analytics', async (req, res) => {
       recentRenewals: [],
       error: err?.message || 'Could not aggregate platform analytics.',
     });
+  }
+});
+
+// ── Admin merchant management ───────────────
+// GET    /api/admin/merchants            — list stores (query: status, search)
+// POST   /api/admin/merchants            — create a new store
+// PATCH  /api/admin/merchants/:ref       — action on one store (extend_trial,
+//                                          change_plan, suspend, unsuspend, delete)
+// All read/write through lib/adminMerchants.ts and always answer 200 with a
+// well-formed envelope so the dashboard never blanks on a database hiccup.
+app.get('/api/admin/merchants', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const status = typeof req.query.status === 'string' ? req.query.status : 'all';
+    const search = typeof req.query.search === 'string' ? req.query.search : '';
+    const result = await listAdminMerchants({ status, search });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/merchants error:', err);
+    return res.status(200).json({
+      ok: false,
+      generatedAt: new Date().toISOString(),
+      merchants: [],
+      counts: { all: 0, active: 0, trial: 0, suspended: 0 },
+      error: err?.message || 'Could not load merchants.',
+    });
+  }
+});
+
+app.post('/api/admin/merchants', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const result = await createAdminMerchant({
+      storeName: body.storeName || body.store_name,
+      email: body.email,
+      ownerName: body.ownerName || body.owner_name,
+      phone: body.phone,
+      plan: body.plan || body.subscriptionPlan,
+      password: body.password,
+    });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/merchants error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not create the store.' });
+  }
+});
+
+app.patch('/api/admin/merchants/:ref', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const ref = String(req.params.ref || '').trim();
+    const body = req.body || {};
+    const action = String(body.action || '').trim();
+    if (!action) return res.status(200).json({ ok: false, error: 'An action is required.' });
+    const result = await applyMerchantAction(ref, action, body);
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] PATCH /api/admin/merchants/:ref error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Merchant action failed.' });
   }
 });
 

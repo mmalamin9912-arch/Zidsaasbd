@@ -153,6 +153,39 @@ interface PlatformAnalyticsPayload {
   error?: string;
 }
 
+/** Mirror of AdminMerchant in lib/adminMerchants.ts. */
+interface AdminMerchantRow {
+  id: string;
+  storeCode: string;
+  storeName: string;
+  storeSlug: string;
+  ownerName: string;
+  email: string;
+  phone: string;
+  subscriptionPlan: string;
+  subscriptionExpiry: string | null;
+  planStartedAt: string | null;
+  expiresAt: string | null;
+  durationDays: number;
+  trialDaysRemaining: number;
+  trialEndsAt: string | null;
+  isLocked: boolean;
+  status?: 'active' | 'trial' | 'suspended' | 'expired';
+  totalSalesBDT: number;
+  onboardingProgress: number;
+  createdAt: string | null;
+}
+
+/** Full response envelope of GET /api/admin/merchants. */
+interface AdminMerchantListResponse {
+  ok: boolean;
+  generatedAt?: string;
+  database?: string;
+  merchants?: AdminMerchantRow[];
+  counts?: { all: number; active: number; trial: number; suspended: number };
+  error?: string;
+}
+
 export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   currentMerchant,
   onUpdateMerchant,
@@ -817,6 +850,48 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const [merchantCurrentPage, setMerchantCurrentPage] = useState(1);
   const merchantItemsPerPage = 5;
 
+  // Registered Merchant Stores — rows fetched from GET /api/admin/merchants.
+  // `serverMerchants` holds the API result; when the API is unavailable we fall
+  // back to the in-memory `allMerchants` prop so the table is never empty.
+  const [serverMerchants, setServerMerchants] = useState<AdminMerchantRow[]>([]);
+  const [merchantCounts, setMerchantCounts] = useState<{ all: number; active: number; trial: number; suspended: number }>({ all: 0, active: 0, trial: 0, suspended: 0 });
+  const [isLoadingMerchants, setIsLoadingMerchants] = useState(false);
+  const [merchantsError, setMerchantsError] = useState<string | null>(null);
+
+  const fetchMerchants = useCallback(async () => {
+    setIsLoadingMerchants(true);
+    setMerchantsError(null);
+    try {
+      const params = new URLSearchParams();
+      params.set('status', merchantStatusFilter);
+      if (merchantSearchQuery.trim()) params.set('search', merchantSearchQuery.trim());
+      const res = await fetch(`/api/admin/merchants?${params.toString()}`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = (await res.json()) as AdminMerchantListResponse;
+      if (Array.isArray(data?.merchants)) {
+        setServerMerchants(data.merchants);
+      }
+      if (data?.counts) {
+        setMerchantCounts(data.counts);
+      }
+      if (data && data.ok === false) {
+        setMerchantsError(data.error || 'Merchant service temporarily unavailable.');
+      }
+    } catch (e: any) {
+      setMerchantsError(e?.message || 'Failed to load merchants.');
+    } finally {
+      setIsLoadingMerchants(false);
+    }
+  }, [merchantStatusFilter, merchantSearchQuery]);
+
+  // Reload whenever the tab or search changes (debounced for typing).
+  useEffect(() => {
+    const handle = setTimeout(() => { fetchMerchants(); }, merchantSearchQuery ? 300 : 0);
+    return () => clearTimeout(handle);
+  }, [fetchMerchants, merchantSearchQuery]);
+
   const handleSaveGateways = (e: React.FormEvent) => {
     e.preventDefault();
     onUpdateAdminPaymentConfig(gatewayForm);
@@ -1249,19 +1324,54 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     alert(`Changed plan for "${storeName}" to ${getPlanDisplayName(nextPlan)}`);
   };
 
-  const filteredMerchants = allMerchants.filter(m => {
-    const query = merchantSearchQuery.toLowerCase();
-    const matchesSearch =
+  // Rows shown in the table. Prefer the API-backed list; if the API returned
+  // nothing (e.g. MongoDB unavailable) fall back to the in-memory merchants so
+  // the admin still sees accounts and can act on them.
+  const merchantRows: AdminMerchantRow[] = serverMerchants.length > 0
+    ? serverMerchants
+    : allMerchants.map((m) => ({
+        id: m.id || m.storeSlug || '',
+        storeCode: m.storeCode || m.store_code || '',
+        storeName: m.storeName || 'Store',
+        storeSlug: m.storeSlug || '',
+        ownerName: m.ownerName || '',
+        email: m.email || '',
+        phone: m.phone || '',
+        subscriptionPlan: String(m.subscriptionPlan || 'free_trial'),
+        subscriptionExpiry: m.subscriptionExpiry || null,
+        expiresAt: m.expiresAt || m.expires_at || null,
+        planStartedAt: m.planStartedAt || m.plan_started_at || null,
+        durationDays: m.durationDays || m.duration_days || 0,
+        trialDaysRemaining: m.trialDaysRemaining ?? 0,
+        trialEndsAt: m.trialEndsAt || null,
+        isLocked: m.isLocked === true,
+        totalSalesBDT: Number(m.totalSalesBDT || 0),
+        onboardingProgress: Number(m.onboardingProgress || 0),
+        createdAt: null,
+      }));
+
+  // Client-side filtering still applies as a safety net (the server already
+  // filtered, but this keeps the in-memory fallback consistent with the tabs).
+  const filteredMerchants = merchantRows.filter(m => {
+    const query = merchantSearchQuery.trim().toLowerCase();
+    const matchesSearch = !query ||
       (m?.storeName || '').toLowerCase().includes(query) ||
       (m?.email || '').toLowerCase().includes(query) ||
-      (m?.ownerName || '').toLowerCase().includes(query);
+      (m?.ownerName || '').toLowerCase().includes(query) ||
+      (m?.storeSlug || '').toLowerCase().includes(query) ||
+      (m?.storeCode || '').toLowerCase().includes(query) ||
+      (m?.phone || '').toLowerCase().includes(query);
 
     if (!matchesSearch) return false;
 
+    const plan = String(m.subscriptionPlan || '').toLowerCase();
+    const isPaid = plan !== 'trial' && plan !== 'free_trial' && plan !== '';
+    const isExpired = !!m.expiresAt && new Date(m.expiresAt).getTime() < Date.now();
+
     if (merchantStatusFilter === 'all') return true;
-    if (merchantStatusFilter === 'active') return m.subscriptionPlan !== 'trial' && m.subscriptionPlan !== 'free_trial' && !m.isLocked;
-    if (merchantStatusFilter === 'trial') return m.subscriptionPlan === 'trial' || m.subscriptionPlan === 'free_trial';
-    if (merchantStatusFilter === 'suspended') return m.isLocked === true;
+    if (merchantStatusFilter === 'active') return isPaid && !m.isLocked && !isExpired;
+    if (merchantStatusFilter === 'trial') return !isPaid;
+    if (merchantStatusFilter === 'suspended') return m.isLocked === true || isExpired;
 
     return true;
   });
