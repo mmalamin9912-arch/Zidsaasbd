@@ -11,6 +11,7 @@ import mongoose from 'mongoose';
 // bundlers (vite/esbuild) and tsx map it back to lib/db.ts.
 import { connectToDatabase, getMongoDb, getMongoUri, DB_NAME } from './lib/db.js';
 import { generateFaqFromPolicies } from './lib/faqGenerator.js';
+import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary } from './lib/adminAnalytics.js';
 
 const app = express();
 app.use(express.json());
@@ -321,6 +322,79 @@ app.all('/api/categories', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.json({ status: 'ok', provider: 'Supabase Data Layer' });
+});
+
+// GET /api/admin/analytics — platform-wide aggregation for the Super Admin
+// Portal (`/admin`). Aggregates ALL orders, stores and subscriptions in the
+// `zidbdsaas` database (see lib/adminAnalytics.ts) and always answers 200 with
+// a well-formed envelope so the dashboard never blanks on a database hiccup.
+app.get('/api/admin/analytics', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await getPlatformAnalytics();
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/analytics error:', err);
+    return res.status(200).json({
+      ok: false,
+      generatedAt: new Date().toISOString(),
+      overview: {
+        totalPlatformSalesBDT: 0,
+        totalOrderVolume: 0,
+        completedOrderCount: 0,
+        baasSubscriptionRevenueBDT: 0,
+        activeMerchants: 0,
+        totalMerchants: 0,
+        paidMerchants: 0,
+        averageOrderValueBDT: 0,
+      },
+      topStores: [],
+      recentRenewals: [],
+      error: err?.message || 'Could not aggregate platform analytics.',
+    });
+  }
+});
+
+// POST /api/ai/analytics-summary — local dev mirror of the Vercel function
+// (api/ai/analytics-summary.ts). Turns the numeric platform analytics payload
+// into a short natural-language executive briefing for the admin dashboard.
+app.post('/api/ai/analytics-summary', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const analyticsData = (req.body && (req.body.analyticsData || req.body)) || {};
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+
+    const prompt = buildAnalyticsSummaryPrompt(analyticsData);
+
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      // AI is optional — fall back to a deterministic, human-readable summary
+      // built from the same numbers so the panel is never empty.
+      return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+    }
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const providerRes = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.6, maxOutputTokens: 600 },
+      }),
+    });
+
+    if (!providerRes.ok) {
+      console.warn('[Server] analytics-summary AI provider status:', providerRes.status);
+      return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+    }
+
+    const data = await providerRes.json();
+    const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim();
+    return res.status(200).json({ summary: text || buildFallbackSummary(analyticsData), fallback: !text });
+  } catch (err: any) {
+    console.error('[Server] POST /api/ai/analytics-summary error:', err);
+    const analyticsData = (req.body && (req.body.analyticsData || req.body)) || {};
+    return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+  }
 });
 
 app.all('/api/categories', async (req, res) => {

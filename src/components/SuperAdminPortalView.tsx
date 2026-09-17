@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
 import {
@@ -105,6 +105,54 @@ interface SuperAdminPortalViewProps {
   onUpdateRolePermissions: React.Dispatch<React.SetStateAction<AdminRolePermission[]>>;
 }
 
+/** A store ranked by its completed-order revenue (from GET /api/admin/analytics). */
+interface AdminTopStore {
+  storeId: string;
+  storeName: string;
+  storeSlug: string;
+  subscriptionPlan: string;
+  orderCount: number;
+  completedOrderCount: number;
+  totalSalesBDT: number;
+  averageOrderValueBDT: number;
+}
+
+/** A recent subscription renewal/payment event (from GET /api/admin/analytics). */
+interface AdminRecentRenewal {
+  id: string;
+  storeName: string;
+  storeSlug: string;
+  planId: string;
+  planName: string;
+  amountBDT: number;
+  paymentMethod: string;
+  transactionId: string;
+  status: string;
+  date: string;
+}
+
+interface AdminPlatformOverview {
+  totalPlatformSalesBDT: number;
+  totalOrderVolume: number;
+  completedOrderCount: number;
+  baasSubscriptionRevenueBDT: number;
+  activeMerchants: number;
+  totalMerchants: number;
+  paidMerchants: number;
+  averageOrderValueBDT: number;
+}
+
+/** Full response envelope of GET /api/admin/analytics. */
+interface PlatformAnalyticsPayload {
+  ok: boolean;
+  generatedAt: string;
+  database?: string;
+  overview: AdminPlatformOverview;
+  topStores: AdminTopStore[];
+  recentRenewals: AdminRecentRenewal[];
+  error?: string;
+}
+
 export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   currentMerchant,
   onUpdateMerchant,
@@ -170,6 +218,13 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   });
   const [analyticsSummary, setAnalyticsSummary] = useState<string>('');
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+
+  // Platform-wide analytics fetched from GET /api/admin/analytics. The stat
+  // cards, top-stores table and recent-renewals table all read from this single
+  // payload so the whole tab reflects one consistent aggregation snapshot.
+  const [platformAnalytics, setPlatformAnalytics] = useState<PlatformAnalyticsPayload | null>(null);
+  const [isLoadingAnalytics, setIsLoadingAnalytics] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [supportDraft, setSupportDraft] = useState<string>('');
   const [isGeneratingReply, setIsGeneratingReply] = useState(false);
   const [broadcastDraft, setBroadcastDraft] = useState<string>('');
@@ -583,13 +638,73 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     setSaveSuccess(`Store "${newMerchantForm?.storeName || 'New Store'}" created successfully!`);
     setTimeout(() => setSaveSuccess(null), 3000);
   };
-  const totalOnboardedStores = 0;
-  const aggregateMerchantSales = 0;
-  const totalCompletedOrders = 0;
-  const platformSubscriptionRevenue = 0;
+  // ── Platform analytics wiring ──────────────────────────────
+  // Pull the platform-wide aggregation for the Analytics tab. We fall back to
+  // sensible values (0 / allMerchants) if the request fails so the dashboard is
+  // never left in a broken state.
+  const fetchPlatformAnalytics = useCallback(async () => {
+    setIsLoadingAnalytics(true);
+    setAnalyticsError(null);
+    try {
+      const res = await fetch('/api/admin/analytics', {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = (await res.json()) as PlatformAnalyticsPayload;
+      setPlatformAnalytics(data);
+      if (data && data.ok === false) {
+        setAnalyticsError(data.error || 'Analytics temporarily unavailable.');
+      }
+    } catch (e: any) {
+      setAnalyticsError(e?.message || 'Failed to load platform analytics.');
+    } finally {
+      setIsLoadingAnalytics(false);
+    }
+  }, []);
 
-  const topStores: any[] = [];
-  const recentRenewals: any[] = [];
+  useEffect(() => {
+    fetchPlatformAnalytics();
+  }, [fetchPlatformAnalytics]);
+
+  // Derived summary figures. Mongo totals come from the API; merchant fallbacks
+  // use the in-memory `allMerchants` list so the cards still show real counts
+  // before the first request resolves.
+  const fallbackActiveMerchants = allMerchants.filter(
+    (m) => !m.isLocked && !['trial', 'free_trial'].includes(String(m.subscriptionPlan || '').toLowerCase())
+  ).length;
+  const totalOnboardedStores = platformAnalytics?.overview?.totalMerchants ?? allMerchants.length;
+  const aggregateMerchantSales = platformAnalytics?.overview?.totalPlatformSalesBDT ?? 0;
+  const totalOrderVolume = platformAnalytics?.overview?.totalOrderVolume ?? 0;
+  const totalCompletedOrders = platformAnalytics?.overview?.completedOrderCount ?? 0;
+  const platformSubscriptionRevenue = platformAnalytics?.overview?.baasSubscriptionRevenueBDT ?? 0;
+  const activeMerchantCount = platformAnalytics?.overview?.activeMerchants ?? fallbackActiveMerchants;
+  const paidMerchantCount = platformAnalytics?.overview?.paidMerchants ?? 0;
+  const averageOrderValueBDT = platformAnalytics?.overview?.averageOrderValueBDT ?? 0;
+  const retainedPercent =
+    aggregateMerchantSales > 0
+      ? Math.round((platformSubscriptionRevenue / aggregateMerchantSales) * 100)
+      : 0;
+
+  // Top revenue generating stores & recent subscription renewals from the API.
+  // If the API returned none (e.g. MongoDB unavailable) and we still have an
+  // in-memory merchant list, present that list's stores sorted by sales.
+  const apiTopStores = platformAnalytics?.topStores || [];
+  const localTopStores: AdminTopStore[] = allMerchants
+    .map((m) => ({
+      storeId: m.storeSlug || m.storeName || '',
+      storeName: m.storeName || 'Store',
+      storeSlug: m.storeSlug || '',
+      subscriptionPlan: String(m.subscriptionPlan || 'free_trial'),
+      orderCount: 0,
+      completedOrderCount: 0,
+      totalSalesBDT: Number(m.totalSalesBDT || 0),
+      averageOrderValueBDT: 0,
+    }))
+    .filter((s) => s.totalSalesBDT > 0)
+    .sort((a, b) => b.totalSalesBDT - a.totalSalesBDT)
+    .slice(0, 8);
+  const topStores: AdminTopStore[] = apiTopStores.length > 0 ? apiTopStores : localTopStores;
+  const recentRenewals: AdminRecentRenewal[] = platformAnalytics?.recentRenewals || [];
 
   // Gateway config form state
   const [gatewayForm, setGatewayForm] = useState<AdminPaymentGatewayConfig>(adminPaymentConfig);
@@ -1283,9 +1398,9 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   <span className="text-xs uppercase font-semibold">Total Platform Sales</span>
                   <DollarSign className="w-5 h-5 text-[#D4AF37]" />
                 </div>
-                <div className="text-2xl font-black text-white">৳0 BDT</div>
+                <div className="text-2xl font-black text-white">৳{aggregateMerchantSales.toLocaleString()} BDT</div>
                 <div className="text-[11px] text-[#D4AF37] flex items-center gap-1 font-semibold">
-                  <span>0.0% growth across 0 stores</span>
+                  <span>{totalCompletedOrders.toLocaleString()} completed orders across {totalOnboardedStores.toLocaleString()} stores</span>
                 </div>
               </div>
 
@@ -1294,8 +1409,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   <span className="text-xs uppercase font-semibold">Total Order Volume</span>
                   <ShoppingBag className="w-5 h-5 text-indigo-400" />
                 </div>
-                <div className="text-2xl font-black text-white">0 Orders</div>
-                <div className="text-[11px] text-slate-400">Processed by 0 onboarded stores</div>
+                <div className="text-2xl font-black text-white">{totalOrderVolume.toLocaleString()} Orders</div>
+                <div className="text-[11px] text-slate-400">Avg order value ৳{averageOrderValueBDT.toLocaleString()} BDT</div>
               </div>
 
               <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-5 space-y-2">
@@ -1303,8 +1418,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   <span className="text-xs uppercase font-semibold">SaaS Subscription Revenue</span>
                   <CreditCard className="w-5 h-5 text-pink-400" />
                 </div>
-                <div className="text-2xl font-black text-white">৳0 BDT</div>
-                <div className="text-[11px] text-pink-400 font-semibold">0% Retained SaaS Earnings</div>
+                <div className="text-2xl font-black text-white">৳{platformSubscriptionRevenue.toLocaleString()} BDT</div>
+                <div className="text-[11px] text-pink-400 font-semibold">{retainedPercent}% Retained SaaS Earnings • {paidMerchantCount.toLocaleString()} paid plans</div>
               </div>
 
               <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-5 space-y-2">
@@ -1312,8 +1427,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   <span className="text-xs uppercase font-semibold">Active Merchants</span>
                   <Users className="w-5 h-5 text-amber-400" />
                 </div>
-                <div className="text-2xl font-black text-white">0 Stores</div>
-                <div className="text-[11px] text-amber-400 font-semibold">0% Commission Model</div>
+                <div className="text-2xl font-black text-white">{activeMerchantCount.toLocaleString()} Stores</div>
+                <div className="text-[11px] text-amber-400 font-semibold">{totalOnboardedStores.toLocaleString()} total onboarded stores</div>
               </div>
             </div>
 
@@ -1331,7 +1446,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       const response = await fetch('/api/ai/analytics-summary', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ analyticsData: { totalSales: '0 BDT', activeStores: allMerchants.length } })
+                        body: JSON.stringify({ analyticsData: platformAnalytics || { overview: { totalPlatformSalesBDT: aggregateMerchantSales, totalOrderVolume, completedOrderCount: totalCompletedOrders, baasSubscriptionRevenueBDT: platformSubscriptionRevenue, activeMerchants: activeMerchantCount, paidMerchants: paidMerchantCount, averageOrderValueBDT }, topStores, recentRenewals } })
                       });
                       const data = await response.json();
                       setAnalyticsSummary(data.summary);
@@ -1375,7 +1490,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                         </div>
                         <div className="text-right">
                           <div className="text-sm font-bold text-[#D4AF37]">৳{(m?.totalSalesBDT || 0).toLocaleString()} BDT</div>
-                          <div className="text-[10px] text-slate-400 uppercase">{(m?.subscriptionPlan || 'Basic').replace('_', ' ')} plan</div>
+                          <div className="text-[10px] text-slate-400 uppercase">{Number(m?.orderCount || 0).toLocaleString()} orders • {(m?.subscriptionPlan || 'Basic').replace(/_/g, ' ')} plan</div>
                         </div>
                       </div>
                     ))
@@ -1398,10 +1513,20 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                       <div key={idx} className="bg-[#202533] border border-[#2E3548] p-3.5 rounded-xl flex items-center justify-between">
                         <div>
                           <div className="text-sm font-bold text-white">{req?.storeName || 'Store'}</div>
-                          <div className="text-xs text-slate-400">{req.planName} • {req.paymentMethod.replace('_admin', '')} (TrxID: {req.transactionId})</div>
+                          <div className="text-xs text-slate-400">
+                            {req.planName} • {String(req.paymentMethod || 'Admin').replace(/_admin$/, '')} (TrxID: {req.transactionId || '—'})
+                          </div>
                         </div>
                         <div className="text-right">
-                          <span className="text-xs bg-[#D4AF37]/20 text-[#D4AF37] px-2.5 py-1 rounded-full font-bold">Approved</span>
+                          <div className="text-sm font-bold text-[#D4AF37]">৳{Number(req.amountBDT || 0).toLocaleString()} BDT</div>
+                          <div className="flex items-center justify-end gap-2 mt-1">
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${/active|approved|completed/i.test(req.status || '') ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#D4AF37]/20 text-[#D4AF37]'}`}>
+                              {req.status || 'active'}
+                            </span>
+                            {req.date && (
+                              <span className="text-[10px] text-slate-500">{new Date(req.date).toLocaleDateString()}</span>
+                            )}
+                          </div>
                         </div>
                       </div>
                     ))
