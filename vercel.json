@@ -44,6 +44,14 @@
       "destination": "/api/admin/analytics.ts"
     },
     {
+      "source": "/api/admin/subscription-plans/:path*",
+      "destination": "/api/admin/subscription-plans.ts"
+    },
+    {
+      "source": "/api/admin/subscription-plans",
+      "destination": "/api/admin/subscription-plans.ts"
+    },
+    {
       "source": "/api/admin/requests/:path*",
       "destination": "/api/admin/requests.ts"
     },

@@ -81,6 +81,15 @@ export interface PlatformAnalyticsResult {
   error?: string;
   /** Structured DB diagnosis (code + actionable message) when the read failed. */
   dbError?: { code: string; message: string; detail?: string };
+  /** Which providers contributed rows to this payload. */
+  sources?: string[];
+  /** Present when MongoDB counts were empty and Supabase supplied a backup. */
+  supabaseFallback?: {
+    merchantCount: number | null;
+    subscriptionCount: number | null;
+    domainCount: number | null;
+    error?: string;
+  };
 }
 
 /** Human-readable labels for the plan ids used across the app. */
@@ -302,7 +311,9 @@ export async function getPlatformAnalytics(dbName: string = DB_NAME): Promise<Pl
     }
   }
 
-  const totalMerchants = allStores.length;
+  // `let` because the Supabase fallback below can raise these when MongoDB has
+  // no store rows at all but Supabase's real-time mirror does.
+  let totalMerchants = allStores.length;
   let activeMerchants = 0;
   let paidMerchants = 0;
   for (const store of allStores) {
@@ -502,6 +513,38 @@ export async function getPlatformAnalytics(dbName: string = DB_NAME): Promise<Pl
     return tb - ta;
   });
 
+  // ── Hybrid secondary source ───────────────────────────────
+  // MongoDB is authoritative. When a COUNT metric came back empty/zero we ask
+  // Supabase (the real-time mirror of `merchants`/`subscriptions`/`domains`) and
+  // backfill it, so a store that only exists in Supabase is still counted. Money
+  // metrics are NEVER invented from Supabase — only the counts it can prove.
+  let supabaseFallback: { merchantCount: number | null; subscriptionCount: number | null; domainCount: number | null; error?: string } | null = null;
+  const mongodbCountsEmpty = totalMerchants === 0 && activeMerchants === 0 && paidMerchants === 0;
+  if (mongodbCountsEmpty) {
+    try {
+      const { fetchSupabaseMetricFallback } = await import('./hybridDb.js');
+      supabaseFallback = await fetchSupabaseMetricFallback();
+      if (typeof supabaseFallback?.merchantCount === 'number' && supabaseFallback.merchantCount > 0) {
+        // Supabase knows about merchants Mongo does not — surface the count so
+        // the dashboard is not left showing a misleading zero.
+        totalMerchants = supabaseFallback.merchantCount;
+        if (activeMerchants === 0) activeMerchants = supabaseFallback.merchantCount;
+      }
+    } catch (err: any) {
+      console.warn('[adminAnalytics] Supabase fallback warning:', err?.message || err);
+    }
+  }
+
+  const sources: string[] = ['mongodb'];
+  if (
+    supabaseFallback &&
+    (supabaseFallback.merchantCount !== null ||
+      supabaseFallback.subscriptionCount !== null ||
+      supabaseFallback.domainCount !== null)
+  ) {
+    sources.push('supabase');
+  }
+
   const overview: PlatformOverview = {
     totalPlatformSalesBDT: Math.round(totalPlatformSalesBDT),
     totalOrderVolume,
@@ -518,6 +561,18 @@ export async function getPlatformAnalytics(dbName: string = DB_NAME): Promise<Pl
     overview,
     topStores,
     recentRenewals: renewals.slice(0, 10),
+    // Which providers contributed — lets the UI explain a partial number.
+    sources,
+    ...(supabaseFallback
+      ? {
+          supabaseFallback: {
+            merchantCount: supabaseFallback.merchantCount,
+            subscriptionCount: supabaseFallback.subscriptionCount,
+            domainCount: supabaseFallback.domainCount,
+            error: supabaseFallback.error,
+          },
+        }
+      : {}),
   };
 }
 

@@ -45,6 +45,7 @@ import {
   listThemeRequests,
   purgeTestTransactionsAndReload,
 } from '../lib/adminRequests.js';
+import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from '../lib/hybridDb.js';
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
 // Serverless functions are frozen/thawed and modules can be re-evaluated between
@@ -488,6 +489,71 @@ app.get('/api/admin/analytics', async (req, res) => {
       topStores: [],
       recentRenewals: [],
       error: err?.message || 'Could not aggregate platform analytics.',
+    });
+  }
+});
+
+// ── Admin subscription plans (HYBRID: MongoDB primary, Supabase fallback) ──
+// GET /api/admin/subscription-plans — plan catalogue merged from MongoDB
+// `subscription_plans` and the Supabase `subscription_plans`/`plans` tables,
+// with per-plan subscriber counts from both subscription sources. Always
+// answers 200 with a shaped envelope (never a 404/500).
+app.get('/api/admin/subscription-plans', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const [plans, subscriptions] = await Promise.all([fetchHybridPlans(), fetchHybridSubscriptions()]);
+
+    const normalized = plans.data.map((plan: Record<string, any>) => {
+      const id = String(pick(plan, ['plan_id', 'planId', 'id', 'slug', 'code']) || '').toLowerCase();
+      return {
+        id,
+        name: String(pick(plan, ['name', 'plan_name', 'planName', 'title', 'label']) || id || 'Plan'),
+        priceBDT: toNumber(pick(plan, ['priceBDT', 'price_bdt', 'price', 'amountBDT', 'amount']), 0),
+        durationDays: toNumber(pick(plan, ['durationDays', 'duration_days', 'duration', 'days']), 0),
+        isActive: pick(plan, ['isActive', 'is_active', 'active', 'enabled']) !== false,
+        maxProducts: toNumber(pick(plan, ['maxProducts', 'max_products', 'productLimit', 'product_limit']), 0),
+        features: Array.isArray(plan.features) ? plan.features : [],
+        source: plan._source || 'unknown',
+      };
+    });
+
+    const subscriptionCounts: Record<string, number> = {};
+    for (const sub of subscriptions.data) {
+      const planId = String(pick(sub, ['plan_id', 'planId', 'plan', 'subscription_plan']) || '').toLowerCase();
+      if (!planId) continue;
+      subscriptionCounts[planId] = (subscriptionCounts[planId] || 0) + 1;
+    }
+
+    const plansWithCounts = normalized.map((plan: Record<string, any>) => ({
+      ...plan,
+      subscriberCount: subscriptionCounts[plan.id] || 0,
+    }));
+
+    return res.status(200).json({
+      ok: plans.ok || plansWithCounts.length > 0,
+      generatedAt: new Date().toISOString(),
+      sources: plans.sources,
+      counts: { plans: plansWithCounts.length, subscriptions: subscriptions.data.length },
+      plans: plansWithCounts,
+      diagnostics: {
+        mongodb: plans.mongodb,
+        supabase: plans.supabase,
+        subscriptions: { mongodb: subscriptions.mongodb, supabase: subscriptions.supabase },
+      },
+      warning:
+        plansWithCounts.length === 0
+          ? 'No subscription plans were returned by MongoDB or Supabase. Configure MONGODB_URI or the Supabase keys to populate this table.'
+          : undefined,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/subscription-plans error:', err);
+    return res.status(200).json({
+      ok: false,
+      generatedAt: new Date().toISOString(),
+      sources: [],
+      counts: { plans: 0, subscriptions: 0 },
+      plans: [],
+      error: err?.message || 'Could not load subscription plans.',
     });
   }
 });
