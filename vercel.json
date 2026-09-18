@@ -44,6 +44,14 @@
       "destination": "/api/admin/analytics.ts"
     },
     {
+      "source": "/api/admin/requests/:path*",
+      "destination": "/api/admin/requests.ts"
+    },
+    {
+      "source": "/api/admin/requests",
+      "destination": "/api/admin/requests.ts"
+    },
+    {
       "source": "/api/admin/:path*",
       "destination": "/api/index.ts"
     },

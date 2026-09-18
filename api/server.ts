@@ -40,6 +40,11 @@ import mongoose from 'mongoose';
 // The explicit '.js' extension is required under "type": "module".
 import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary, getGeminiApiKey } from '../lib/adminAnalytics.js';
 import { listAdminMerchants, applyMerchantAction, createAdminMerchant } from '../lib/adminMerchants.js';
+import {
+  listSubscriptionRequests,
+  listThemeRequests,
+  purgeTestTransactionsAndReload,
+} from '../lib/adminRequests.js';
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
 // Serverless functions are frozen/thawed and modules can be re-evaluated between
@@ -484,6 +489,47 @@ app.get('/api/admin/analytics', async (req, res) => {
       recentRenewals: [],
       error: err?.message || 'Could not aggregate platform analytics.',
     });
+  }
+});
+
+// ── Admin approval requests (subscription + theme purchase) ───────────────
+// GET    /api/admin/requests            — list requests
+//        query: type=subscription|theme  status=all|pending|approved|rejected
+// POST   /api/admin/requests            — { action: 'purge_test_data', dryRun? }
+// The status filter is applied INSIDE the Mongo query so the ALL / PENDING / etc
+// buttons change what is fetched. Always answers 200 with a shaped envelope.
+app.get('/api/admin/requests', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const type = String(req.query.type || 'subscription').toLowerCase();
+    const status = String(req.query.status || 'all').toLowerCase();
+    const isTheme = type === 'theme' || type === 'theme_purchase' || type === 'theme-purchase';
+    const result = isTheme ? await listThemeRequests({ status }) : await listSubscriptionRequests({ status });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/requests error:', err);
+    return res.status(200).json({
+      ok: false,
+      generatedAt: new Date().toISOString(),
+      requests: [],
+      counts: { all: 0, pending: 0, approved: 0, rejected: 0 },
+      error: err?.message || 'Could not load requests.',
+    });
+  }
+});
+
+app.post('/api/admin/requests', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const action = String(req.body?.action || '').trim().toLowerCase();
+    if (action === 'purge_test_data') {
+      const dryRun = req.body?.dryRun === true || String(req.query.dryRun) === 'true';
+      return res.status(200).json(await purgeTestTransactionsAndReload({ dryRun }));
+    }
+    return res.status(200).json({ ok: false, error: 'unknown_action', message: 'Supported action: "purge_test_data".' });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/requests error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Request action failed.' });
   }
 });
 

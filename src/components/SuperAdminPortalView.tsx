@@ -186,6 +186,71 @@ interface AdminMerchantListResponse {
   error?: string;
 }
 
+/**
+ * Rows shown in the Approvals & Requests tab. These come from
+ * `GET /api/admin/requests` (lib/adminRequests.ts) when MongoDB is reachable,
+ * and fall back to the localStorage-backed props otherwise.
+ */
+interface AdminSubscriptionRequestRow {
+  id: string;
+  kind: 'subscription';
+  storeName: string;
+  storeSlug: string;
+  storeId: string;
+  email: string;
+  planId: string;
+  planName: string;
+  amountBDT: number;
+  paymentMethod: string;
+  transactionId: string;
+  requestedAt: string;
+  status: 'pending' | 'approved' | 'rejected';
+}
+
+interface AdminThemeRequestRow {
+  id: string;
+  kind: 'theme';
+  storeName: string;
+  storeSlug: string;
+  storeId: string;
+  email: string;
+  themeId: string;
+  themeName: string;
+  amountBDT: number;
+  paymentMethod: string;
+  transactionId: string;
+  requestedAt: string;
+  status: 'pending_approval' | 'approved' | 'rejected';
+}
+
+interface AdminRequestCounts {
+  all: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+}
+
+/** Full response envelope of GET /api/admin/requests. */
+interface AdminRequestListResponse<T> {
+  ok: boolean;
+  generatedAt?: string;
+  database?: string;
+  requests?: T[];
+  counts?: AdminRequestCounts;
+  status?: string;
+  error?: string;
+}
+
+/** Response envelope of POST /api/admin/requests { action: 'purge_test_data' }. */
+interface AdminPurgeResponse {
+  ok: boolean;
+  purge?: { totalDeleted: number; scanned: number; dryRun: boolean; deleted: { collection: string; count: number }[] };
+  error?: string;
+}
+
+/** The four status filter buttons that drive the request queries. */
+type ApprovalFilter = 'All' | 'Pending' | 'Approved' | 'Rejected';
+
 export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   currentMerchant,
   onUpdateMerchant,
@@ -520,10 +585,54 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const [ticketSearchQuery, setTicketSearchQuery] = useState('');
   const [ticketStatusFilter, setTicketStatusFilter] = useState<'All' | 'Open' | 'In Progress' | 'Resolved'>('All');
 
-  const [approvalStatusFilter, setApprovalStatusFilter] = useState<'All' | 'Pending' | 'Approved' | 'Rejected'>('Pending');
+  const [approvalStatusFilter, setApprovalStatusFilter] = useState<ApprovalFilter>('Pending');
   const [selectedApprovalRequest, setSelectedApprovalRequest] = useState<any | null>(null);
   const [isApprovalDetailsModalOpen, setIsApprovalDetailsModalOpen] = useState(false);
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
+
+  // ── Approval requests wiring (MongoDB) ─────────────────────
+  // Rows for the two tables below come from GET /api/admin/requests. The status
+  // filter button is sent to the API so the FILTERING HAPPENS IN MONGO; the
+  // localStorage-backed props are only a fallback for when the API is down.
+  const [dbSubscriptionRequests, setDbSubscriptionRequests] = useState<AdminSubscriptionRequestRow[]>([]);
+  const [dbThemeRequests, setDbThemeRequests] = useState<AdminThemeRequestRow[]>([]);
+  const [requestCounts, setRequestCounts] = useState<AdminRequestCounts>({ all: 0, pending: 0, approved: 0, rejected: 0 });
+  const [isLoadingRequests, setIsLoadingRequests] = useState(false);
+  const [requestsError, setRequestsError] = useState<string | null>(null);
+  const [isPurgingTestData, setIsPurgingTestData] = useState(false);
+
+  // Fetch both request tables for the current filter. Runs on mount and every
+  // time the ALL / PENDING / APPROVED / REJECTED button changes.
+  const fetchRequests = useCallback(async () => {
+    setIsLoadingRequests(true);
+    setRequestsError(null);
+    const status = approvalStatusFilter.toLowerCase();
+    try {
+      const [subRes, themeRes] = await Promise.all([
+        fetch('/api/admin/requests?type=subscription&status=' + status, { method: 'GET', headers: { 'Content-Type': 'application/json' }}),
+        fetch('/api/admin/requests?type=theme&status=' + status, { method: 'GET', headers: { 'Content-Type': 'application/json' }}),
+      ]);
+      const subData = (await subRes.json()) as AdminRequestListResponse<AdminSubscriptionRequestRow>;
+      const themeData = (await themeRes.json()) as AdminRequestListResponse<AdminThemeRequestRow>;
+
+      if (Array.isArray(subData?.requests)) setDbSubscriptionRequests(subData.requests);
+      if (Array.isArray(themeData?.requests)) setDbThemeRequests(themeData.requests);
+      // Counts describe the whole collection, so either response is authoritative.
+      if (subData?.counts) setRequestCounts(subData.counts);
+      else if (themeData?.counts) setRequestCounts(themeData.counts);
+
+      if (subData?.ok === false) setRequestsError(subData.error || 'Subscription requests temporarily unavailable.');
+      else if (themeData?.ok === false) setRequestsError(themeData.error || 'Theme requests temporarily unavailable.');
+    } catch (e: any) {
+      setRequestsError(e?.message || 'Failed to load approval requests.');
+    } finally {
+      setIsLoadingRequests(false);
+    }
+  }, [approvalStatusFilter]);
+
+  useEffect(() => {
+    fetchRequests();
+  }, [fetchRequests]);
 
   const handleCopyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -531,16 +640,25 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     setTimeout(() => setCopySuccess(null), 2000);
   };
 
-  const filteredSubscriptionRequests = pendingRequests.filter(req => {
-    if (approvalStatusFilter === 'All') return true;
-    return req.status.toLowerCase() === approvalStatusFilter.toLowerCase();
-  });
+  // Prefer the MongoDB rows; fall back to the localStorage props when the API
+  // returned nothing (unavailable DB, or a deployment with no requests yet) so
+  // the tables are never wrongly blanked out.
+  const usingDbRequests = dbSubscriptionRequests.length > 0 || dbThemeRequests.length > 0;
 
-  const filteredThemeRequests = themePurchaseRequests.filter(req => {
-    if (approvalStatusFilter === 'All') return true;
-    if (approvalStatusFilter === 'Pending') return req.status === 'pending_approval';
-    return req.status.toLowerCase() === approvalStatusFilter.toLowerCase();
-  });
+  const filteredSubscriptionRequests: Array<SubscriptionRequest | AdminSubscriptionRequestRow> = usingDbRequests
+    ? dbSubscriptionRequests
+    : pendingRequests.filter(req => {
+        if (approvalStatusFilter === 'All') return true;
+        return req.status.toLowerCase() === approvalStatusFilter.toLowerCase();
+      });
+
+  const filteredThemeRequests: Array<ThemePurchaseRequest | AdminThemeRequestRow> = usingDbRequests
+    ? dbThemeRequests
+    : themePurchaseRequests.filter(req => {
+        if (approvalStatusFilter === 'All') return true;
+        if (approvalStatusFilter === 'Pending') return req.status === 'pending_approval';
+        return req.status.toLowerCase() === approvalStatusFilter.toLowerCase();
+      });
 
   const filteredTickets = supportTickets.filter(ticket => {
     const matchesSearch = ticket.subject.toLowerCase().includes(ticketSearchQuery.toLowerCase()) ||
@@ -1226,8 +1344,74 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     }
   };
 
-  const handleClearFakeTransactions = () => {
-    if (window.confirm('WARNING: Are you sure you want to permanently clear ALL transaction records (Subscriptions and Theme Purchases)? This is meant for pre-launch database resets.')) {
+  /**
+   * "CLEAN TEST DATA" — purge mock/test transactions from MongoDB.
+   *
+   * Calls POST /api/admin/requests { action: 'purge_test_data' }, which removes
+   * ONLY rows that positively identify as test data (see isTestTransaction in
+   * lib/adminRequests.ts) — real payments are never touched. Because that can
+   * delete data permanently we show a summary first and require confirmation.
+   */
+  const handleClearFakeTransactions = async () => {
+    if (isPurgingTestData) return;
+
+    const firstConfirm = window.confirm(
+      'CLEAN TEST DATA\n\nThis scans the subscription and theme-purchase collections for MOCK/TEST transactions and permanently deletes them.\n\nReal payment records are never deleted.\n\nRun a preview first to see exactly what would be removed?'
+    );
+    if (!firstConfirm) return;
+
+    setIsPurgingTestData(true);
+    setRequestsError(null);
+    try {
+      // 1. Dry run — report what WOULD be deleted without touching anything.
+      const previewRes = await fetch('/api/admin/requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'purge_test_data', dryRun: true }),
+      });
+      const preview = (await previewRes.json()) as AdminPurgeResponse;
+      if (preview?.ok === false) {
+        setRequestsError(preview.error || 'Could not scan for test transactions.');
+        return;
+      }
+
+      const wouldDelete = preview?.purge?.totalDeleted ?? 0;
+      const scanned = preview?.purge?.scanned ?? 0;
+      if (wouldDelete === 0) {
+        setSaveSuccess('Clean Test Data: no mock/test transactions found (' + scanned + ' records scanned).');
+        setTimeout(() => setSaveSuccess(null), 4000);
+        return;
+      }
+
+      const breakdown = (preview?.purge?.deleted || [])
+        .filter((d) => d.count > 0)
+        .map((d) => '  • ' + d.collection + ': ' + d.count)
+        .join('\n');
+
+      const finalConfirm = window.confirm(
+        'PREVIEW\n\n' + scanned + ' records scanned.\n' + wouldDelete + ' mock/test transaction(s) will be PERMANENTLY deleted:\n\n' + breakdown + '\n\nProceed with the deletion?'
+      );
+      if (!finalConfirm) return;
+
+      // 2. Real purge, which also returns the refreshed (now-clean) lists.
+      const purgeRes = await fetch('/api/admin/requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'purge_test_data' }),
+      });
+      const result = (await purgeRes.json()) as AdminPurgeResponse;
+      if (result?.ok === false) {
+        setRequestsError(result.error || 'Failed to clear test transactions.');
+        return;
+      }
+
+      const deleted = result?.purge?.totalDeleted ?? 0;
+      setSaveSuccess('Clean Test Data: permanently removed ' + deleted + ' mock/test transaction(s).');
+      setTimeout(() => setSaveSuccess(null), 4000);
+
+      // Refresh the tables from MongoDB, and clear the localStorage mirror so a
+      // stale cached copy cannot resurrect the deleted rows on next load.
+      await fetchRequests();
       onUpdatePendingRequests([]);
       if (onUpdateThemePurchaseRequests) {
         onUpdateThemePurchaseRequests([]);
@@ -1236,8 +1420,12 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         localStorage.removeItem('ZID_PENDING_REQUESTS');
         localStorage.removeItem('ZID_THEME_PURCHASE_REQUESTS');
       } catch (e) {
-        console.error('Failed to clear transaction records', e);
+        console.error('Failed to clear the cached transaction records', e);
       }
+    } catch (e: any) {
+      setRequestsError(e?.message || 'Failed to clear test transactions.');
+    } finally {
+      setIsPurgingTestData(false);
     }
   };
 
@@ -1719,26 +1907,44 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
               <div className="flex items-center gap-3">
                 <button
                   onClick={handleClearFakeTransactions}
-                  className="bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white px-3 py-1.5 rounded-lg border border-red-500/30 text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer flex items-center gap-2"
-                  title="Clear all test transaction records before launch"
+                  disabled={isPurgingTestData}
+                  className={`px-3 py-1.5 rounded-lg border-red-500/30 text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-2 ${
+                    isPurgingTestData
+                      ? 'bg-red-500/20 text-red-300 cursor-wait'
+                      : 'bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white cursor-pointer'
+                  }`}
+                  title="Scan for and permanently delete mock/test transactions"
                 >
-                  <Trash2 className="w-3 h-3" />
-                  Clean Test Data
+                  <Trash2 className={`w-3 h-3 ${isPurgingTestData ? 'animate-pulse' : ''}`} />
+                  {isPurgingTestData ? 'Cleaning...' : 'Clean Test Data'}
                 </button>
                 <div className="bg-[#202533] p-1 rounded-xl border border-[#2E3548] flex">
-                  {['All', 'Pending', 'Approved', 'Rejected'].map((status) => (
-                    <button
-                      key={status}
-                      onClick={() => setApprovalStatusFilter(status as any)}
-                      className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all cursor-pointer ${
-                        approvalStatusFilter === status
-                          ? 'bg-indigo-600 text-white shadow-lg'
-                          : 'text-slate-500 hover:text-white'
-                      }`}
-                    >
-                      {status}
-                    </button>
-                  ))}
+                  {(['All', 'Pending', 'Approved', 'Rejected'] as ApprovalFilter[]).map((status) => {
+                    const count = requestCounts[status.toLowerCase() as keyof AdminRequestCounts];
+                    return (
+                      <button
+                        key={status}
+                        onClick={() => setApprovalStatusFilter(status)}
+                        title={`Show ${status.toLowerCase()} requests`}
+                        className={`px-3.5 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all cursor-pointer flex items-center gap-1.5 ${
+                          approvalStatusFilter === status
+                            ? 'bg-indigo-600 text-white shadow-lg'
+                            : 'text-slate-500 hover:text-white'
+                        }`}
+                      >
+                        {status}
+                        {typeof count === 'number' && (
+                          <span
+                            className={`px-1.5 rounded-md text-[9px] ${
+                              approvalStatusFilter === status ? 'bg-white/20 text-white' : 'bg-[#181B26] text-slate-400'
+                            }`}
+                          >
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </div>
