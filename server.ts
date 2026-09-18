@@ -1431,28 +1431,12 @@ app.get('/api/stores/by-slug', async (req, res) => {
   }
 });
 
-// Flexible store lookup by ANY reference (slug, permanent ZID-BD-XXXX code or
-// UUID): /api/stores/:ref. Registered AFTER the literal /api/stores/by-slug
-// and /check routes so those win, and BEFORE the catch-all 404 handler.
-//
-// This is what lets a client fetch `/api/stores/ZID-BD-5150` directly instead of
-// a bare `/ZID-BD-5150` URL (which the edge answers with an HTML 404 page).
-app.get('/api/stores/:ref', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  try {
-    const ref = String(req.params.ref || '').split(':')[0].trim();
-    if (!ref) return res.status(200).json({ ok: true, store_slug: '', merchant: null });
-    const merchant = await resolveStoreRecordFlexible(ref);
-    return res.status(200).json({
-      ok: true,
-      store_slug: String((merchant as any)?.store_slug || (merchant as any)?.storeSlug || ref).toLowerCase(),
-      merchant: merchant || null,
-    });
-  } catch (err: any) {
-    console.error('[Server] GET /api/stores/:ref error:', err);
-    return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
-  }
-});
+// NOTE: the flexible single-segment lookup `/api/stores/:ref` is registered far
+// below, AFTER every literal store route. Express matches in registration order,
+// so registering a `:ref` param route here would swallow `/api/stores/slug/...`,
+// `/api/stores/check/...` and `/api/stores/locale` — those requests would match
+// `:ref = "slug"` and return `merchant: null` instead of ever reaching their
+// real handler. That exact mis-ordering is what produced the production 404s.
 
 // Store lookup by email: /api/stores/check/:email.
 app.get('/api/stores/check/:email', async (req, res) => {
@@ -1658,22 +1642,6 @@ app.post('/api/stores/update-locale', async (req, res) => {
   }
 });
 
-// Generic store lookup by single slug segment: /api/stores/:slug.
-app.all('/api/stores/:slug', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  try {
-    const slug = extractStoreSlugFromRequest(req);
-    if (!slug) {
-      return res.status(200).json({ ok: true, store_slug: '', merchant: null });
-    }
-    const merchant = await resolveStoreRecordFlexible(slug);
-    return res.status(200).json({ ok: true, store_slug: slug, merchant: merchant || null });
-  } catch (err: any) {
-    console.error('[Server] /api/stores/:slug error:', err);
-    return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
-  }
-});
-
 app.post('/api/stores/update', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -1687,6 +1655,37 @@ app.post('/api/stores/update', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] POST /api/stores/update error:', err);
     return res.status(200).json({ ok: false, store_slug: '', error: err?.message || String(err) });
+  }
+});
+
+// ── Catch-all dynamic store lookup ──────────────────────────
+// GET /api/stores/:ref — the LAST store route to be registered, so every
+// literal route above (by-slug, check, slug, locale, update, update-locale)
+// matches first. This is the route that answers `/api/stores/mystore` and
+// `/api/stores/ZID-BD-5150`.
+//
+// GET only (not `app.all`): an `app.all` here would intercept
+// `POST /api/stores/update` on the strength of `:ref === "update"`. GET is also
+// what the storefront actually issues.
+//
+// ALWAYS answers 200 with JSON `{ merchant: null }` for an unknown store, so a
+// missing store can never surface as the platform's 404 HTML page.
+app.get('/api/stores/:ref', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const ref = extractStoreSlugFromRequest(req);
+    if (!ref) {
+      return res.status(200).json({ ok: true, store_slug: '', merchant: null });
+    }
+    const merchant = await resolveStoreRecordFlexible(ref);
+    return res.status(200).json({
+      ok: true,
+      store_slug: String((merchant as any)?.store_slug || (merchant as any)?.storeSlug || ref).toLowerCase(),
+      merchant: merchant || null,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/stores/:ref error:', err);
+    return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
   }
 });
 

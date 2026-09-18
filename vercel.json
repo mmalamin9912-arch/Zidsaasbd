@@ -128,6 +128,14 @@
       "destination": "/index.html"
     },
     {
+      "source": "/store/:slug",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/e/:slug",
+      "destination": "/index.html"
+    },
+    {
       "source": "/:storeSlug",
       "destination": "/index.html"
     },
@@ -138,7 +146,22 @@
   ],
   "functions": {
     "api/index.ts": {
-      "includeFiles": "api/server.ts"
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/analytics-summary.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/ai/analytics-summary.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/admin/analytics.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/admin/merchants.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/admin/requests.ts": {
+      "includeFiles": "{api/**,lib/**}"
     }
   }
 }

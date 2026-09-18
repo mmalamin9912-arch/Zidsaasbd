@@ -898,7 +898,11 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       recentRenewals,
     };
 
-    const endpoints = ['/api/ai/analytics-summary', '/api/analytics-summary'];
+    // `/api/analytics-summary` is the canonical path (the dedicated Vercel
+    // function in api/analytics-summary.ts); `/api/ai/analytics-summary` is kept
+    // as a fallback for older deployments. Order matters: try the canonical one
+    // first so a working production route is never shadowed by a stale alias.
+    const endpoints = ['/api/analytics-summary', '/api/ai/analytics-summary'];
     try {
       for (const endpoint of endpoints) {
         try {
@@ -910,8 +914,14 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
           // 404/405 means this path is not deployed — try the next spelling.
           if (response.status === 404 || response.status === 405) continue;
           if (!response.ok) continue;
-          const data = await response.json();
-          if (data?.summary) {
+
+          // safeJson returns null for a non-JSON body — notably the platform's
+          // 404 HTML page, which used to make an unconditional res.json() throw
+          // a SyntaxError and surface as "Failed to generate summary".
+          const data = await safeJson<{ summary?: string; fallback?: boolean; reason?: string; dbError?: string | null }>(response);
+          if (!data) continue;
+
+          if (data.summary) {
             setAnalyticsSummary(data.summary);
             return;
           }
@@ -922,7 +932,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       // Every endpoint failed: surface an actionable notice rather than a raw
       // error string, and point the admin at the numbers already on screen.
       setSummaryError(
-        'The AI summary service is unreachable right now. The platform figures above are current — retry once the backend is redeployed with /api/ai/analytics-summary.'
+        'The AI summary service is unreachable right now. The platform figures above are current — retry once the backend is redeployed with /api/analytics-summary.'
       );
     } finally {
       setIsGeneratingSummary(false);
