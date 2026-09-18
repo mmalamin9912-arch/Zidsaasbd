@@ -127,6 +127,38 @@ export function classifyMerchant(plan: string, isLocked: boolean, expiresAtRaw: 
   return 'trial';
 }
 
+/**
+ * Build the unique identity key for a raw store/merchant document.
+ *
+ * WHY THIS IS SLUG-FIRST (and not `id`-first)
+ * ---------------------------------------------------------------------------
+ * The SAME store is written to several collections with DIFFERENT document ids —
+ * `stores` uses `_id`, the upserted `merchants` mirror uses its own `_id`, and a
+ * legacy row may carry only `store_code`. Keying on `id`/`_id` therefore produced
+ * a SEPARATE key per document and the admin table rendered the same store two or
+ * three times.
+ *
+ * `store_slug` (falling back to the permanent `store_code`) is the shared,
+ * human-stable identifier, so it is checked FIRST. Mongo's `_id` is used only
+ * as a last resort — it is a document id, never a business key.
+ */
+export function merchantUniqueKey(record: Record<string, any> | null | undefined): string {
+  if (!record) return '';
+  const slugish = pick(record, ['store_slug', 'storeSlug', 'slug']);
+  if (slugish) return `slug:${String(slugish).trim().toLowerCase()}`;
+
+  const code = pick(record, ['store_code', 'storeCode']);
+  if (code) return `code:${String(code).trim().toUpperCase()}`;
+
+  const idish = pick(record, ['id', 'store_id', 'storeId', 'merchant_id', 'merchantId']);
+  if (idish) return `id:${String(idish).trim().toLowerCase()}`;
+
+  const email = pick(record, ['email', 'owner_email', 'ownerEmail']);
+  if (email) return `email:${String(email).trim().toLowerCase()}`;
+
+  return '';
+}
+
 /** Map a raw MongoDB store/merchant document into the normalised AdminMerchant shape. */
 export function normalizeMerchant(record: Record<string, any>): AdminMerchant {
   const plan = planIdOf(record);
@@ -216,18 +248,11 @@ export async function listAdminMerchants(opts: { status?: string; search?: strin
   if (!db) return { ...base, ok: false, error: failure?.message || 'MongoDB is not configured or unavailable.', dbError: failure };
 
   const raw: Record<string, any>[] = [];
-  const seen = new Set<string>();
 
   for (const collectionName of ['stores', 'merchants']) {
     try {
       const rows = await db.collection(collectionName).find({}).limit(5000).toArray();
-      for (const row of rows) {
-        // De-dupe: prefer the first collection (stores) entry per identity key.
-        const key = String(row?.id || row?.store_id || row?.store_slug || row?.storeSlug || row?.store_code || row?._id || '');
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        raw.push(row);
-      }
+      for (const row of rows) raw.push(row);
     } catch (err: any) {
       // Missing collection is expected (legacy vs new deployments).
       if (!/ns not found|does not exist/i.test(String(err?.message || ''))) {
@@ -236,7 +261,51 @@ export async function listAdminMerchants(opts: { status?: string; search?: strin
     }
   }
 
-  let merchants = raw.map(normalizeMerchant);
+  // ── De-duplication ──────────────────────────
+  // Collapse every document describing the SAME store into a single row, keyed
+  // by store_slug / store_code first (see merchantUniqueKey). A Map retains the
+  // first occurrence per key, matching the documented
+  // `Array.from(new Map(rows.map(r => [key, r])).values())` behaviour, but it
+  // additionally MERGES fields across the duplicates so a store whose name lives
+  // in `stores` and whose plan lives in `merchants` still renders completely.
+  const byKey = new Map<string, Record<string, any>>();
+  const unkeyed: Record<string, any>[] = [];
+
+  for (const row of raw) {
+    const key = merchantUniqueKey(row);
+    if (!key) {
+      // A row with no usable identity cannot be de-duped safely — keep it so a
+      // half-written record is still visible rather than silently dropped.
+      unkeyed.push(row);
+      continue;
+    }
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { ...row });
+      continue;
+    }
+    // Same store from another collection: backfill only the fields the first
+    // copy is missing, so the primary (`stores`) values always win.
+    for (const [field, value] of Object.entries(row)) {
+      const current = existing[field];
+      if ((current === undefined || current === null || current === '') && value !== undefined && value !== null && value !== '') {
+        existing[field] = value;
+      }
+    }
+  }
+
+  let merchants = [...byKey.values(), ...unkeyed].map(normalizeMerchant);
+
+  // Defensive second pass on the NORMALISED records: two raw rows can carry
+  // different spellings of the same slug (`storeSlug` vs `store_slug`) and only
+  // collapse once normalised. Cheap, and it guarantees the UI never sees a
+  // duplicate even if a write path invents a new field name.
+  const finalByKey = new Map<string, AdminMerchant>();
+  for (const merchant of merchants) {
+    const key = merchantUniqueKey(merchant) || `id:${merchant.id}` || `email:${merchant.email}`;
+    if (!finalByKey.has(key)) finalByKey.set(key, merchant);
+  }
+  merchants = [...finalByKey.values()];
 
   // Counts reflect the FULL set (before status/search filtering) so the tabs
   // can show real totals regardless of the active filter.
@@ -301,8 +370,25 @@ export interface MerchantActionResult {
   ok: boolean;
   merchant?: AdminMerchant;
   deleted?: boolean;
+  /** true when an existing store was updated rather than a new one inserted. */
+  updated?: boolean;
   error?: string;
   /** Structured DB diagnosis (code + actionable message) when the write failed. */
+  dbError?: MongoFailure | null;
+}
+
+export interface DuplicateCleanupResult {
+  ok: boolean;
+  generatedAt: string;
+  database: string;
+  /** Duplicate documents permanently removed. */
+  removed: number;
+  /** Store slugs that had more than one document. */
+  duplicateGroups: number;
+  /** Per-slug detail, so an operator can see exactly what was collapsed. */
+  groups: { key: string; kept: string; removedIds: string[] }[];
+  dryRun: boolean;
+  error?: string;
   dbError?: MongoFailure | null;
 }
 
@@ -434,10 +520,26 @@ export interface CreateMerchantInput {
 }
 
 /**
- * Create a new merchant/store record. Returns the normalised row on success.
- * A store_code (ZID-BD-XXXX) and slug are derived when not supplied.
+ * Create OR update a merchant/store record, keyed by store_slug.
+ *
+ * IDEMPOTENT BY DESIGN
+ * ---------------------------------------------------------------------------
+ * This used to `insertOne()` unconditionally with a freshly generated
+ * `store_code` and `id`. Onboarding the same store twice therefore produced TWO
+ * documents sharing a `store_slug` but differing in every other key, which is
+ * what rendered as duplicate rows in the Merchant Accounts table.
+ *
+ * Now the store is looked up by slug (and by email) across `stores` and
+ * `merchants` first. If it exists the existing document is UPDATED in place and
+ * its permanent `store_code`/`id` are PRESERVED — a store's system ID must never
+ * change, since orders and products reference it.
+ *
+ * `mode: 'upsert' | 'insert'` allows a caller that genuinely wants a second
+ * store with the same display name to force an insert; the default is upsert.
  */
-export async function createAdminMerchant(input: CreateMerchantInput): Promise<MerchantActionResult> {
+export async function createAdminMerchant(
+  input: CreateMerchantInput & { mode?: 'upsert' | 'insert' }
+): Promise<MerchantActionResult> {
   const { db, failure } = await getDb();
   if (!db) return { ok: false, error: failure?.message || 'MongoDB is not configured or unavailable.', dbError: failure };
 
@@ -451,9 +553,89 @@ export async function createAdminMerchant(input: CreateMerchantInput): Promise<M
   const nowIso = new Date(now).toISOString();
 
   const slug = storeName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'new-store';
+  const email = String(input.email || '').trim().toLowerCase();
+  const expiresAt = new Date(now + durationDays * 86400000).toISOString();
+
+  // ── 1. Does this store already exist? ──────────────
+  // Matched on slug OR email, case-insensitively, across both collections, so a
+  // store created through a different write path is still recognised.
+  const wantsInsert = input.mode === 'insert';
+  let existing: Record<string, any> | null = null;
+
+  if (!wantsInsert) {
+    const orClauses: Record<string, any>[] = [
+      { store_slug: slug },
+      { storeSlug: slug },
+      { slug },
+    ];
+    if (email) {
+      orClauses.push({ email }, { owner_email: email }, { ownerEmail: email });
+    }
+    for (const collectionName of ['stores', 'merchants']) {
+      try {
+        const found = await db.collection(collectionName).findOne({ $or: orClauses });
+        if (found) {
+          existing = found as Record<string, any>;
+          break;
+        }
+      } catch (err: any) {
+        if (!/ns not found|does not exist/i.test(String(err?.message || ''))) {
+          console.warn(`[adminMerchants] ${collectionName} existence check warning:`, err?.message || err);
+        }
+      }
+    }
+  }
+
+  // ── 2. Update in place when it exists (preserve the permanent identity) ──
+  if (existing) {
+    const patch: Record<string, any> = {
+      // Keep the ORIGINAL store_code and id — they are permanent identifiers
+      // referenced by orders/products, so re-onboarding must not rewrite them.
+      store_name: storeName,
+      storeName,
+      store_slug: slug,
+      storeSlug: slug,
+      owner_name: String(input.ownerName || '').trim() || existing.owner_name || existing.ownerName || '',
+      ownerName: String(input.ownerName || '').trim() || existing.ownerName || existing.owner_name || '',
+      email: email || existing.email || '',
+      phone: String(input.phone || '').trim() || existing.phone || '',
+      subscription_plan: plan,
+      subscriptionPlan: plan,
+      duration_days: durationDays,
+      durationDays,
+      plan_started_at: nowIso,
+      planStartedAt: nowIso,
+      expires_at: expiresAt,
+      expiresAt,
+      subscription_expiry: expiresAt.split('T')[0],
+      trialEndsAt: isTrial ? expiresAt : null,
+      trial_ends_at: isTrial ? expiresAt : null,
+      trialDaysRemaining: isTrial ? durationDays : 0,
+      updated_at: nowIso,
+      updatedAt: nowIso,
+    };
+
+    try {
+      await db.collection('stores').updateOne({ _id: existing._id }, { $set: patch });
+      // Remove any duplicate rows for the same slug left over from the previous
+      // non-idempotent insert path, so the cleanup and the write agree.
+      try {
+        await db.collection('stores').deleteMany({
+          _id: { $ne: existing._id },
+          $or: [{ store_slug: slug }, { storeSlug: slug }],
+        });
+      } catch { /* best-effort tidy-up */ }
+
+      return { ok: true, merchant: normalizeMerchant({ ...existing, ...patch }), updated: true };
+    } catch (err: any) {
+      console.warn('[adminMerchants] update warning:', err?.message || err);
+      return { ok: false, error: err?.message || 'Could not update the existing store.' };
+    }
+  }
+
+  // ── 3. Genuinely new store → insert once ─────────────
   const storeCode = `ZID-BD-${String(Math.floor(1000 + Math.random() * 9000))}`;
   const id = `store-${now}-${Math.floor(Math.random() * 1000)}`;
-  const expiresAt = new Date(now + durationDays * 86400000).toISOString();
 
   const record: Record<string, any> = {
     id,
@@ -491,12 +673,149 @@ export async function createAdminMerchant(input: CreateMerchantInput): Promise<M
   };
 
   try {
+    // A unique index on store_slug makes the intent explicit and stops a
+    // concurrent double-submit from racing an insert past the existence check.
+    // Created best-effort: an existing duplicate data set would otherwise make
+    // index creation fail, and that must not block onboarding.
+    try {
+      await db.collection('stores').createIndex({ store_slug: 1 }, { unique: true, name: 'uniq_store_slug' });
+    } catch (indexErr: any) {
+      console.warn('[adminMerchants] unique store_slug index not created:', indexErr?.message || indexErr);
+    }
+
     await db.collection('stores').insertOne(record);
-    return { ok: true, merchant: normalizeMerchant(record) };
+    return { ok: true, merchant: normalizeMerchant(record), updated: false };
   } catch (err: any) {
+    // A duplicate-key error means another request created this slug first —
+    // return the existing row instead of failing the onboarding.
+    if (/E11000|duplicate key/i.test(String(err?.message || ''))) {
+      try {
+        const existingRow = await db.collection('stores').findOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] });
+        if (existingRow) return { ok: true, merchant: normalizeMerchant(existingRow), updated: true };
+      } catch { /* fall through to the error below */ }
+    }
     console.warn('[adminMerchants] create warning:', err?.message || err);
     return { ok: false, error: err?.message || 'Could not create the store.' };
   }
+}
+
+/**
+ * Remove duplicate store documents, keeping ONE row per store slug.
+ *
+ * WHY: createAdminMerchant() used to insert unconditionally, so re-onboarding a
+ * store left several documents sharing a `store_slug`. Those all rendered as
+ * separate rows in the Merchant Accounts table.
+ *
+ * SAFETY:
+ *  - Groups by the SAME identity key the list endpoint de-dupes on
+ *    (store_slug → store_code → id → email), so the cleanup and the read agree.
+ *  - Within a group the row with the MOST fields wins; ties break on the oldest
+ *    `created_at`, so the original record and its permanent store_code survive.
+ *  - Every other document in the group is removed from BOTH `stores` and
+ *    `merchants`.
+ *  - `dryRun: true` reports what WOULD be removed without deleting anything.
+ */
+export async function cleanupDuplicateMerchants(opts: { dryRun?: boolean } = {}): Promise<DuplicateCleanupResult> {
+  const dryRun = Boolean(opts.dryRun);
+  const base: DuplicateCleanupResult = {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    database: DB_NAME,
+    removed: 0,
+    duplicateGroups: 0,
+    groups: [],
+    dryRun,
+  };
+
+  const { db, failure } = await getDb();
+  if (!db) return { ...base, ok: false, error: failure?.message || 'MongoDB is not configured or unavailable.', dbError: failure };
+
+  // Collect every document from both collections, tagged with its source so the
+  // right collection is targeted when deleting.
+  const docs: { collection: string; doc: Record<string, any> }[] = [];
+  for (const collectionName of ['stores', 'merchants']) {
+    try {
+      const rows = await db.collection(collectionName).find({}).limit(5000).toArray();
+      for (const doc of rows) docs.push({ collection: collectionName, doc });
+    } catch (err: any) {
+      if (!/ns not found|does not exist/i.test(String(err?.message || ''))) {
+        console.warn(`[adminMerchants] cleanup ${collectionName} warning:`, err?.message || err);
+      }
+    }
+  }
+
+  // Group by shared identity.
+  const grouped = new Map<string, { collection: string; doc: Record<string, any> }[]>();
+  for (const entry of docs) {
+    const key = merchantUniqueKey(entry.doc);
+    if (!key) continue;
+    const list = grouped.get(key) || [];
+    list.push(entry);
+    grouped.set(key, list);
+  }
+
+  const groups: { key: string; kept: string; removedIds: string[] }[] = [];
+  let removed = 0;
+
+  for (const [key, entries] of grouped) {
+    if (entries.length < 2) continue;
+
+    // Keep the most complete record; ties → oldest created_at (the original).
+    const scored = [...entries].sort((a, b) => {
+      const fieldsA = Object.values(a.doc).filter((v) => v !== undefined && v !== null && v !== '').length;
+      const fieldsB = Object.values(b.doc).filter((v) => v !== undefined && v !== null && v !== '').length;
+      if (fieldsB !== fieldsA) return fieldsB - fieldsA;
+      const ta = a.doc.created_at || a.doc.createdAt ? new Date(a.doc.created_at || a.doc.createdAt).getTime() : Infinity;
+      const tb = b.doc.created_at || b.doc.createdAt ? new Date(b.doc.created_at || b.doc.createdAt).getTime() : Infinity;
+      return ta - tb;
+    });
+
+    const keeper = scored[0];
+    const duplicates = scored.slice(1).filter((entry) => String(entry.doc._id) !== String(keeper.doc._id));
+    groups.push({
+      key,
+      kept: String(keeper.doc._id),
+      removedIds: duplicates.map((d) => String(d.doc._id)),
+    });
+
+    if (dryRun) {
+      removed += duplicates.length;
+      continue;
+    }
+
+    // Backfill the keeper with anything only the duplicates carried, so removing
+    // them cannot lose a field (e.g. a phone number written by a later onboarding).
+    const backfill: Record<string, any> = {};
+    for (const entry of duplicates) {
+      for (const [field, value] of Object.entries(entry.doc)) {
+        const current = keeper.doc[field];
+        if ((current === undefined || current === null || current === '') && value !== undefined && value !== null && value !== '') {
+          backfill[field] = value;
+          keeper.doc[field] = value;
+        }
+      }
+    }
+    if (Object.keys(backfill).length > 0) {
+      try {
+        await db.collection(keeper.collection).updateOne({ _id: keeper.doc._id }, { $set: backfill });
+      } catch (err: any) {
+        console.warn('[adminMerchants] cleanup backfill warning:', err?.message || err);
+      }
+    }
+
+    for (const collectionName of ['stores', 'merchants']) {
+      const ids = duplicates.filter((d) => d.collection === collectionName).map((d) => d.doc._id).filter((id) => id !== undefined);
+      if (ids.length === 0) continue;
+      try {
+        const res = await db.collection(collectionName).deleteMany({ _id: { $in: ids }});
+        removed += res?.deletedCount || 0;
+      } catch (err: any) {
+        console.warn(`[adminMerchants] cleanup delete ${collectionName} warning:`, err?.message || err);
+      }
+    }
+  }
+
+  return { ...base, removed, duplicateGroups: groups.length, groups };
 }
 
 export default listAdminMerchants;

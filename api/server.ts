@@ -39,7 +39,7 @@ import mongoose from 'mongoose';
 // bundled by Vercel alongside this file (same pattern as lib/faqGenerator).
 // The explicit '.js' extension is required under "type": "module".
 import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary, getGeminiApiKey } from '../lib/adminAnalytics.js';
-import { listAdminMerchants, applyMerchantAction, createAdminMerchant } from '../lib/adminMerchants.js';
+import { listAdminMerchants, applyMerchantAction, createAdminMerchant, cleanupDuplicateMerchants } from '../lib/adminMerchants.js';
 import {
   listSubscriptionRequests,
   listThemeRequests,
@@ -629,6 +629,19 @@ app.post('/api/admin/merchants', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const body = req.body || {};
+    const action = String(body.action || '').trim().toLowerCase();
+
+    // POST { action: 'cleanup_duplicates', dryRun?: true }
+    // Collapses duplicate store documents onto one row per store_slug. Dry run
+    // is the DEFAULT so a mis-click reports what it would remove rather than
+    // deleting anything; pass dryRun: false to purge for real.
+    if (action === 'cleanup_duplicates') {
+      const dryRun = body.dryRun !== false && String(req.query.dryRun) !== 'false';
+      return res.status(200).json(await cleanupDuplicateMerchants({ dryRun }));
+    }
+
+    // Upserting by default: re-onboarding an existing store UPDATES it rather
+    // than inserting a second document with the same slug.
     const result = await createAdminMerchant({
       storeName: body.storeName || body.store_name,
       email: body.email,
@@ -636,6 +649,7 @@ app.post('/api/admin/merchants', async (req, res) => {
       phone: body.phone,
       plan: body.plan || body.subscriptionPlan,
       password: body.password,
+      mode: body.mode === 'insert' ? 'insert' : 'upsert',
     });
     return res.status(200).json(result);
   } catch (err: any) {

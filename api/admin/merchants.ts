@@ -15,7 +15,7 @@ type VercelResponse = {
 
 // Explicit '.js' extension required: package.json sets "type": "module", so
 // Vercel's Node ESM resolver rejects extensionless relative specifiers.
-import { listAdminMerchants, createAdminMerchant, applyMerchantAction } from '../../lib/adminMerchants.js';
+import { listAdminMerchants, createAdminMerchant, applyMerchantAction, cleanupDuplicateMerchants } from '../../lib/adminMerchants.js';
 
 /**
  * /api/admin/merchants — merchant/store management for the Super Admin Portal.
@@ -56,6 +56,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (req.method === 'POST') {
       const body = (req.body || {}) as Record<string, any>;
+      const action = String(body.action || '').trim().toLowerCase();
+
+      // POST { action: 'cleanup_duplicates', dryRun?: true }
+      // Collapses duplicate store documents onto one row per store_slug. The
+      // default is a DRY RUN so a mis-click reports what it would remove instead
+      // of deleting anything; pass dryRun: false to actually purge.
+      if (action === 'cleanup_duplicates') {
+        const dryRun = body.dryRun !== false && String(req.query?.dryRun) !== 'false';
+        const result = await cleanupDuplicateMerchants({ dryRun });
+        res.status(200).json(result);
+        return;
+      }
+
+      // Upserting by default: re-onboarding an existing store UPDATES it rather
+      // than inserting a second document with the same slug.
       const result = await createAdminMerchant({
         storeName: body.storeName || body.store_name,
         email: body.email,
@@ -63,6 +78,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         phone: body.phone,
         plan: body.plan || body.subscriptionPlan,
         password: body.password,
+        mode: body.mode === 'insert' ? 'insert' : 'upsert',
       });
       res.status(200).json(result);
       return;
