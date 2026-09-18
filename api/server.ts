@@ -1593,14 +1593,49 @@ async function lookupStoreRecord(slug: string): Promise<Record<string, unknown> 
 
 // Store lookup by slug: /api/stores/by-slug?slug=xxx.
 // Registered BEFORE /api/stores/:slug so the literal path wins over the param.
+//
+// Uses resolveStoreRecordFlexible (Supabase -> MongoDB -> memory -> file) so a
+// store that exists ONLY in MongoDB is still found. Previously this route used
+// lookupStoreRecord alone, which never consulted Mongo, so a slug like
+// "dhaka-threads" returned merchant:null even though the store existed.
 app.get('/api/stores/by-slug', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const slug = String((req.query.slug as string) || (req.query.store_slug as string) || '').trim().toLowerCase();
-    const merchant = await lookupStoreRecord(slug);
+    const slug = String(
+      (req.query.slug as string) ||
+      (req.query.store_slug as string) ||
+      (req.query.store_id as string) ||
+      (req.query.store_code as string) ||
+      ''
+    ).trim().toLowerCase();
+    if (!slug) return res.status(200).json({ ok: true, store_slug: '', merchant: null });
+    const merchant = await resolveStoreRecordFlexible(slug);
     return res.status(200).json({ ok: true, store_slug: slug, merchant: merchant || null });
   } catch (err: any) {
     console.error('[Server] GET /api/stores/by-slug error:', err);
+    return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
+  }
+});
+
+// Flexible store lookup by ANY reference (slug, permanent ZID-BD-XXXX code or
+// UUID): /api/stores/:ref. Registered AFTER the literal /api/stores/by-slug,
+// /check and /slug routes so those win, and BEFORE the catch-all 404 handler.
+//
+// This is what lets a client fetch `/api/stores/ZID-BD-5150` directly instead of
+// a bare `/ZID-BD-5150` URL (which the edge answers with an HTML 404 page).
+app.get('/api/stores/:ref', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const ref = String(req.params.ref || '').split(':')[0].trim();
+    if (!ref) return res.status(200).json({ ok: true, store_slug: '', merchant: null });
+    const merchant = await resolveStoreRecordFlexible(ref);
+    return res.status(200).json({
+      ok: true,
+      store_slug: String((merchant as any)?.store_slug || (merchant as any)?.storeSlug || ref).toLowerCase(),
+      merchant: merchant || null,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/stores/:ref error:', err);
     return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
   }
 });

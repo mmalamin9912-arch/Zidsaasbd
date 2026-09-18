@@ -38,6 +38,7 @@ import {
 } from '../lib/subscriptionService';
 import { safeParseJson } from '../lib/safeFetch';
 import { generateStoreCode, resolveStoreRef, withPermanentStoreId } from '../lib/storeId';
+import { fetchStoreByRef } from '../lib/storeApi';
 
 interface AuthFlowProps {
   onLoginSuccess: (userProfile: MerchantProfile) => void;
@@ -383,14 +384,13 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // profile (the 2FA-enabled store is not always the locally-cached one).
     let phone = enrichedProfile.whatsappNumber || enrichedProfile.phone || '';
     if (!phone) {
-      try {
-        const res = await fetch(`/api/stores/slug/${encodeURIComponent(matchedTwoFactorSlug)}`);
-        const data = await safeParseJson(res, null);
-        const record = data?.merchant || {};
-        phone = record.whatsappNumber || record.phone || record.whatsapp_number || '';
-      } catch {
-        // Fall through to the error below.
-      }
+      // Null-safe lookup: an unknown/blank store yields merchant:null instead of
+      // a 404 HTML response that would break JSON parsing. The helper never
+      // throws, so the caller simply falls through to the "no number on file"
+      // branch below when the store cannot be resolved.
+      const lookup = await fetchStoreByRef(matchedTwoFactorSlug);
+      const record = lookup.merchant || {};
+      phone = record.whatsappNumber || record.phone || record.whatsapp_number || '';
     }
     if (!phone) {
       setErrorMsg('Two-factor authentication is enabled but no WhatsApp number is on file. Please contact support to recover your account.');

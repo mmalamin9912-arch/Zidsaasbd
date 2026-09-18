@@ -6,6 +6,7 @@ import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../li
 import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
 import { resolveActiveStoreSlug } from '../lib/activeStore';
+import { fetchStoreByRef, storeIdFromRecord } from '../lib/storeApi';
 import { LanguageToggle } from './LanguageToggle';
 import SafeImage from './SafeImage';
 import { useStorefrontTracking } from '../hooks/useStorefrontTracking';
@@ -1098,28 +1099,27 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
       if (storeId && !isUuidLike(storeId)) storeId = '';
 
+      // Resolve the canonical store UUID through the shared, null-safe helper.
+      // It never throws on a missing store or a non-JSON (404 HTML) response —
+      // lookup problems are logged and the caller falls back to the slug.
       if (!storeId && cleanSlug && !isUuidLike(cleanSlug)) {
-        try {
-          const res = await fetch(`/api/stores/slug/${encodeURIComponent(cleanSlug)}`);
-          const data = await res.json().catch(() => null);
-          if (data?.merchant?.id) {
-            storeId = String(data.merchant.id);
-            setResolvedStoreId(storeId);
-          }
-        } catch { /* ignore store lookup errors */ }
+        const lookup = await fetchStoreByRef(cleanSlug);
+        if (lookup.error) console.warn('[Checkout] Store lookup warning:', lookup.error);
+        if (storeIdFromRecord(lookup.merchant)) {
+          storeId = storeIdFromRecord(lookup.merchant)!;
+          setResolvedStoreId(storeId);
+        }
       }
       if (!storeId && cleanCode) {
         if (isUuidLike(cleanCode)) {
           storeId = cleanCode;
         } else {
-          try {
-            const res = await fetch(`/api/stores/slug/${encodeURIComponent(cleanCode)}`);
-            const data = await res.json().catch(() => null);
-            if (data?.merchant?.id) {
-              storeId = String(data.merchant.id);
-              setResolvedStoreId(storeId);
-            }
-          } catch { /* ignore store lookup errors */ }
+          const lookup = await fetchStoreByRef(cleanCode);
+          if (lookup.error) console.warn('[Checkout] Store lookup warning (code):', lookup.error);
+          if (storeIdFromRecord(lookup.merchant)) {
+            storeId = storeIdFromRecord(lookup.merchant)!;
+            setResolvedStoreId(storeId);
+          }
         }
       }
       if (!storeId) {

@@ -65,6 +65,7 @@ import {
 import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from '../types';
 import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingDays, getPlanDisplayName } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
+import { safeJson } from '../lib/storeApi';
 
 interface SuperAdminPortalViewProps {
   currentMerchant: MerchantProfile;
@@ -612,8 +613,10 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         fetch('/api/admin/requests?type=subscription&status=' + status, { method: 'GET', headers: { 'Content-Type': 'application/json' }}),
         fetch('/api/admin/requests?type=theme&status=' + status, { method: 'GET', headers: { 'Content-Type': 'application/json' }}),
       ]);
-      const subData = (await subRes.json()) as AdminRequestListResponse<AdminSubscriptionRequestRow>;
-      const themeData = (await themeRes.json()) as AdminRequestListResponse<AdminThemeRequestRow>;
+      // safeJson returns null for a non-JSON body (e.g. the platform's 404 HTML
+      // page) instead of throwing on parse.
+      const subData = await safeJson<AdminRequestListResponse<AdminSubscriptionRequestRow>>(subRes);
+      const themeData = await safeJson<AdminRequestListResponse<AdminThemeRequestRow>>(themeRes);
 
       if (Array.isArray(subData?.requests)) setDbSubscriptionRequests(subData.requests);
       if (Array.isArray(themeData?.requests)) setDbThemeRequests(themeData.requests);
@@ -805,9 +808,15 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
       });
-      const data = (await res.json()) as PlatformAnalyticsPayload;
+      // safeJson returns null for a non-JSON body (e.g. the platform's 404 HTML
+      // page) instead of throwing "Unexpected token < in JSON at position 0".
+      const data = await safeJson<PlatformAnalyticsPayload>(res);
+      if (!data) {
+        setAnalyticsError('Analytics endpoint did not return JSON. The API may not be deployed.');
+        return;
+      }
       setPlatformAnalytics(data);
-      if (data && data.ok === false) {
+      if (data.ok === false) {
         setAnalyticsError(data.error || 'Analytics temporarily unavailable.');
       }
     } catch (e: any) {
@@ -987,14 +996,18 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
       });
-      const data = (await res.json()) as AdminMerchantListResponse;
-      if (Array.isArray(data?.merchants)) {
+      const data = await safeJson<AdminMerchantListResponse>(res);
+      if (!data) {
+        setMerchantsError('Merchant endpoint did not return JSON. The API may not be deployed.');
+        return;
+      }
+      if (Array.isArray(data.merchants)) {
         setServerMerchants(data.merchants);
       }
-      if (data?.counts) {
+      if (data.counts) {
         setMerchantCounts(data.counts);
       }
-      if (data && data.ok === false) {
+      if (data.ok === false) {
         setMerchantsError(data.error || 'Merchant service temporarily unavailable.');
       }
     } catch (e: any) {

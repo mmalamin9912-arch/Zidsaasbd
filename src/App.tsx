@@ -38,6 +38,7 @@ import { TenantStorefrontView } from './components/TenantStorefrontView';
 import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { normalizeOrders } from './utils/orderUtils';
+import { isStoreCode, isUuid } from './lib/storeId';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -64,6 +65,40 @@ import {
   subscribeToMerchantSubscription
 } from './lib/subscriptionService';
 import { Menu, ShieldAlert, Clock, ArrowUpRight } from 'lucide-react';
+
+/**
+ * Reserved first-path-segments that are application routes, not store refs.
+ * Anything else at the root is treated as a store reference.
+ */
+const RESERVED_ROOT_SEGMENTS = new Set([
+  'admin', 'super-admin', 'admin-login', 'super-admin-gateway',
+  'dashboard', 'store', 'e', 'pricing', 'landing', 'login', 'signin',
+  'register', 'signup', 'checkout', 'api', 'assets', 'static',
+]);
+
+/**
+ * Is this path a bare store reference like `/ZID-BD-5150` or `/dhaka-threads`?
+ *
+ * These arrive from shared storefront links. They are NOT app routes, so
+ * without explicit handling they matched nothing and the platform served its
+ * 404 HTML page — the "The page could not be found" (NOT_FOUND) error. Only a
+ * single non-reserved segment qualifies, so real routes are never hijacked.
+ */
+function isBareStorePath(path: string): boolean {
+  const segments = String(path || '').split('?')[0].split('/').filter(Boolean);
+  if (segments.length !== 1) return false;
+
+  const segment: string = decodeURIComponent(segments[0]).split(':')[0].trim();
+  if (!segment) return false;
+
+  // A permanent ZID-BD-XXXX code or a stores.id UUID is unambiguously a store.
+  const isCodeOrUuid: boolean = isStoreCode(segment) || isUuid(segment);
+  if (isCodeOrUuid) return true;
+
+  // Otherwise it must look like a slug (no dots) and not be a reserved route.
+  if (segment.includes('.')) return false;
+  return !RESERVED_ROOT_SEGMENTS.has(segment.toLowerCase());
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
@@ -144,6 +179,21 @@ export default function App() {
       }
 
       if (path.startsWith('/store/') || path.startsWith('/e/')) {
+        return;
+      }
+
+      // A bare store reference — `/ZID-BD-5150`, `/dhaka-threads` — is a
+      // storefront link, NOT an app route. Without this branch the path matched
+      // nothing, so the edge fell through to the platform's 404 HTML page
+      // ("The page could not be found"). We rewrite it to the real storefront
+      // route (which resolves slug/code/UUID via the store API) so the URL
+      // always lands on a page that exists.
+      if (isBareStorePath(path)) {
+        const ref = path.replace(/^\/+/, '');
+        const target = `/store/${ref}`;
+        window.history.replaceState({}, '', target);
+        setCurrentPath(target);
+        setShowLanding(false);
         return;
       }
 
