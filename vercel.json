@@ -1,7 +1,32 @@
 {
   "version": 2,
-  "buildCommand": "npx vite build",
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/analytics-summary.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/ai/analytics-summary.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/admin/analytics.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/admin/merchants.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/admin/requests.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    },
+    "api/admin/subscription-plans.ts": {
+      "includeFiles": "{api/**,lib/**}"
+    }
+  },
   "rewrites": [
     {
       "source": "/api/health",
@@ -151,25 +176,5 @@
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
-  ],
-  "functions": {
-    "api/index.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/analytics-summary.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/ai/analytics-summary.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/admin/analytics.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/admin/merchants.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/admin/requests.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    }
-  }
+  ]
 }

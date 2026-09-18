@@ -691,6 +691,20 @@ export function buildFallbackSummary(analyticsData: any, dbMetrics?: any): strin
   const paid = Number(overview.paidMerchants || 0).toLocaleString();
   const aov = Number(overview.averageOrderValueBDT || 0).toLocaleString();
   const leader = topStores[0];
+  const storeCount = Number(overview.totalMerchants || overview.activeMerchants || 0).toLocaleString();
+
+  // Zero-data case. When BOTH providers returned nothing there is no signal to
+  // interpret, so emit one explicit sentence rather than three empty metrics.
+  // This is the guaranteed, never-failing string the dashboard renders.
+  const hasNoData =
+    Number(overview.totalPlatformSalesBDT || 0) === 0 &&
+    Number(overview.totalOrderVolume || 0) === 0 &&
+    Number(overview.completedOrderCount || 0) === 0 &&
+    Number(overview.baasSubscriptionRevenueBDT || 0) === 0;
+
+  if (hasNoData) {
+    return `Current platform analytics: Total Sales 0 BDT across ${storeCount} onboarded stores.`;
+  }
 
   const lines = [
     `Platform sales stand at ৳${sales} BDT from ${orders} completed orders (out of ${volume} total).`,
