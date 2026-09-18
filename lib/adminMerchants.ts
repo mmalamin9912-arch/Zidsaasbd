@@ -15,7 +15,8 @@
  * serverless functions (api/admin/merchants.ts).
  */
 
-import { connectToDatabase, getMongoUri, DB_NAME } from './db.js';
+import { connectToDatabase, getMongoUri, describeMongoError, DB_NAME } from './db.js';
+import type { MongoFailure } from './db.js';
 
 /** Normalised merchant row returned to the admin dashboard. */
 export interface AdminMerchant {
@@ -53,6 +54,8 @@ export interface AdminMerchantListResult {
     suspended: number;
   };
   error?: string;
+  /** Structured DB diagnosis (code + actionable message) when the read failed. */
+  dbError?: MongoFailure | null;
 }
 
 const NON_PAID_PLANS = new Set(['free_trial', 'trial', 'free', 'basic', 'starter', '']);
@@ -173,15 +176,23 @@ export function normalizeMerchant(record: Record<string, any>): AdminMerchant {
   };
 }
 
-/** Resolve the native Db handle (or null when Mongo is unavailable). */
-async function getDb(dbName: string = DB_NAME): Promise<any | null> {
-  if (!getMongoUri()) return null;
+/**
+ * Resolve the native Db handle. Always returns a structured outcome so the
+ * caller can report WHY Mongo was unavailable (missing URI vs. bad credentials
+ * vs. timeout) instead of the generic "not configured or unavailable".
+ */
+async function getDb(dbName: string = DB_NAME): Promise<{ db: any | null; failure: MongoFailure | null }> {
+  if (!getMongoUri()) {
+    return { db: null, failure: describeMongoError(new Error('MONGODB_URI is not set')) };
+  }
   try {
     const mongoose = await connectToDatabase(dbName);
-    return mongoose.connection.db ?? null;
+    const db = mongoose.connection.db ?? null;
+    return { db, failure: db ? null : describeMongoError(new Error('connection handle unavailable')) };
   } catch (err) {
-    console.warn('[adminMerchants] Mongo connection warning:', (err as any)?.message || err);
-    return null;
+    const failure = describeMongoError(err);
+    console.warn('[adminMerchants] Mongo connection failure:', failure.detail || failure.message);
+    return { db: null, failure };
   }
 }
 
@@ -201,8 +212,8 @@ export async function listAdminMerchants(opts: { status?: string; search?: strin
     counts: { all: 0, active: 0, trial: 0, suspended: 0 },
   };
 
-  const db = await getDb();
-  if (!db) return { ...base, ok: false, error: 'MongoDB is not configured or unavailable.' };
+  const { db, failure } = await getDb();
+  if (!db) return { ...base, ok: false, error: failure?.message || 'MongoDB is not configured or unavailable.', dbError: failure };
 
   const raw: Record<string, any>[] = [];
   const seen = new Set<string>();
@@ -291,6 +302,8 @@ export interface MerchantActionResult {
   merchant?: AdminMerchant;
   deleted?: boolean;
   error?: string;
+  /** Structured DB diagnosis (code + actionable message) when the write failed. */
+  dbError?: MongoFailure | null;
 }
 
 /**
@@ -307,8 +320,8 @@ export async function applyMerchantAction(
   action: string,
   payload: Record<string, any> = {}
 ): Promise<MerchantActionResult> {
-  const db = await getDb();
-  if (!db) return { ok: false, error: 'MongoDB is not configured or unavailable.' };
+  const { db, failure } = await getDb();
+  if (!db) return { ok: false, error: failure?.message || 'MongoDB is not configured or unavailable.', dbError: failure };
 
   const filter = merchantIdentityFilter(ref);
 
@@ -425,8 +438,8 @@ export interface CreateMerchantInput {
  * A store_code (ZID-BD-XXXX) and slug are derived when not supplied.
  */
 export async function createAdminMerchant(input: CreateMerchantInput): Promise<MerchantActionResult> {
-  const db = await getDb();
-  if (!db) return { ok: false, error: 'MongoDB is not configured or unavailable.' };
+  const { db, failure } = await getDb();
+  if (!db) return { ok: false, error: failure?.message || 'MongoDB is not configured or unavailable.', dbError: failure };
 
   const storeName = String(input.storeName || '').trim();
   if (!storeName) return { ok: false, error: 'Store name is required.' };

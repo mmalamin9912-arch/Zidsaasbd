@@ -11,7 +11,7 @@ import mongoose from 'mongoose';
 // bundlers (vite/esbuild) and tsx map it back to lib/db.ts.
 import { connectToDatabase, getMongoDb, getMongoUri, DB_NAME } from './lib/db.js';
 import { generateFaqFromPolicies } from './lib/faqGenerator.js';
-import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary } from './lib/adminAnalytics.js';
+import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary, getGeminiApiKey } from './lib/adminAnalytics.js';
 import { listAdminMerchants, applyMerchantAction, createAdminMerchant } from './lib/adminMerchants.js';
 
 const app = express();
@@ -443,36 +443,60 @@ app.delete('/api/admin/merchants/:ref', async (req, res) => {
 async function handleAnalyticsSummary(req: express.Request, res: express.Response) {
   res.setHeader('Content-Type', 'application/json');
   const analyticsData = (req.body && (req.body.analyticsData || req.body)) || {};
+
+  // Numbers straight from the database — used for the fallback summary when the
+  // AI key is absent and to fill metrics the request body omitted. A Mongo
+  // failure is reported in the payload, never thrown at the caller.
+  let dbMetrics: any = null;
+  let dbError: string | null = null;
   try {
-    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+    const platform = await getPlatformAnalytics();
+    dbMetrics = platform.overview;
+    if (platform.ok === false) dbError = platform.error || 'MongoDB unavailable.';
+  } catch (err: any) {
+    dbError = err?.message || 'MongoDB unavailable.';
+    console.warn('[Server] analytics-summary DB metrics unavailable:', dbError);
+  }
 
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-      // AI is optional — fall back to a deterministic, human-readable summary
-      // built from the same numbers so the panel is never empty.
-      return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
-    }
+  const respondFallback = (reason: string) =>
+    res.status(200).json({
+      summary: buildFallbackSummary(analyticsData, dbMetrics),
+      fallback: true,
+      reason,
+      dbError,
+    });
 
+  // Key is read from GEMINI_API_KEY or the VITE_GEMINI_API_KEY spelling.
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    // AI is optional — fall back to a deterministic, human-readable summary
+    // built from the same numbers so the panel is never empty.
+    return respondFallback('missing_api_key');
+  }
+
+  try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
     const providerRes = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData) }] }],
+        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData, dbMetrics) }] }],
         generationConfig: { temperature: 0.6, maxOutputTokens: 600 },
       }),
     });
 
     if (!providerRes.ok) {
       console.warn('[Server] analytics-summary AI provider status:', providerRes.status);
-      return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+      return respondFallback(`provider_status_${providerRes.status}`);
     }
 
-    const data = await providerRes.json();
+    const data = await providerRes.json().catch(() => null);
     const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim();
-    return res.status(200).json({ summary: text || buildFallbackSummary(analyticsData), fallback: !text });
+    if (!text) return respondFallback('empty_provider_response');
+    return res.status(200).json({ summary: text, fallback: false, dbError });
   } catch (err: any) {
     console.error('[Server] POST analytics-summary error:', err);
-    return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+    return respondFallback('provider_error');
   }
 }
 

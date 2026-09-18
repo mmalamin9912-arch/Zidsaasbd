@@ -17,11 +17,20 @@ import mongoose from 'mongoose';
 
 export const DB_NAME = 'zidbdsaas';
 
-const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  process.env.MONGODB_URL ||
-  process.env.DATABASE_URL ||
-  '';
+/**
+ * Resolve the connection string on every call rather than freezing it at module
+ * load. Serverless functions can have module state created before the runtime
+ * injects its environment, and a cached empty value would make the app report
+ * "Database is not configured" even though MONGODB_URI IS set in Vercel.
+ */
+function readMongoUri(): string {
+  return (
+    process.env.MONGODB_URI ||
+    process.env.MONGODB_URL ||
+    process.env.DATABASE_URL ||
+    ''
+  ).trim();
+}
 
 type MongooseCache = {
   conn: typeof mongoose | null;
@@ -38,11 +47,47 @@ const cached: MongooseCache =
   global.__mongooseCache ?? (global.__mongooseCache = { conn: null, promise: null });
 
 export function getMongoUri(): string {
-  return MONGODB_URI;
+  return readMongoUri();
 }
 
 export function isMongoConfigured(): boolean {
-  return Boolean(MONGODB_URI);
+  return Boolean(readMongoUri());
+}
+
+export type MongoFailure = {
+  /** Machine-readable reason the DB is unusable. */
+  code: 'not_configured' | 'auth_failed' | 'dns_failed' | 'timeout' | 'connection_failed';
+  /** Operator-facing sentence safe to return in an API payload. */
+  message: string;
+  /** Raw driver message, for logs only (never contains credentials). */
+  detail?: string;
+};
+
+/**
+ * Translate a mongoose/driver connection error into an actionable, non-leaky
+ * description. Callers use this to report DB trouble in a JSON envelope instead
+ * of throwing an opaque 500 at the dashboard.
+ */
+export function describeMongoError(err: unknown): MongoFailure {
+  const raw = (err as any)?.message || String(err || '');
+  const detail = raw && !/MONGODB_URI is not set/.test(raw) ? raw : undefined;
+
+  if (!readMongoUri()) {
+    return {
+      code: 'not_configured',
+      message: 'Database is not configured: MONGODB_URI is missing on the server. Add it in Vercel > Settings > Environment Variables.',
+    };
+  }
+  if (/authentication failed|bad auth|unauthorized|invalid credentials/i.test(raw)) {
+    return { code: 'auth_failed', message: 'Database connection rejected: MONGODB_URI credentials are invalid or lack access to the cluster.', detail };
+  }
+  if (/ENOTFOUND|querySrv|getaddrinfo|DNS/i.test(raw)) {
+    return { code: 'dns_failed', message: 'Database host could not be resolved: the cluster hostname in MONGODB_URI is wrong or unreachable.', detail };
+  }
+  if (/timed out|timeout|server selection/i.test(raw)) {
+    return { code: 'timeout', message: 'Database connection timed out: the cluster did not respond — check the Atlas IP allow-list (allow 0.0.0.0/0 for Vercel).', detail };
+  }
+  return { code: 'connection_failed', message: 'Database unavailable: could not establish a MongoDB connection.', detail };
 }
 
 /**
@@ -51,7 +96,8 @@ export function isMongoConfigured(): boolean {
  * callers can surface real details instead of an opaque 500.
  */
 export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeof mongoose> {
-  if (!MONGODB_URI) {
+  const uri = readMongoUri();
+  if (!uri) {
     throw new Error('[MongoDB] MONGODB_URI is not set. Set it in your environment variables.');
   }
 
@@ -71,7 +117,7 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
     console.log(`[MongoDB] Opening new connection pool (dbName=${dbName})`);
 
     cached.promise = mongoose
-      .connect(MONGODB_URI, opts)
+      .connect(uri, opts)
       .then((m) => {
         console.log('[MongoDB] Connected successfully');
         return m;
@@ -100,7 +146,7 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
  * shared (global-cached) mongoose connection pool.
  */
 export async function getMongoDb(dbName: string = DB_NAME) {
-  if (!MONGODB_URI) return null;
+  if (!readMongoUri()) return null;
   await connectToDatabase(dbName);
   return mongoose.connection.db ?? null;
 }

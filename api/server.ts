@@ -38,7 +38,7 @@ import mongoose from 'mongoose';
 // Platform-wide aggregation for the Super Admin Portal. Lives in lib/ and is
 // bundled by Vercel alongside this file (same pattern as lib/faqGenerator).
 // The explicit '.js' extension is required under "type": "module".
-import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary } from '../lib/adminAnalytics.js';
+import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary, getGeminiApiKey } from '../lib/adminAnalytics.js';
 import { listAdminMerchants, applyMerchantAction, createAdminMerchant } from '../lib/adminMerchants.js';
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
@@ -557,33 +557,58 @@ app.patch('/api/admin/merchants/:ref', async (req, res) => {
 async function handleAnalyticsSummary(req: express.Request, res: express.Response) {
   res.setHeader('Content-Type', 'application/json');
   const analyticsData = (req.body && (req.body.analyticsData || req.body)) || {};
-  try {
-    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-      return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
-    }
 
+  // Numbers straight from the database — used for the fallback summary when the
+  // AI key is absent and to fill metrics the request body omitted. A Mongo
+  // failure is reported in the payload, never thrown at the caller.
+  let dbMetrics: any = null;
+  let dbError: string | null = null;
+  try {
+    const platform = await getPlatformAnalytics();
+    dbMetrics = platform.overview;
+    if (platform.ok === false) dbError = platform.error || 'MongoDB unavailable.';
+  } catch (err: any) {
+    dbError = err?.message || 'MongoDB unavailable.';
+    console.warn('[Server] analytics-summary DB metrics unavailable:', dbError);
+  }
+
+  const respondFallback = (reason: string) =>
+    res.status(200).json({
+      summary: buildFallbackSummary(analyticsData, dbMetrics),
+      fallback: true,
+      reason,
+      dbError,
+    });
+
+  // Key is read from GEMINI_API_KEY or the VITE_GEMINI_API_KEY spelling.
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    return respondFallback('missing_api_key');
+  }
+
+  try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
     const providerRes = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData) }] }],
+        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData, dbMetrics) }] }],
         generationConfig: { temperature: 0.6, maxOutputTokens: 600 },
       }),
     });
 
     if (!providerRes.ok) {
       console.warn('[Server] analytics-summary AI provider status:', providerRes.status);
-      return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+      return respondFallback(`provider_status_${providerRes.status}`);
     }
 
-    const data = await providerRes.json();
+    const data = await providerRes.json().catch(() => null);
     const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim();
-    return res.status(200).json({ summary: text || buildFallbackSummary(analyticsData), fallback: !text });
+    if (!text) return respondFallback('empty_provider_response');
+    return res.status(200).json({ summary: text, fallback: false, dbError });
   } catch (err: any) {
     console.error('[Server] POST analytics-summary error:', err);
-    return res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+    return respondFallback('provider_error');
   }
 }
 

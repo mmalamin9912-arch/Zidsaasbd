@@ -25,7 +25,7 @@
  * and the Vercel serverless function (`api/admin/analytics.ts`).
  */
 
-import { connectToDatabase, getMongoUri, DB_NAME } from './db.js';
+import { connectToDatabase, getMongoUri, describeMongoError, DB_NAME } from './db.js';
 
 export interface PlatformOverview {
   /** Sum of completed order totals across every store, in BDT. */
@@ -79,6 +79,8 @@ export interface PlatformAnalyticsResult {
   topStores: TopStore[];
   recentRenewals: RecentRenewal[];
   error?: string;
+  /** Structured DB diagnosis (code + actionable message) when the read failed. */
+  dbError?: { code: string; message: string; detail?: string };
 }
 
 /** Human-readable labels for the plan ids used across the app. */
@@ -196,7 +198,8 @@ export async function getPlatformAnalytics(dbName: string = DB_NAME): Promise<Pl
   };
 
   if (!getMongoUri()) {
-    return { ...base, ok: false, error: 'MONGODB_URI is not configured.' };
+    const failure = describeMongoError(new Error('MONGODB_URI is not set'));
+    return { ...base, ok: false, error: failure.message, dbError: failure };
   }
 
   let db: any = null;
@@ -204,10 +207,14 @@ export async function getPlatformAnalytics(dbName: string = DB_NAME): Promise<Pl
     const mongoose = await connectToDatabase(dbName);
     db = mongoose.connection.db;
   } catch (err: any) {
-    return { ...base, ok: false, error: err?.message || 'MongoDB connection failed.' };
+    // Report WHY (credentials, DNS, timeout) instead of a raw driver string.
+    const failure = describeMongoError(err);
+    console.error('[adminAnalytics] MongoDB connection failed:', failure.detail || failure.message);
+    return { ...base, ok: false, error: failure.message, dbError: failure };
   }
   if (!db) {
-    return { ...base, ok: false, error: 'MongoDB connection handle unavailable.' };
+    const failure = describeMongoError(new Error('connection handle unavailable'));
+    return { ...base, ok: false, error: failure.message, dbError: failure };
   }
 
   const safeAggregate = async (collection: string, pipeline: any[]): Promise<any[]> => {
@@ -515,6 +522,62 @@ export async function getPlatformAnalytics(dbName: string = DB_NAME): Promise<Pl
 }
 
 export default getPlatformAnalytics;
+
+/**
+ * Resolve the Gemini API key from either spelling Vercel may hold it under.
+ *
+ * Vercel projects created from the AI Studio template expose the key as
+ * VITE_GEMINI_API_KEY, while a hand-configured project usually uses the
+ * server-only GEMINI_API_KEY. Both are accepted everywhere; only the server
+ * reads them, so the key is never shipped into the browser bundle.
+ *
+ * Returns '' when nothing usable is configured (missing, blank, or still the
+ * placeholder from .env.example) — callers then serve the deterministic
+ * fallback summary instead of erroring.
+ */
+export function getGeminiApiKey(): string {
+  const raw = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+  const key = String(raw).trim();
+  if (!key || key === 'MY_GEMINI_API_KEY') return '';
+  return key;
+}
+
+/** True when `value` carries at least one usable metric (so 0 counts as real). */
+function hasMetric(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== '';
+}
+
+/**
+ * Pick the overview numbers from an analytics payload.
+ *
+ * Two shapes reach this helper:
+ *   - a full PlatformAnalyticsResult / platformAnalytics document (has .overview)
+ *   - the flat `overview` object itself
+ *
+ * The `dbMetrics` argument is the authoritative fallback: when the request
+ * carries no/incomplete numbers (for example the AI panel was opened before
+ * /api/admin/analytics answered, or MongoDB was unreachable) the summary is
+ * still built from what the server itself calculated from the database.
+ */
+export function normalizeAnalyticsOverview(analyticsData: any, dbMetrics?: any): PlatformOverview {
+  const provided = analyticsData?.overview || analyticsData || {};
+  const fromDb = dbMetrics || {};
+  const pick = (field: keyof PlatformOverview): number => {
+    if (hasMetric(provided[field])) return Number(provided[field]) || 0;
+    return Number(fromDb[field]) || 0;
+  };
+  return {
+    totalPlatformSalesBDT: pick('totalPlatformSalesBDT'),
+    totalOrderVolume: pick('totalOrderVolume'),
+    completedOrderCount: pick('completedOrderCount'),
+    baasSubscriptionRevenueBDT: pick('baasSubscriptionRevenueBDT'),
+    activeMerchants: pick('activeMerchants'),
+    totalMerchants: pick('totalMerchants'),
+    paidMerchants: pick('paidMerchants'),
+    averageOrderValueBDT: pick('averageOrderValueBDT'),
+  };
+}
+
 /**
  * Build the natural-language prompt that turns the platform analytics payload
  * into a short executive briefing for the Super Admin AI panel.
@@ -523,8 +586,8 @@ export default getPlatformAnalytics;
  * (api/server.ts + api/ai/analytics-summary.ts) so the summary is identical in
  * every environment.
  */
-export function buildAnalyticsSummaryPrompt(analyticsData: any): string {
-  const overview = analyticsData?.overview || analyticsData || {};
+export function buildAnalyticsSummaryPrompt(analyticsData: any, dbMetrics?: any): string {
+  const overview = normalizeAnalyticsOverview(analyticsData, dbMetrics);
   const topStores = Array.isArray(analyticsData?.topStores) ? analyticsData.topStores : [];
   const renewals = Array.isArray(analyticsData?.recentRenewals) ? analyticsData.recentRenewals : [];
 
@@ -557,9 +620,13 @@ ${renewalsText}
 Respond with the executive summary only — no preamble.`;
 }
 
-/** Deterministic fallback summary used when the AI key is absent or the call fails. */
-export function buildFallbackSummary(analyticsData: any): string {
-  const overview = analyticsData?.overview || analyticsData || {};
+/**
+ * Deterministic fallback summary used when the AI key is absent or the call
+ * fails. Always returns a non-empty human-readable string built from the DB
+ * metrics, so the AI panel renders content even with no key and no request body.
+ */
+export function buildFallbackSummary(analyticsData: any, dbMetrics?: any): string {
+  const overview = normalizeAnalyticsOverview(analyticsData, dbMetrics);
   const topStores = Array.isArray(analyticsData?.topStores) ? analyticsData.topStores : [];
   const sales = Number(overview.totalPlatformSalesBDT || 0).toLocaleString();
   const volume = Number(overview.totalOrderVolume || 0).toLocaleString();

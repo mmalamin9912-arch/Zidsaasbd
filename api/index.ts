@@ -23,6 +23,7 @@
 
 import mongoose from 'mongoose';
 import app from './server.js';
+import { describeMongoError } from '../lib/db.js';
 
 type ExpressApp = (req: any, res: any) => any;
 
@@ -38,7 +39,7 @@ declare global {
 
 const mongoCache = global.__vercelMongoCache ?? (global.__vercelMongoCache = { promise: null });
 
-async function ensureMongo(): Promise<{ ok: boolean; error?: string }> {
+async function ensureMongo(): Promise<{ ok: boolean; error?: string; code?: string }> {
   const uri = process.env.MONGODB_URI || process.env.MONGODB_URL || process.env.DATABASE_URL;
 
   if (mongoose.connection.readyState === 1) return { ok: true };
@@ -46,7 +47,8 @@ async function ensureMongo(): Promise<{ ok: boolean; error?: string }> {
   if (!uri) {
     // Not fatal: routes that are Supabase-only (storefront, products) must keep
     // working. Routes that need Mongo report the missing variable themselves.
-    return { ok: false, error: 'MONGODB_URI is not set in this environment' };
+    const failure = describeMongoError(new Error('MONGODB_URI is not set'));
+    return { ok: false, error: failure.message, code: failure.code };
   }
 
   if (!mongoCache.promise) {
@@ -69,7 +71,10 @@ async function ensureMongo(): Promise<{ ok: boolean; error?: string }> {
     return { ok: true };
   } catch (err: any) {
     mongoCache.promise = null;
-    return { ok: false, error: err?.message || String(err) };
+    // Report WHY the connection failed (bad credentials, DNS, timeout, …) in an
+    // actionable sentence rather than a raw driver stack.
+    const failure = describeMongoError(err);
+    return { ok: false, error: failure.message, code: failure.code };
   }
 }
 
@@ -93,9 +98,13 @@ export default async function handler(req: any, res: any) {
 
   const mongo = await ensureMongo();
   if (!mongo.ok) {
-    // Surface the reason on the response so the runtime log is actionable.
+    // Surface the reason on the response headers so the runtime log and the
+    // client can both see it. Routes that need Mongo add `ok:false` themselves.
     console.error('[api/index] MongoDB unavailable:', mongo.error);
     res.setHeader('x-mongodb-status', 'error');
+    res.setHeader('x-mongodb-error', String(mongo.error || '').slice(0, 300));
+  } else {
+    res.setHeader('x-mongodb-status', 'connected');
   }
 
   try {
@@ -106,6 +115,10 @@ export default async function handler(req: any, res: any) {
       return res.status(500).json({
         success: false,
         error: err?.message || 'Internal Server Error',
+        // Structured DB diagnosis so a Mongo failure is never an opaque 500.
+        database: mongo.ok
+          ? { connected: true }
+          : { connected: false, code: mongo.code, message: mongo.error },
         mongodb: mongo.ok ? 'connected' : mongo.error,
       });
     }

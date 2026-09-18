@@ -14,7 +14,12 @@ type VercelResponse = {
 };
 
 // Explicit '.js' extension required under "type": "module" (see api/ai/generate-text.ts).
-import { buildAnalyticsSummaryPrompt, buildFallbackSummary } from '../../lib/adminAnalytics.js';
+import {
+  buildAnalyticsSummaryPrompt,
+  buildFallbackSummary,
+  getGeminiApiKey,
+  getPlatformAnalytics,
+} from '../../lib/adminAnalytics.js';
 
 /**
  * POST /api/ai/analytics-summary
@@ -23,9 +28,12 @@ import { buildAnalyticsSummaryPrompt, buildFallbackSummary } from '../../lib/adm
  * Turns the numeric platform analytics payload into a short natural-language
  * EXECUTIVE BRIEFING for the Super Admin Portal.
  *
- * Always answers 200 with a `summary` string — if GEMINI_API_KEY is missing or
- * the provider call fails, a deterministic fallback summary built from the same
- * numbers is returned (`fallback: true`), so the AI panel is never empty.
+ * The Gemini key is read from EITHER `GEMINI_API_KEY` (server-only) OR
+ * `VITE_GEMINI_API_KEY` (name used by AI Studio/Vercel templates). If neither
+ * is configured, or the provider rejects the key, or the provider call times
+ * out, the route STILL answers 200 with a deterministic summary computed from
+ * the DB metrics (`fallback: true`) — it never throws and never returns 5xx, so
+ * the admin AI panel is never empty and never shows a hard error.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') {
@@ -40,36 +48,66 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const body = (req.body || {}) as any;
   const analyticsData = body.analyticsData || body;
 
+  // Authoritative numbers straight from the database. Used (a) as the source for
+  // the fallback summary when the key is missing, and (b) to fill in any metric
+  // the request body omitted. A Mongo failure is reported, never thrown.
+  let dbMetrics: any = null;
+  let dbError: string | null = null;
   try {
-    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-      res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
-      return;
-    }
+    const platform = await getPlatformAnalytics();
+    dbMetrics = platform.overview;
+    if (platform.ok === false) dbError = platform.error || 'MongoDB unavailable.';
+  } catch (err: any) {
+    dbError = err?.message || 'MongoDB unavailable.';
+    console.warn('[/api/ai/analytics-summary] DB metrics unavailable:', dbError);
+  }
 
+  const respondFallback = (reason: string) => {
+    res.status(200).json({
+      summary: buildFallbackSummary(analyticsData, dbMetrics),
+      fallback: true,
+      reason,
+      dbError,
+    });
+  };
+
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    // No key configured (checked both env spellings) — deterministic summary.
+    respondFallback('missing_api_key');
+    return;
+  }
+
+  try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
     const providerRes = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData) }] }],
+        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData, dbMetrics) }] }],
         generationConfig: { temperature: 0.6, maxOutputTokens: 600 },
       }),
     });
 
     if (!providerRes.ok) {
       console.warn('[/api/ai/analytics-summary] provider status:', providerRes.status);
-      res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+      respondFallback(`provider_status_${providerRes.status}`);
       return;
     }
 
-    const data = await providerRes.json();
+    const data = await providerRes.json().catch(() => null);
     const text: string =
       data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
 
-    res.status(200).json({ summary: text || buildFallbackSummary(analyticsData), fallback: !text });
+    if (!text) {
+      respondFallback('empty_provider_response');
+      return;
+    }
+
+    res.status(200).json({ summary: text, fallback: false, dbError });
   } catch (err: any) {
-    console.error('[/api/ai/analytics-summary] error:', err?.message || err);
-    res.status(200).json({ summary: buildFallbackSummary(analyticsData), fallback: true });
+    // Network error / abort / malformed provider payload — still a clean 200.
+    console.error('[/api/ai/analytics-summary] provider error:', err?.message || err);
+    respondFallback('provider_error');
   }
 }
