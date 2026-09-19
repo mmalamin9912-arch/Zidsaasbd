@@ -46,6 +46,8 @@ import {
   purgeTestTransactionsAndReload,
 } from './adminRequests.js';
 import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from './hybridDb.js';
+import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabasePlans, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
+import { authenticateMerchant, emailHasStore } from './authService.js';
 import { generateFaqFromPolicies } from './faqGenerator.js';
 import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
 
@@ -515,7 +517,11 @@ app.get('/api/merchants/subscription-check/:storeName', async (req, res) => {
   }
 });
 
-// ── Merchant Auth Routes (MongoDB Find-or-Create) ───────────────────────────
+// ── Merchant Auth Routes (Supabase-first, MongoDB fallback) ──────────────────
+// Enforces strict one-store-per-email across all devices: the email is checked
+// against Supabase's `stores` table FIRST, then MongoDB, and a new record is
+// only created when neither provider knows the email. Both providers are kept
+// in sync so multi-device sessions stay consistent.
 app.post('/api/auth/merchant/register', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -525,107 +531,76 @@ app.post('/api/auth/merchant/register', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Valid email is required.' });
     }
 
-    await connectToMongoDB();
-    const db = mongoose.connection.readyState === 1 ? mongoose.connection.db : null;
-
-    if (db) {
-      const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-      let existingDoc = await db.collection('stores').findOne({ email: emailRegex });
-      if (!existingDoc) {
-        existingDoc = await db.collection('merchants').findOne({ email: emailRegex });
-      }
-
-      if (existingDoc) {
-        const updateFields: Record<string, any> = {
-          updated_at: new Date(),
-        };
-        if (body.storeName) {
-          updateFields.store_name = body.storeName;
-          updateFields.storeName = body.storeName;
-        }
-        if (body.ownerName) {
-          updateFields.owner_name = body.ownerName;
-          updateFields.ownerName = body.ownerName;
-        }
-        if (body.phone) updateFields.phone = body.phone;
-        if (body.logoUrl) {
-          updateFields.logo_url = body.logoUrl;
-          updateFields.logoUrl = body.logoUrl;
-        }
-        if (body.password) updateFields.password = body.password;
-
-        await db.collection('stores').updateOne({ _id: existingDoc._id }, { $set: updateFields });
-        const updatedDoc = await db.collection('stores').findOne({ _id: existingDoc._id });
-        const merchant = sanitizeServerMerchant(updatedDoc || existingDoc);
-
-        return res.status(200).json({
-          ok: true,
-          isExisting: true,
-          message: 'Logged into your existing store account.',
-          merchant: {
-            ...merchant,
-            id: String(existingDoc.id || existingDoc._id),
-            storeId: String(existingDoc.store_id || existingDoc.id || existingDoc._id),
-            storeSlug: existingDoc.store_slug || existingDoc.storeSlug,
-            storeCode: existingDoc.store_code || existingDoc.storeCode,
-          }
-        });
-      }
-    }
-
-    const storeSlug = String(body.storeSlug || body.storeName || email.split('@')[0] || 'store')
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '') || `store${Date.now()}`;
-    const storeCode = body.storeCode || `ZID-BD-${Math.floor(1000 + Math.random() * 9000)}`;
-    const storeId = body.storeId || body.id || `store-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const now = new Date();
-
-    const durationDays = getPlanDurationInDays(body.subscriptionPlan || 'free_trial');
-    const { plan_started_at, expires_at } = calculatePlanTimestamps(body.subscriptionPlan || 'free_trial', now);
-
-    const newStoreRecord: Record<string, any> = {
-      id: storeId,
-      store_id: storeId,
-      storeId: storeId,
-      store_code: storeCode,
-      storeCode: storeCode,
-      store_slug: storeSlug,
-      storeSlug: storeSlug,
-      store_name: body.storeName || `${storeSlug} Store`,
-      storeName: body.storeName || `${storeSlug} Store`,
-      owner_name: body.ownerName || email.split('@')[0],
-      ownerName: body.ownerName || email.split('@')[0],
+    // authenticateMerchant checks Supabase first (fallback to MongoDB) and
+    // creates+syncs a new record only when the email is unknown to both.
+    const merchant = await authenticateMerchant({
       email,
-      phone: body.phone || '',
-      password: body.password || '',
-      subscription_plan: body.subscriptionPlan || 'free_trial',
-      subscriptionPlan: body.subscriptionPlan || 'free_trial',
-      plan_started_at,
-      planStartedAt: plan_started_at,
-      expires_at,
-      expiresAt: expires_at,
-      duration_days: durationDays,
-      durationDays: durationDays,
-      logo_url: body.logoUrl || '',
-      logoUrl: body.logoUrl || '',
-      is_locked: false,
-      isLocked: false,
-      status: 'active',
-      created_at: now,
-      updated_at: now,
-    };
+      storeName: body.storeName || body.store_name,
+      storeSlug: body.storeSlug || body.store_slug,
+      storeId: body.storeId || body.id || body.storeId,
+      storeCode: body.storeCode || body.store_code,
+      ownerName: body.ownerName || body.owner_name,
+      phone: body.phone,
+      password: body.password,
+      subscriptionPlan: body.subscriptionPlan || body.subscription_plan || 'free_trial',
+      logoUrl: body.logoUrl || body.logo_url,
+    });
 
-    if (db) {
-      await db.collection('stores').insertOne({ ...newStoreRecord });
+    if (!merchant) {
+      return res.status(500).json({ ok: false, error: 'Registration failed: no database provider available.' });
     }
 
-    merchantStore.set(storeSlug, newStoreRecord);
+    // Also mirror into the in-memory store for local dev convenience.
+    merchantStore.set(merchant.storeSlug || email.split('@')[0], {
+      id: merchant.id,
+      storeId: merchant.storeId,
+      storeCode: merchant.storeCode,
+      store_name: merchant.storeName,
+      storeName: merchant.storeName,
+      store_slug: merchant.storeSlug,
+      storeSlug: merchant.storeSlug,
+      email,
+      owner_name: merchant.ownerName,
+      ownerName: merchant.ownerName,
+      subscription_plan: merchant.subscriptionPlan,
+      subscriptionPlan: merchant.subscriptionPlan,
+      plan_started_at: merchant.plan_started_at,
+      expires_at: merchant.expires_at,
+      isLocked: merchant.isLocked,
+      status: merchant.status,
+      createdAt: merchant.createdAt,
+    });
+
+    const message = merchant.isExisting
+      ? 'Logged into your existing store account.'
+      : 'Store account created successfully.';
 
     return res.status(200).json({
       ok: true,
-      isExisting: false,
-      message: 'Store account created successfully.',
-      merchant: sanitizeServerMerchant(newStoreRecord),
+      isExisting: merchant.isExisting,
+      sources: merchant.sources,
+      message,
+      merchant: {
+        id: merchant.id,
+        storeId: merchant.storeId,
+        storeCode: merchant.storeCode,
+        storeName: merchant.storeName,
+        storeSlug: merchant.storeSlug,
+        ownerName: merchant.ownerName,
+        email: merchant.email,
+        phone: merchant.phone,
+        storeName_normalized: merchant.storeName,
+        subscriptionPlan: merchant.subscriptionPlan,
+        subscriptionExpiry: merchant.subscriptionExpiry,
+        plan_started_at: merchant.plan_started_at,
+        expires_at: merchant.expires_at,
+        duration_days: merchant.duration_days,
+        trialDaysRemaining: merchant.trialDaysRemaining,
+        trialEndsAt: merchant.trialEndsAt,
+        isLocked: merchant.isLocked,
+        status: merchant.status,
+        createdAt: merchant.createdAt,
+      },
     });
   } catch (err: any) {
     console.error('[Server] POST /api/auth/merchant/register error:', err);
@@ -636,41 +611,64 @@ app.post('/api/auth/merchant/register', async (req, res) => {
 app.post('/api/auth/merchant/login', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const { email, password } = req.body || {};
+    const { email } = req.body || {};
     const cleanEmail = String(email || '').trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes('@')) {
       return res.status(400).json({ ok: false, error: 'Valid email is required.' });
     }
 
-    await connectToMongoDB();
-    const db = mongoose.connection.readyState === 1 ? mongoose.connection.db : null;
-
-    if (db) {
-      const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-      let storeDoc = await db.collection('stores').findOne({ email: emailRegex });
-      if (!storeDoc) {
-        storeDoc = await db.collection('merchants').findOne({ email: emailRegex });
-      }
-
-      if (storeDoc) {
-        const merchant = sanitizeServerMerchant(storeDoc);
-        return res.status(200).json({
-          ok: true,
-          merchant: {
-            ...merchant,
-            id: String(storeDoc.id || storeDoc._id),
-            storeId: String(storeDoc.store_id || storeDoc.id || storeDoc._id),
-            storeSlug: storeDoc.store_slug || storeDoc.storeSlug,
-            storeCode: storeDoc.store_code || storeDoc.storeCode,
-          }
-        });
-      }
+    // Check Supabase FIRST, fallback to MongoDB. authenticateMerchant enforces
+    // one-store-per-email by returning the existing record from whichever
+    // provider knows the email, and syncs the other provider for multi-device
+    // consistency.
+    const merchant = await authenticateMerchant({ email: cleanEmail });
+    if (merchant) {
+      const sanitized = sanitizeServerMerchant(merchant);
+      return res.status(200).json({
+        ok: true,
+        sources: merchant.sources,
+        merchant: {
+          ...sanitized,
+          id: merchant.id,
+          storeId: merchant.storeId,
+          storeSlug: merchant.storeSlug,
+          storeCode: merchant.storeCode,
+        },
+      });
     }
 
     return res.status(404).json({ ok: false, error: 'No account found with this email.' });
   } catch (err: any) {
     console.error('[Server] POST /api/auth/merchant/login error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Login failed' });
+  }
+});
+
+// GET /api/auth/merchant/check-email/:email — checks Supabase first, then MongoDB
+// to enforce one-store-per-email across all devices. Returns whether a store
+// already exists for the given email and which provider(s) confirmed it.
+app.get('/api/auth/merchant/check-email/:email', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const email = decodeURIComponent(String(req.params.email || '')).trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      return res.status(200).json({ ok: false, error: 'Valid email is required.' });
+    }
+
+    const result = await emailHasStore(email);
+    return res.status(200).json({
+      ok: true,
+      email,
+      hasStore: result.hasStore,
+      sources: result.sources,
+      canRegister: !result.hasStore,
+      message: result.hasStore
+        ? 'A store already exists for this email. Please log in instead.'
+        : 'This email is available for registration.',
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/auth/merchant/check-email/:email error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Email check failed.' });
   }
 });
 
@@ -711,11 +709,12 @@ app.get('/api/admin/analytics', async (req, res) => {
   }
 });
 
-// ── Admin subscription plans (HYBRID: MongoDB primary, Supabase fallback) ──
-// GET /api/admin/subscription-plans — plan catalogue merged from MongoDB
-// `subscription_plans` and the Supabase `subscription_plans`/`plans` tables,
-// with per-plan subscriber counts from both subscription sources. Always
-// answers 200 with a shaped envelope (never a 404/500).
+// ── Admin Subscription Plans (Supabase-first, MongoDB fallback) ──────────────
+// GET    /api/admin/subscription-plans — catalog merged from Supabase
+//        `subscription_plans` (primary) + MongoDB `subscription_plans`/`plans`.
+// POST   /api/admin/subscription-plans — create/update a plan (writes BOTH providers).
+// DELETE /api/admin/subscription-plans/:id — delete a plan (removes from BOTH).
+// Always answers 200 with a shaped envelope (never a 404/500).
 app.get('/api/admin/subscription-plans', async (_req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -773,6 +772,227 @@ app.get('/api/admin/subscription-plans', async (_req, res) => {
       plans: [],
       error: err?.message || 'Could not load subscription plans.',
     });
+  }
+});
+
+// POST /api/admin/subscription-plans — create or update a plan across both providers
+app.post('/api/admin/subscription-plans', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    if (!body.slug && !body.id) {
+      return res.status(200).json({ ok: false, error: 'Plan slug or id is required.' });
+    }
+    const result = await supabasePlans.create(body);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      message: result.ok ? 'Plan created/updated successfully.' : (result.error || 'Could not save plan.'),
+      plan: result.record,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/subscription-plans error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not create plan.' });
+  }
+});
+
+// DELETE /api/admin/subscription-plans/:id — remove a plan from both providers
+app.delete('/api/admin/subscription-plans/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, error: 'Plan id is required.' });
+    const result = await supabasePlans.delete(id);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      deleted: result.deleted,
+      message: result.ok ? 'Plan deleted successfully.' : (result.error || 'Could not delete plan.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/admin/subscription-plans/:id error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not delete plan.' });
+  }
+});
+
+// ── Admin Themes & Templates Management (Supabase-first, MongoDB fallback) ───
+// GET    /api/admin/themes         — list themes/templates from Supabase + Mongo
+// POST   /api/admin/themes         — create/update a theme across both providers
+// DELETE /api/admin/themes/:id     — delete a theme from both providers
+app.get('/api/admin/themes', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await fetchHybridThemes();
+    const normalized = result.data.map((theme: Record<string, any>) => {
+      const id = String(pick(theme, ['id', 'slug', '_id']) || '').toLowerCase();
+      return {
+        id: theme.id || theme._id || id,
+        slug: String(pick(theme, ['slug', 'id']) || id || ''),
+        name: String(pick(theme, ['name', 'theme_name', 'themeName', 'title']) || ''),
+        category: String(pick(theme, ['category', 'type']) || 'General'),
+        priceBDT: toNumber(pick(theme, ['priceBDT', 'price_bdt', 'price', 'amount']), 0),
+        isFree: pick(theme, ['isFree', 'is_free', 'free']) === true || toNumber(pick(theme, ['price', 'priceBDT', 'price_bdt']), 0) === 0,
+        previewUrl: String(pick(theme, ['previewUrl', 'preview_url']) || ''),
+        thumbnailUrl: String(pick(theme, ['thumbnailUrl', 'thumbnail_url']) || ''),
+        status: String(pick(theme, ['status']) || 'Active'),
+        isPublished: pick(theme, ['isPublished', 'is_published']) !== false,
+        source: theme._source || 'unknown',
+      };
+    });
+
+    return res.status(200).json({
+      ok: result.ok || normalized.length > 0,
+      generatedAt: new Date().toISOString(),
+      sources: result.sources,
+      counts: { themes: normalized.length },
+      themes: normalized,
+      diagnostics: {
+        mongodb: result.mongodb,
+        supabase: result.supabase,
+      },
+      warning:
+        normalized.length === 0
+          ? 'No themes were returned by Supabase or MongoDB. Configure the database keys to populate this table.'
+          : undefined,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/themes error:', err);
+    return res.status(200).json({
+      ok: false,
+      generatedAt: new Date().toISOString(),
+      sources: [],
+      counts: { themes: 0 },
+      themes: [],
+      error: err?.message || 'Could not load themes.',
+    });
+  }
+});
+
+app.post('/api/admin/themes', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    if (!body.slug && !body.id) {
+      return res.status(200).json({ ok: false, error: 'Theme slug or id is required.' });
+    }
+    const result = await supabaseThemes.create(body);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      message: result.ok ? 'Theme created/updated successfully.' : (result.error || 'Could not save theme.'),
+      theme: result.record,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/themes error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not create theme.' });
+  }
+});
+
+app.delete('/api/admin/themes/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, error: 'Theme id is required.' });
+    const result = await supabaseThemes.delete(id);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      deleted: result.deleted,
+      message: result.ok ? 'Theme deleted successfully.' : (result.error || 'Could not delete theme.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/admin/themes/:id error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not delete theme.' });
+  }
+});
+
+// ── Admin Platform Add-ons Management (Supabase-first, MongoDB fallback) ─────
+// GET    /api/admin/addons         — list add-ons from Supabase + Mongo
+// POST   /api/admin/addons         — create/update an add-on across both providers
+// DELETE /api/admin/addons/:id     — delete an add-on from both providers
+app.get('/api/admin/addons', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await fetchHybridAddons();
+    const normalized = result.data.map((addon: Record<string, any>) => {
+      const id = String(pick(addon, ['id', 'slug', '_id']) || '').toLowerCase();
+      return {
+        id: addon.id || addon._id || id,
+        slug: String(pick(addon, ['slug', 'id']) || id || ''),
+        name: String(pick(addon, ['name', 'addon_name', 'addonName']) || ''),
+        category: String(pick(addon, ['category']) || 'General'),
+        pricingType: String(pick(addon, ['pricingType', 'pricing_type']) || 'Free'),
+        priceBDT: toNumber(pick(addon, ['priceBDT', 'price_bdt', 'price', 'amount']), 0),
+        description: String(pick(addon, ['description']) || ''),
+        icon: String(pick(addon, ['icon']) || ''),
+        isPublished: pick(addon, ['isPublished', 'is_published', 'published']) !== false,
+        source: addon._source || 'unknown',
+      };
+    });
+
+    return res.status(200).json({
+      ok: result.ok || normalized.length > 0,
+      generatedAt: new Date().toISOString(),
+      sources: result.sources,
+      counts: { addons: normalized.length },
+      addons: normalized,
+      diagnostics: {
+        mongodb: result.mongodb,
+        supabase: result.supabase,
+      },
+      warning:
+        normalized.length === 0
+          ? 'No add-ons were returned by Supabase or MongoDB. Configure the database keys to populate this table.'
+          : undefined,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/addons error:', err);
+    return res.status(200).json({
+      ok: false,
+      generatedAt: new Date().toISOString(),
+      sources: [],
+      counts: { addons: 0 },
+      addons: [],
+      error: err?.message || 'Could not load add-ons.',
+    });
+  }
+});
+
+app.post('/api/admin/addons', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    if (!body.slug && !body.id) {
+      return res.status(200).json({ ok: false, error: 'Add-on slug or id is required.' });
+    }
+    const result = await supabaseAddons.create(body);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      message: result.ok ? 'Add-on created/updated successfully.' : (result.error || 'Could not save add-on.'),
+      addon: result.record,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/addons error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not create add-on.' });
+  }
+});
+
+app.delete('/api/admin/addons/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, error: 'Add-on id is required.' });
+    const result = await supabaseAddons.delete(id);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      deleted: result.deleted,
+      message: result.ok ? 'Add-on deleted successfully.' : (result.error || 'Could not delete add-on.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/admin/addons/:id error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not delete add-on.' });
   }
 });
 
