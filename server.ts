@@ -1,3 +1,10 @@
+// Load local env BEFORE any other import runs, so that MONGODB_URI and friends
+// are populated for server-side code in local dev. Explicitly includes
+// `.env.local`, which bare `dotenv/config` does NOT read (it only loads `.env`).
+// Loaded in priority order; Vercel injects these from its dashboard instead, so
+// this is a harmless no-op in production (no such files exist there).
+import dotenv from 'dotenv';
+dotenv.config({ path: ['.env.local', '.env'], quiet: true });
 import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
