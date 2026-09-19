@@ -38,14 +38,17 @@ import mongoose from 'mongoose';
 // Platform-wide aggregation for the Super Admin Portal. Lives in lib/ and is
 // bundled by Vercel alongside this file (same pattern as lib/faqGenerator).
 // The explicit '.js' extension is required under "type": "module".
-import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary, getGeminiApiKey } from '../lib/adminAnalytics.js';
-import { listAdminMerchants, applyMerchantAction, createAdminMerchant, cleanupDuplicateMerchants } from '../lib/adminMerchants.js';
+import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary, getGeminiApiKey } from './adminAnalytics.js';
+import { listAdminMerchants, applyMerchantAction, createAdminMerchant, cleanupDuplicateMerchants } from './adminMerchants.js';
 import {
   listSubscriptionRequests,
   listThemeRequests,
   purgeTestTransactionsAndReload,
-} from '../lib/adminRequests.js';
-import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from '../lib/hybridDb.js';
+} from './adminRequests.js';
+import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from './hybridDb.js';
+import { generateFaqFromPolicies } from './faqGenerator.js';
+import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
+
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
 // Serverless functions are frozen/thawed and modules can be re-evaluated between
@@ -658,6 +661,20 @@ app.post('/api/admin/merchants', async (req, res) => {
   }
 });
 
+
+app.delete('/api/admin/merchants/:ref', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const ref = String(req.params.ref || '').trim();
+    if (!ref) return res.status(200).json({ ok: false, error: 'A merchant reference is required.' });
+    const result = await applyMerchantAction(ref, 'delete', {});
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/admin/merchants/:ref error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Merchant action failed.' });
+  }
+});
+
 app.patch('/api/admin/merchants/:ref', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -741,6 +758,104 @@ async function handleAnalyticsSummary(req: express.Request, res: express.Respons
 app.post('/api/ai/analytics-summary', handleAnalyticsSummary);
 app.post('/api/analytics-summary', handleAnalyticsSummary);
 app.post('/api/admin-analytics-summary', handleAnalyticsSummary);
+
+// POST /api/ai/generate-faq — delegates to lib/faqGenerator
+app.post('/api/ai/generate-faq', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body || {}) as {
+      policies?: { privacy?: string; terms?: string; return?: string; shipping?: string };
+      storeName?: string;
+    };
+    const result = await generateFaqFromPolicies(body.policies || {}, body.storeName);
+    if (!result.ok) {
+      const statusByError: Record<string, number> = {
+        no_policies: 400,
+        missing_api_key: 400,
+        invalid_api_key: 401,
+        rate_limited: 429,
+        parse_error: 500,
+        empty_response: 500,
+        server_error: 500,
+      };
+      const status = statusByError[result.error || 'server_error'] || 500;
+      return res.status(status).json({ error: result.error, message: result.message, faq: [], chatbotScript: '' });
+    }
+    return res.status(200).json({ faq: result.faq, chatbotScript: result.chatbotScript });
+  } catch (err: any) {
+    console.error('[Server] POST /api/ai/generate-faq error:', err);
+    return res.status(500).json({ error: 'server_error', message: 'Unexpected server error while generating the FAQ.' });
+  }
+});
+
+// POST /api/ai/generate-text — Gemini AI text generation
+app.post('/api/ai/generate-text', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { prompt, systemInstruction } = (req.body || {}) as { prompt?: string; systemInstruction?: string };
+
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: 'bad_request', message: 'A non-empty "prompt" is required.' });
+    }
+
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      return res.status(400).json({
+        error: 'missing_api_key',
+        message: 'AI features are not configured: GEMINI_API_KEY is missing on the server. Add it in Vercel > Settings > Environment Variables.'
+      });
+    }
+
+    const model = 'gemini-2.0-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+    const payload: Record<string, unknown> = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.8, maxOutputTokens: 1024 }
+    };
+    if (systemInstruction) {
+      payload.systemInstruction = { parts: [{ text: `${ZID_AI_SYSTEM_INSTRUCTION}\n\n## ADDITIONAL CONTEXT FROM THE CALLING FEATURE\n${systemInstruction}` }] };
+    } else {
+      payload.systemInstruction = { parts: [{ text: ZID_AI_SYSTEM_INSTRUCTION }] };
+    }
+
+    const providerRes = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (providerRes.status === 400 || providerRes.status === 403) {
+      const detail = await providerRes.json().catch(() => ({}));
+      const msg = (detail as any)?.error?.message || 'The AI provider rejected the API key.';
+      return res.status(401).json({ error: 'invalid_api_key', message: `The configured GEMINI_API_KEY is invalid or lacks access: ${msg}` });
+    }
+    if (providerRes.status === 429) {
+      return res.status(429).json({ error: 'rate_limited', message: 'AI request limit reached. Please try again in a moment.' });
+    }
+    if (!providerRes.ok) {
+      const detail = await providerRes.json().catch(() => ({}));
+      return res.status(500).json({
+        error: 'server_error',
+        message: `AI provider error (${providerRes.status}): ${(detail as any)?.error?.message || 'Unknown error'}`
+      });
+    }
+
+    const data = await providerRes.json();
+    const text: string =
+      data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
+
+    if (!text) {
+      return res.status(500).json({ error: 'empty_response', message: 'The AI returned an empty response. Please try again.' });
+    }
+
+    return res.status(200).json({ text });
+  } catch (err: any) {
+    console.error('[/api/ai/generate-text] error:', err?.message || err);
+    return res.status(500).json({ error: 'server_error', message: 'Unexpected server error while generating AI text.' });
+  }
+});
+
 
 app.all('/api/categories', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');

@@ -22,7 +22,7 @@
  */
 
 import mongoose from 'mongoose';
-import app from './server.js';
+import app from '../lib/serverApp.js';
 import { describeMongoError } from '../lib/db.js';
 
 type ExpressApp = (req: any, res: any) => any;

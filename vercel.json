@@ -6,154 +6,16 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/analytics-summary.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/ai/analytics-summary.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/admin/analytics.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/admin/merchants.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/admin/requests.ts": {
-      "includeFiles": "{api/**,lib/**}"
-    },
-    "api/admin/subscription-plans.ts": {
-      "includeFiles": "{api/**,lib/**}"
+      "includeFiles": "{lib/**,src/**,local-store.json}"
     }
   },
   "rewrites": [
     {
-      "source": "/api/health",
+      "source": "/api/(.*)",
       "destination": "/api/index.ts"
     },
     {
-      "source": "/api/merchants/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/merchants",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/orders/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/orders",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/customers/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/customers",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/admin/merchants/:path*",
-      "destination": "/api/admin/merchants.ts"
-    },
-    {
-      "source": "/api/admin/merchants",
-      "destination": "/api/admin/merchants.ts"
-    },
-    {
-      "source": "/api/admin/analytics",
-      "destination": "/api/admin/analytics.ts"
-    },
-    {
-      "source": "/api/admin/subscription-plans/:path*",
-      "destination": "/api/admin/subscription-plans.ts"
-    },
-    {
-      "source": "/api/admin/subscription-plans",
-      "destination": "/api/admin/subscription-plans.ts"
-    },
-    {
-      "source": "/api/admin/requests/:path*",
-      "destination": "/api/admin/requests.ts"
-    },
-    {
-      "source": "/api/admin/requests",
-      "destination": "/api/admin/requests.ts"
-    },
-    {
-      "source": "/api/admin/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/stores/slug/:slug*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/stores/by-slug",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/stores/check/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/stores/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/stores",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/store/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/subscription/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/subscriptions",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/subscriptions/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/security/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/security",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/export/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/export",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/auth/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/courier/:path*",
-      "destination": "/api/index.ts"
-    },
-    {
-      "source": "/api/analytics-summary",
-      "destination": "/api/analytics-summary.ts"
-    },
-    {
-      "source": "/api/admin-analytics-summary",
+      "source": "/api",
       "destination": "/api/index.ts"
     },
     {
