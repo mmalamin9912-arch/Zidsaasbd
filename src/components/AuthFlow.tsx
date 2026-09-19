@@ -918,7 +918,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     }
   };
 
-  // Step 3: Registration / Store Profile Setup Submit
+    // Step 3: Registration / Store Profile Setup Submit (Find-or-Create)
   const handleRegisterProfileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
@@ -955,69 +955,59 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = password.trim();
 
-    // Enforce: 1 store per Gmail/email AND per phone number.
-    // Query the Supabase 'stores' table BEFORE creating the store (fall back to 'merchants'
-    // if the stores table does not exist yet); block duplicates explicitly.
+    setIsLoading(true);
+
+    // Call backend find-or-create registration endpoint
     try {
-      if (supabase) {
-        const last10Digits = String(phone || '').replace(/\D/g, '').slice(-10);
+      const regRes = await fetch('/api/auth/merchant/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: cleanPassword,
+          ownerName: fullName,
+          storeName: storeName.trim(),
+          phone: formattedPhone,
+          address: fullBusinessAddress,
+          storeSlug: slug,
+          logoUrl: storeLogo || '',
+          subscriptionPlan: 'free_trial',
+        }),
+      });
 
-        const checkTable = async (table: 'stores' | 'merchants') => {
-          // 1. Email check (case-insensitive)
-          const { data: emailMatch, error: emailErr } = await supabase!
-            .from(table)
-            .select('id, email, phone')
-            .ilike('email', cleanEmail)
-            .maybeSingle();
-          if (emailErr && /does not exist|relation|schema/i.test(emailErr.message || '')) return 'missing';
+      const regData = await safeParseJson(regRes, null);
+      if (regData?.ok && regData?.merchant) {
+        setIsLoading(false);
+        const serverMerchant = regData.merchant;
+        const userProfile: MerchantProfile = normalizeMerchantRecord(serverMerchant, cleanEmail);
 
-          // 2. Phone check — match on the last 10 digits regardless of stored formatting (+880, 01, spaces)
-          let phoneMatch: any = null;
-          if (last10Digits.length === 10) {
-            const { data } = await supabase!
-              .from(table)
-              .select('id, email, phone')
-              .ilike('phone', `%${last10Digits}%`)
-              .maybeSingle();
-            phoneMatch = data;
-          }
-
-          return Boolean(emailMatch || phoneMatch);
-        };
-
-        let duplicateFound: boolean | 'missing' = false;
-        duplicateFound = await checkTable('stores');
-        if (duplicateFound === 'missing') {
-          duplicateFound = await checkTable('merchants');
+        if (regData.isExisting) {
+          setToastMsg('Welcome back! Logged into your existing store.');
+        } else {
+          setToastMsg('Store account created successfully!');
         }
 
-        if (duplicateFound === true) {
-          alert('This Email or Phone number is already registered with another store.');
-          setErrorMsg('This Email or Phone number is already registered with another store.');
-          return;
-        }
+        await finishLogin(userProfile);
+        return;
       }
-    } catch (dupErr) {
-      console.error('[AuthFlow] Error checking stores table for duplicates:', dupErr);
-      // Fail closed: if we cannot verify uniqueness, do not silently allow a duplicate store.
-      alert('This Email or Phone number is already registered with another store.');
-      setErrorMsg('Could not verify store uniqueness. Please try again.');
-      return;
+    } catch (regErr) {
+      console.warn('[AuthFlow] Backend registration notice:', regErr);
     }
 
-    // Check for existing merchant profile in Supabase first
+    // Check for existing merchant profile in MongoDB / backend
     let existingProfile = null;
     try {
-        const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        existingProfile = await safeParseJson(response, null);
+      const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
+        headers: { 'Accept': 'application/json' }
+      });
+      const data = await safeParseJson(response, null);
+      if (data?.merchant || data?.id) {
+        existingProfile = data?.merchant || data;
+      }
     } catch (e) {
-        console.error('Error checking for existing merchant:', e);
+      console.error('Error checking for existing merchant:', e);
     }
 
-    // Permanent store identity: canonical UUID + immutable ZID-BD-XXXX code.
-    // The code is generated ONCE here and never regenerated on name/slug change.
     let storeRef: any = null;
     try {
       const { resolveStoreRef } = await import('../lib/storeId');
@@ -1039,7 +1029,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       logoUrl: storeLogo || defaultMerchant.logoUrl || '',
     }, storeRef);
 
-    // If Supabase is available, update user password and metadata
     if (supabase) {
       try {
         await supabase.auth.updateUser({
@@ -1070,40 +1059,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     ];
     localStorage.setItem('zid_registered_users', JSON.stringify(updatedUsers));
 
-    // Persist the permanent store identity to Supabase (store_code is written
-    // once; migration 0002 makes it immutable and unique). Local fallback row
-    // for anon Supabase-less installs keeps the same permanent code.
-    if (supabase && cleanEmail) {
-      try {
-        const { error: storeUpsertErr } = await supabase
-          .from('stores')
-          .upsert({
-            email: cleanEmail,
-            store_name: storeName.trim(),
-            store_slug: slug,
-            store_code: newUserProfile.storeCode,
-            owner_name: fullName,
-            phone: formattedPhone,
-          }, { onConflict: 'email' });
-        if (storeUpsertErr) {
-          console.warn('[AuthFlow] store_code upsert notice:', storeUpsertErr.message);
-        } else {
-          // Re-resolve so the profile carries the canonical UUID (stores.id).
-          const ref = await resolveStoreRef(supabase, newUserProfile.storeCode || slug || cleanEmail);
-          if (ref) {
-            newUserProfile.id = ref.id;
-            newUserProfile.storeId = ref.id;
-            if (ref.storeCode) {
-              newUserProfile.storeCode = ref.storeCode;
-              newUserProfile.store_code = ref.storeCode;
-            }
-          }
-        }
-      } catch (e) {
-        console.warn('[AuthFlow] permanent store identity persist failed:', e);
-      }
-    }
-
+    setIsLoading(false);
     await finishLogin(newUserProfile);
   };
 

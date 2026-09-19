@@ -300,6 +300,62 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.models.Product || mongoose.model('Product', productSchema, 'products');
 
+const categorySchema = new mongoose.Schema({
+  id: { type: String, required: true, index: true },
+  store_slug: { type: String, required: true, index: true },
+  storeSlug: { type: String, index: true },
+  store_id: { type: String, index: true },
+  name: String,
+  title: String,
+  slug: String,
+  image: String,
+  image_url: String,
+  category_id: String,
+  status: String,
+  is_published: Boolean,
+  parent_id: String,
+  created_at: { type: Date, default: Date.now },
+}, { strict: false });
+
+const Category = mongoose.models.Category || mongoose.model('Category', categorySchema, 'categories');
+
+const storeSchema = new mongoose.Schema({
+  id: { type: String, required: true, index: true },
+  store_code: { type: String, index: true },
+  storeCode: { type: String, index: true },
+  store_slug: { type: String, required: true, index: true },
+  storeSlug: { type: String, index: true },
+  store_name: String,
+  storeName: String,
+  owner_name: String,
+  ownerName: String,
+  email: { type: String, required: true, index: true },
+  phone: String,
+  password: { type: String },
+  subscription_plan: String,
+  subscriptionPlan: String,
+  subscription_expiry: String,
+  subscriptionExpiry: String,
+  plan_started_at: String,
+  planStartedAt: String,
+  expires_at: String,
+  expiresAt: String,
+  duration_days: Number,
+  durationDays: Number,
+  is_locked: Boolean,
+  isLocked: Boolean,
+  status: String,
+  logo_url: String,
+  logoUrl: String,
+  theme_config: Object,
+  themeConfig: Object,
+  settings: Object,
+  created_at: { type: Date, default: Date.now },
+  updated_at: { type: Date, default: Date.now },
+}, { strict: false });
+
+const Store = mongoose.models.Store || mongoose.model('Store', storeSchema, 'stores');
+
 // Export requests: one document per generated data export so the dashboard can
 // list history and re-download. `downloadUrl` points at GET /api/export/download
 // for the same id; `status` tracks the generation lifecycle.
@@ -404,7 +460,7 @@ async function writeStorePayload(payload: any) {
   }
 }
 
-app.all('/api/categories', async (req, res) => {
+app.get('/api/merchants/subscription-check/:storeName', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const storeName = decodeURIComponent((req.params as any)?.storeName || '').trim();
@@ -456,6 +512,165 @@ app.all('/api/categories', async (req, res) => {
     return res.status(200).json({ ok: true, subscription_plan: 'free_trial', subscription_expiry: null, duration_days: 30 });
   } catch (err: any) {
     return res.status(200).json({ ok: false, error: err?.message || 'Error fetching subscription', subscription_plan: 'free_trial' });
+  }
+});
+
+// ── Merchant Auth Routes (MongoDB Find-or-Create) ───────────────────────────
+app.post('/api/auth/merchant/register', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const email = String(body.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ ok: false, error: 'Valid email is required.' });
+    }
+
+    await connectToMongoDB();
+    const db = mongoose.connection.readyState === 1 ? mongoose.connection.db : null;
+
+    if (db) {
+      const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+      let existingDoc = await db.collection('stores').findOne({ email: emailRegex });
+      if (!existingDoc) {
+        existingDoc = await db.collection('merchants').findOne({ email: emailRegex });
+      }
+
+      if (existingDoc) {
+        const updateFields: Record<string, any> = {
+          updated_at: new Date(),
+        };
+        if (body.storeName) {
+          updateFields.store_name = body.storeName;
+          updateFields.storeName = body.storeName;
+        }
+        if (body.ownerName) {
+          updateFields.owner_name = body.ownerName;
+          updateFields.ownerName = body.ownerName;
+        }
+        if (body.phone) updateFields.phone = body.phone;
+        if (body.logoUrl) {
+          updateFields.logo_url = body.logoUrl;
+          updateFields.logoUrl = body.logoUrl;
+        }
+        if (body.password) updateFields.password = body.password;
+
+        await db.collection('stores').updateOne({ _id: existingDoc._id }, { $set: updateFields });
+        const updatedDoc = await db.collection('stores').findOne({ _id: existingDoc._id });
+        const merchant = sanitizeServerMerchant(updatedDoc || existingDoc);
+
+        return res.status(200).json({
+          ok: true,
+          isExisting: true,
+          message: 'Logged into your existing store account.',
+          merchant: {
+            ...merchant,
+            id: String(existingDoc.id || existingDoc._id),
+            storeId: String(existingDoc.store_id || existingDoc.id || existingDoc._id),
+            storeSlug: existingDoc.store_slug || existingDoc.storeSlug,
+            storeCode: existingDoc.store_code || existingDoc.storeCode,
+          }
+        });
+      }
+    }
+
+    const storeSlug = String(body.storeSlug || body.storeName || email.split('@')[0] || 'store')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '') || `store${Date.now()}`;
+    const storeCode = body.storeCode || `ZID-BD-${Math.floor(1000 + Math.random() * 9000)}`;
+    const storeId = body.storeId || body.id || `store-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const now = new Date();
+
+    const durationDays = getPlanDurationInDays(body.subscriptionPlan || 'free_trial');
+    const { plan_started_at, expires_at } = calculatePlanTimestamps(body.subscriptionPlan || 'free_trial', now);
+
+    const newStoreRecord: Record<string, any> = {
+      id: storeId,
+      store_id: storeId,
+      storeId: storeId,
+      store_code: storeCode,
+      storeCode: storeCode,
+      store_slug: storeSlug,
+      storeSlug: storeSlug,
+      store_name: body.storeName || `${storeSlug} Store`,
+      storeName: body.storeName || `${storeSlug} Store`,
+      owner_name: body.ownerName || email.split('@')[0],
+      ownerName: body.ownerName || email.split('@')[0],
+      email,
+      phone: body.phone || '',
+      password: body.password || '',
+      subscription_plan: body.subscriptionPlan || 'free_trial',
+      subscriptionPlan: body.subscriptionPlan || 'free_trial',
+      plan_started_at,
+      planStartedAt: plan_started_at,
+      expires_at,
+      expiresAt: expires_at,
+      duration_days: durationDays,
+      durationDays: durationDays,
+      logo_url: body.logoUrl || '',
+      logoUrl: body.logoUrl || '',
+      is_locked: false,
+      isLocked: false,
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    if (db) {
+      await db.collection('stores').insertOne({ ...newStoreRecord });
+    }
+
+    merchantStore.set(storeSlug, newStoreRecord);
+
+    return res.status(200).json({
+      ok: true,
+      isExisting: false,
+      message: 'Store account created successfully.',
+      merchant: sanitizeServerMerchant(newStoreRecord),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/auth/merchant/register error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Registration failed' });
+  }
+});
+
+app.post('/api/auth/merchant/login', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { email, password } = req.body || {};
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return res.status(400).json({ ok: false, error: 'Valid email is required.' });
+    }
+
+    await connectToMongoDB();
+    const db = mongoose.connection.readyState === 1 ? mongoose.connection.db : null;
+
+    if (db) {
+      const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+      let storeDoc = await db.collection('stores').findOne({ email: emailRegex });
+      if (!storeDoc) {
+        storeDoc = await db.collection('merchants').findOne({ email: emailRegex });
+      }
+
+      if (storeDoc) {
+        const merchant = sanitizeServerMerchant(storeDoc);
+        return res.status(200).json({
+          ok: true,
+          merchant: {
+            ...merchant,
+            id: String(storeDoc.id || storeDoc._id),
+            storeId: String(storeDoc.store_id || storeDoc.id || storeDoc._id),
+            storeSlug: storeDoc.store_slug || storeDoc.storeSlug,
+            storeCode: storeDoc.store_code || storeDoc.storeCode,
+          }
+        });
+      }
+    }
+
+    return res.status(404).json({ ok: false, error: 'No account found with this email.' });
+  } catch (err: any) {
+    console.error('[Server] POST /api/auth/merchant/login error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Login failed' });
   }
 });
 
@@ -869,9 +1084,43 @@ app.all('/api/categories', async (req, res) => {
 
     const categories = Array.isArray(req.body?.categories) ? req.body.categories : (req.body ? [req.body] : []);
 
+    await connectToMongoDB();
+    const db = mongoose.connection.readyState === 1 ? mongoose.connection.db : null;
+
     if (req.method === 'POST' || req.method === 'PUT') {
       if (storeSlug) {
         categoryStore.set(storeSlug, categories);
+      }
+
+      // MongoDB Upsert
+      if (db && categories.length > 0) {
+        try {
+          for (const cat of categories) {
+            const catId = String(cat.id || `cat-${Date.now()}`);
+            const doc = {
+              id: catId,
+              category_id: catId,
+              store_slug: storeSlug || cat.store_slug || cat.storeSlug || 'bd',
+              storeSlug: storeSlug || cat.store_slug || cat.storeSlug || 'bd',
+              name: String(cat.name || cat.title || 'Category'),
+              title: String(cat.name || cat.title || 'Category'),
+              image_url: String(cat.image || cat.coverImage || cat.image_url || ''),
+              image: String(cat.image || cat.coverImage || cat.image_url || ''),
+              status: cat.status || 'active',
+              is_published: cat.status !== 'hidden',
+              parent_id: cat.parentId || cat.parent_id || null,
+              slug: cat.slug || '',
+              updated_at: new Date(),
+            };
+            await db.collection('categories').updateOne(
+              { id: catId },
+              { $set: doc, $setOnInsert: { created_at: new Date() } },
+              { upsert: true }
+            );
+          }
+        } catch (mongoCatErr) {
+          console.warn('[Server] /api/categories MongoDB upsert warning:', mongoCatErr);
+        }
       }
 
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
@@ -918,6 +1167,18 @@ app.all('/api/categories', async (req, res) => {
           .map((c: any) => String(c.parentId) === catId || String(c.parent_id) === catId ? { ...c, parentId: null, parent_id: null } : c);
         categoryStore.set(storeSlug, updatedCats);
 
+        if (db) {
+          try {
+            await db.collection('categories').deleteOne({ id: catId });
+            await db.collection('categories').updateMany(
+              { $or: [{ parent_id: catId }, { parentId: catId }] },
+              { $set: { parent_id: null, parentId: null } }
+            );
+          } catch (mongoDelErr) {
+            console.warn('[Server] /api/categories MongoDB delete warning:', mongoDelErr);
+          }
+        }
+
         const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
         if (isConfigured) {
           try {
@@ -950,7 +1211,18 @@ app.all('/api/categories', async (req, res) => {
     }
 
     if (req.method === 'GET') {
-      const cats = categoryStore.get(storeSlug) || [];
+      let cats = categoryStore.get(storeSlug) || [];
+      if (cats.length === 0 && db) {
+        try {
+          const query: any = storeSlug ? { $or: [{ store_slug: storeSlug }, { storeSlug: storeSlug }] } : {};
+          const mongoCats = await db.collection('categories').find(query).toArray();
+          if (Array.isArray(mongoCats) && mongoCats.length > 0) {
+            cats = mongoCats;
+          }
+        } catch (mongoGetErr) {
+          console.warn('[Server] /api/categories MongoDB query warning:', mongoGetErr);
+        }
+      }
       return res.status(200).json({ ok: true, store_slug: storeSlug, categories: cats });
     }
 
@@ -1575,6 +1847,18 @@ app.delete('/api/products/:id', async (req, res) => {
   }
   await writeStorePayload(payload);
 
+  // MongoDB deletion
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      await mongoose.connection.db.collection('products').deleteOne({
+        $or: [{ id: prodId }]
+      });
+    }
+  } catch (mongoDelErr) {
+    console.warn('[Server] DELETE /api/products/:id MongoDB delete warning:', mongoDelErr);
+  }
+
   const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
   if (isConfigured) {
     await fetch(`${supabaseUrl}/rest/v1/products?id=eq.${encodeURIComponent(prodId)}`, {
@@ -1610,6 +1894,18 @@ app.delete('/api/products', async (req, res) => {
     }
   }
   await writeStorePayload(payload);
+
+  // MongoDB deletion
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      await mongoose.connection.db.collection('products').deleteOne({
+        $or: [{ id: prodId }]
+      });
+    }
+  } catch (mongoDelErr) {
+    console.warn('[Server] DELETE /api/products MongoDB delete warning:', mongoDelErr);
+  }
 
   const { supabaseUrl: sbUrl2, supabaseKey: sbKey2, isConfigured: isSbConfig2 } = getServerSupabaseConfig();
   if (isSbConfig2) {
@@ -1826,6 +2122,26 @@ app.get('/api/stores/check/:email', async (req, res) => {
     const email = String(req.params.email || '').trim().toLowerCase();
     if (!email) return res.status(200).json({ ok: false, merchant: null });
 
+    // 1. Primary: Strict MongoDB query on stores and merchants collections
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        const storeDoc = await mongoose.connection.db.collection('stores').findOne({ email: emailRegex });
+        if (storeDoc) {
+          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(storeDoc) });
+        }
+
+        const merchDoc = await mongoose.connection.db.collection('merchants').findOne({ email: emailRegex });
+        if (merchDoc) {
+          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(merchDoc) });
+        }
+      }
+    } catch (dbErr) {
+      console.warn('[Server] /api/stores/check MongoDB warning:', dbErr);
+    }
+
+    // 2. Secondary: Supabase REST query
     try {
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
       if (isConfigured) {
@@ -2027,12 +2343,49 @@ app.post('/api/stores/update', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const patch = req.body || {};
+    const m = patch.merchant || patch;
+    const storeSlug = String(m.storeSlug || m.store_slug || '').trim().toLowerCase();
+    const email = String(m.email || '').trim().toLowerCase();
+    const storeId = String(m.id || m.storeId || m.store_id || '').trim();
+
+    // 1. Direct MongoDB update
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      try {
+        const filterOr: any[] = [];
+        if (email) filterOr.push({ email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
+        if (storeSlug) filterOr.push({ store_slug: storeSlug }, { storeSlug });
+        if (storeId) filterOr.push({ id: storeId }, { store_id: storeId });
+
+        if (filterOr.length > 0) {
+          await mongoose.connection.db.collection('stores').updateOne(
+            { $or: filterOr },
+            {
+              $set: {
+                ...m,
+                store_slug: storeSlug || m.storeSlug,
+                storeSlug: storeSlug || m.storeSlug,
+                updated_at: new Date(),
+              }
+            },
+            { upsert: true }
+          );
+        }
+      } catch (mongoErr) {
+        console.warn('[Server] POST /api/stores/update MongoDB warning:', mongoErr);
+      }
+    }
+
+    if (storeSlug) {
+      merchantStore.set(storeSlug, m);
+    }
     const payload = await readStorePayload();
     if (patch.merchant) {
       payload.merchant = { ...(payload.merchant || {}), ...patch.merchant };
     }
     await writeStorePayload(payload);
-    return res.status(200).json({ ok: true, store_slug: payload.merchant?.storeSlug || patch.merchant?.storeSlug || '' });
+
+    return res.status(200).json({ ok: true, store_slug: storeSlug || payload.merchant?.storeSlug || '' });
   } catch (err: any) {
     console.error('[Server] POST /api/stores/update error:', err);
     return res.status(200).json({ ok: false, store_slug: '', error: err?.message || String(err) });

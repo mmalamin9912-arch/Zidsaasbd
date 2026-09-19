@@ -284,7 +284,19 @@ export default function App() {
     try {
       let resolved: MerchantProfile | null = null;
 
-      if (userId || userEmail) {
+      if (userEmail) {
+        try {
+          const res = await fetch(`/api/stores/check/${encodeURIComponent(userEmail)}`);
+          const data = await res.json().catch(() => null);
+          if (data?.merchant) {
+            resolved = resolveMerchantSubscription(data.merchant);
+          }
+        } catch (e) {
+          console.warn('[App] MongoDB store check notice:', e);
+        }
+      }
+
+      if (!resolved && (userId || userEmail)) {
         resolved = await fetchMerchantSubscriptionFromSupabase({ userId, email: userEmail });
       }
 
