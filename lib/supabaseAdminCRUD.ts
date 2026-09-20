@@ -273,12 +273,19 @@ export async function fetchHybridCatalog(
 
   // ── Mongo (secondary / fallback) ──
   const mongoRows: Record<string, any>[] = [];
+  let mongoError: string | undefined;
   for (const coll of map.mongo) {
     const result = await queryMongoCollection(coll);
     for (const row of result.rows) mongoRows.push(row);
+    // First provider error is surfaced; a missing collection already reads as
+    // `undefined` inside queryMongoCollection, so this only reports real faults.
+    if (!mongoError && result.error) mongoError = result.error;
   }
 
-  const merged = mergeRows(supabaseRows, mongoRows, catalogIdentity);
+  // mergeRows(mongoRows, supabaseRows) keeps MongoDB authoritative per entity
+  // and lets Supabase fill the gaps — including Supabase-only rows, which are
+  // appended so the admin UI still shows a record that only exists there.
+  const merged = mergeRows(mongoRows, supabaseRows, catalogIdentity);
 
   return {
     data: merged,
@@ -288,7 +295,7 @@ export async function fetchHybridCatalog(
       ...(mongoRows.length ? (['mongodb'] as DataSource[]) : []),
     ],
     ok: merged.length > 0,
-    mongodb: { ok: !mongoRows.length || true, count: mongoRows.length, error: undefined },
+    mongodb: { ok: !mongoError, count: mongoRows.length, error: mongoError },
     supabase: { ok: !supaMain.error, count: supabaseRows.length, error: supaMain.error || supaLegacy.error },
   };
 }

@@ -17,6 +17,7 @@
 
 import { connectToDatabase, getMongoUri, describeMongoError, DB_NAME } from './db.js';
 import type { MongoFailure } from './db.js';
+import { getSupabaseServerConfig } from './hybridDb.js';
 
 /** Normalised merchant row returned to the admin dashboard. */
 export interface AdminMerchant {
@@ -228,6 +229,203 @@ async function getDb(dbName: string = DB_NAME): Promise<{ db: any | null; failur
   }
 }
 
+/* ────────────────────────── Supabase redundancy (mirror of `stores`) ────────────────────────── */
+
+/**
+ * Physical snake_case columns on the Supabase `stores` table that the admin
+ * write paths are allowed to mirror. Anything outside this list is dropped so
+ * PostgREST never rejects a write for an unknown column.
+ */
+const SUPABASE_STORE_WRITE_COLUMNS = [
+  'id',
+  'store_code',
+  'store_slug',
+  'store_name',
+  'owner_name',
+  'email',
+  'phone',
+  'password',
+  'logo_url',
+  'subscription_plan',
+  'subscription_expiry',
+  'plan_started_at',
+  'expires_at',
+  'duration_days',
+  'trial_ends_at',
+  'trial_days_remaining',
+  'is_locked',
+  'status',
+  'created_at',
+  'updated_at',
+] as const;
+
+/** Copy the known `stores` columns present in `source` into a new object. */
+function pickStoreColumns(
+  source: Record<string, any>,
+  columns: readonly string[]
+): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const column of columns) {
+    const value = source[column];
+    if (value !== undefined) out[column] = value;
+  }
+  return out;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** true when `value` is a canonical UUID (the type of Supabase `stores.id`). */
+function isUuid(value: unknown): boolean {
+  return typeof value === 'string' && UUID_RE.test(value.trim());
+}
+
+/**
+ * Mirror a merchant/store record into the Supabase `stores` table.
+ *
+ * The Super Admin portal writes merchants straight to MongoDB; this helper
+ * adds the SAME write to Supabase so the two providers stay in sync. That is
+ * what keeps the "automatic Mongo/Fallback redundancy" contract true for the
+ * admin portal too: if MongoDB is later degraded, the record is still readable
+ * from Supabase (and vice-versa — the auth path reads Supabase first).
+ *
+ * Upserts by `store_slug` via the REST API. NEVER throws: a Supabase outage
+ * must not fail an admin write that already succeeded in Mongo. Returns the
+ * outcome so the caller can report which providers accepted the write.
+ */
+async function mirrorMerchantToSupabase(
+  record: Record<string, any>,
+  matchColumn: string = 'store_slug'
+): Promise<{ ok: boolean; error?: string }> {
+  const { supabaseUrl, supabaseKey, isConfigured } = getSupabaseServerConfig();
+  if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
+
+  const matchValue = String(record[matchColumn] || record.store_slug || record.storeSlug || record.email || '').trim();
+  if (!matchValue) return { ok: false, error: 'No store identity to mirror.' };
+
+  // Keep ONLY the physical snake_case columns of the Supabase `stores` table.
+  // Mongo documents carry camelCase aliases (`storeName`, `storeSlug`, …) and
+  // helper keys (`_id`); PostgREST rejects an unknown column and would fail the
+  // whole mirror write, so those are dropped here.
+  const payload = pickStoreColumns(record, SUPABASE_STORE_WRITE_COLUMNS);
+  // `stores.id` is a uuid column; the admin-created `store-<ts>` string id would
+  // be rejected, so let Supabase generate its own UUID when the id is not one.
+  if (payload.id && !isUuid(payload.id)) delete payload.id;
+  if (Object.keys(payload).length === 0) return { ok: false, error: 'No mappable store columns to mirror.' };
+
+  const headers: Record<string, string> = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    Prefer: 'resolution=merge-duplicates',
+  };
+
+  try {
+    // Upsert with `on_conflict` so a repeat write updates the existing row
+    // instead of violating a unique constraint on store_slug.
+    const url = `${supabaseUrl}/rest/v1/stores?on_conflict=${encodeURIComponent(matchColumn)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+    });
+
+    if (res.ok) return { ok: true };
+    return { ok: false, error: `Supabase stores upsert responded ${res.status}` };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Supabase stores upsert failed' };
+  }
+}
+
+/**
+ * Mirror a PATCH payload onto the Supabase `stores` row identified by `ref`.
+ * Applied by store_slug first, then by id, since either may be the stored key.
+ * NEVER throws.
+ */
+async function patchMerchantInSupabase(
+  ref: string,
+  patch: Record<string, any>
+): Promise<{ ok: boolean; error?: string }> {
+  const { supabaseUrl, supabaseKey, isConfigured } = getSupabaseServerConfig();
+  if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
+
+  const payload = pickStoreColumns(patch, SUPABASE_STORE_WRITE_COLUMNS);
+  if (Object.keys(payload).length === 0) return { ok: false, error: 'No mappable store columns to patch.' };
+
+  const cleaned = String(ref || '').trim();
+  const slug = cleaned.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+  const headers: Record<string, string> = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    Prefer: 'return=minimal',
+  };
+
+  const attempts: Array<{ column: string; value: string }> = [
+    { column: 'store_slug', value: slug || cleaned },
+    { column: 'id', value: cleaned },
+  ];
+
+  let lastError: string | undefined;
+  for (const attempt of attempts) {
+    if (!attempt.value) continue;
+    try {
+      const res = await fetch(
+        `${supabaseUrl}/rest/v1/stores?${attempt.column}=eq.${encodeURIComponent(attempt.value)}`,
+        {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+        }
+      );
+      if (res.ok) return { ok: true };
+      lastError = `Supabase stores PATCH responded ${res.status}`;
+    } catch (err: any) {
+      lastError = err?.message || 'Supabase stores PATCH failed';
+    }
+  }
+
+  return { ok: false, error: lastError || 'Supabase stores PATCH failed' };
+}
+
+/**
+ * Delete the Supabase `stores` row(s) matching `ref` by slug and id. NEVER
+ * throws — a Supabase outage leaves the Mongo delete (already applied) intact.
+ */
+async function deleteMerchantInSupabase(ref: string): Promise<{ ok: boolean; error?: string }> {
+  const { supabaseUrl, supabaseKey, isConfigured } = getSupabaseServerConfig();
+  if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
+
+  const cleaned = String(ref || '').trim();
+  const slug = cleaned.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const headers: Record<string, string> = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    Accept: 'application/json',
+  };
+
+  let ok = false;
+  let lastError: string | undefined;
+  for (const [column, value] of [['store_slug', slug || cleaned], ['id', cleaned]] as const) {
+    if (!value) continue;
+    try {
+      const res = await fetch(
+        `${supabaseUrl}/rest/v1/stores?${column}=eq.${encodeURIComponent(value)}`,
+        { method: 'DELETE', headers, signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined }
+      );
+      if (res.ok) ok = true;
+      else lastError = `Supabase stores DELETE responded ${res.status}`;
+    } catch (err: any) {
+      lastError = err?.message || 'Supabase stores DELETE failed';
+    }
+  }
+  return { ok, error: ok ? undefined : lastError };
+}
+
 /**
  * List every merchant/store account across the `stores` and `merchants`
  * collections, de-duplicated by slug/store_id and optionally filtered.
@@ -421,6 +619,10 @@ export async function applyMerchantAction(
         console.warn(`[adminMerchants] delete ${collectionName} warning:`, err?.message || err);
       }
     }
+    // Mirror the delete to Supabase so the fallback store does not keep serving
+    // a merchant the admin just removed. Best-effort (never blocks the result).
+    const sbDelete = await deleteMerchantInSupabase(ref);
+    if (!sbDelete.ok) console.warn('[adminMerchants] Supabase delete mirror warning:', sbDelete.error);
     return { ok: deleted > 0, deleted: deleted > 0, error: deleted > 0 ? undefined : 'Merchant not found.' };
   }
 
@@ -493,6 +695,11 @@ export async function applyMerchantAction(
   if (matched === 0) {
     return { ok: false, error: 'Merchant not found.' };
   }
+
+  // Mirror the SAME patch to Supabase (redundancy). Best-effort: a Supabase
+  // outage must not fail an admin action that already applied in MongoDB.
+  const sbPatch = await patchMerchantInSupabase(ref, set);
+  if (!sbPatch.ok) console.warn('[adminMerchants] Supabase update mirror warning:', sbPatch.error);
 
   const updated = await findMerchantRecord(db, ref);
   return { ok: true, merchant: updated ? normalizeMerchant(updated) : undefined };
@@ -626,6 +833,10 @@ export async function createAdminMerchant(
         });
       } catch { /* best-effort tidy-up */ }
 
+      // Mirror the update to Supabase (redundancy in the other direction).
+      const sbUpdate = await mirrorMerchantToSupabase({ ...existing, ...patch, store_slug: slug });
+      if (!sbUpdate.ok) console.warn('[adminMerchants] Supabase upsert mirror warning:', sbUpdate.error);
+
       return { ok: true, merchant: normalizeMerchant({ ...existing, ...patch }), updated: true };
     } catch (err: any) {
       console.warn('[adminMerchants] update warning:', err?.message || err);
@@ -684,6 +895,12 @@ export async function createAdminMerchant(
     }
 
     await db.collection('stores').insertOne(record);
+
+    // Mirror the new merchant to Supabase so the auth path (which reads Supabase
+    // FIRST) and the fallback store both see the freshly onboarded store.
+    const sbCreate = await mirrorMerchantToSupabase(record);
+    if (!sbCreate.ok) console.warn('[adminMerchants] Supabase insert mirror warning:', sbCreate.error);
+
     return { ok: true, merchant: normalizeMerchant(record), updated: false };
   } catch (err: any) {
     // A duplicate-key error means another request created this slug first —

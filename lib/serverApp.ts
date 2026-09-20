@@ -2342,41 +2342,52 @@ app.get('/api/stores/check/:email', async (req, res) => {
     const email = String(req.params.email || '').trim().toLowerCase();
     if (!email) return res.status(200).json({ ok: false, merchant: null });
 
-    // 1. Primary: Strict MongoDB query on stores and merchants collections
+    // 1. Primary: Supabase REST — the canonical auth mirror. Checked FIRST so a
+    //    merchant signing in on a new device instantly sees the same store/email
+    //    binding (strict one-store-per-email across all devices). The `stores`
+    //    table is authoritative for auth; `merchants` is the legacy mirror.
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (isConfigured) {
+        for (const table of ['stores', 'merchants'] as const) {
+          const sbRes = await fetch(
+            `${supabaseUrl}/rest/v1/${table}?email=ilike.${encodeURIComponent(email)}&select=*&limit=1`,
+            {
+              headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
+              signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+            }
+          );
+          if (sbRes.ok) {
+            const rows = await sbRes.json();
+            if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
+              return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(rows[0]), source: 'supabase' });
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn('[Server] /api/stores/check Supabase warning:', e?.message || e);
+    }
+
+    // 2. Fallback: MongoDB query on the stores and merchants collections. Only
+    //    reached when Supabase is unconfigured, times out, or has no such email
+    //    — so the dashboard still resolves the account during a Supabase outage.
     try {
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
         const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
         const storeDoc = await mongoose.connection.db.collection('stores').findOne({ email: emailRegex });
         if (storeDoc) {
-          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(storeDoc) });
+          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(storeDoc), source: 'mongodb' });
         }
 
         const merchDoc = await mongoose.connection.db.collection('merchants').findOne({ email: emailRegex });
         if (merchDoc) {
-          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(merchDoc) });
+          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(merchDoc), source: 'mongodb' });
         }
       }
     } catch (dbErr) {
       console.warn('[Server] /api/stores/check MongoDB warning:', dbErr);
-    }
-
-    // 2. Secondary: Supabase REST query
-    try {
-      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-      if (isConfigured) {
-        const sbRes = await fetch(`${supabaseUrl}/rest/v1/merchants?email=ilike.${encodeURIComponent(email)}&select=*&limit=1`, {
-          headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
-        });
-        if (sbRes.ok) {
-          const rows = await sbRes.json();
-          if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
-            return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(rows[0]) });
-          }
-        }
-      }
-    } catch (e: any) {
-      console.warn('[Server] /api/stores/check Supabase warning:', e?.message || e);
     }
 
     try {
