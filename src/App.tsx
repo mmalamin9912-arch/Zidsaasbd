@@ -40,6 +40,15 @@ import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { normalizeOrders } from './utils/orderUtils';
 import { isStoreCode, isUuid } from './lib/storeId';
 import { resolveLayoutForTheme } from './lib/themeRegistry';
+import {
+  fetchPlatformConfig,
+  savePlatformConfig,
+  fetchSecuritySettings,
+  saveSecuritySettings,
+  fetchAuditLogs,
+  appendAuditLog,
+  clearAuditLogs,
+} from './lib/platformConfigApi';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -909,6 +918,127 @@ export default function App() {
     })();
   }, []);
 
+  // ── Load Super Admin platform configuration from the database ────────────────
+  // Payment gateways, platform settings (tax / trial / branding / AI), security
+  // policy and audit logs are all persisted in Supabase (primary) + MongoDB
+  // (fallback). On mount we hydrate local state from the API so every admin sees
+  // the shared, dynamic configuration instead of their browser's localStorage.
+  React.useEffect(() => {
+    let active = true;
+    (async () => {
+      // 1. Composite platform document (gateways + settings + AI/automation).
+      const config = await fetchPlatformConfig();
+      if (active && config) {
+        if (config.adminPaymentConfig && typeof config.adminPaymentConfig === 'object') {
+          setAdminPaymentConfig(prev => ({ ...prev, ...config.adminPaymentConfig }));
+        }
+        if (config.platformSettings && typeof config.platformSettings === 'object') {
+          setPlatformSettings((prev: any) => ({ ...prev, ...config.platformSettings }));
+        }
+        if (config.automationSettings && typeof config.automationSettings === 'object') {
+          setAutomationSettings((prev: any) => ({ ...prev, ...config.automationSettings }));
+        }
+      }
+
+      if (!active) return;
+
+      // 2. Security policy document.
+      const security = await fetchSecuritySettings();
+      if (active && security && typeof security === 'object') {
+        setPlatformSecuritySettings(prev => ({ ...prev, ...security }));
+      }
+
+      if (!active) return;
+
+      // 3. Real-time audit logs.
+      const logs = await fetchAuditLogs();
+      if (active && logs.length > 0) {
+        setAuditLogs(logs);
+      }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  // ── Persist Super Admin platform configuration to the database ──────────────
+  // These wrapped setters update local state AND write through to the API
+  // (Supabase-first, MongoDB fallback) so a save is durable and shared across
+  // admins/devices, not trapped in one browser.
+
+  /** Payment gateways + platform settings + automation, saved as one document. */
+  const persistPlatformConfig = useCallback((partial: {
+    adminPaymentConfig?: AdminPaymentGatewayConfig;
+    platformSettings?: any;
+    automationSettings?: any;
+  }) => {
+    void savePlatformConfig({
+      adminPaymentConfig: partial.adminPaymentConfig,
+      platformSettings: partial.platformSettings,
+      automationSettings: partial.automationSettings,
+    });
+  }, []);
+
+  // Latest-value refs so the side-effecting persistence runs OUTSIDE the state
+  // updater. React (StrictMode) invokes updater functions twice in dev, which
+  // would otherwise double-fire every save.
+  // (initialised to undefined; reconciled against the real state below, since
+  // some of those state hooks are declared further down this component)
+  const adminPaymentConfigRef = React.useRef<any>(adminPaymentConfig);
+  const platformSettingsRef = React.useRef<any>(platformSettings);
+  const automationSettingsRef = React.useRef<any>(undefined);
+  const platformSecuritySettingsRef = React.useRef<any>(undefined);
+  const auditLogsRef = React.useRef<any>(undefined);
+  adminPaymentConfigRef.current = adminPaymentConfig;
+  platformSettingsRef.current = platformSettings;
+
+  const handleUpdateAdminPaymentConfig = useCallback((updater: React.SetStateAction<AdminPaymentGatewayConfig>) => {
+    const prev = adminPaymentConfigRef.current;
+    const next = typeof updater === 'function' ? (updater as (p: AdminPaymentGatewayConfig) => AdminPaymentGatewayConfig)(prev) : updater;
+    adminPaymentConfigRef.current = next;
+    setAdminPaymentConfig(next);
+    persistPlatformConfig({ adminPaymentConfig: next });
+  }, [persistPlatformConfig]);
+
+  const handleUpdatePlatformSettings = useCallback((updater: React.SetStateAction<any>) => {
+    const prev = platformSettingsRef.current;
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    platformSettingsRef.current = next;
+    setPlatformSettings(next);
+    persistPlatformConfig({ platformSettings: next });
+  }, [persistPlatformConfig]);
+
+  const handleUpdateAutomationSettings = useCallback((updater: React.SetStateAction<PlatformAutomationSettings>) => {
+    const prev = automationSettingsRef.current;
+    const next = typeof updater === 'function' ? (updater as (p: PlatformAutomationSettings) => PlatformAutomationSettings)(prev) : updater;
+    automationSettingsRef.current = next;
+    setAutomationSettings(next);
+    persistPlatformConfig({ automationSettings: next });
+  }, [persistPlatformConfig]);
+
+  const handleUpdateSecuritySettings = useCallback((updater: React.SetStateAction<PlatformSecuritySettings>) => {
+    const prev = platformSecuritySettingsRef.current;
+    const next = typeof updater === 'function' ? (updater as (p: PlatformSecuritySettings) => PlatformSecuritySettings)(prev) : updater;
+    platformSecuritySettingsRef.current = next;
+    setPlatformSecuritySettings(next);
+    void saveSecuritySettings(next);
+  }, []);
+
+  const handleUpdateAuditLogs = useCallback((updater: React.SetStateAction<AuditLog[]>) => {
+    const prev = auditLogsRef.current;
+    const next = typeof updater === 'function' ? (updater as (p: AuditLog[]) => AuditLog[])(prev) : updater;
+    auditLogsRef.current = next;
+    setAuditLogs(next);
+    // Clearing all logs is the only array-replacing operation the UI performs;
+    // a full wipe is deleted from BOTH providers. New entries are appended via
+    // the dedicated POST route.
+    if (Array.isArray(next) && next.length === 0 && prev.length > 0) {
+      void clearAuditLogs();
+    }
+  }, []);
+
+  const handleUpdateSupportTickets = useCallback((updater: React.SetStateAction<SupportTicket[]>) => {
+    setSupportTickets(prev => (typeof updater === 'function' ? (updater as (p: SupportTicket[]) => SupportTicket[])(prev) : updater));
+  }, []);
+
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>(() => {
     try {
       const saved = localStorage.getItem('ZID_SUPPORT_TICKETS');
@@ -962,6 +1092,11 @@ export default function App() {
       return initialAutomationSettings;
     }
   });
+
+  // Reconcile the persistence refs now that every config state is declared.
+  automationSettingsRef.current = automationSettings;
+  platformSecuritySettingsRef.current = platformSecuritySettings;
+  auditLogsRef.current = auditLogs;
 
   const [adminTeam, setAdminTeam] = useState<AdminTeamMember[]>(() => {
     try {
@@ -1364,7 +1499,7 @@ export default function App() {
         currentMerchant={merchant}
         onUpdateMerchant={setMerchant}
         adminPaymentConfig={adminPaymentConfig}
-        onUpdateAdminPaymentConfig={setAdminPaymentConfig}
+        onUpdateAdminPaymentConfig={handleUpdateAdminPaymentConfig}
         pendingRequests={pendingRequests}
         onUpdatePendingRequests={setPendingRequests}
         themePurchaseRequests={themePurchaseRequests}
@@ -1389,7 +1524,7 @@ export default function App() {
           setCurrentPath('/dashboard');
         }}
         platformSettings={platformSettings}
-        onUpdatePlatformSettings={setPlatformSettings}
+        onUpdatePlatformSettings={handleUpdatePlatformSettings}
         platformAnnouncement={platformAnnouncement}
         onUpdatePlatformAnnouncement={setPlatformAnnouncement}
         platformPlans={platformPlans}
@@ -1401,13 +1536,13 @@ export default function App() {
         platformAddons={platformAddons}
         onUpdatePlatformAddons={setPlatformAddons}
         auditLogs={auditLogs}
-        onUpdateAuditLogs={setAuditLogs}
+        onUpdateAuditLogs={handleUpdateAuditLogs}
         securitySettings={platformSecuritySettings}
-        onUpdateSecuritySettings={setPlatformSecuritySettings}
+        onUpdateSecuritySettings={handleUpdateSecuritySettings}
         broadcastHistory={broadcastHistory}
         onUpdateBroadcastHistory={setBroadcastHistory}
         automationSettings={automationSettings}
-        onUpdateAutomationSettings={setAutomationSettings}
+        onUpdateAutomationSettings={handleUpdateAutomationSettings}
         adminTeam={adminTeam}
         onUpdateAdminTeam={setAdminTeam}
         rolePermissions={rolePermissions}

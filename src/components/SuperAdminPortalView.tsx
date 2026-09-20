@@ -4,6 +4,7 @@ import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
 import LiveThemePreview from './LiveThemePreview';
 import { resolveLayoutForTheme, LAYOUT_LABELS } from '../lib/themeRegistry';
+import { fetchAuditLogs } from '../lib/platformConfigApi';
 import {
   ShieldAlert,
   DollarSign,
@@ -436,6 +437,25 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       setTimeout(() => setSaveSuccess(null), 3000);
     }
   };
+
+  // Real-time refresh directly from the database (Supabase-first, Mongo fallback).
+  // Runs when the Security & Logs tab opens and on demand via the Refresh button.
+  const [isRefreshingLogs, setIsRefreshingLogs] = useState(false);
+  const handleRefreshLogs = useCallback(async () => {
+    setIsRefreshingLogs(true);
+    try {
+      const logs = await fetchAuditLogs();
+      if (Array.isArray(logs)) onUpdateAuditLogs(logs);
+    } catch (err: any) {
+      console.warn('[SuperAdmin] audit log refresh notice:', err?.message || err);
+    } finally {
+      setIsRefreshingLogs(false);
+    }
+  }, [onUpdateAuditLogs]);
+
+  useEffect(() => {
+    if (activeSubTab === 'security') void handleRefreshLogs();
+  }, [activeSubTab, handleRefreshLogs]);
 
   const handleExportLogs = () => {
     const headers = ['Log ID', 'Timestamp', 'Admin User', 'Action', 'Target Entity', 'IP Address', 'Severity'];
@@ -3912,8 +3932,17 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
               </div>
               <div className="flex gap-3">
                 <button
+                  onClick={handleRefreshLogs}
+                  disabled={isRefreshingLogs}
+                  className="bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-2 transition border-[#3A435E] cursor-pointer disabled:opacity-60"
+                  title="Fetch the latest activity records from the database"
+                >
+                  <History className={`w-4 h-4 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
+                  <span>{isRefreshingLogs ? 'Refreshing…' : 'Refresh Logs'}</span>
+                </button>
+                <button
                   onClick={handleExportLogs}
-                  className="bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-2 transition border border-[#3A435E] cursor-pointer"
+                  className="bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-2 transition border-[#3A435E] cursor-pointer"
                 >
                   <Download className="w-4 h-4" />
                   <span>Export Logs (CSV)</span>

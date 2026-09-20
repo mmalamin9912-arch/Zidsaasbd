@@ -48,6 +48,15 @@ import {
 import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from './hybridDb.js';
 import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabasePlans, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
 import { authenticateMerchant, emailHasStore } from './authService.js';
+import {
+  readPlatformConfig,
+  writePlatformConfig,
+  readSecuritySettings,
+  writeSecuritySettings,
+  readAuditLogs,
+  appendAuditLog,
+  clearAuditLogs,
+} from './platformConfig.js';
 import { generateFaqFromPolicies } from './faqGenerator.js';
 import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
 
@@ -907,6 +916,149 @@ app.delete('/api/admin/themes/:id', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] DELETE /api/admin/themes/:id error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Could not delete theme.' });
+  }
+});
+
+// ── Admin Platform Configuration (Supabase-first, MongoDB fallback) ────────
+// Persists the Super Admin portal's payment gateways, platform settings and AI
+// controls. One document under config_key='platform' in BOTH providers.
+//   GET  /api/admin/platform-config — read the saved config (merged).
+//   POST /api/admin/platform-config — upsert the config to Supabase + Mongo.
+// Always answers 200 with a shaped envelope (never a 404/500).
+app.get('/api/admin/platform-config', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await readPlatformConfig();
+    return res.status(200).json({
+      ok: result.ok,
+      config: result.data,
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/platform-config error:', err);
+    return res.status(200).json({ ok: false, config: null, sources: [], error: err?.message || 'Could not load platform config.' });
+  }
+});
+
+app.post('/api/admin/platform-config', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    // Accept either a wrapped { config: {...} } payload or the raw object.
+    const payload = body.config && typeof body.config === 'object' ? body.config : body;
+    const result = await writePlatformConfig(payload);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      config: result.data,
+      message: result.ok ? 'Platform configuration saved.' : (result.error || 'Could not save platform config.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/platform-config error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save platform config.' });
+  }
+});
+
+// ── Admin Security Settings (Supabase-first, MongoDB fallback) ───────────────
+// Force 2FA, admin session timeout, max login attempts, etc.
+//   GET  /api/admin/security-settings — read the saved policy.
+//   POST /api/admin/security-settings — upsert the policy to Supabase + Mongo.
+app.get('/api/admin/security-settings', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await readSecuritySettings();
+    return res.status(200).json({
+      ok: result.ok,
+      settings: result.data,
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/security-settings error:', err);
+    return res.status(200).json({ ok: false, settings: null, sources: [], error: err?.message || 'Could not load security settings.' });
+  }
+});
+
+app.post('/api/admin/security-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const payload = body.settings && typeof body.settings === 'object' ? body.settings : body;
+    const result = await writeSecuritySettings(payload);
+
+    // Audit the policy change so the change is traceable in the logs tab.
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: 'Updated platform security policy',
+      targetEntity: 'security_settings',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Warning',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      settings: result.data,
+      message: result.ok ? 'Security settings saved.' : (result.error || 'Could not save security settings.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/security-settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save security settings.' });
+  }
+});
+
+// ── Admin Audit Logs (Supabase-first, MongoDB fallback) ─────────────────────
+//   GET    /api/admin/audit-logs — real-time activity records, newest first.
+//   POST   /api/admin/audit-logs — append a single activity record.
+//   DELETE /api/admin/audit-logs — clear all records from both providers.
+app.get('/api/admin/audit-logs', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const limit = Math.min(2000, Math.max(1, Number(req.query.limit) || 500));
+    const result = await readAuditLogs(limit);
+    return res.status(200).json({
+      ok: true,
+      logs: result.data || [],
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/audit-logs error:', err);
+    return res.status(200).json({ ok: false, logs: [], sources: [], error: err?.message || 'Could not load audit logs.' });
+  }
+});
+
+app.post('/api/admin/audit-logs', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const result = await appendAuditLog({
+      timestamp: body.timestamp,
+      adminUser: body.adminUser || body.admin_user,
+      action: body.action,
+      targetEntity: body.targetEntity || body.target_entity,
+      ipAddress: body.ipAddress || body.ip_address || String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: body.severity,
+    });
+    return res.status(200).json({ ok: result.ok, log: result.data, sources: result.sources, error: result.error });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/audit-logs error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not write audit log.' });
+  }
+});
+
+app.delete('/api/admin/audit-logs', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await clearAuditLogs();
+    return res.status(200).json({ ok: result.ok, sources: result.sources, message: 'Audit logs cleared.' });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/admin/audit-logs error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not clear audit logs.' });
   }
 });
 
