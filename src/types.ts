@@ -456,6 +456,11 @@ export interface PlatformTheme {
   previewUrl: string;
   thumbnailUrl: string;
   status: 'Active' | 'Hidden';
+  /**
+   * Storefront layout this theme renders. Optional — when omitted the layout is
+   * derived from the category/name (see src/lib/themeRegistry.ts).
+   */
+  layout?: 'classic' | 'supermarket' | 'fashion';
 }
 
 export interface ThemeConfig {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { NavigationTab, ProductSubTab, CustomerSubTab, StoreSubTab, SettingsSubTab, MerchantProfile, BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig, CourierService, Order, Product, Customer, AdminPaymentGatewayConfig, SubscriptionRequest, ThemeConfig, ThemePurchaseRequest, SubscriptionPlan, PlatformTheme, SupportTicket, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from './types';
 
 import {
@@ -39,6 +39,7 @@ import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { normalizeOrders } from './utils/orderUtils';
 import { isStoreCode, isUuid } from './lib/storeId';
+import { resolveLayoutForTheme } from './lib/themeRegistry';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -830,6 +831,84 @@ export default function App() {
     }
   });
 
+  // Load the Super Admin theme catalogue from the DATABASE (Supabase-first,
+  // MongoDB fallback via GET /api/admin/themes) so merchant-facing and
+  // storefront code reflects the platform's ACTIVE themes without a rebuild.
+  // Falls back to the localStorage / initial themes when the API is unreachable.
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/admin/themes', { headers: { Accept: 'application/json' }, });
+        const data = await res.json().catch(() => null);
+        const themes = Array.isArray(data?.themes) ? data.themes : [];
+        if (active && themes.length > 0) {
+          const normalized: PlatformTheme[] = themes.map((t: any): PlatformTheme => ({
+            id: String(t.id || t.slug || ''),
+            name: String(t.name || t.title || 'Theme'),
+            category: String(t.category || 'General'),
+            price: Number(t.priceBDT ?? t.price ?? 0) || 0,
+            isFree: t.isFree === true || Number(t.priceBDT ?? t.price ?? 0) === 0,
+            previewUrl: String(t.previewUrl || t.preview_url || ''),
+            thumbnailUrl: String(t.thumbnailUrl || t.thumbnail_url || ''),
+            status: (t.status === 'Hidden' ? 'Hidden' : 'Active'),
+            layout: (t.layout || t.template_style || t.template || t.themeLayout) as PlatformTheme['layout'],
+          }));
+          setPlatformThemes(normalized);
+          safeSetItem('ZID_PLATFORM_THEMES', JSON.stringify(normalized));
+        }
+      } catch (err: any) {
+        console.warn('[App] platform themes API notice:', err?.message || err);
+      }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  /**
+   * Persist the Super Admin theme catalogue to the database AND local state.
+   *
+   * Every theme in the list is upserted via POST /api/admin/themes (Supabase-
+   * first, MongoDB fallback). Deletions are handled by the admin UI calling the
+   * DELETE endpoint directly; here we simply mirror the resulting catalogue so
+   * merchant-facing/storefront code sees it immediately.
+   */
+  const handleUpdatePlatformThemes = useCallback((themes: PlatformTheme[]) => {
+    setPlatformThemes(themes);
+    safeSetItem('ZID_PLATFORM_THEMES', JSON.stringify(themes));
+    (async () => {
+      for (const theme of themes) {
+        try {
+          await fetch('/api/admin/themes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            // NOTE: `template_style` is a real Supabase column; `layout` is not,
+            // so the layout is transported inside `template_style` to avoid a
+            // PostgREST "unknown column" rejection. Mongo stores both keys.
+            body: JSON.stringify({
+              id: theme.id,
+              slug: theme.id,
+              name: theme.name,
+              category: theme.category,
+              price: theme.price,
+              priceBDT: theme.price,
+              isFree: theme.isFree,
+              previewUrl: theme.previewUrl,
+              preview_url: theme.previewUrl,
+              thumbnailUrl: theme.thumbnailUrl,
+              thumbnail_url: theme.thumbnailUrl,
+              status: theme.status,
+              template_style: theme.layout,
+              template: theme.layout,
+              layout: theme.layout,
+            }),
+          });
+        } catch (err: any) {
+          console.warn('[App] platform theme persist notice:', err?.message || err);
+        }
+      }
+    })();
+  }, []);
+
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>(() => {
     try {
       const saved = localStorage.getItem('ZID_SUPPORT_TICKETS');
@@ -1165,6 +1244,12 @@ export default function App() {
       console.error('Error fetching custom theme from database:', e);
     }
 
+    // Resolve which LAYOUT this store's active theme maps to. TenantStorefrontView
+    // renders the classic full-featured storefront for 'classic', and the
+    // dedicated supermarket/fashion layouts for those themes. Unknown/absent
+    // themes fall back to classic, so a store is never blank.
+    const activeLayout = resolveLayoutForTheme({ id: targetMerchant?.activeThemeId });
+
     return (
       <TenantStorefrontView
         storeSlug={storeSlug || targetMerchant.storeSlug}
@@ -1173,6 +1258,7 @@ export default function App() {
         bankAccounts={targetBankAccounts}
         mobileBanking={targetMobileBanking}
         themes={targetThemes}
+        layout={activeLayout}
         onPlaceOrder={async (newOrder) => {
           try {
             // Persist order details back to that store's custom record
@@ -1309,7 +1395,7 @@ export default function App() {
         platformPlans={platformPlans}
         onUpdatePlatformPlans={setPlatformPlans}
         platformThemes={platformThemes}
-        onUpdatePlatformThemes={setPlatformThemes}
+        onUpdatePlatformThemes={handleUpdatePlatformThemes}
         supportTickets={supportTickets}
         onUpdateSupportTickets={setSupportTickets}
         platformAddons={platformAddons}
@@ -1558,6 +1644,7 @@ export default function App() {
                 onAddThemePurchaseRequest={handleAddThemePurchaseRequest}
                 isPremiumPlan={isPremiumPlan}
                 onOpenSubscriptionModal={() => setIsSubscriptionModalOpen(true)}
+                platformThemes={platformThemes}
               />
             )}
 

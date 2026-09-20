@@ -3,7 +3,8 @@ import { StoreSubTab, MerchantProfile, AdminPaymentGatewayConfig, ThemePurchaseR
 import { ThemeCustomizerModal } from '../ThemeCustomizerModal';
 import { StorefrontPreviewModal } from '../StorefrontPreviewModal';
 import SafeImage from '../SafeImage';
-import { 
+import {  readZidStoreData, writeZidStoreData } from '../../lib/storeData';
+import {
   Palette, 
   Globe, 
   ExternalLink, 
@@ -55,6 +56,8 @@ interface OnlineStoreViewProps {
   onAddThemePurchaseRequest?: (req: ThemePurchaseRequest) => void;
   isPremiumPlan: boolean;
   onOpenSubscriptionModal: () => void;
+  /** Active themes published by the Super Admin (from /api/admin/themes). */
+  platformThemes?: Array<Record<string, any>>;
 }
 
 export interface ThemeMarketItem {
@@ -126,7 +129,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
   themePurchaseRequests = [],
   onAddThemePurchaseRequest,
   isPremiumPlan,
-  onOpenSubscriptionModal
+  onOpenSubscriptionModal,
+  platformThemes = [],
 }) => {
   // Theme Manager States
   const [selectedThemeAction, setSelectedThemeAction] = useState<string | null>(null);
@@ -174,15 +178,77 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
       setShowUpgradePrompt(true);
       return;
     }
+
+    // 1. Update local state → storefront re-renders with the new layout at once.
     setMerchant(prev => ({
       ...prev,
       activeThemeId: theme.id
     }));
-    alert(`Theme "${theme.name}" has been published and set as your live storefront design!`);
+
+    // 2. Persist the choice to the database immediately (Supabase-first / Mongo
+    //    fallback via /api/stores/update) so it survives reloads and applies on
+    //    every device — the live storefront reflects it the moment it's saved.
+    const slug = merchant?.storeSlug || (merchant as any)?.store_slug;
+    try {
+      fetch('/api/stores/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          merchant: {
+            ...merchant,
+            storeSlug: slug,
+            activeThemeId: theme.id,
+          },
+        }),
+      }).catch(err => console.warn('[OnlineStoreView] theme publish persist warning:', err));
+    } catch (err) {
+      console.warn('[OnlineStoreView] theme publish persist notice:', err);
+    }
+
+    // 3. Broadcast via the shared store so an open storefront tab updates live
+    //    without a refresh.
+    try {
+      if (slug) {
+        const existing = readZidStoreData(slug);
+        writeZidStoreData({
+          ...existing,
+          merchant: { ...((existing?.merchant || {}) as MerchantProfile), activeThemeId: theme.id },
+        }, slug);
+      }
+    } catch (err) {
+      console.warn('[OnlineStoreView] theme publish broadcast notice:', err);
+    }
+
+    alert(`Theme "${theme.name}" is now live on your storefront!`);
   };
 
+  // Effective catalogue = built-in market themes + any ACTIVE themes published
+  // by the Super Admin. Admin themes are appended so a newly-created platform
+  // theme becomes selectable here immediately (ids are de-duplicated).
+  const mergedThemeCatalog: ThemeMarketItem[] = React.useMemo(() => {
+    const byId = new Map<string, ThemeMarketItem>();
+    for (const t of themeCatalog) byId.set(t.id, t);
+    for (const raw of platformThemes || []) {
+      const id = String(raw?.id || raw?.slug || '').trim();
+      if (!id) continue;
+      if (byId.has(id)) continue;
+      byId.set(id, {
+        id,
+        name: String(raw?.name || raw?.title || 'Theme'),
+        version: String(raw?.version || '1.0.0'),
+        badge: raw?.badge ? String(raw.badge) : undefined,
+        isFree: raw?.isFree === true || Number(raw?.priceBDT ?? raw?.price ?? 0) === 0,
+        updatedAt: String(raw?.updatedAt || raw?.updated_at || 'Published by admin'),
+        previewUrl: String(raw?.previewUrl || raw?.preview_url || raw?.thumbnailUrl || raw?.thumbnail_url || ''),
+        description: String(raw?.description || `Theme: ${raw?.name || id}`),
+        category: String(raw?.category || 'General'),
+      });
+    }
+    return [...byId.values()];
+  }, [platformThemes]);
+
   // Current active theme object
-  const currentActiveTheme = themeCatalog.find(t => t.id === (merchant?.activeThemeId || 'growth-1')) || themeCatalog[0];
+  const currentActiveTheme = mergedThemeCatalog.find(t => t.id === (merchant?.activeThemeId || 'growth-1')) || mergedThemeCatalog[0];
 
   // Landing Pages Data
   const [landingPages, setLandingPages] = useState<any[]>([]);
@@ -509,7 +575,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#2E3548] text-slate-200">
-                  {themeCatalog.map((t) => {
+                  {mergedThemeCatalog.map((t) => {
                     const unlocked = isThemeUnlocked(t);
                     const isActive = (merchant?.activeThemeId || 'growth-1') === t.id;
 
@@ -1343,7 +1409,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {themeCatalog.map((item) => {
+              {mergedThemeCatalog.map((item) => {
                 const unlocked = isThemeUnlocked(item);
                 const isActive = (merchant?.activeThemeId || 'growth-1') === item.id;
 

@@ -53,6 +53,8 @@ function mapSupabaseCategory(c: any) {
 }
 import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
+import { findThemeById, resolveLayoutForTheme } from '../lib/themeRegistry';
+import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
 
 interface TenantStorefrontViewProps {
   storeSlug: string;
@@ -61,8 +63,22 @@ interface TenantStorefrontViewProps {
   bankAccounts: BankAccount[];
   mobileBanking: MobileBankingConfig[];
   themes: ThemeConfig[];
-  orders: Order[];
+  orders?: Order[];
   onPlaceOrder: (order: Order) => void;
+  /**
+   * Forces a specific theme's LAYOUT for preview purposes (Super Admin eye
+   * icon / merchant demo). When set, this theme id wins over the merchant's
+   * persisted `activeThemeId`, so a preview never mutates live settings.
+   */
+  previewThemeId?: string;
+  /** Renders a slimmer, non-interactive variant (embedded thumbnails). */
+  compact?: boolean;
+  /**
+   * Explicit layout override. The App route passes the merchant's active
+   * theme's resolved layout here so `/store/:slug` mounts the right design.
+   * When omitted, it is derived from `previewThemeId` / the active theme.
+   */
+  layout?: 'classic' | 'supermarket' | 'fashion';
 }
 
 interface CustomerReturnRequest {
@@ -94,8 +110,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   bankAccounts,
   mobileBanking,
   themes,
-  orders,
+  orders = [],
   onPlaceOrder,
+  previewThemeId,
+  compact = false,
+  layout,
 }) => {
   // The storefront may be mounted in another route/tab from the editor. Subscribe
   // directly to the shared store so products and published theme changes appear
@@ -284,7 +303,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const storefrontThemes = Array.isArray(liveStoreData.themes) && (liveStoreData.themes as ThemeConfig[]).length > 0
     ? (liveStoreData.themes as ThemeConfig[])
     : (Array.isArray(themes) ? themes : []);
-  const activeTheme = (storefrontThemes || []).find((theme) => theme?.id === storefrontMerchant.activeThemeId) || storefrontThemes[0];
+  // The theme actually in effect: a preview theme (Super Admin eye icon / merchant
+  // demo) overrides the merchant's persisted selection WITHOUT mutating it. The
+  // registry supplies the theme's layout + accent colour.
+  const effectiveThemeId = previewThemeId || storefrontMerchant.activeThemeId;
+  const activeTheme = (storefrontThemes || []).find((theme) => theme?.id === effectiveThemeId)
+    || (storefrontThemes || [])[0];
+  const registryTheme = findThemeById(effectiveThemeId);
   const merchantThemeConfig = (storefrontMerchant.themeConfig || liveStoreData.themeCustomization || {}) as Record<string, unknown>;
   // Resolved theme settings: themeConfig (from editor/Supabase) > themeCustomization > hardcoded defaults
   const resolvedTheme = {
@@ -364,6 +389,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     (typeof themeCustomization.primaryColor === 'string' && themeCustomization.primaryColor) ||
     (typeof themeCustomization.themePrimaryColor === 'string' && themeCustomization.themePrimaryColor) ||
     activeTheme?.primaryColor ||
+    registryTheme?.primaryColor ||
     '#00D68F'
   );
   // Direct Supabase & Backend API & LocalStorage Catalog Hook
@@ -1315,6 +1341,20 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
       return false;
     });
+
+  // ── Theme-driven layout switch ──────────────────────────
+  // The merchant's selected theme (or a forced preview theme) decides which
+  // layout renders. 'supermarket' and 'fashion' mount their dedicated designs;
+  // 'classic' falls through to the full-featured storefront below. This is the
+  // mechanism that makes choosing a theme on the dashboard actually change
+  // what shoppers see on /store/:slug.
+  const resolvedLayout = layout || resolveLayoutForTheme({ id: effectiveThemeId });
+  if (resolvedLayout === 'supermarket') {
+    return <SupermarketTechMockup />;
+  }
+  if (resolvedLayout === 'fashion') {
+    return <ElegantFashionMockup />;
+  }
 
   return (
     <div

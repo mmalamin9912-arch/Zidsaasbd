@@ -4,6 +4,7 @@ import { X, ExternalLink, Monitor, Tablet, Smartphone, Sparkles, Lock, CheckCirc
 import { TenantStorefrontView } from './TenantStorefrontView';
 import { ThemeMarketItem } from './views/OnlineStoreView';
 import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
+import { resolveLayoutForTheme } from '../lib/themeRegistry';
 
 interface StorefrontPreviewModalProps {
   isOpen: boolean;
@@ -53,7 +54,7 @@ export const StorefrontPreviewModal: React.FC<StorefrontPreviewModalProps> = ({
               <div className="w-3 h-3 rounded-full bg-emerald-500/80" />
             </div>
             <div className="h-4 w-[1px] bg-slate-800 mx-1 hidden sm:block" />
-            
+
             <div className="flex items-center gap-2">
               <span className="flex h-2.5 w-2.5 relative">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00D68F] opacity-75"></span>
@@ -177,9 +178,9 @@ export const StorefrontPreviewModal: React.FC<StorefrontPreviewModalProps> = ({
             )}
 
             <div className="flex-1 overflow-y-auto no-scrollbar relative w-full h-full">
-              {themeId === 'supermarket-tech' ? (
+              {resolveLayoutForTheme({ id: themeId, category: previewTheme?.category, name: previewTheme?.name }) === 'supermarket' ? (
                 <SupermarketTechMockup />
-              ) : themeId === 'elegant-fashion' ? (
+              ) : resolveLayoutForTheme({ id: themeId, category: previewTheme?.category, name: previewTheme?.name }) === 'fashion' ? (
                 <ElegantFashionMockup />
               ) : (
                 <TenantStorefrontView

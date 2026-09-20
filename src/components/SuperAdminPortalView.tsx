@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
+import LiveThemePreview from './LiveThemePreview';
+import { resolveLayoutForTheme, LAYOUT_LABELS } from '../lib/themeRegistry';
 import {
   ShieldAlert,
   DollarSign,
@@ -525,6 +528,10 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   // Theme Manager States
   const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
   const [editingThemeId, setEditingThemeId] = useState<string | null>(null);
+  // Live demo preview: the theme currently open in the preview modal. Rendered
+  // with SAMPLE store data so an admin can preview ANY theme without logging in
+  // and without a real store existing (fixes the eye-icon login redirect).
+  const [previewTheme, setPreviewTheme] = useState<PlatformTheme | null>(null);
   const [themeForm, setThemeForm] = useState<Partial<PlatformTheme>>({
     name: '',
     category: 'General',
@@ -4197,14 +4204,14 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                           <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{theme.category}</p>
                         </div>
                       </div>
-                      <a
-                        href={theme.previewUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-slate-400 hover:text-white transition"
+                      <button
+                        type="button"
+                        onClick={() => setPreviewTheme(theme)}
+                        className="text-slate-400 hover:text-[#00D68F] transition cursor-pointer"
+                        title="Open live demo preview (sample store data)"
                       >
                         <Eye className="w-4 h-4" />
-                      </a>
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -4767,12 +4774,28 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                   />
                 </div>
                 <div className="col-span-2">
-                  <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Live Preview URL</label>
+                  <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Storefront Layout</label>
+                  <select
+                    value={themeForm.layout || ''}
+                    onChange={(e) => setThemeForm({ ...themeForm, layout: (e.target.value || undefined) as PlatformTheme['layout'] })}
+                    className="w-full bg-[#202533] border-[#3A435E] rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none appearance-none"
+                  >
+                    <option value="">Auto (derive from category)</option>
+                    <option value="classic">Classic Luxury (default storefront)</option>
+                    <option value="supermarket">Supermarket &amp; Tech Mega-Store</option>
+                    <option value="fashion">Elegant Fashion &amp; Boutique</option>
+                  </select>
+                  <p className="text-[10px] text-slate-500 mt-1.5">
+                    The layout shoppers see on the live storefront when a merchant selects this theme.
+                  </p>
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Live Preview URL (optional)</label>
                   <input
                     type="text"
                     value={themeForm.previewUrl}
                     onChange={(e) => setThemeForm({...themeForm, previewUrl: e.target.value})}
-                    placeholder="#"
+                    placeholder="Leave blank to use the built-in live demo preview"
                     className="w-full bg-[#202533] border border-[#3A435E] rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
                   />
                 </div>
@@ -5087,6 +5110,58 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* LIVE THEME DEMO PREVIEW MODAL (eye icon) */}
+      {previewTheme && createPortal(
+        <div className="fixed inset-0 z-[300] flex items-center justify-center p-2 sm:p-4 bg-slate-950/90 backdrop-blur-md">
+          <div className="relative w-full max-w-[1200px] h-[92vh] bg-slate-900 rounded-3xl shadow-2xl border-slate-800 overflow-hidden flex-col">
+            {/* Header */}
+            <div className="flex bg-slate-900 border-b border-slate-800 px-4 py-3 flex-wrap items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-3">
+                <span className="flex h-2.5 w-2.5 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00D68F] opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#00D68F]"></span>
+                </span>
+                <div>
+                  <span className="font-extrabold text-white text-sm">
+                    Live Demo: <span className="text-[#00D68F]">{previewTheme.name}</span>
+                  </span>
+                  <p className="text-[10px] text-slate-400">
+                    Layout: {LAYOUT_LABELS[resolveLayoutForTheme({ id: previewTheme.id, category: previewTheme.category, name: previewTheme.name })]} • Sample store data
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="hidden sm:inline text-[10px] font-bold uppercase tracking-wider text-slate-400 bg-slate-800 border-slate-700 px-2.5 py-1 rounded-full">
+                  Preview • Not Live
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPreviewTheme(null)}
+                  className="p-2 rounded-xl text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+                  title="Close preview"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Preview stage */}
+            <div className="h-[calc(92vh-72px)] overflow-y-auto bg-slate-950 p-2 sm:p-6 flex items-start justify-center">
+              <div className="w-full h-full max-w-full bg-white rounded-2xl border-slate-800 overflow-y-auto shadow-2xl">
+                <LiveThemePreview
+                  themeId={previewTheme.id}
+                  category={previewTheme.category}
+                  name={previewTheme.name}
+                  compact
+                />
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
 
     </div>

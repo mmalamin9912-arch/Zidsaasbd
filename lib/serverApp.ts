@@ -836,6 +836,10 @@ app.get('/api/admin/themes', async (_req, res) => {
         thumbnailUrl: String(pick(theme, ['thumbnailUrl', 'thumbnail_url']) || ''),
         status: String(pick(theme, ['status']) || 'Active'),
         isPublished: pick(theme, ['isPublished', 'is_published']) !== false,
+        // Layout the storefront renders for this theme. Stored in Supabase as
+        // `template_style` (a real column) and in Mongo as `layout`. The client
+        // maps any unknown theme to a layout via category/name heuristics.
+        layout: pick(theme, ['layout', 'template_style', 'template', 'themeLayout']),
         source: theme._source || 'unknown',
       };
     });
@@ -2605,6 +2609,47 @@ app.post('/api/stores/update', async (req, res) => {
       } catch (mongoErr) {
         console.warn('[Server] POST /api/stores/update MongoDB warning:', mongoErr);
       }
+    }
+
+    // 2. Mirror the patch to Supabase (redundancy). The `stores` table only has
+    //    snake_case columns, so unknown camelCase keys are dropped to avoid a
+    //    PostgREST "unknown column" rejection. This is what makes a merchant's
+    //    persisted theme choice (activeThemeId/theme_config) readable from the
+    //    Supabase fallback store, not just MongoDB.
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (isConfigured && (storeSlug || email || storeId)) {
+        const allowed = [
+          'id', 'store_code', 'store_slug', 'store_name', 'owner_name', 'email', 'phone',
+          'password', 'logo_url', 'subscription_plan', 'subscription_expiry', 'plan_started_at',
+          'expires_at', 'duration_days', 'trial_ends_at', 'trial_days_remaining',
+          'is_locked', 'status', 'active_theme_id', 'theme_config', 'created_at', 'updated_at',
+        ];
+        const sbPayload: Record<string, any> = {};
+        for (const key of allowed) {
+          if (m[key] !== undefined) sbPayload[key] = m[key];
+        }
+        // Carry the theme selection under its snake_case column names.
+        if (m.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = m.activeThemeId;
+        if (m.themeConfig && sbPayload.theme_config === undefined) sbPayload.theme_config = m.themeConfig;
+        if (storeSlug && sbPayload.store_slug === undefined) sbPayload.store_slug = storeSlug;
+
+        if (Object.keys(sbPayload).length > 0) {
+          const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?on_conflict=store_slug`, {
+            method: 'POST',
+            headers: {
+              apikey: supabaseKey,
+              Authorization: `Bearer ${supabaseKey}`,
+              'Content-Type': 'application/json',
+              Prefer: 'resolution=merge-duplicates',
+            },
+            body: JSON.stringify(sbPayload),
+          });
+          if (!sbRes.ok) console.warn('[Server] /api/stores/update Supabase mirror warning:', sbRes.status);
+        }
+      }
+    } catch (sbErr: any) {
+      console.warn('[Server] /api/stores/update Supabase warning:', sbErr?.message || sbErr);
     }
 
     if (storeSlug) {
