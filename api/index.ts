@@ -25,6 +25,26 @@ import mongoose from 'mongoose';
 import app from '../lib/serverApp.js';
 import { describeMongoError } from '../lib/db.js';
 
+/**
+ * Process-level safety nets. On Vercel a stray unhandled rejection can kill the
+ * warm function invocation without a useful log; logging it (once) keeps the
+ * backend observable and prevents silent failures. Registration is guarded so
+ * module re-evaluation across warm invocations does not stack listeners.
+ */
+declare global {
+  // eslint-disable-next-line no-var
+  var __zidProcessGuards: boolean | undefined;
+}
+if (!global.__zidProcessGuards) {
+  global.__zidProcessGuards = true;
+  process.on('unhandledRejection', (reason: any) => {
+    console.error('[api/index] unhandledRejection:', reason?.message || reason);
+  });
+  process.on('uncaughtException', (err: any) => {
+    console.error('[api/index] uncaughtException:', err?.message || err);
+  });
+}
+
 type ExpressApp = (req: any, res: any) => any;
 
 /**

@@ -156,14 +156,20 @@ export const Header: React.FC<HeaderProps> = ({
 
     const fetchSupabaseSubRecord = async () => {
       try {
-        // Query 'subscriptions' table in Supabase
-        const { data: subData } = await supabase
+        // Query the 'subscriptions' table in Supabase. When the table is not yet
+        // provisioned (PGRST205 / 404) we fall through to the 'stores' fallback
+        // instead of letting the missing-table error surface as a broken row.
+        const { data: subData, error: subError } = await supabase
           .from('subscriptions')
           .select('*')
           .or(`merchant_email.ilike.${email},store_slug.ilike.${storeSlug}`)
           .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle();
+
+        if (subError && !/does not exist|PGRST205|schema cache/i.test(subError.message || '')) {
+          console.warn('Supabase subscriptions read notice:', subError.message);
+        }
 
         if (subData && isMounted) {
           setSupabaseSub(subData);

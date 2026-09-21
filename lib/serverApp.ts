@@ -46,6 +46,7 @@ import {
   purgeTestTransactionsAndReload,
 } from './adminRequests.js';
 import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from './hybridDb.js';
+import { writeSubscription, listSubscriptions, deleteSubscription } from './subscriptionStore.js';
 import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabasePlans, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
 import { authenticateMerchant, emailHasStore } from './authService.js';
 import {
@@ -2921,11 +2922,17 @@ function extractStoreSlugFromRequest(req: express.Request): string {
   if (fromQuery) return fromQuery.split(':')[0].trim().toLowerCase();
 
   // Last-resort: the final path segment (skipping the routing words themselves).
+  // Parse with the WHATWG URL API rather than req.path/req.originalUrl so we do
+  // not depend on Express's (deprecated) url.parse path internally.
   try {
-    const segments = String(req.path || req.originalUrl || '')
-      .split('?')[0]
-      .split('/')
-      .filter(Boolean);
+    const rawUrl = String(req.originalUrl || req.url || '/');
+    let pathname = rawUrl;
+    try {
+      pathname = new URL(rawUrl, 'http://localhost').pathname;
+    } catch {
+      pathname = rawUrl.split('?')[0];
+    }
+    const segments = pathname.split('/').filter(Boolean);
     const last = segments[segments.length - 1];
     if (last && !['stores', 'store', 'api', 'slug'].includes(last.toLowerCase())) {
       return decodeURIComponent(last).split(':')[0].trim().toLowerCase();
@@ -3374,9 +3381,92 @@ app.post('/api/subscription/update', async (req, res) => {
       }
     }
 
-    res.json({ status: 'ok', updated: true, plan_started_at, expires_at, duration_days });
+    // Persist the renewal to the `subscriptions` table in BOTH providers so the
+    // merchant dashboard's Supabase read reflects the change (and no longer 404s).
+    const subWrite = await writeSubscription({
+      merchant_email: email,
+      store_slug: storeSlug,
+      store_name: storeName,
+      subscription_plan: planId,
+      plan_started_at,
+      expires_at,
+      subscription_expiry: expiryDate,
+      duration_days,
+      transaction_id: req.body?.transactionId,
+      payment_method: req.body?.paymentMethod,
+      status: req.body?.status || 'active',
+    });
+
+    res.json({
+      status: 'ok',
+      updated: true,
+      plan_started_at,
+      expires_at,
+      duration_days,
+      sources: subWrite.sources,
+    });
   } catch (err: any) {
     res.status(500).json({ status: 'error', error: err?.message });
+  }
+});
+
+/**
+ * GET /api/subscription/list — all subscriptions from Supabase + MongoDB.
+ * Used by the Admin portal and analytics to read real renewal records.
+ */
+app.get('/api/subscription/list', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await listSubscriptions();
+    return res.status(200).json({
+      ok: true,
+      subscriptions: result.data,
+      counts: { subscriptions: result.data.length },
+      sources: result.sources,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/subscription/list error:', err);
+    return res.status(200).json({ ok: false, subscriptions: [], sources: [], error: err?.message || 'Could not load subscriptions.' });
+  }
+});
+
+/**
+ * POST /api/subscription/record — upsert a subscription record directly to
+ * BOTH providers (used when approving a plan change in the Admin portal).
+ */
+app.post('/api/subscription/record', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await writeSubscription(req.body || {});
+    return res.status(200).json({
+      ok: result.ok,
+      subscription: result.record,
+      sources: result.sources,
+      message: result.ok ? 'Subscription saved.' : (result.error || 'Could not save subscription.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/subscription/record error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save subscription.' });
+  }
+});
+
+/**
+ * DELETE /api/subscription/:email — remove a subscription from both providers.
+ */
+app.delete('/api/subscription/:email', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const email = decodeURIComponent(String(req.params.email || '')).trim();
+    if (!email) return res.status(200).json({ ok: false, error: 'Merchant email is required.' });
+    const result = await deleteSubscription(email);
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      message: result.ok ? 'Subscription deleted.' : 'Could not delete subscription.',
+    });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/subscription/:email error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not delete subscription.' });
   }
 });
 
@@ -6709,9 +6799,31 @@ app.get('/api/export/download', async (req, res) => {
   }
 });
 
-// Fallback for any unhandled /api/* request so it returns JSON and NOT HTML
+// ── Global error handler ─────────────────────
+// Catches errors thrown/rejected anywhere in the route chain (including a
+// rejected async handler in Express 4, whose promise rejection would otherwise
+// surface as an unhandled rejection) and always answers JSON so the client
+// never receives an HTML error page or a hung request.
+app.use((err: any, req: any, res: any, _next: any) => {
+  if (res.headersSent) return;
+  const status = Number(err?.status || err?.statusCode) || 500;
+  console.error(`[Server] Unhandled error on ${req.method} ${req.originalUrl || req.url}:`, err?.message || err);
+  try {
+    return res.status(status).json({ ok: false, error: err?.message || 'Internal Server Error' });
+  } catch {
+    return res.status(500).end();
+  }
+});
+
+// Fallback for any unhandled /api/* request so it returns JSON and NOT HTML.
+// Parse the path with the WHATWG URL API (not req.path) for consistency with
+// the rest of the server.
 app.all('/api/*', (req, res) => {
-  res.status(404).json({ ok: false, error: `API route ${req.method} ${req.path} not found` });
+  let pathname = '/api';
+  try {
+    pathname = new URL(String(req.originalUrl || req.url || '/api'), 'http://localhost').pathname;
+  } catch { /* keep default */ }
+  res.status(404).json({ ok: false, error: `API route ${req.method} ${pathname} not found` });
 });
 
 // Default export: api/index.ts imports this and invokes it as a request handler.

@@ -12,7 +12,9 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "postinstall": "node scripts/patch-url-parse.cjs",
+    "vercel-build": "node scripts/patch-url-parse.cjs && npm run build"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
