@@ -310,6 +310,18 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const [settingsForm, setSettingsForm] = useState<PlatformSettings>(platformSettings);
   const [announcementForm, setAnnouncementForm] = useState<PlatformAnnouncement>(platformAnnouncement);
   const [plansForm, setPlansForm] = useState<SubscriptionPlan[]>(platformPlans);
+
+  // Keep the forms in sync with the database-backed values. The parent hydrates
+  // platformSettings / platformAnnouncement asynchronously on mount (Supabase +
+  // MongoDB), so without this effect the form would keep showing the seed data
+  // and a save would overwrite the loaded configuration.
+  useEffect(() => {
+    setSettingsForm(platformSettings);
+  }, [platformSettings]);
+
+  useEffect(() => {
+    setAnnouncementForm(platformAnnouncement);
+  }, [platformAnnouncement]);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
   const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
@@ -4382,7 +4394,10 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                                  });
                                  const data = await response.json();
                                  setSupportDraft(data.draftReply);
-                                 alert('AI Draft: \n\n' + data.draftReply);
+                                 // Drop the draft into the reply composer and open the
+                                 // ticket so the admin can review and save it to the DB.
+                                 setReplyMessage(data.draftReply || '');
+                                 setSelectedTicketId(ticket.id);
                                } catch (e) {
                                  alert('Failed to generate draft.');
                                } finally {

@@ -57,6 +57,14 @@ import {
   appendAuditLog,
   clearAuditLogs,
 } from './platformConfig.js';
+import {
+  readSupportTickets,
+  writeSupportTicket,
+  readBroadcastHistory,
+  writeBroadcast,
+  readAnnouncement,
+  writeAnnouncement,
+} from './supportComms.js';
 import { generateFaqFromPolicies } from './faqGenerator.js';
 import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
 
@@ -1059,6 +1067,155 @@ app.delete('/api/admin/audit-logs', async (_req, res) => {
   } catch (err: any) {
     console.error('[Server] DELETE /api/admin/audit-logs error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Could not clear audit logs.' });
+  }
+});
+
+// ── Admin Support Tickets (Supabase-first, MongoDB fallback) ─────────────────
+//   GET  /api/admin/support-tickets — list active merchant tickets.
+//   POST /api/admin/support-tickets — upsert one ticket (reply / status change).
+// Always answers 200 with a shaped envelope (never a 404/500).
+app.get('/api/admin/support-tickets', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await readSupportTickets();
+    return res.status(200).json({
+      ok: true,
+      tickets: result.data || [],
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/support-tickets error:', err);
+    return res.status(200).json({ ok: false, tickets: [], sources: [], error: err?.message || 'Could not load support tickets.' });
+  }
+});
+
+app.post('/api/admin/support-tickets', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const ticket = body.ticket && typeof body.ticket === 'object' ? body.ticket : body;
+    if (!ticket || !ticket.id) {
+      return res.status(200).json({ ok: false, error: 'A ticket with an id is required.' });
+    }
+    const result = await writeSupportTicket(ticket);
+
+    // Audit the reply / status change so it is traceable in the logs tab.
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: `Updated support ticket ${ticket.id}`,
+      targetEntity: 'support_tickets',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Info',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      ticket: result.data,
+      sources: result.sources,
+      message: result.ok ? 'Support ticket saved.' : (result.error || 'Could not save support ticket.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/support-tickets error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save support ticket.' });
+  }
+});
+
+// ── Admin Broadcast History (Supabase-first, MongoDB fallback) ────────────────
+//   GET  /api/admin/broadcast-history — delivery records, newest first.
+//   POST /api/admin/broadcast-history — append one mass broadcast.
+app.get('/api/admin/broadcast-history', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await readBroadcastHistory();
+    return res.status(200).json({
+      ok: true,
+      history: result.data || [],
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/broadcast-history error:', err);
+    return res.status(200).json({ ok: false, history: [], sources: [], error: err?.message || 'Could not load broadcast history.' });
+  }
+});
+
+app.post('/api/admin/broadcast-history', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const broadcast = body.broadcast && typeof body.broadcast === 'object' ? body.broadcast : body;
+    if (!broadcast || !broadcast.subject) {
+      return res.status(200).json({ ok: false, error: 'A broadcast with a subject is required.' });
+    }
+    const result = await writeBroadcast(broadcast);
+
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: `Sent mass broadcast: ${broadcast.subject}`,
+      targetEntity: 'broadcast_history',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Info',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      broadcast: result.data,
+      sources: result.sources,
+      message: result.ok ? 'Broadcast saved.' : (result.error || 'Could not save broadcast.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/broadcast-history error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save broadcast.' });
+  }
+});
+
+// ── Admin Global Notice Banner (stored in platform_config singleton) ──────────
+//   GET  /api/admin/announcement — read the shared notice banner config.
+//   POST /api/admin/announcement — upsert it so all merchants see it live.
+app.get('/api/admin/announcement', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await readAnnouncement();
+    return res.status(200).json({
+      ok: true,
+      announcement: result.data,
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/announcement error:', err);
+    return res.status(200).json({ ok: false, announcement: null, sources: [], error: err?.message || 'Could not load announcement.' });
+  }
+});
+
+app.post('/api/admin/announcement', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const announcement = body.announcement && typeof body.announcement === 'object' ? body.announcement : body;
+    const result = await writeAnnouncement(announcement);
+
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: `Updated global notice banner (${announcement?.isActive ? 'active' : 'hidden'})`,
+      targetEntity: 'platform_config',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Warning',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      announcement: result.data,
+      sources: result.sources,
+      message: result.ok ? 'Notice banner saved.' : (result.error || 'Could not save notice banner.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/announcement error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save notice banner.' });
   }
 });
 

@@ -49,6 +49,14 @@ import {
   appendAuditLog,
   clearAuditLogs,
 } from './lib/platformConfigApi';
+import {
+  fetchSupportTickets,
+  saveSupportTicket,
+  fetchBroadcastHistory,
+  saveBroadcast,
+  fetchAnnouncement,
+  saveAnnouncement,
+} from './lib/supportCommsApi';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -955,6 +963,32 @@ export default function App() {
       if (active && logs.length > 0) {
         setAuditLogs(logs);
       }
+
+      if (!active) return;
+
+      // 4. Support & Communication: active merchant tickets. The seed data is
+      // only replaced when the database actually has tickets, so a fresh project
+      // still renders its demo tickets instead of an empty list.
+      const tickets = await fetchSupportTickets();
+      if (active && tickets.length > 0) {
+        setSupportTickets(tickets);
+      }
+
+      if (!active) return;
+
+      // 5. Mass-broadcast delivery history.
+      const broadcasts = await fetchBroadcastHistory();
+      if (active && broadcasts.length > 0) {
+        setBroadcastHistory(broadcasts);
+      }
+
+      if (!active) return;
+
+      // 6. Global Notice Banner (shared with every online merchant).
+      const announcement = await fetchAnnouncement();
+      if (active && announcement && typeof announcement === 'object') {
+        setPlatformAnnouncement((prev: any) => ({ ...prev, ...announcement }));
+      }
     })();
     return () => { active = false; };
   }, []);
@@ -1035,8 +1069,44 @@ export default function App() {
     }
   }, []);
 
+  /** Support tickets: update local state then write the affected ticket(s) to
+   *  the database. A full replace (e.g. a bulk refresh) writes every ticket. */
+  const supportTicketsRef = React.useRef<SupportTicket[]>([]);
   const handleUpdateSupportTickets = useCallback((updater: React.SetStateAction<SupportTicket[]>) => {
-    setSupportTickets(prev => (typeof updater === 'function' ? (updater as (p: SupportTicket[]) => SupportTicket[])(prev) : updater));
+    const prev = supportTicketsRef.current;
+    const next = typeof updater === 'function' ? (updater as (p: SupportTicket[]) => SupportTicket[])(prev) : updater;
+    supportTicketsRef.current = next;
+    setSupportTickets(next);
+
+    // Persist ONLY the tickets that actually changed so a single reply does not
+    // re-write the whole list.
+    const prevById = new Map(prev.map(t => [t.id, t] as const));
+    for (const ticket of next) {
+      const before = prevById.get(ticket.id);
+      if (!before || before !== ticket) {
+        void saveSupportTicket(ticket);
+      }
+    }
+  }, []);
+
+  /** Mass broadcast: append the new record to local state AND the database. */
+  const broadcastHistoryRef = React.useRef<BroadcastMessage[]>([]);
+  const handleUpdateBroadcastHistory = useCallback((updater: React.SetStateAction<BroadcastMessage[]>) => {
+    const prev = broadcastHistoryRef.current;
+    const next = typeof updater === 'function' ? (updater as (p: BroadcastMessage[]) => BroadcastMessage[])(prev) : updater;
+    broadcastHistoryRef.current = next;
+    setBroadcastHistory(next);
+
+    const prevIds = new Set(prev.map(b => b.id));
+    for (const broadcast of next) {
+      if (!prevIds.has(broadcast.id)) void saveBroadcast(broadcast);
+    }
+  }, []);
+
+  /** Global Notice Banner: persist so every online merchant sees it in real time. */
+  const handleUpdatePlatformAnnouncement = useCallback((announcement: any) => {
+    setPlatformAnnouncement(announcement);
+    void saveAnnouncement(announcement);
   }, []);
 
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>(() => {
@@ -1097,6 +1167,8 @@ export default function App() {
   automationSettingsRef.current = automationSettings;
   platformSecuritySettingsRef.current = platformSecuritySettings;
   auditLogsRef.current = auditLogs;
+  supportTicketsRef.current = supportTickets;
+  broadcastHistoryRef.current = broadcastHistory;
 
   const [adminTeam, setAdminTeam] = useState<AdminTeamMember[]>(() => {
     try {
@@ -1526,13 +1598,13 @@ export default function App() {
         platformSettings={platformSettings}
         onUpdatePlatformSettings={handleUpdatePlatformSettings}
         platformAnnouncement={platformAnnouncement}
-        onUpdatePlatformAnnouncement={setPlatformAnnouncement}
+        onUpdatePlatformAnnouncement={handleUpdatePlatformAnnouncement}
         platformPlans={platformPlans}
         onUpdatePlatformPlans={setPlatformPlans}
         platformThemes={platformThemes}
         onUpdatePlatformThemes={handleUpdatePlatformThemes}
         supportTickets={supportTickets}
-        onUpdateSupportTickets={setSupportTickets}
+        onUpdateSupportTickets={handleUpdateSupportTickets}
         platformAddons={platformAddons}
         onUpdatePlatformAddons={setPlatformAddons}
         auditLogs={auditLogs}
@@ -1540,7 +1612,7 @@ export default function App() {
         securitySettings={platformSecuritySettings}
         onUpdateSecuritySettings={handleUpdateSecuritySettings}
         broadcastHistory={broadcastHistory}
-        onUpdateBroadcastHistory={setBroadcastHistory}
+        onUpdateBroadcastHistory={handleUpdateBroadcastHistory}
         automationSettings={automationSettings}
         onUpdateAutomationSettings={handleUpdateAutomationSettings}
         adminTeam={adminTeam}
