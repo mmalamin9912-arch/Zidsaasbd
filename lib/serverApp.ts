@@ -4270,6 +4270,27 @@ app.post('/api/security/register', (req, res, next) => {
   return (app as any).handle(req, res, next);
 });
 
+/**
+ * Decode a PostgREST-style filter without forwarding its operator grammar.
+ *
+ * The browser may send `merchant_email=ilike.user%40example.com`. The value is
+ * decoded by Express before this function sees it, but it may still contain the
+ * `ilike.` operator prefix. We only accept the scalar value after the supported
+ * operator and reject wildcard/control characters; the value is then compared
+ * in memory against the merged provider result.
+ */
+function sanitizeSubscriptionFilter(raw: unknown): string {
+  if (Array.isArray(raw)) return sanitizeSubscriptionFilter(raw[0]);
+  let value = String(raw ?? '').trim();
+  if (!value) return '';
+  try { value = decodeURIComponent(value); } catch { /* Express may have decoded it already. */ }
+  const operatorMatch = value.match(/^(?:eq|ilike|like)\.(.*)$/i);
+  if (operatorMatch) value = operatorMatch[1];
+  // Treat PostgREST wildcards as non-identifying input rather than passing them
+  // to another query language. Email/slug lookups are exact after normalization.
+  return value.replace(/[\x00-\x1F\x7F]/g, '').trim().toLowerCase();
+}
+
 /** Normalise a raw plan row (Supabase table / Mongo doc) into the API shape. */
 function normalizePlanRow(plan: Record<string, any>) {
   const id = String(pick(plan, ['slug', 'plan_id', 'planId', 'id', 'code']) || '').toLowerCase();
@@ -4332,11 +4353,16 @@ app.all('/api/subscriptions', async (req, res) => {
     }
 
     // Supabase/PostgREST clients append `?select=*`; it is not meaningful here.
-    const storeRef = cleanStoreRef(
+    // Sanitize identity filters before using them. In particular, never pass a
+    // raw `ilike.email@example.com` value to another database query builder.
+    const requestedEmail = sanitizeSubscriptionFilter(req.query.merchant_email || req.query.email);
+    const requestedStore = sanitizeSubscriptionFilter(
       req.query.store_slug || req.query.slug || req.query.store_id
       || (body && (body.store_slug || body.slug || body.store_id))
     );
-    const wantsPlans = !storeRef || String(req.query.type || '') === 'plans';
+    const storeRef = cleanStoreRef(requestedStore);
+    const hasRenewalRef = Boolean(requestedEmail || storeRef);
+    const wantsPlans = !hasRenewalRef || String(req.query.type || '') === 'plans';
 
     // 1. Live plan catalogue. `listSubscriptionPlans` reads Supabase FIRST and
     //    transparently falls back to MongoDB when Supabase is missing the table
@@ -4353,16 +4379,29 @@ app.all('/api/subscriptions', async (req, res) => {
       seeded = planResult.seeded;
     }
 
-    // 2. Tenant renewal record (when a store ref is supplied).
+    // 2. Tenant renewal record (when an email/store ref is supplied). Read the
+    //    merged subscription collection first so MongoDB remains the fallback
+    //    when Supabase responds with 400/404/PGRST205; then fill gaps from stores.
+    let matchedSubscription: Record<string, any> | null = null;
+    if (hasRenewalRef && String(req.query.type || '') !== 'plans') {
+      const mergedSubscriptions = await listSubscriptions();
+      matchedSubscription = mergedSubscriptions.data.find((row: Record<string, any>) => {
+        const rowEmail = String(row.merchant_email || row.merchantEmail || row.email || '').trim().toLowerCase();
+        const rowStore = String(row.store_slug || row.storeSlug || '').trim().toLowerCase();
+        return (requestedEmail && rowEmail === requestedEmail) || (storeRef && rowStore === storeRef);
+      }) || null;
+    }
     const record = storeRef ? await resolveStoreRecordFlexible(storeRef) : null;
     const subscription = {
-      store_slug: storeRef || null,
-      subscription_plan: (record?.subscription_plan || record?.subscriptionPlan || 'free_trial') as string,
-      subscription_expiry: (record?.subscription_expiry || record?.subscriptionExpiry || null) as string | null,
-      plan_started_at: (record?.plan_started_at || record?.planStartedAt || null) as string | null,
-      expires_at: (record?.expires_at || record?.expiresAt || null) as string | null,
-      duration_days: (record?.duration_days || record?.durationDays || 30) as number,
-      status: 'active' as const,
+      ...(matchedSubscription || {}),
+      merchant_email: requestedEmail || matchedSubscription?.merchant_email || record?.email || null,
+      store_slug: storeRef || matchedSubscription?.store_slug || null,
+      subscription_plan: (matchedSubscription?.subscription_plan || matchedSubscription?.subscriptionPlan || record?.subscription_plan || record?.subscriptionPlan || 'free_trial') as string,
+      subscription_expiry: (matchedSubscription?.subscription_expiry || matchedSubscription?.subscriptionExpiry || record?.subscription_expiry || record?.subscriptionExpiry || null) as string | null,
+      plan_started_at: (matchedSubscription?.plan_started_at || matchedSubscription?.planStartedAt || record?.plan_started_at || record?.planStartedAt || null) as string | null,
+      expires_at: (matchedSubscription?.expires_at || matchedSubscription?.expiresAt || record?.expires_at || record?.expiresAt || null) as string | null,
+      duration_days: (matchedSubscription?.duration_days || matchedSubscription?.durationDays || record?.duration_days || record?.durationDays || 30) as number,
+      status: matchedSubscription?.status || 'active',
     };
 
     // Accept the `select=*` shape PostgREST clients expect: an array of rows.

@@ -159,13 +159,35 @@ export const Header: React.FC<HeaderProps> = ({
         // Query the 'subscriptions' table in Supabase. When the table is not yet
         // provisioned (PGRST205 / 404) we fall through to the 'stores' fallback
         // instead of letting the missing-table error surface as a broken row.
-        const { data: subData, error: subError } = await supabase
-          .from('subscriptions')
-          .select('*')
-          .or(`merchant_email.ilike.${email},store_slug.ilike.${storeSlug}`)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+        // Avoid PostgREST `.or(...)` filter grammar for user-supplied email/
+        // slug values. An empty operand or a special character such as `@`
+        // can turn the generated request into HTTP 400. Equality filters are
+        // encoded safely by the Supabase client and have the same semantics for
+        // these canonical identity fields.
+        let subData: any = null;
+        let subError: any = null;
+        if (email) {
+          const result = await supabase
+            .from('subscriptions')
+            .select('*')
+            .eq('merchant_email', email)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          subData = result.data;
+          subError = result.error;
+        }
+        if (!subData && !subError && storeSlug) {
+          const result = await supabase
+            .from('subscriptions')
+            .select('*')
+            .eq('store_slug', storeSlug)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          subData = result.data;
+          subError = result.error;
+        }
 
         if (subError && !/does not exist|PGRST205|schema cache/i.test(subError.message || '')) {
           console.warn('Supabase subscriptions read notice:', subError.message);
@@ -177,11 +199,23 @@ export const Header: React.FC<HeaderProps> = ({
         }
 
         // Fallback: Query 'stores' table in Supabase
-        const { data: mData } = await supabase
-          .from('stores')
-          .select('*')
-          .or(`email.ilike.${email},store_slug.ilike.${storeSlug}`)
-          .maybeSingle();
+        let mData: any = null;
+        if (email) {
+          const result = await supabase
+            .from('stores')
+            .select('*')
+            .eq('email', email)
+            .maybeSingle();
+          mData = result.data;
+        }
+        if (!mData && storeSlug) {
+          const result = await supabase
+            .from('stores')
+            .select('*')
+            .eq('store_slug', storeSlug)
+            .maybeSingle();
+          mData = result.data;
+        }
 
         if (mData && isMounted) {
           setSupabaseSub(mData);

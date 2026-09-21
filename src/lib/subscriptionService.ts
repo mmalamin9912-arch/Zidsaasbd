@@ -180,7 +180,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
             const { data: sData } = await supabase
               .from('subscriptions')
               .select('*')
-              .ilike('merchant_email', mData.email)
+              .eq('merchant_email', String(mData.email).trim().toLowerCase())
               .order('created_at', { ascending: false })
               .limit(1)
               .maybeSingle();
@@ -193,14 +193,14 @@ export async function fetchMerchantSubscriptionFromSupabase(
         const { data: mData } = await supabase
           .from('stores')
           .select('*')
-          .ilike('email', cleanEmail)
+          .eq('email', cleanEmail)
           .maybeSingle();
         if (mData) dbMerchant = mData;
 
         const { data: sData } = await supabase
           .from('subscriptions')
           .select('*')
-          .ilike('merchant_email', cleanEmail)
+          .eq('merchant_email', cleanEmail)
           .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle();
@@ -209,7 +209,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
         const { data: mData } = await supabase
           .from('stores')
           .select('*')
-          .ilike('store_slug', cleanSlug)
+          .eq('store_slug', cleanSlug)
           .maybeSingle();
         if (mData) dbMerchant = mData;
 
@@ -217,7 +217,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
           const { data: sData } = await supabase
             .from('subscriptions')
             .select('*')
-            .ilike('merchant_email', mData.email)
+            .eq('merchant_email', String(mData.email).trim().toLowerCase())
             .order('created_at', { ascending: false })
             .limit(1)
             .maybeSingle();
