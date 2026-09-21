@@ -46,7 +46,8 @@ import {
   purgeTestTransactionsAndReload,
 } from './adminRequests.js';
 import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from './hybridDb.js';
-import { writeSubscription, listSubscriptions, deleteSubscription } from './subscriptionStore.js';
+import type { DataSource } from './hybridDb.js';
+import { writeSubscription, listSubscriptions, listSubscriptionPlans, deleteSubscription, ensureSubscriptionSeed } from './subscriptionStore.js';
 import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabasePlans, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
 import { authenticateMerchant, emailHasStore } from './authService.js';
 import {
@@ -3470,6 +3471,32 @@ app.delete('/api/subscription/:email', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/subscription/seed — idempotent auto-initialisation.
+ *
+ * Creates the default plan catalogue (1-Month, Starter, Pro, Enterprise) in
+ * Supabase AND MongoDB when the store is empty. Safe to call repeatedly: an
+ * already-populated store is left untouched. Never throws.
+ */
+app.post('/api/subscription/seed', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await ensureSubscriptionSeed();
+    const plans = await listSubscriptionPlans();
+    return res.status(200).json({
+      ok: true,
+      seeded: result.seeded,
+      sources: result.sources,
+      counts: { plans: plans.data.length },
+      plans: plans.data.map(normalizePlanRow),
+      message: result.seeded ? 'Default subscription plans created.' : 'Plans already present; nothing to seed.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/subscription/seed error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not seed subscriptions.' });
+  }
+});
+
 function normalizeServerPhone(rawPhone: string, defaultCountryCode?: string): string {
   if (!rawPhone) return '';
   let cleaned = String(rawPhone).trim().replace(/[^\d+]/g, '');
@@ -4243,23 +4270,90 @@ app.post('/api/security/register', (req, res, next) => {
   return (app as any).handle(req, res, next);
 });
 
+/** Normalise a raw plan row (Supabase table / Mongo doc) into the API shape. */
+function normalizePlanRow(plan: Record<string, any>) {
+  const id = String(pick(plan, ['slug', 'plan_id', 'planId', 'id', 'code']) || '').toLowerCase();
+  return {
+    id,
+    name: String(pick(plan, ['plan_name', 'planName', 'name', 'title', 'label']) || id || 'Plan'),
+    priceBDT: toNumber(pick(plan, ['price_bdt', 'priceBDT', 'price', 'amount_bdt', 'amount']), 0),
+    durationDays: toNumber(pick(plan, ['duration_days', 'durationDays', 'duration', 'days']), 30),
+    badge: String(pick(plan, ['badge_text', 'badge', 'tag']) || id || ''),
+    isActive: pick(plan, ['is_active', 'isActive', 'active', 'enabled', 'is_published']) !== false,
+    isPopular: pick(plan, ['is_popular', 'isPopular', 'popular']) === true,
+    maxProducts: toNumber(pick(plan, ['max_products', 'maxProducts', 'product_limit']), 0),
+    features: Array.isArray(plan.features) ? plan.features : [],
+  };
+}
+
 /**
- * GET /api/subscriptions — tenant billing/subscription check.
+ * /api/subscriptions — dual-purpose subscription endpoint.
  *
- * The dashboard queries this on mount to decide whether a paid plan is active.
- * It must always answer 200 with a well-formed payload so a missing or new
- * tenant never produces a 404 (which previously surfaced as a red network row).
- * Query params accepted: store_slug | slug | store_id | email.
+ *  1. PLAN CATALOGUE (the primary merchant use): the Subscription Modal fetches
+ *     this to render LIVE prices/features configured by the Super Admin, so a
+ *     price change (e.g. 1-Month → ৳1,000) reflects without a rebuild.
+ *     Triggered when no store ref is supplied, or `?type=plans`.
+ *  2. TENANT RENEWAL CHECK: when a store ref is supplied the response also
+ *     includes that tenant's current subscription status.
+ *
+ * POST supports saving a plan record (admin configurator) to the `subscriptions`
+ * table via the hybrid Supabase/MongoDB store.
+ *
+ * Always answers 200 with a well-formed payload so a missing tenant never
+ * produces a 404 (which previously surfaced as a red network row).
  */
 app.all('/api/subscriptions', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
+    const body = req.body || {};
+
+    // POST → persist a plan record (Admin Configurator save).
+    if (req.method === 'POST' && (body.slug || body.plan_id || body.id || body.plan_name)) {
+      const result = await writeSubscription({
+        id: body.slug || body.plan_id || body.id,
+        slug: body.slug || body.plan_id || body.id,
+        plan_id: body.plan_id || body.slug || body.id,
+        plan_name: body.plan_name || body.name,
+        name: body.name || body.plan_name,
+        price_bdt: body.price_bdt ?? body.priceBDT ?? body.price,
+        priceBDT: body.priceBDT ?? body.price_bdt ?? body.price,
+        price: body.price ?? body.price_bdt ?? body.priceBDT,
+        duration_days: body.duration_days ?? body.durationDays,
+        durationDays: body.durationDays ?? body.duration_days,
+        badge_text: body.badge_text || body.badge,
+        badge: body.badge || body.badge_text,
+        features: body.features,
+        is_active: body.is_active ?? body.isActive,
+        isActive: body.isActive ?? body.is_active,
+        is_popular: body.is_popular ?? body.isPopular,
+        isPopular: body.isPopular ?? body.is_popular,
+      });
+      return res.status(200).json({ ok: result.ok, plan: result.record, sources: result.sources });
+    }
+
     // Supabase/PostgREST clients append `?select=*`; it is not meaningful here.
     const storeRef = cleanStoreRef(
       req.query.store_slug || req.query.slug || req.query.store_id
-      || (req.body && (req.body.store_slug || req.body.slug || req.body.store_id))
+      || (body && (body.store_slug || body.slug || body.store_id))
     );
+    const wantsPlans = !storeRef || String(req.query.type || '') === 'plans';
 
+    // 1. Live plan catalogue. `listSubscriptionPlans` reads Supabase FIRST and
+    //    transparently falls back to MongoDB when Supabase is missing the table
+    //    (PGRST205) or otherwise errors — and auto-seeds the default catalogue
+    //    when BOTH providers are empty. It never throws, so this route always
+    //    answers 200 (never a 404).
+    let plans: Record<string, any>[] = [];
+    let planSources: DataSource[] = [];
+    let seeded = false;
+    if (wantsPlans) {
+      const planResult = await listSubscriptionPlans();
+      plans = planResult.data.map(normalizePlanRow).filter((p) => p.id && p.isActive !== false);
+      planSources = planResult.sources;
+      seeded = planResult.seeded;
+    }
+
+    // 2. Tenant renewal record (when a store ref is supplied).
     const record = storeRef ? await resolveStoreRecordFlexible(storeRef) : null;
     const subscription = {
       store_slug: storeRef || null,
@@ -4273,13 +4367,21 @@ app.all('/api/subscriptions', async (req, res) => {
 
     // Accept the `select=*` shape PostgREST clients expect: an array of rows.
     if (typeof req.query.select === 'string') {
-      return res.status(200).json([subscription]);
+      return res.status(200).json(plans.length > 0 ? plans : [subscription]);
     }
-    return res.status(200).json({ ok: true, subscription });
+    return res.status(200).json({
+      ok: true,
+      plans,
+      subscription,
+      sources: planSources,
+      seeded,
+      counts: { plans: plans.length },
+    });
   } catch (err: any) {
     console.error('[Server] /api/subscriptions error:', err);
     return res.status(200).json({
       ok: false,
+      plans: [],
       error: err?.message || 'Could not load subscription.',
       subscription: { subscription_plan: 'free_trial', status: 'active' },
     });

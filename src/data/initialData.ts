@@ -170,7 +170,7 @@ export const subscriptionPlans: SubscriptionPlan[] = [
   {
     id: 'starter_1m',
     name: '1-Month Plan',
-    price: 1200,
+    price: 1000,
     durationDays: 30,
     badge: '1_MONTH',
     features: ['Up to 100 Products', 'Standard Themes', 'Basic AI Tools', 'Standard Support'],
@@ -188,7 +188,7 @@ export const subscriptionPlans: SubscriptionPlan[] = [
   {
     id: 'pro_6m',
     name: 'Pro Plan (6 Months)',
-    price: 5500,
+    price: 5000,
     durationDays: 180,
     badge: '6_MONTHS',
     features: ['Unlimited Products', 'Premium Themes', 'Pro AI Marketing & Caption Tools', 'Priority Support'],

@@ -64,7 +64,7 @@ import {
   fetchRolePermissions,
   saveRolePermissions,
 } from './lib/adminTeamApi';
-import { fetchPlans, savePlan, deletePlan } from './lib/plansApi';
+import { fetchPlans, ensurePlansSeeded, savePlan, deletePlan } from './lib/plansApi';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -1018,14 +1018,21 @@ export default function App() {
       if (!active) return;
 
       // 9. Subscription-plan catalogue. This is the SINGLE source of truth for
-      // both the admin configurator and the merchant selection modal. When the
-      // database is empty we seed it with the default catalogue so subsequent
-      // admin edits persist.
-      const dbPlans = await fetchPlans();
+      // both the admin configurator and the merchant selection modal, served by
+      // the dual-database `/api/subscriptions` endpoint (Supabase → MongoDB).
+      // When both stores are empty we auto-seed the default catalogue so the
+      // merchant modal always has live, editable plans.
+      let dbPlans = await fetchPlans();
+      if (dbPlans.length === 0) {
+        // Server-side auto-init (creates the collection/table defaults).
+        await ensurePlansSeeded();
+        dbPlans = await fetchPlans();
+      }
       if (active) {
         if (dbPlans.length > 0) {
           setPlatformPlans(dbPlans.filter(p => p.isActive !== false));
         } else {
+          // Last-resort local seed (offline / no backend).
           for (const plan of subscriptionPlans) void savePlan(plan);
         }
       }

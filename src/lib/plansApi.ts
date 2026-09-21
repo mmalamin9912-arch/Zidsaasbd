@@ -3,8 +3,10 @@
  *
  * The plan catalogue is the SINGLE source of truth for both the Super Admin
  * "Subscription Plans Configurator" and the merchant "Subscription Plans"
- * selection modal. It is persisted Supabase-first with a MongoDB fallback via
- * the `/api/admin/subscription-plans` routes (see lib/supabaseAdminCRUD.ts).
+ * selection modal. It is served by the dual-database endpoint
+ * `/api/subscriptions` (Supabase-first with an automatic MongoDB fallback and
+ * auto-seeding — see lib/subscriptionStore.ts), so a price/feature change made
+ * by the admin is reflected on the merchant dashboard in real time.
  *
  * Every function is defensive: a network/parse failure resolves to a
  * null/empty result rather than throwing, so a render never breaks.
@@ -51,15 +53,54 @@ export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan 
   };
 }
 
-/** Load the live plan catalogue from Supabase + MongoDB. */
+/**
+ * Load the live plan catalogue.
+ *
+ * Primary source is `/api/subscriptions`, which reads Supabase first and
+ * transparently falls back to MongoDB (and auto-seeds defaults), so it ALWAYS
+ * answers 200 with a plan list — the merchant modal therefore never crashes on
+ * a missing Supabase table (PGRST205). `/api/subscription-plans` is kept as a
+ * secondary source for older deployments.
+ */
 export async function fetchPlans(): Promise<SubscriptionPlan[]> {
+  const map = (rows: ApiPlanRow[] | undefined) =>
+    (Array.isArray(rows) ? rows : []).map(mapApiPlanToSubscriptionPlan).filter(p => p.id);
+
+  // 1. Dual-database endpoint (Supabase → MongoDB fallback + auto-seed).
+  try {
+    const res = await fetch('/api/subscriptions?type=plans', { headers: { Accept: 'application/json' } });
+    const data = await safeJson<{ ok: boolean; plans: ApiPlanRow[] }>(res);
+    const plans = map(data?.plans);
+    if (plans.length > 0) return plans;
+  } catch (err) {
+    console.warn('[plansApi] fetchPlans (/api/subscriptions) failed:', err);
+  }
+
+  // 2. Legacy catalogue endpoint as a secondary source.
   try {
     const res = await fetch('/api/subscription-plans', { headers: { Accept: 'application/json' } });
     const data = await safeJson<{ ok: boolean; plans: ApiPlanRow[] }>(res);
-    if (!Array.isArray(data?.plans)) return [];
-    return data.plans.map(mapApiPlanToSubscriptionPlan).filter(p => p.id);
+    return map(data?.plans);
   } catch (err) {
-    console.warn('[plansApi] fetchPlans failed:', err);
+    console.warn('[plansApi] fetchPlans (/api/subscription-plans) failed:', err);
+    return [];
+  }
+}
+
+/**
+ * Ask the backend to auto-create the default plan catalogue when the store is
+ * empty. Idempotent — an already-populated store is left untouched.
+ */
+export async function ensurePlansSeeded(): Promise<ApiPlanRow[]> {
+  try {
+    const res = await fetch('/api/subscription/seed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const data = await safeJson<{ ok: boolean; plans: ApiPlanRow[] }>(res);
+    return Array.isArray(data?.plans) ? data.plans : [];
+  } catch (err) {
+    console.warn('[plansApi] ensurePlansSeeded failed:', err);
     return [];
   }
 }
@@ -71,22 +112,39 @@ export async function savePlan(plan: SubscriptionPlan): Promise<boolean> {
       slug: plan.id,
       id: plan.id,
       plan_id: plan.id,
+      plan_name: plan.name,
       name: plan.name,
+      price_bdt: plan.price,
       priceBDT: plan.price,
       price: plan.price,
+      duration_days: plan.durationDays,
       durationDays: plan.durationDays,
+      badge_text: plan.badge,
       badge: plan.badge,
       features: plan.features,
+      is_active: plan.isActive !== false,
       isActive: plan.isActive !== false,
+      is_popular: Boolean(plan.isPopular),
       isPopular: Boolean(plan.isPopular),
     };
-    const res = await fetch('/api/admin/subscription-plans', {
+    // Save through the dual-database endpoint so the write survives a missing
+    // Supabase table (it falls back to the MongoDB `subscriptions` collection).
+    const res = await fetch('/api/subscriptions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     const data = await safeJson<{ ok: boolean }>(res);
-    return Boolean(data?.ok);
+    if (data?.ok) return true;
+
+    // Secondary: the admin catalogue endpoint.
+    const adminRes = await fetch('/api/admin/subscription-plans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const adminData = await safeJson<{ ok: boolean }>(adminRes);
+    return Boolean(adminData?.ok);
   } catch (err) {
     console.warn('[plansApi] savePlan failed:', err);
     return false;
@@ -105,4 +163,4 @@ export async function deletePlan(id: string): Promise<boolean> {
   }
 }
 
-export default { fetchPlans, savePlan, deletePlan, mapApiPlanToSubscriptionPlan };
+export default { fetchPlans, ensurePlansSeeded, savePlan, deletePlan, mapApiPlanToSubscriptionPlan };
