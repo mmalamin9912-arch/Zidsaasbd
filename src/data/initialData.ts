@@ -343,74 +343,10 @@ export const initialAllMerchants: MerchantProfile[] = [];
 export const initialPendingSubscriptions: SubscriptionRequest[] = [];
 
 export const initialThemePurchaseRequests: ThemePurchaseRequest[] = [];
-export const initialSupportTickets: SupportTicket[] = [
-  {
-    id: 'ticket-1',
-    storeName: 'Dhaka Gadget Hub',
-    merchantEmail: 'admin@dhakagadget.com',
-    subject: 'Payment Gateway Setup Help',
-    category: 'Technical',
-    priority: 'High',
-    status: 'Open',
-    createdAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-    messages: [
-      {
-        id: 'msg-1',
-        sender: 'merchant',
-        message: 'I am having trouble setting up the bKash payment gateway. It keeps showing an error during verification.',
-        timestamp: new Date(Date.now() - 3600000 * 2).toISOString()
-      }
-    ]
-  },
-  {
-    id: 'ticket-2',
-    storeName: 'Chittagong Fashion House',
-    merchantEmail: 'contact@ctgfashion.com',
-    subject: 'Custom Domain Not Connecting',
-    category: 'Technical',
-    priority: 'Medium',
-    status: 'In Progress',
-    createdAt: new Date(Date.now() - 86400000).toISOString(),
-    messages: [
-      {
-        id: 'msg-2',
-        sender: 'merchant',
-        message: 'I added my custom domain ctgfashion.com but it is still showing the zid subdomain.',
-        timestamp: new Date(Date.now() - 86400000).toISOString()
-      },
-      {
-        id: 'msg-3',
-        sender: 'admin',
-        message: 'Hello! Please ensure you have pointed the A record to our server IP 159.223.170.211. DNS propagation can take up to 24 hours.',
-        timestamp: new Date(Date.now() - 3600000 * 12).toISOString()
-      }
-    ]
-  },
-  {
-    id: 'ticket-3',
-    storeName: 'Sylhet Organic Foods',
-    merchantEmail: 'info@sylhetorganic.com',
-    subject: 'Theme Color Customization',
-    category: 'General',
-    priority: 'Low',
-    status: 'Resolved',
-    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-    messages: [
-      {
-        id: 'msg-4',
-        sender: 'merchant',
-        message: 'Can I change the primary color of the "Luxury Boutique" theme?',
-        timestamp: new Date(Date.now() - 86400000 * 3).toISOString()
-      },
-      {
-        id: 'msg-5',
-        sender: 'admin',
-        message: 'Yes, you can go to Store -> Themes -> Customize to change the primary and secondary colors.',
-        timestamp: new Date(Date.now() - 86400000 * 2).toISOString()
-      }
-    ]
-  }
-];
+// No mock support tickets. Tickets are sourced from real merchant submissions
+// in Supabase/MongoDB; an empty array renders the clean "No tickets found"
+// empty state until a real ticket arrives.
+export const initialSupportTickets: SupportTicket[] = [];
 export const initialPlatformAddons: PlatformAddon[] = [
   {
     id: 'addon-1',
@@ -527,6 +463,8 @@ export const initialAutomationSettings: PlatformAutomationSettings = {
   merchantSuspensionAlert: true
 };
 
+// Only the real, seeded platform administrator remains. The previous mock
+// members (Sara Khan, Tanvir Hossain) were removed from the platform.
 export const initialAdminTeam: AdminTeamMember[] = [
   {
     id: 'adm-1',
@@ -535,22 +473,6 @@ export const initialAdminTeam: AdminTeamMember[] = [
     role: 'Super Admin',
     lastActive: new Date().toISOString(),
     status: 'Active'
-  },
-  {
-    id: 'adm-2',
-    fullName: 'Sara Khan',
-    email: 'sara.support@zid.com',
-    role: 'Support Lead',
-    lastActive: new Date(Date.now() - 3600000).toISOString(),
-    status: 'Active'
-  },
-  {
-    id: 'adm-3',
-    fullName: 'Tanvir Hossain',
-    email: 'tanvir.finance@zid.com',
-    role: 'Finance Admin',
-    lastActive: new Date(Date.now() - 86400000).toISOString(),
-    status: 'Inactive'
   }
 ];
 

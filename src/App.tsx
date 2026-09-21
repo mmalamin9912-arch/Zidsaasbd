@@ -57,6 +57,13 @@ import {
   fetchAnnouncement,
   saveAnnouncement,
 } from './lib/supportCommsApi';
+import {
+  fetchAdminTeam,
+  saveAdminMember,
+  deleteAdminMember,
+  fetchRolePermissions,
+  saveRolePermissions,
+} from './lib/adminTeamApi';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -989,8 +996,73 @@ export default function App() {
       if (active && announcement && typeof announcement === 'object') {
         setPlatformAnnouncement((prev: any) => ({ ...prev, ...announcement }));
       }
+
+      if (!active) return;
+
+      // 7. Admin team roster. When the database is empty we keep the seeded
+      // roster (the single real System Administrator).
+      const team = await fetchAdminTeam();
+      if (active && team.length > 0) {
+        setAdminTeam(team);
+      }
+
+      if (!active) return;
+
+      // 8. Role→tab permission matrix.
+      const roles = await fetchRolePermissions();
+      if (active && roles.length > 0) {
+        setRolePermissions(roles);
+      }
     })();
     return () => { active = false; };
+  }, []);
+
+  // ── One-time cleanup of removed mock data ───────────────────
+  // Earlier builds shipped mock support tickets (Dhaka Gadget Hub, Chittagong
+  // Fashion House, Sylhet Organic Foods) and mock admin members (Sara Khan,
+  // Tanvir Hossain) that a returning browser may still hold in localStorage.
+  // Purge those stale records once and delete the members from the database.
+  React.useEffect(() => {
+    const MOCK_TICKET_IDS = ['ticket-1', 'ticket-2', 'ticket-3'];
+    const REMOVED_MEMBER_EMAILS = ['sara.support@zid.com', 'tanvir.finance@zid.com'];
+    const REMOVED_MEMBER_IDS = ['adm-2', 'adm-3'];
+
+    try {
+      const savedTickets = localStorage.getItem('ZID_SUPPORT_TICKETS');
+      if (savedTickets) {
+        const parsed = JSON.parse(savedTickets);
+        if (Array.isArray(parsed)) {
+          const cleaned = parsed.filter((t: any) => !MOCK_TICKET_IDS.includes(String(t?.id)));
+          localStorage.setItem('ZID_SUPPORT_TICKETS', JSON.stringify(cleaned));
+          setSupportTickets(prev => prev.filter(t => !MOCK_TICKET_IDS.includes(String(t?.id))));
+        }
+      }
+
+      const savedTeam = localStorage.getItem('ZID_ADMIN_TEAM');
+      if (savedTeam) {
+        const parsed = JSON.parse(savedTeam);
+        if (Array.isArray(parsed)) {
+          const cleaned = parsed.filter(
+            (m: any) =>
+              !REMOVED_MEMBER_IDS.includes(String(m?.id)) &&
+              !REMOVED_MEMBER_EMAILS.includes(String(m?.email || '').toLowerCase())
+          );
+          localStorage.setItem('ZID_ADMIN_TEAM', JSON.stringify(cleaned));
+          setAdminTeam(prev => prev.filter(
+            m =>
+              !REMOVED_MEMBER_IDS.includes(String(m?.id)) &&
+              !REMOVED_MEMBER_EMAILS.includes(String(m?.email || '').toLowerCase())
+          ));
+        }
+      }
+    } catch (e) {
+      console.warn('[App] mock-data cleanup skipped:', e);
+    }
+
+    // Delete the removed members from Supabase/MongoDB (idempotent).
+    for (const id of REMOVED_MEMBER_IDS) {
+      void deleteAdminMember(id);
+    }
   }, []);
 
   // ── Persist Super Admin platform configuration to the database ──────────────
@@ -1187,6 +1259,37 @@ export default function App() {
       return initialRolePermissions;
     }
   });
+
+  /** Admin team: update local state then write the changed member(s) to the DB. */
+  const adminTeamRef = React.useRef<AdminTeamMember[]>([]);
+  const handleUpdateAdminTeam = useCallback((updater: React.SetStateAction<AdminTeamMember[]>) => {
+    const prev = adminTeamRef.current;
+    const next = typeof updater === 'function' ? (updater as (p: AdminTeamMember[]) => AdminTeamMember[])(prev) : updater;
+    adminTeamRef.current = next;
+    setAdminTeam(next);
+
+    const prevById = new Map(prev.map(m => [m.id, m] as const));
+    for (const member of next) {
+      const before = prevById.get(member.id);
+      if (!before || before !== member) void saveAdminMember(member);
+    }
+    // Members removed in this update are deleted from the database.
+    const nextIds = new Set(next.map(m => m.id));
+    for (const member of prev) {
+      if (!nextIds.has(member.id)) void deleteAdminMember(member.id);
+    }
+  }, []);
+
+  /** Role permissions: persist the whole matrix to the DB on every change. */
+  const handleUpdateRolePermissions = useCallback((updater: React.SetStateAction<AdminRolePermission[]>) => {
+    setRolePermissions(prev => {
+      const next = typeof updater === 'function' ? (updater as (p: AdminRolePermission[]) => AdminRolePermission[])(prev) : updater;
+      void saveRolePermissions(next);
+      return next;
+    });
+  }, []);
+
+  adminTeamRef.current = adminTeam;
 
   // Keep admin configurations persisted when modified
   React.useEffect(() => {
@@ -1616,9 +1719,9 @@ export default function App() {
         automationSettings={automationSettings}
         onUpdateAutomationSettings={handleUpdateAutomationSettings}
         adminTeam={adminTeam}
-        onUpdateAdminTeam={setAdminTeam}
+        onUpdateAdminTeam={handleUpdateAdminTeam}
         rolePermissions={rolePermissions}
-        onUpdateRolePermissions={setRolePermissions}
+        onUpdateRolePermissions={handleUpdateRolePermissions}
       />
     );
   }

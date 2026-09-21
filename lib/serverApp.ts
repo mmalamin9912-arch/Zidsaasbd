@@ -65,6 +65,13 @@ import {
   readAnnouncement,
   writeAnnouncement,
 } from './supportComms.js';
+import {
+  readAdminTeam,
+  writeAdminMember,
+  deleteAdminMember,
+  readRolePermissions,
+  writeRolePermissions,
+} from './adminTeamConfig.js';
 import { generateFaqFromPolicies } from './faqGenerator.js';
 import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
 
@@ -1216,6 +1223,130 @@ app.post('/api/admin/announcement', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] POST /api/admin/announcement error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Could not save notice banner.' });
+  }
+});
+
+// ── Admin Team Members (Supabase-first, MongoDB fallback) ────────────────────
+//   GET    /api/admin/team      — list admin team members.
+//   POST   /api/admin/team      — upsert one member.
+//   DELETE /api/admin/team/:id  — delete a member from both providers.
+app.get('/api/admin/team', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await readAdminTeam();
+    return res.status(200).json({
+      ok: true,
+      team: result.data || [],
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/team error:', err);
+    return res.status(200).json({ ok: false, team: [], sources: [], error: err?.message || 'Could not load admin team.' });
+  }
+});
+
+app.post('/api/admin/team', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const member = body.member && typeof body.member === 'object' ? body.member : body;
+    if (!member || !member.email) {
+      return res.status(200).json({ ok: false, error: 'A team member with an email is required.' });
+    }
+    const result = await writeAdminMember(member);
+
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: `Saved admin team member ${member.fullName || member.email}`,
+      targetEntity: 'admin_team',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Info',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      member: result.data,
+      sources: result.sources,
+      message: result.ok ? 'Team member saved.' : (result.error || 'Could not save team member.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/team error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save team member.' });
+  }
+});
+
+app.delete('/api/admin/team/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, error: 'Member id is required.' });
+    const result = await deleteAdminMember(id);
+
+    void appendAuditLog({
+      adminUser: 'Super Admin',
+      action: `Removed admin team member ${id}`,
+      targetEntity: 'admin_team',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Warning',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      sources: result.sources,
+      message: result.ok ? 'Team member removed.' : (result.error || 'Could not remove team member.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/admin/team/:id error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not remove team member.' });
+  }
+});
+
+// ── Admin Role Permissions (Supabase-first, MongoDB fallback) ────────────────
+//   GET  /api/admin/role-permissions — read the role→allowedTabs matrix.
+//   POST /api/admin/role-permissions — persist the matrix to both providers.
+app.get('/api/admin/role-permissions', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await readRolePermissions();
+    return res.status(200).json({
+      ok: true,
+      roles: result.data || [],
+      sources: result.sources,
+      diagnostics: result.diagnostics,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/role-permissions error:', err);
+    return res.status(200).json({ ok: false, roles: [], sources: [], error: err?.message || 'Could not load role permissions.' });
+  }
+});
+
+app.post('/api/admin/role-permissions', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const roles = Array.isArray(body.roles) ? body.roles : (Array.isArray(body) ? body : []);
+    const result = await writeRolePermissions(roles);
+
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: 'Updated role permissions matrix',
+      targetEntity: 'role_permissions',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Warning',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      roles: result.data,
+      sources: result.sources,
+      message: result.ok ? 'Role permissions saved.' : (result.error || 'Could not save role permissions.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/role-permissions error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save role permissions.' });
   }
 });
 

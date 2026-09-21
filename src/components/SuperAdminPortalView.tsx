@@ -385,6 +385,15 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     onUpdateAdminTeam(prev => prev.map(m => m.id === id ? { ...m, status: m.status === 'Active' ? 'Inactive' : 'Active' } : m));
   };
 
+  // Permanently remove a team member. The parent's onUpdateAdminTeam diffs the
+  // list and deletes the removed member from Supabase/MongoDB.
+  const handleRemoveMember = (member: AdminTeamMember) => {
+    if (!window.confirm(`Remove ${member.fullName || member.email} from the admin team? This deletes the record from the database.`)) return;
+    onUpdateAdminTeam(prev => prev.filter(m => m.id !== member.id));
+    setSaveSuccess(`${member.fullName || member.email} removed from the team.`);
+    setTimeout(() => setSaveSuccess(null), 3000);
+  };
+
   const handleTogglePermission = (role: string, tabId: string) => {
     onUpdateRolePermissions(prev => prev.map(rp => {
       if (rp.role === role) {
@@ -1662,6 +1671,10 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         {(() => {
           const pendingApprovalsCount = pendingRequests.filter(r => r.status === 'pending').length;
           const unresolvedSupportCount = supportTickets.filter(t => t.status !== 'Resolved').length;
+          // Real registered-merchant count from Supabase/MongoDB (the server's
+          // `counts.all` totals the FULL set before status/search filtering).
+          // Falls back to the in-memory merchant list before the request resolves.
+          const totalMerchantAccounts = merchantCounts.all || allMerchants.length;
 
           type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team';
 
@@ -1687,7 +1700,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
               icon: DollarSign,
               items: [
                 { id: 'analytics', label: 'Global Analytics & Sales', icon: DollarSign },
-                { id: 'merchants', label: `Merchant Accounts (${allMerchants.length})`, icon: Users },
+                { id: 'merchants', label: `Merchant Accounts (${totalMerchantAccounts})`, icon: Users },
                 { id: 'approvals', label: 'Pending Subscriptions', icon: Clock, badge: pendingApprovalsCount, badgeColor: 'bg-amber-500 text-slate-950 font-black' },
               ]
             },
@@ -3601,12 +3614,21 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                           <td className="p-4 text-[10px] text-slate-400 font-bold uppercase tracking-wider">
                             {member.lastActive !== 'Never' ? new Date(member.lastActive).toLocaleString() : 'Never'}
                           </td>
-                          <td className="p-4 text-right">
-                            <div
-                              className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ml-auto ${member.status === 'Active' ? 'bg-emerald-600' : 'bg-slate-700'}`}
-                              onClick={() => toggleMemberStatus(member.id)}
-                            >
-                              <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${member.status === 'Active' ? 'left-5' : 'left-1'}`} />
+                          <td className="p-4">
+                            <div className="flex items-center justify-end gap-3">
+                              <div
+                                className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${member.status === 'Active' ? 'bg-emerald-600' : 'bg-slate-700'}`}
+                                onClick={() => toggleMemberStatus(member.id)}
+                              >
+                                <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${member.status === 'Active' ? 'left-5' : 'left-1'}`} />
+                              </div>
+                              <button
+                                onClick={() => handleRemoveMember(member)}
+                                title="Remove team member"
+                                className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition cursor-pointer"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -4418,8 +4440,19 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
                           <div className="w-16 h-16 bg-[#202533] rounded-3xl flex items-center justify-center mx-auto text-slate-600 mb-4 shadow-inner">
                             <LifeBuoy className="w-8 h-8" />
                           </div>
-                          <div className="text-white font-bold text-sm">No tickets found</div>
-                          <p className="text-[10px] text-slate-500 uppercase mt-2 tracking-widest font-black">Try adjusting your filters or search query</p>
+                          {supportTickets.length === 0 ? (
+                            <>
+                              <div className="text-white font-bold text-sm">No active support tickets</div>
+                              <p className="text-[10px] text-slate-500 uppercase mt-2 tracking-widest font-black">
+                                New tickets from merchants will appear here automatically
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <div className="text-white font-bold text-sm">No tickets found</div>
+                              <p className="text-[10px] text-slate-500 uppercase mt-2 tracking-widest font-black">Try adjusting your filters or search query</p>
+                            </>
+                          )}
                         </td>
                       </tr>
                     )}
