@@ -733,6 +733,44 @@ app.get('/api/admin/analytics', async (req, res) => {
   }
 });
 
+// ── Public Subscription Plans (read-only, for the merchant dashboard) ────────
+// GET /api/subscription-plans — the SAME live catalogue the admin configures,
+// surfaced to merchants so plan prices/names/badges stay in lock-step with the
+// admin configurator in real time. Read-only; never writes.
+app.get('/api/subscription-plans', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const plans = await fetchHybridPlans();
+    const normalized = plans.data
+      .map((plan: Record<string, any>) => {
+        const id = String(pick(plan, ['plan_id', 'planId', 'slug', 'id', 'code']) || '').toLowerCase();
+        return {
+          id,
+          name: String(pick(plan, ['name', 'plan_name', 'planName', 'title', 'label']) || id || 'Plan'),
+          priceBDT: toNumber(pick(plan, ['priceBDT', 'price_bdt', 'price', 'amountBDT', 'amount']), 0),
+          durationDays: toNumber(pick(plan, ['durationDays', 'duration_days', 'duration', 'days']), 0),
+          isActive: pick(plan, ['isActive', 'is_active', 'active', 'enabled']) !== false,
+          badge: String(pick(plan, ['badge', 'tag']) || id || ''),
+          isPopular: pick(plan, ['isPopular', 'is_popular', 'popular']) === true,
+          features: Array.isArray(plan.features) ? plan.features : [],
+          maxProducts: toNumber(pick(plan, ['maxProducts', 'max_products', 'productLimit', 'product_limit']), 0),
+        };
+      })
+      .filter((plan: Record<string, any>) => Boolean(plan.id));
+
+    return res.status(200).json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      sources: plans.sources,
+      counts: { plans: normalized.length },
+      plans: normalized,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/subscription-plans error:', err);
+    return res.status(200).json({ ok: false, plans: [], error: err?.message || 'Could not load subscription plans.' });
+  }
+});
+
 // ── Admin Subscription Plans (Supabase-first, MongoDB fallback) ──────────────
 // GET    /api/admin/subscription-plans — catalog merged from Supabase
 //        `subscription_plans` (primary) + MongoDB `subscription_plans`/`plans`.
@@ -752,6 +790,8 @@ app.get('/api/admin/subscription-plans', async (_req, res) => {
         priceBDT: toNumber(pick(plan, ['priceBDT', 'price_bdt', 'price', 'amountBDT', 'amount']), 0),
         durationDays: toNumber(pick(plan, ['durationDays', 'duration_days', 'duration', 'days']), 0),
         isActive: pick(plan, ['isActive', 'is_active', 'active', 'enabled']) !== false,
+        badge: String(pick(plan, ['badge', 'tag']) || id || ''),
+        isPopular: pick(plan, ['isPopular', 'is_popular', 'popular']) === true,
         maxProducts: toNumber(pick(plan, ['maxProducts', 'max_products', 'productLimit', 'product_limit']), 0),
         features: Array.isArray(plan.features) ? plan.features : [],
         source: plan._source || 'unknown',

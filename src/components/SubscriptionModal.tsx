@@ -27,6 +27,12 @@ interface SubscriptionModalProps {
   onConfirmSubscription: (planId: string, paymentMethod: string, txId: string) => void;
   adminPaymentConfig: AdminPaymentGatewayConfig;
   initialPlanId?: string;
+  /**
+   * Live plan catalogue configured by the Super Admin (Supabase/MongoDB).
+   * When omitted the fallback catalogue is used, but the dashboard always
+   * passes the database-backed list so admin price edits reflect in real time.
+   */
+  plans?: SubscriptionPlan[];
 }
 
 export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
@@ -37,7 +43,11 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   onConfirmSubscription,
   adminPaymentConfig,
   initialPlanId,
+  plans,
 }) => {
+  // The live catalogue from the DB; falls back to the default seed only when the
+  // admin catalogue has not loaded yet.
+  const planList = plans && plans.length > 0 ? plans : subscriptionPlans;
   const [selectedPlanId, setSelectedPlanId] = useState<string>(initialPlanId || 'pro_6m');
   const [step, setStep] = useState<'select' | 'payment' | 'invoice'>(initialPlanId && initialPlanId !== 'free_trial' ? 'payment' : 'select');
   const [adminPaymentMethod, setAdminPaymentMethod] = useState<string>('');
@@ -46,16 +56,21 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   // Auto-select first active payment method
   React.useEffect(() => {
     if (isOpen) {
+      // Prefer the current plan list's own "popular" plan, then its first entry,
+      // so a DB-configured catalogue with different ids still selects correctly.
+      const fallbackPlanId =
+        planList.find((p) => p.isPopular)?.id || planList[0]?.id || 'pro_6m';
       if (initialPlanId) {
         setSelectedPlanId(initialPlanId);
         setStep(initialPlanId !== 'free_trial' ? 'payment' : 'select');
       } else {
-        setSelectedPlanId('pro_6m');
+        setSelectedPlanId(fallbackPlanId);
         setStep('select');
       }
       setTransactionId('');
       setIsSubmitting(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialPlanId]);
 
   React.useEffect(() => {
@@ -73,7 +88,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
 
   if (!isOpen) return null;
 
-  const currentPlan = subscriptionPlans.find((p) => p.id === selectedPlanId) || subscriptionPlans[1];
+  const currentPlan = planList.find((p) => p.id === selectedPlanId) || planList[0];
 
   const handleCopy = (text: string, fieldName: string) => {
     navigator.clipboard.writeText(text);
@@ -189,7 +204,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
 
               {/* Plans Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-                {subscriptionPlans.map((plan) => {
+                {planList.map((plan) => {
                   const isSelected = selectedPlanId === plan.id;
                   return (
                     <div

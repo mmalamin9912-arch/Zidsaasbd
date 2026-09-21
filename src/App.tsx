@@ -64,6 +64,7 @@ import {
   fetchRolePermissions,
   saveRolePermissions,
 } from './lib/adminTeamApi';
+import { fetchPlans, savePlan, deletePlan } from './lib/plansApi';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -1013,6 +1014,21 @@ export default function App() {
       if (active && roles.length > 0) {
         setRolePermissions(roles);
       }
+
+      if (!active) return;
+
+      // 9. Subscription-plan catalogue. This is the SINGLE source of truth for
+      // both the admin configurator and the merchant selection modal. When the
+      // database is empty we seed it with the default catalogue so subsequent
+      // admin edits persist.
+      const dbPlans = await fetchPlans();
+      if (active) {
+        if (dbPlans.length > 0) {
+          setPlatformPlans(dbPlans.filter(p => p.isActive !== false));
+        } else {
+          for (const plan of subscriptionPlans) void savePlan(plan);
+        }
+      }
     })();
     return () => { active = false; };
   }, []);
@@ -1291,6 +1307,29 @@ export default function App() {
 
   adminTeamRef.current = adminTeam;
 
+  /**
+   * Subscription plans: update local state AND persist the catalogue to the
+   * database so merchant-facing plan modals reflect admin price edits live.
+   * Each changed plan is upserted; removed plans are deleted from both providers.
+   */
+  const platformPlansRef = React.useRef<SubscriptionPlan[]>([]);
+  const handleUpdatePlatformPlans = useCallback((next: SubscriptionPlan[]) => {
+    const prev = platformPlansRef.current;
+    platformPlansRef.current = next;
+    setPlatformPlans(next);
+
+    const prevById = new Map(prev.map(p => [p.id, p] as const));
+    for (const plan of next) {
+      const before = prevById.get(plan.id);
+      if (!before || before !== plan) void savePlan(plan);
+    }
+    const nextIds = new Set(next.map(p => p.id));
+    for (const plan of prev) {
+      if (!nextIds.has(plan.id)) void deletePlan(plan.id);
+    }
+  }, []);
+  platformPlansRef.current = platformPlans;
+
   // Keep admin configurations persisted when modified
   React.useEffect(() => {
     try {
@@ -1462,7 +1501,10 @@ export default function App() {
   };
 
   const handleConfirmSubscription = async (planId: string, paymentMethod: string, txId: string) => {
-    const plan = subscriptionPlans.find(p => p.id === planId) || subscriptionPlans[1];
+    // Resolve the plan from the LIVE database-backed catalogue so the recorded
+    // amount/name match exactly what the merchant saw in the plan modal.
+    const catalogue = platformPlans.length > 0 ? platformPlans : subscriptionPlans;
+    const plan = catalogue.find(p => p.id === planId) || catalogue[0];
 
     // Calculate exact start and expiry timestamps dynamically based on chosen plan
     const { plan_started_at, expires_at, expiryDate, durationDays } = calculatePlanTimestamps(planId, new Date());
@@ -1703,7 +1745,7 @@ export default function App() {
         platformAnnouncement={platformAnnouncement}
         onUpdatePlatformAnnouncement={handleUpdatePlatformAnnouncement}
         platformPlans={platformPlans}
-        onUpdatePlatformPlans={setPlatformPlans}
+        onUpdatePlatformPlans={handleUpdatePlatformPlans}
         platformThemes={platformThemes}
         onUpdatePlatformThemes={handleUpdatePlatformThemes}
         supportTickets={supportTickets}
@@ -2029,6 +2071,7 @@ export default function App() {
         onConfirmSubscription={handleConfirmSubscription}
         adminPaymentConfig={adminPaymentConfig}
         initialPlanId={localStorage.getItem('zid_intended_plan') || undefined}
+        plans={platformPlans}
       />
 
       {/* Storefront Customer Preview Drawer Modal */}

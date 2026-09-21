@@ -322,6 +322,13 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   useEffect(() => {
     setAnnouncementForm(platformAnnouncement);
   }, [platformAnnouncement]);
+
+  // The plan catalogue is hydrated from Supabase/MongoDB after mount; mirror it
+  // into the configurator form so admin edits are made against the live data.
+  useEffect(() => {
+    setPlansForm(platformPlans);
+  }, [platformPlans]);
+
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
   const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
