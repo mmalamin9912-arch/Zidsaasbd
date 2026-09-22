@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { MerchantProfile, Order, Product } from '../../types';
 import SafeImage from '../SafeImage';
+import { fetchOnboardingStatus, completeOnboardingStep } from '../../lib/onboardingApi';
+import type { OnboardingStatus } from '../../lib/onboardingApi';
 import { 
   TrendingUp, 
   ShoppingBag, 
@@ -70,27 +72,100 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const topProducts = [...products].sort((a, b) => b.salesCount - a.salesCount).slice(0, 5);
 
   // Onboarding Step State
-  const [supportPhone, setSupportPhone] = useState('');
-  const [isPhoneConfirmed, setIsPhoneConfirmed] = useState(false);
-  const [pickupLocation, setPickupLocation] = useState('');
-  const [isLocationSet, setIsLocationSet] = useState(false);
+  //
+  // These hold the VALUES a step is derived from, plus the server-computed
+  // status. The checklist is no longer driven by local booleans: a step is
+  // complete when the stored data says so, which is why the widget survives a
+  // reload instead of resetting to "Pending".
+  const storeSlug = String(merchant?.storeSlug || '').trim().toLowerCase();
+  const [supportPhone, setSupportPhone] = useState(String((merchant as any)?.phone || (merchant as any)?.supportPhone || ''));
+  const [pickupLocation, setPickupLocation] = useState(String((merchant as any)?.pickupAddress || ''));
   const [brandLogo, setBrandLogo] = useState(merchant?.logoUrl || '');
+  const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const [savingStep, setSavingStep] = useState(false);
 
   // Modal Triggers
   const [activeModal, setActiveModal] = useState<'none' | 'phone' | 'location' | 'branding'>('none');
   const [tempInput, setTempInput] = useState('');
 
+  /**
+   * Auto-check the onboarding status on dashboard load.
+   *
+   * Re-runs whenever the product count or the store slug changes, so adding a
+   * product (which updates `products` upstream) immediately recomputes the
+   * percentage and flips "Add product" to a green check.
+   */
+  const refreshOnboarding = useCallback(async (signal?: AbortSignal) => {
+    if (!storeSlug) return;
+    const status = await fetchOnboardingStatus(storeSlug, { signal });
+    if (signal?.aborted) return;
+    if (status.ok) {
+      setOnboarding(status);
+      setOnboardingError(null);
+    } else if (status.error) {
+      setOnboardingError(status.error);
+    }
+  }, [storeSlug]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    void refreshOnboarding(controller.signal);
+    return () => controller.abort();
+  }, [refreshOnboarding, products.length]);
 
+  /**
+   * Persist a step's value, then apply the recomputed status the server returns
+   * (one authoritative response, rather than a guess at the new percentage).
+   */
+  const saveStep = useCallback(async (
+    step: 'confirm_phone' | 'setup_branding' | 'pickup_point',
+    value: string
+  ) => {
+    if (!storeSlug) return;
+    setSavingStep(true);
+    try {
+      const status = await completeOnboardingStep(storeSlug, step, value);
+      if (status?.ok) {
+        setOnboarding(status);
+        setOnboardingError(null);
+      } else {
+        // Fall back to a fresh read so the UI is still truthful about progress.
+        await refreshOnboarding();
+      }
+    } finally {
+      setSavingStep(false);
+    }
+  }, [storeSlug, refreshOnboarding]);
 
-  const step1Complete = products.length > 0;
-  const step2Complete = !!brandLogo;
-  const step3Complete = isPhoneConfirmed;
-  const step4Complete = isLocationSet;
-  const step5Complete = true; // Payment bKash & Bank setup
+  // ── Step completion, derived from the SERVER status ──────────────────────
+  // The product step also falls back to the locally-loaded products list so the
+  // checklist stays correct while the status request is still in flight.
+  const stepById = useMemo(() => {
+    const map = new Map<string, { completed: boolean; detail: string }>();
+    for (const step of onboarding?.steps || []) map.set(step.id, step);
+    return map;
+  }, [onboarding]);
 
+  const serverCompleted = useCallback(
+    (id: string) => Boolean(stepById.get(id)?.completed),
+    [stepById]
+  );
+
+  const step1Complete = serverCompleted('add_product') || products.length > 0;
+  const step2Complete = serverCompleted('setup_branding') || !!brandLogo;
+  const step3Complete = serverCompleted('confirm_phone');
+  const step4Complete = serverCompleted('pickup_point');
+  const step5Complete = serverCompleted('payment_setup');
+
+  // Prefer the server's percentage (it counts all five steps); fall back to a
+  // local computation before the first response lands.
   const completedStepsCount = [step1Complete, step2Complete, step3Complete, step4Complete, step5Complete].filter(Boolean).length;
-  const onboardingPercent = Math.round((completedStepsCount / 5) * 100);
+  const onboardingPercent = onboarding?.ok
+    ? onboarding.progress
+    : Math.round((completedStepsCount / 5) * 100);
+
+  const stepDetail = (id: string, fallback: string) => stepById.get(id)?.detail || fallback;
 
   return (
     <div className="space-y-6 select-none bg-[#1C1814] p-4 sm:p-6 rounded-3xl border border-[#3E342B]/40 shadow-inner">
@@ -188,8 +263,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Onboarding Setup Checklist
               </span>
               <span className="text-xs text-slate-400 font-medium pl-1">
-                {completedStepsCount} of 5 Steps Complete ({onboardingPercent}%)
+                {completedStepsCount} of {onboarding?.totalCount ?? 5} Steps Complete ({onboardingPercent}%)
               </span>
+              {onboardingError && (
+                <span className="text-[10px] text-amber-400/80 pl-1" title={onboardingError}>
+                  · progress could not be synced
+                </span>
+              )}
             </div>
             <h2 className="text-xl font-extrabold text-[#E6C587] mt-2">Setup Your Zid Store</h2>
           </div>
@@ -229,14 +309,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
               <h3 className="font-bold text-white text-xs mb-1">Add product</h3>
               <p className="text-[11px] text-slate-400 line-clamp-2">
-                {products.length} Products listed in stock
+                {stepDetail('add_product', `${products.length} Products listed in stock`)}
               </p>
             </div>
             <button
               onClick={() => onNavigateTab('products')}
               className={`mt-3 w-full py-2 px-3 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition ${
-                step1Complete 
-                  ? 'bg-[#221D19] hover:bg-[#2E241D] text-slate-400 border border-[#3E342B]' 
+                step1Complete
+                  ? 'bg-[#221D19] hover:bg-[#2E241D] text-slate-400 border border-[#3E342B]'
                   : 'bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 border border-transparent shadow-lg shadow-[#BF953F]/10'
               }`}
             >
@@ -247,8 +327,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           {/* Step 02: Add your branding */}
           <div className={`p-4 rounded-2xl border transition-all flex flex-col justify-between ${
-            step2Complete 
-              ? 'bg-[#1C1814] border-[#D4AF37]/40' 
+            step2Complete
+              ? 'bg-[#1C1814] border-[#D4AF37]/40'
               : 'bg-[#1C1814]/60 border-amber-600/40 shadow-[0_0_15px_rgba(217,119,6,0.1)]'
           }`}>
             <div>
@@ -264,7 +344,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
               <h3 className="font-bold text-white text-xs mb-1">Store Branding</h3>
               <p className="text-[11px] text-slate-400 line-clamp-2">
-                Logo, theme color & banners set
+                {stepDetail('setup_branding', 'Logo, theme color & banners set')}
               </p>
             </div>
             <button
@@ -273,8 +353,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 setActiveModal('branding');
               }}
               className={`mt-3 w-full py-2 px-3 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition ${
-                step2Complete 
-                  ? 'bg-[#221D19] hover:bg-[#2E241D] text-slate-400 border border-[#3E342B]' 
+                step2Complete
+                  ? 'bg-[#221D19] hover:bg-[#2E241D] text-slate-400 border border-[#3E342B]'
                   : 'bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 border border-transparent shadow-lg shadow-[#BF953F]/10'
               }`}
             >
@@ -285,8 +365,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           {/* Step 03: Confirm support phone number */}
           <div className={`p-4 rounded-2xl border transition-all flex flex-col justify-between ${
-            step3Complete 
-              ? 'bg-[#1C1814] border-[#D4AF37]/40' 
+            step3Complete
+              ? 'bg-[#1C1814] border-[#D4AF37]/40'
               : 'bg-[#1C1814]/60 border-amber-600/40 shadow-[0_0_15px_rgba(217,119,6,0.1)]'
           }`}>
             <div>
@@ -302,7 +382,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
               <h3 className="font-bold text-white text-xs mb-1">Support Contact</h3>
               <p className="text-[11px] text-slate-400 truncate">
-                {supportPhone || 'Contact not set'}
+                {stepDetail('confirm_phone', supportPhone || 'Contact not set')}
               </p>
             </div>
             <button
@@ -311,8 +391,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 setActiveModal('phone');
               }}
               className={`mt-3 w-full py-2 px-3 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition ${
-                step3Complete 
-                  ? 'bg-[#221D19] hover:bg-[#2E241D] text-slate-400 border border-[#3E342B]' 
+                step3Complete
+                  ? 'bg-[#221D19] hover:bg-[#2E241D] text-slate-400 border border-[#3E342B]'
                   : 'bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 border border-transparent shadow-lg shadow-[#BF953F]/10'
               }`}
             >
@@ -323,8 +403,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           {/* Step 04: Set pickup location */}
           <div className={`p-4 rounded-2xl border transition-all flex flex-col justify-between ${
-            step4Complete 
-              ? 'bg-[#1C1814] border-[#D4AF37]/40' 
+            step4Complete
+              ? 'bg-[#1C1814] border-[#D4AF37]/40'
               : 'bg-[#1C1814]/60 border-amber-600/40 shadow-[0_0_15px_rgba(217,119,6,0.1)]'
           }`}>
             <div>
@@ -340,7 +420,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
               <h3 className="font-bold text-white text-xs mb-1">Pickup Point</h3>
               <p className="text-[11px] text-slate-400 truncate">
-                {pickupLocation || 'Location not set'}
+                {stepDetail('pickup_point', pickupLocation || 'Location not set')}
               </p>
             </div>
             <button
@@ -378,7 +458,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
               <h3 className="font-bold text-white text-xs mb-1">Payment & Finance</h3>
               <p className="text-[11px] text-slate-400 line-clamp-2">
-                bKash, Bank & Domain
+                {stepDetail('payment_setup', 'bKash, Bank & Domain')}
               </p>
             </div>
             <button
@@ -620,15 +700,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Cancel
               </button>
               <button 
-                onClick={() => {
-                  setSupportPhone(tempInput || '');
-                  setIsPhoneConfirmed(true);
+                onClick={async () => {
+                  const phone = tempInput || '';
+                  setSupportPhone(phone);
                   setActiveModal('none');
-                }} 
-                className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1"
+                  // Persist the value, then apply the recomputed checklist.
+                  await saveStep('confirm_phone', phone);
+                }}
+                disabled={savingStep}
+                className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1 disabled:opacity-60"
               >
                 <Check className="w-4 h-4" />
-                <span>Confirm Phone</span>
+                <span>{savingStep ? 'Saving…' : 'Confirm Phone'}</span>
               </button>
             </div>
           </div>
@@ -662,22 +745,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               />
             </div>
             <div className="flex justify-end gap-2">
-              <button 
-                onClick={() => setActiveModal('none')} 
+              <button
+                onClick={() => setActiveModal('none')}
                 className="px-4 py-2 bg-[#1C1814] text-slate-300 rounded-xl text-xs font-bold border border-[#3E342B]"
               >
                 Cancel
               </button>
-              <button 
-                onClick={() => {
-                  setPickupLocation(tempInput || '');
-                  setIsLocationSet(true);
+              <button
+                onClick={async () => {
+                  const location = tempInput || '';
+                  setPickupLocation(location);
                   setActiveModal('none');
-                }} 
-                className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1"
+                  await saveStep('pickup_point', location);
+                }}
+                disabled={savingStep}
+                className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1 disabled:opacity-60"
               >
                 <Check className="w-4 h-4" />
-                <span>Save Location</span>
+                <span>{savingStep ? 'Saving…' : 'Save Location'}</span>
               </button>
             </div>
           </div>
@@ -719,21 +804,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               )}
             </div>
             <div className="flex justify-end gap-2">
-              <button 
-                onClick={() => setActiveModal('none')} 
+              <button
+                onClick={() => setActiveModal('none')}
                 className="px-4 py-2 bg-[#1C1814] text-slate-300 rounded-xl text-xs font-bold border border-[#3E342B]"
               >
                 Cancel
               </button>
-              <button 
-                onClick={() => {
-                  setBrandLogo(tempInput || '');
+              <button
+                onClick={async () => {
+                  const logo = tempInput || '';
+                  setBrandLogo(logo);
                   setActiveModal('none');
-                }} 
-                className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1"
+                  await saveStep('setup_branding', logo);
+                }}
+                disabled={savingStep}
+                className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1 disabled:opacity-60"
               >
                 <Check className="w-4 h-4" />
-                <span>Save Branding</span>
+                <span>{savingStep ? 'Saving…' : 'Save Branding'}</span>
               </button>
             </div>
           </div>

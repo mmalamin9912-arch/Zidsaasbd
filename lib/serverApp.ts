@@ -48,6 +48,8 @@ import {
 import { pick, toNumber } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
 import { writeSubscription, listSubscriptions, listSubscriptionPlans, deleteSubscription, ensureSubscriptionSeed } from './subscriptionStore.js';
+import { checkOnboardingStatus, ONBOARDING_STEP_IDS } from './onboarding.js';
+import type { OnboardingStepId } from './onboarding.js';
 import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
 import { authenticateMerchant, emailHasStore } from './authService.js';
 import {
@@ -2501,7 +2503,29 @@ app.post('/api/products', async (req, res) => {
       }
     }
 
-    return res.status(200).json({ ok: true, success: true, product });
+    // 5. Onboarding trigger: a store with >= 1 product has satisfied "Add
+    //    product". Recompute + stamp the status so the dashboard checklist and
+    //    the admin table both flip immediately. Best-effort — the product is
+    //    already saved, so a stamping failure must not fail the create.
+    try {
+      const stored = await checkOnboardingStatus(store_slug, { persist: true });
+      const addProduct = stored.steps.find((s) => s.id === 'add_product');
+      return res.status(200).json({
+        ok: true,
+        success: true,
+        product,
+        onboarding: {
+          progress: stored.progress,
+          completedCount: stored.completedCount,
+          totalCount: stored.totalCount,
+          steps: stored.steps,
+          addProductCompleted: Boolean(addProduct?.completed),
+        },
+      });
+    } catch (onbErr: any) {
+      console.warn('[Server] product onboarding stamp warning:', onbErr?.message || onbErr);
+      return res.status(200).json({ ok: true, success: true, product });
+    }
   } catch (err: any) {
     console.error('[Server] POST /api/products error:', err);
     return res.status(400).json({ ok: false, error: err?.message || 'Invalid product request' });
@@ -3125,7 +3149,38 @@ app.post('/api/stores/update', async (req, res) => {
     }
     await writeStorePayload(payload);
 
-    return res.status(200).json({ ok: true, store_slug: storeSlug || payload.merchant?.storeSlug || '' });
+    // Onboarding trigger: a phone / logo / theme / pickup-address change on the
+    // store record satisfies its step. Recompute from the stored data and stamp
+    // the flags so the dashboard widget and the admin table update at once.
+    // Best-effort — the update already succeeded, so a stamping failure must
+    // not turn this response into an error. Skipped when the patch touched none
+    // of the step-defining fields, to avoid a pointless round trip per keystroke.
+    const ONBOARDING_RELEVANT_KEYS = [
+      'phone', 'support_contact', 'supportContact', 'support_phone', 'supportPhone',
+      'logo_url', 'logoUrl', 'logo', 'theme', 'active_theme_id', 'activeThemeId',
+      'theme_config', 'themeConfig', 'pickup_address', 'pickupAddress', 'address',
+      'payment_config', 'paymentConfig',
+    ];
+    let onboardingStatus: Record<string, any> | undefined;
+    if (storeSlug && ONBOARDING_RELEVANT_KEYS.some((key) => m[key] !== undefined)) {
+      try {
+        const status = await checkOnboardingStatus(storeSlug, { persist: true });
+        onboardingStatus = {
+          progress: status.progress,
+          completedCount: status.completedCount,
+          totalCount: status.totalCount,
+          steps: status.steps,
+        };
+      } catch (onbErr: any) {
+        console.warn('[Server] /api/stores/update onboarding stamp warning:', onbErr?.message || onbErr);
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeSlug || payload.merchant?.storeSlug || '',
+      ...(onboardingStatus ? { onboarding: onboardingStatus } : {}),
+    });
   } catch (err: any) {
     console.error('[Server] POST /api/stores/update error:', err);
     return res.status(200).json({ ok: false, store_slug: '', error: err?.message || String(err) });
@@ -3162,6 +3217,175 @@ app.get('/api/stores/:ref', async (req, res) => {
     return res.status(200).json({ ok: true, store_slug: '', merchant: null, error: err?.message || String(err) });
   }
 });
+
+// ── Onboarding status (derived from real store + product data) ───────────────
+//
+// GET  /api/onboarding/check-status   — recompute every step from the stored
+//      store record and the `products` collection, then stamp the result back
+//      onto the store document (`onboarding.<step>.completed`, progress %).
+// POST /api/onboarding/complete-step  — persist the value a step is derived
+//      from (phone / logo / pickup address), then recompute + stamp. The flag
+//      is never written without the data behind it.
+//
+// Both always answer 200 so the dashboard widget degrades to a computed value
+// instead of a broken render when a provider is down.
+app.get('/api/onboarding/check-status', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(200).json({
+        ok: false,
+        store_slug: '',
+        progress: 0,
+        steps: [],
+        error: 'store_slug is required.',
+      });
+    }
+    // `persist=0` lets a caller inspect the status without writing.
+    const persist = String(req.query.persist ?? '1') !== '0';
+    const status = await checkOnboardingStatus(storeRef, { persist });
+    return res.status(200).json({ ...status, store_slug: storeRef });
+  } catch (err: any) {
+    console.error('[Server] GET /api/onboarding/check-status error:', err);
+    return res.status(200).json({
+      ok: false,
+      store_slug: '',
+      progress: 0,
+      steps: [],
+      error: err?.message || 'Could not compute the onboarding status.',
+    });
+  }
+});
+
+app.post('/api/onboarding/complete-step', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    const step = String(body.step || body.stepId || '').trim().toLowerCase() as OnboardingStepId;
+
+    if (!storeRef) return res.status(200).json({ ok: false, error: 'store_slug is required.' });
+    if (!ONBOARDING_STEP_IDS.includes(step)) {
+      return res.status(200).json({
+        ok: false,
+        error: `Unknown step \`${step}\`. Expected one of: ${ONBOARDING_STEP_IDS.join(', ')}.`,
+      });
+    }
+
+    // 1. Persist the underlying VALUE for this step (never a bare boolean), so
+    //    the derived status and the stored data can never disagree.
+    if (step !== 'add_product') {
+      const patch = buildOnboardingStepPatch(step, body);
+      if (!Object.keys(patch).length) {
+        // Nothing to persist. Return the REAL current status so the caller can
+        // see the step is still incomplete rather than a misleading success.
+        const current = await checkOnboardingStatus(storeRef, { persist: false });
+        const currentStep = current.steps.find((s) => s.id === step) || null;
+        return res.status(200).json({
+          ok: false,
+          store_slug: storeRef,
+          step: currentStep,
+          completed: Boolean(currentStep?.completed),
+          progress: current.progress,
+          completedCount: current.completedCount,
+          totalCount: current.totalCount,
+          steps: current.steps,
+          error: `No value supplied for step \`${step}\`. Send \`value\` (or the step's own field).`,
+        });
+      }
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        await mongoose.connection.db.collection('stores').updateOne(
+          { $or: [{ store_slug: storeRef }, { storeSlug: storeRef }, { store_code: storeRef }, { slug: storeRef }] },
+          { $set: { ...patch, updated_at: new Date() } }
+        );
+      }
+      // Mirror to Supabase (best-effort; a drifted table must not fail the step).
+      try {
+        const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+        if (isConfigured) {
+          const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeRef)}`, {
+            method: 'PATCH',
+            headers: {
+              apikey: supabaseKey,
+              Authorization: `Bearer ${supabaseKey}`,
+              'Content-Type': 'application/json',
+              Prefer: 'return=minimal',
+            },
+            body: JSON.stringify(patch),
+          });
+          if (!sbRes.ok) console.warn('[Server] complete-step Supabase mirror warning:', sbRes.status);
+        }
+      } catch (sbErr: any) {
+        console.warn('[Server] complete-step Supabase warning:', sbErr?.message || sbErr);
+      }
+    }
+
+    // 2. Recompute from the stored data and stamp the flags.
+    const status = await checkOnboardingStatus(storeRef, { persist: true });
+    const stepStatus = status.steps.find((s) => s.id === step);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      step: stepStatus || null,
+      // `completed: false` is a legitimate answer — e.g. the value did not save.
+      completed: Boolean(stepStatus?.completed),
+      progress: status.progress,
+      completedCount: status.completedCount,
+      totalCount: status.totalCount,
+      steps: status.steps,
+      sources: status.sources,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/onboarding/complete-step error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not update the onboarding step.' });
+  }
+});
+
+/**
+ * Map an incoming step request onto the store fields that step is derived from.
+ * Accepts an explicit `value` plus the step's natural field names, so the client
+ * can post either `{ step, value }` or `{ step, phone }` / `{ step, logoUrl }`.
+ */
+function buildOnboardingStepPatch(step: OnboardingStepId, body: Record<string, any>): Record<string, any> {
+  const patch: Record<string, any> = {};
+  const value = body.value ?? body.url ?? body.location ?? body.phone ?? body.address;
+
+  if (step === 'confirm_phone') {
+    const phone = String(value ?? '').trim();
+    if (phone) {
+      // Both spellings: existing readers check either column.
+      patch.phone = phone;
+      patch.support_contact = phone;
+    }
+  } else if (step === 'setup_branding') {
+    const logo = String(value ?? '').trim();
+    if (logo) {
+      patch.logo_url = logo;
+      patch.logoUrl = logo;
+    }
+    // A theme id/colour is an alternative way to satisfy the branding step.
+    const theme = body.theme ?? body.activeThemeId ?? body.themeColor;
+    if (theme !== undefined && theme !== null && String(theme).trim() !== '') {
+      patch.active_theme_id = String(theme);
+      patch.activeThemeId = String(theme);
+    }
+  } else if (step === 'pickup_point') {
+    const address = String(value ?? '').trim();
+    if (address) {
+      patch.pickup_address = address;
+      patch.pickupAddress = address;
+    }
+  } else if (step === 'payment_setup') {
+    const config = body.payment_config ?? body.paymentConfig ?? body.value;
+    if (config !== undefined && config !== null && String(config).trim() !== '') {
+      patch.payment_config = config;
+    }
+  }
+
+  return patch;
+}
 
 // ── Locale / currency (Languages & currencies) ─────
 //
