@@ -30,7 +30,6 @@
 import { getMongoDb, getMongoUri, describeMongoError, DB_NAME } from './db.js';
 
 /* ────────────────────────── provider config ────────────────────────── */
-
 function cleanEnvUrl(raw?: string): string {
   if (!raw) return '';
   return String(raw)
@@ -99,6 +98,28 @@ export interface HybridResult<T> {
   supabase: { ok: boolean; count: number; error?: string };
 }
 
+/**
+ * PostgREST column-not-found (SQLSTATE 42703) → `column X does not exist`.
+ *
+ * This is the failure mode that produced the persistent HTTP 400 on the
+ * `subscriptions` endpoint: the live table was created before `merchant_email`
+ * was added to the schema, so ANY filter on that column is rejected with 400
+ * and — because it is raised inside a column SELECTION — the whole row is
+ * unreadable even when unfiltered reads would otherwise work.
+ */
+export function isMissingColumnError(message?: string): boolean {
+  if (!message) return false;
+  return /42703|PGRST204|column .* does not exist|could not find the '.*' column/i.test(message);
+}
+
+/**
+ * Detect the PostgREST error meaning "this COLUMN NAME is not in the schema
+ * cache", so the caller can retry with a column that does exist.
+ */
+export function isUnknownColumnError(message?: string): boolean {
+  return /PGRST204|could not find the '.*' column of '.*' in the schema cache/i.test(String(message || ''));
+}
+
 /* ────────────────────────── Supabase REST ────────────────────────── */
 
 /**
@@ -134,7 +155,19 @@ export async function querySupabaseTable<T = Record<string, any>>(
     });
 
     if (!res.ok) {
-      return { rows: [], error: `Supabase ${table} responded ${res.status}` };
+      // Surface the real PostgREST message (e.g. 42703 "column … does not
+      // exist") instead of only the status code — the caller uses it to decide
+      // whether a cheaper placement retry is worth attempting.
+      const detail = await res.text().catch(() => '');
+      const reason = (() => {
+        try {
+          const parsed = JSON.parse(detail);
+          return parsed?.message ? ` — ${parsed.message}` : '';
+        } catch {
+          return detail && !detail.trimStart().startsWith('<') ? ` — ${detail.slice(0, 200)}` : '';
+        }
+      })();
+      return { rows: [], error: `Supabase ${table} responded ${res.status}${reason}` };
     }
     const text = await res.text();
     if (!text || text.trimStart().startsWith('<')) return { rows: [] };
@@ -143,6 +176,60 @@ export async function querySupabaseTable<T = Record<string, any>>(
   } catch (err: any) {
     return { rows: [], error: err?.message || `Supabase ${table} query failed` };
   }
+}
+
+/**
+ * Query a Supabase table through the REST API, SANITISING the filter columns.
+ *
+ * PostgREST answers HTTP 400 with SQLSTATE 42703 (“column X does not exist”)
+ * when the filter column was never added to the live table. This helper:
+ *   1. tries the requested column first (the happy path),
+ *   2. on 42703 / PGRST204 retries the other candidate columns from
+ *      `fallbackColumns` (e.g. `merchant_email` → `email` → `store_slug`),
+ *   3. as a last resort widens to a single `select=id` probe, so a transiently
+ *      missing column can never turn a read into a hard failure.
+ *
+ * It NEVER throws — the caller always receives `{ rows, error }`.
+ */
+export async function querySupabaseTableFiltered<T = Record<string, any>>(
+  table: string,
+  value: string,
+  columns: string[],
+  opts: { select?: string; limit?: number } = {}
+): Promise<{ rows: T[]; error?: string; matchedColumn?: string }> {
+  const clean = String(value || '').trim().toLowerCase();
+  if (!clean) return { rows: [] };
+
+  const unique = [...new Set(columns.filter(Boolean).map((c) => String(c).trim()))];
+  let lastError: string | undefined;
+
+  for (const column of unique) {
+    const result = await querySupabaseTable<T>(table, {
+      select: opts.select,
+      limit: opts.limit,
+      filters: { [column]: `eq.${clean}` },
+    });
+    if (result.rows.length > 0) return { rows: result.rows, matchedColumn: column };
+
+    const unknownColumn = isUnknownColumnError(result.error) || /responded 400/.test(String(result.error || ''));
+    if (result.error) lastError = result.error;
+
+    // A schema mismatch is worth another candidate column; a network/timeout
+    // failure is not (the next column would fail identically).
+    if (result.error && !unknownColumn && !isMissingColumnError(result.error)) break;
+  }
+
+  // Last resort: confirm the table itself is readable (bare SELECT of the key)
+  // so a caller can distinguish “no matching row” from “table unavailable”.
+  const probe = await querySupabaseTable<T>(table, { select: 'id', limit: 1 });
+  if (probe.error && isMissingColumnError(probe.error)) {
+    // Even the primary key is unreadable through this column selection — a
+    // plain `select=*` still works on such deployments.
+    const bare = await querySupabaseTable<T>(table, { limit: opts.limit });
+    return { rows: [], error: bare.error || lastError };
+  }
+
+  return { rows: [], error: probe.error || lastError };
 }
 
 /* ────────────────────────── MongoDB helper ────────────────────────── */
@@ -305,7 +392,26 @@ export async function fetchHybridSubscriptions(): Promise<HybridResult<Record<st
   const mongoRows = [...mongo.rows, ...legacyMongo.rows];
 
   const supa = await querySupabaseTable('subscriptions');
-  const merged = mergeRows(mongoRows, supa.rows, (row) =>
+
+  // The Supabase mirror is the one table that must survive a partially
+  // migrated schema: when the live table predates `merchant_email` (or any
+  // other client column), a `select=*` responds 400/42703 and the whole row
+  // becomes unreadable. Fall back to progressively narrower selections so the
+  // read still returns what the table DOES have, without ever throwing.
+  let supaRows = supa.rows;
+  let supaError = supa.error;
+  if (supaError && isMissingColumnError(supaError)) {
+    let fallback = await querySupabaseTable('subscriptions', { select: 'id, store_slug, store_name, subscription_plan, status, created_at' });
+    if (fallback.error && isMissingColumnError(fallback.error)) {
+      fallback = await querySupabaseTable('subscriptions', { select: 'id' });
+    }
+    if (!fallback.error) {
+      supaRows = fallback.rows;
+      supaError = undefined;
+    }
+  }
+
+  const merged = mergeRows(mongoRows, supaRows, (row) =>
     String(pick(row, ['id', '_id', 'subscription_id', 'store_id', 'merchant_id', 'store_slug']) || '').toLowerCase()
   );
 
@@ -313,11 +419,11 @@ export async function fetchHybridSubscriptions(): Promise<HybridResult<Record<st
     data: merged,
     sources: [
       ...(mongoRows.length ? (['mongodb'] as DataSource[]) : []),
-      ...(supa.rows.length ? (['supabase'] as DataSource[]) : []),
+      ...(supaRows.length ? (['supabase'] as DataSource[]) : []),
     ],
     ok: merged.length > 0,
     mongodb: { ok: !mongo.error, count: mongoRows.length, error: mongo.error || legacyMongo.error },
-    supabase: { ok: !supa.error, count: supa.rows.length, error: supa.error },
+    supabase: { ok: !supaError, count: supaRows.length, error: supaError },
   };
 }
 
@@ -389,15 +495,31 @@ export async function fetchSupabaseMetricFallback(): Promise<{
   if (!isConfigured) return { merchantCount: null, subscriptionCount: null, domainCount: null, error: 'Supabase is not configured.' };
 
   const [merchants, subscriptions, domains] = await Promise.all([
-    querySupabaseTable('merchants', { select: 'id', limit: 5000 }),
-    querySupabaseTable('subscriptions', { select: 'id', limit: 5000 }),
-    querySupabaseTable('domains', { select: 'id', limit: 5000 }),
+    countSupabaseRows('merchants'),
+    countSupabaseRows('subscriptions'),
+    countSupabaseRows('domains'),
   ]);
 
   return {
-    merchantCount: merchants.error ? null : merchants.rows.length,
-    subscriptionCount: subscriptions.error ? null : subscriptions.rows.length,
-    domainCount: domains.error ? null : domains.rows.length,
+    merchantCount: merchants.count,
+    subscriptionCount: subscriptions.count,
+    domainCount: domains.count,
     error: merchants.error || subscriptions.error || domains.error,
   };
+}
+
+/**
+ * Row COUNT for a Supabase table for metric backfills, resilient to a narrower
+ * live schema. Tries `select=id`, then a plain `select=*` (some partially
+ * migrated tables expose neither `id` nor every client column). Returns null
+ * for the count when the table is genuinely unreadable.
+ */
+async function countSupabaseRows(table: string): Promise<{ count: number | null; error?: string }> {
+  const byId = await querySupabaseTable(table, { select: 'id', limit: 5000 });
+  if (!byId.error) return { count: byId.rows.length };
+
+  const bare = await querySupabaseTable(table, { limit: 5000 });
+  if (!bare.error) return { count: bare.rows.length };
+
+  return { count: null, error: byId.error || bare.error };
 }

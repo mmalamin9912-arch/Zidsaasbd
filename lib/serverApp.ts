@@ -45,10 +45,10 @@ import {
   listThemeRequests,
   purgeTestTransactionsAndReload,
 } from './adminRequests.js';
-import { fetchHybridPlans, fetchHybridSubscriptions, pick, toNumber } from './hybridDb.js';
+import { pick, toNumber } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
 import { writeSubscription, listSubscriptions, listSubscriptionPlans, deleteSubscription, ensureSubscriptionSeed } from './subscriptionStore.js';
-import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabasePlans, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
+import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
 import { authenticateMerchant, emailHasStore } from './authService.js';
 import {
   readPlatformConfig,
@@ -739,31 +739,21 @@ app.get('/api/admin/analytics', async (req, res) => {
 // GET /api/subscription-plans — the SAME live catalogue the admin configures,
 // surfaced to merchants so plan prices/names/badges stay in lock-step with the
 // admin configurator in real time. Read-only; never writes.
+//
+// PURE MongoDB (via lib/subscriptionStore.ts) so a Supabase schema drift can
+// never surface as an HTTP 400 here.
 app.get('/api/subscription-plans', async (_req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const plans = await fetchHybridPlans();
-    const normalized = plans.data
-      .map((plan: Record<string, any>) => {
-        const id = String(pick(plan, ['plan_id', 'planId', 'slug', 'id', 'code']) || '').toLowerCase();
-        return {
-          id,
-          name: String(pick(plan, ['name', 'plan_name', 'planName', 'title', 'label']) || id || 'Plan'),
-          priceBDT: toNumber(pick(plan, ['priceBDT', 'price_bdt', 'price', 'amountBDT', 'amount']), 0),
-          durationDays: toNumber(pick(plan, ['durationDays', 'duration_days', 'duration', 'days']), 0),
-          isActive: pick(plan, ['isActive', 'is_active', 'active', 'enabled']) !== false,
-          badge: String(pick(plan, ['badge', 'tag']) || id || ''),
-          isPopular: pick(plan, ['isPopular', 'is_popular', 'popular']) === true,
-          features: Array.isArray(plan.features) ? plan.features : [],
-          maxProducts: toNumber(pick(plan, ['maxProducts', 'max_products', 'productLimit', 'product_limit']), 0),
-        };
-      })
-      .filter((plan: Record<string, any>) => Boolean(plan.id));
+    const result = await listSubscriptionPlans();
+    const normalized = result.data
+      .map(normalizePlanRow)
+      .filter((plan) => Boolean(plan.id));
 
     return res.status(200).json({
       ok: true,
       generatedAt: new Date().toISOString(),
-      sources: plans.sources,
+      sources: result.sources,
       counts: { plans: normalized.length },
       plans: normalized,
     });
@@ -773,32 +763,19 @@ app.get('/api/subscription-plans', async (_req, res) => {
   }
 });
 
-// ── Admin Subscription Plans (Supabase-first, MongoDB fallback) ──────────────
-// GET    /api/admin/subscription-plans — catalog merged from Supabase
-//        `subscription_plans` (primary) + MongoDB `subscription_plans`/`plans`.
-// POST   /api/admin/subscription-plans — create/update a plan (writes BOTH providers).
-// DELETE /api/admin/subscription-plans/:id — delete a plan (removes from BOTH).
+// ── Admin Subscription Plans (MongoDB only) ─────────────────────────────────
+// GET    /api/admin/subscription-plans — the plan catalogue from MongoDB.
+// POST   /api/admin/subscription-plans — create/update a plan in MongoDB.
+// DELETE /api/admin/subscription-plans/:id — delete a plan from MongoDB.
 // Always answers 200 with a shaped envelope (never a 404/500).
 app.get('/api/admin/subscription-plans', async (_req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const [plans, subscriptions] = await Promise.all([fetchHybridPlans(), fetchHybridSubscriptions()]);
+    const [plans, subscriptions] = await Promise.all([listSubscriptionPlans(), listSubscriptions()]);
 
-    const normalized = plans.data.map((plan: Record<string, any>) => {
-      const id = String(pick(plan, ['plan_id', 'planId', 'id', 'slug', 'code']) || '').toLowerCase();
-      return {
-        id,
-        name: String(pick(plan, ['name', 'plan_name', 'planName', 'title', 'label']) || id || 'Plan'),
-        priceBDT: toNumber(pick(plan, ['priceBDT', 'price_bdt', 'price', 'amountBDT', 'amount']), 0),
-        durationDays: toNumber(pick(plan, ['durationDays', 'duration_days', 'duration', 'days']), 0),
-        isActive: pick(plan, ['isActive', 'is_active', 'active', 'enabled']) !== false,
-        badge: String(pick(plan, ['badge', 'tag']) || id || ''),
-        isPopular: pick(plan, ['isPopular', 'is_popular', 'popular']) === true,
-        maxProducts: toNumber(pick(plan, ['maxProducts', 'max_products', 'productLimit', 'product_limit']), 0),
-        features: Array.isArray(plan.features) ? plan.features : [],
-        source: plan._source || 'unknown',
-      };
-    });
+    const normalized = plans.data
+      .map(normalizePlanRow)
+      .map((plan) => ({ ...plan, source: 'mongodb' }));
 
     const subscriptionCounts: Record<string, number> = {};
     for (const sub of subscriptions.data) {
@@ -813,19 +790,19 @@ app.get('/api/admin/subscription-plans', async (_req, res) => {
     }));
 
     return res.status(200).json({
-      ok: plans.ok || plansWithCounts.length > 0,
+      ok: plansWithCounts.length > 0,
       generatedAt: new Date().toISOString(),
       sources: plans.sources,
       counts: { plans: plansWithCounts.length, subscriptions: subscriptions.data.length },
       plans: plansWithCounts,
       diagnostics: {
-        mongodb: plans.mongodb,
-        supabase: plans.supabase,
-        subscriptions: { mongodb: subscriptions.mongodb, supabase: subscriptions.supabase },
+        provider: 'mongodb',
+        mongodb: plans.diagnostics?.mongodb,
+        supabase: { ok: true, count: 0, inUse: false },
       },
       warning:
         plansWithCounts.length === 0
-          ? 'No subscription plans were returned by MongoDB or Supabase. Configure MONGODB_URI or the Supabase keys to populate this table.'
+          ? 'No subscription plans were returned by MongoDB. Set MONGODB_URI so the catalogue can be stored and served.'
           : undefined,
     });
   } catch (err: any) {
@@ -841,7 +818,7 @@ app.get('/api/admin/subscription-plans', async (_req, res) => {
   }
 });
 
-// POST /api/admin/subscription-plans — create or update a plan across both providers
+// POST /api/admin/subscription-plans — create or update a plan in MongoDB
 app.post('/api/admin/subscription-plans', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -849,7 +826,7 @@ app.post('/api/admin/subscription-plans', async (req, res) => {
     if (!body.slug && !body.id) {
       return res.status(200).json({ ok: false, error: 'Plan slug or id is required.' });
     }
-    const result = await supabasePlans.create(body);
+    const result = await writeSubscription(body);
     return res.status(200).json({
       ok: result.ok,
       sources: result.sources,
@@ -862,18 +839,17 @@ app.post('/api/admin/subscription-plans', async (req, res) => {
   }
 });
 
-// DELETE /api/admin/subscription-plans/:id — remove a plan from both providers
+// DELETE /api/admin/subscription-plans/:id — remove a plan from MongoDB
 app.delete('/api/admin/subscription-plans/:id', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const id = String(req.params.id || '').trim();
     if (!id) return res.status(200).json({ ok: false, error: 'Plan id is required.' });
-    const result = await supabasePlans.delete(id);
+    const result = await deleteSubscription(id);
     return res.status(200).json({
       ok: result.ok,
       sources: result.sources,
-      deleted: result.deleted,
-      message: result.ok ? 'Plan deleted successfully.' : (result.error || 'Could not delete plan.'),
+      message: result.ok ? 'Plan deleted successfully.' : 'Could not delete plan.',
     });
   } catch (err: any) {
     console.error('[Server] DELETE /api/admin/subscription-plans/:id error:', err);
@@ -3474,9 +3450,9 @@ app.delete('/api/subscription/:email', async (req, res) => {
 /**
  * POST /api/subscription/seed — idempotent auto-initialisation.
  *
- * Creates the default plan catalogue (1-Month, Starter, Pro, Enterprise) in
- * Supabase AND MongoDB when the store is empty. Safe to call repeatedly: an
- * already-populated store is left untouched. Never throws.
+ * Creates the default plan catalogue (1-Month, Starter, Pro, Enterprise) in the
+ * MongoDB `subscriptions` collection when it is empty. Safe to call repeatedly:
+ * an already-populated store is left untouched. Never throws.
  */
 app.post('/api/subscription/seed', async (_req, res) => {
   res.setHeader('Content-Type', 'application/json');
@@ -4352,9 +4328,8 @@ app.all('/api/subscriptions', async (req, res) => {
       return res.status(200).json({ ok: result.ok, plan: result.record, sources: result.sources });
     }
 
-    // Supabase/PostgREST clients append `?select=*`; it is not meaningful here.
-    // Sanitize identity filters before using them. In particular, never pass a
-    // raw `ilike.email@example.com` value to another database query builder.
+    // Query filters are sanitised before use. In particular, never pass a raw
+    // PostgREST operator value (`ilike.email@example.com`) into a lookup.
     const requestedEmail = sanitizeSubscriptionFilter(req.query.merchant_email || req.query.email);
     const requestedStore = sanitizeSubscriptionFilter(
       req.query.store_slug || req.query.slug || req.query.store_id
@@ -4364,11 +4339,9 @@ app.all('/api/subscriptions', async (req, res) => {
     const hasRenewalRef = Boolean(requestedEmail || storeRef);
     const wantsPlans = !hasRenewalRef || String(req.query.type || '') === 'plans';
 
-    // 1. Live plan catalogue. `listSubscriptionPlans` reads Supabase FIRST and
-    //    transparently falls back to MongoDB when Supabase is missing the table
-    //    (PGRST205) or otherwise errors — and auto-seeds the default catalogue
-    //    when BOTH providers are empty. It never throws, so this route always
-    //    answers 200 (never a 404).
+    // 1. Live plan catalogue — read straight from MongoDB (auto-seeds the
+    //    default catalogue when the collection is empty). It never throws, so
+    //    this route always answers 200 (never a 404, and never a SQLSTATE 400).
     let plans: Record<string, any>[] = [];
     let planSources: DataSource[] = [];
     let seeded = false;
@@ -4379,9 +4352,8 @@ app.all('/api/subscriptions', async (req, res) => {
       seeded = planResult.seeded;
     }
 
-    // 2. Tenant renewal record (when an email/store ref is supplied). Read the
-    //    merged subscription collection first so MongoDB remains the fallback
-    //    when Supabase responds with 400/404/PGRST205; then fill gaps from stores.
+    // 2. Tenant renewal record (when an email/store ref is supplied), read from
+    //    the MongoDB `subscriptions` collection; stores fill any remaining gaps.
     let matchedSubscription: Record<string, any> | null = null;
     if (hasRenewalRef && String(req.query.type || '') !== 'plans') {
       const mergedSubscriptions = await listSubscriptions();

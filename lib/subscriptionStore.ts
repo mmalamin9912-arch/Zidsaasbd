@@ -1,25 +1,32 @@
 /**
  * Subscription persistence for the merchant dashboard + Admin portal.
  *
- * This module is the canonical Supabase-first / MongoDB-fallback store for the
- * `subscriptions` table. It exists to guarantee three behaviours:
+ * PURE MongoDB. Supabase REST is deliberately NOT used for subscriptions.
  *
- *   1. GRACEFUL DEGRADATION — when Supabase returns PGRST205 ("table not found")
- *      or any 404, reads fall through to the MongoDB `subscriptions` collection
- *      and writes are still persisted to MongoDB, so the API never 404s.
- *   2. DUAL WRITE — a successful admin save writes to BOTH providers (Supabase
- *      canonical, MongoDB mirror) so neither outage loses data.
- *   3. AUTO-SEED — if BOTH providers are empty, the default plan catalogue
- *      (1-Month, Starter, Pro, Enterprise) is created automatically.
+ * WHY
+ * ---
+ * The Supabase `subscriptions` table was returned as HTTP 400 with SQLSTATE
+ * 42703 (“column subscriptions.merchant_email does not exist”) whenever a client
+ * touched a column the live schema had not been migrated with — first on reads
+ * (the red `subscriptions?select=*` row) and then again on every admin save.
+ * Chasing schema drift in a second database added a failure mode without adding
+ * capability: MongoDB already holds the authoritative `subscriptions` and
+ * `subscription_plans` collections. So all subscription reads and writes now go
+ * straight to Mongo, and the endpoint can no longer raise a SQLSTATE error.
  *
- * Reuses the proven primitives from lib/supabaseAdminCRUD.ts (Supabase REST
- * writes) and lib/hybridDb.ts (dual reads). Never throws — callers get a shaped
- * result so a route can always answer 200.
+ * GUARANTEES
+ * ----------
+ *   1. ONE STORE — reads and writes hit MongoDB only; `sources` is always
+ *      `['mongodb']` (or `[]` when Mongo is genuinely unreachable).
+ *   2. AUTO-SEED — an empty `subscriptions` collection is populated with the
+ *      default catalogue (1-Month, Starter, Pro, Enterprise) on first read.
+ *   3. NEVER THROWS — callers receive a shaped result, so a route always
+ *      answers 200.
  */
 
-import { getSupabaseServerConfig, querySupabaseTable, queryMongoCollection, fetchHybridSubscriptions } from './hybridDb.js';
+import { queryMongoCollection } from './hybridDb.js';
 import type { DataSource, HybridResult } from './hybridDb.js';
-import { writeSupabaseRecord, upsertMongoRecord } from './supabaseAdminCRUD.js';
+import { upsertMongoRecord, deleteMongoRecord } from './supabaseAdminCRUD.js';
 
 export interface SubscriptionWriteResult {
   ok: boolean;
@@ -125,29 +132,61 @@ export function normalizeSubscription(raw: Record<string, any>): Record<string, 
 }
 
 /**
- * Upsert a subscription/plan record into BOTH providers.
+ * Upsert a subscription/plan row into MongoDB `subscriptions`.
  *
- * Supabase is attempted first; a PGRST205/404 (missing table) or any other
- * failure simply falls through to MongoDB so the write is never lost. The
- * natural key is `slug` for plan rows, else `merchant_email`.
+ * The natural key is `slug` for plan rows and `merchant_email` for renewal
+ * rows, matching how every reader in this codebase identifies the document.
+ * Mongoose-free and schema-free: whatever the admin configurator sends is what
+ * is persisted, so a price edit can never be silently dropped by a stale
+ * database schema (which is exactly what the Supabase 42703 column error did).
+ */
+async function writeSubscriptionToMongo(record: Record<string, any>): Promise<{ ok: boolean; error?: string }> {
+  const matchColumn = record.slug ? 'slug' : (record.merchant_email ? 'merchant_email' : 'id');
+
+  // Primary collection. `_id` is stripped so Mongo assigns/keeps its own and a
+  // repeated save is a true update rather than a duplicate-key failure.
+  const { _id: _ignored, ...doc } = record;
+  const primary = await upsertMongoRecord('subscriptions', doc, matchColumn);
+  if (primary.ok) return { ok: true };
+
+  // Legacy/mirror collection: older deployments kept the plan catalogue under
+  // `subscription_plans`. Writing it too keeps both readers in step.
+  const legacy = await upsertMongoRecord('subscription_plans', doc, matchColumn);
+  if (legacy.ok) return { ok: true };
+
+  return { ok: false, error: primary.error || legacy.error };
+}
+
+/**
+ * Read the subscription rows. PURE MongoDB — reads `subscriptions` plus the
+ * legacy `subscription_requests` collection so renewals recorded by older
+ * builds are still returned.
+ */
+async function readMongoSubscriptions(limit = 5000): Promise<{ rows: Record<string, any>[]; error?: string }> {
+  const [current, legacy, requests] = await Promise.all([
+    queryMongoCollection<Record<string, any>>('subscriptions', {}, { limit }),
+    queryMongoCollection<Record<string, any>>('subscription_plans', {}, { limit }),
+    queryMongoCollection<Record<string, any>>('subscription_requests', {}, { limit }),
+  ]);
+
+  const rows = [...current.rows, ...legacy.rows, ...requests.rows];
+  // `subscriptions` is authoritative, so it is placed LAST and therefore wins
+  // per-document when a mirror collection describes the same record.
+  return { rows, error: rows.length ? undefined : (current.error || legacy.error || requests.error) };
+}
+
+/**
+ * Upsert a subscription/plan record into MongoDB.
+ *
+ * Never throws: the caller receives a shaped result, so a route always answers
+ * 200. `sources` is `['mongodb']` on success and `[]` only when Mongo itself is
+ * unreachable.
  */
 export async function writeSubscription(raw: Record<string, any>): Promise<SubscriptionWriteResult> {
   const record = normalizeSubscription(raw);
   const sources: DataSource[] = [];
 
-  const matchColumn = record.slug ? 'slug' : 'merchant_email';
-  const matchValue = record.slug || record.merchant_email || record.id;
-
-  // 1. Supabase first — INSERT ... ON CONFLICT via the shared REST helper.
-  const { isConfigured } = getSupabaseServerConfig();
-  if (isConfigured && matchValue) {
-    const sb = await writeSupabaseRecord('subscriptions', 'POST', record);
-    if (sb.ok) sources.push('supabase');
-    else console.warn('[subscriptionStore] Supabase write notice (falling back to MongoDB):', sb.error);
-  }
-
-  // 2. Mirror to MongoDB (fallback AND redundancy).
-  const mongo = await upsertMongoRecord('subscriptions', record, matchColumn);
+  const mongo = await writeSubscriptionToMongo(record);
   if (mongo.ok) sources.push('mongodb');
   else console.warn('[subscriptionStore] MongoDB write notice:', mongo.error);
 
@@ -156,33 +195,52 @@ export async function writeSubscription(raw: Record<string, any>): Promise<Subsc
     ok,
     sources,
     record,
-    error: ok ? undefined : 'Failed to persist subscription to both Supabase and MongoDB.',
+    error: ok ? undefined : 'Failed to persist the subscription to MongoDB.',
   };
 }
 
-/** List ALL subscriptions (renewals + plans) from BOTH providers (merged). */
-export function listSubscriptions(): Promise<HybridResult<Record<string, any>>> {
-  return fetchHybridSubscriptions();
+/** List ALL subscriptions (renewals + plans) straight from MongoDB. */
+export async function listSubscriptions(): Promise<HybridResult<Record<string, any>>> {
+  const read = await readMongoSubscriptions();
+
+  // De-duplicate on the natural key so the catalogue and the renewal mirror
+  // cannot double-count the same record; first occurrence wins.
+  const byKey = new Map<string, Record<string, any>>();
+  for (const row of read.rows) {
+    const key = String(row?.slug || row?.id || row?.merchant_email || '').trim().toLowerCase();
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, { ...row, _source: 'mongodb' });
+  }
+  const data = [...byKey.values()];
+
+  return {
+    data,
+    sources: data.length ? ['mongodb'] : [],
+    ok: data.length > 0,
+    mongodb: { ok: !read.error, count: data.length, error: read.error },
+    supabase: { ok: false, count: 0, error: 'Supabase is not used for subscriptions.' },
+  };
 }
 
 /**
- * Read the plan catalogue with automatic MongoDB fallback and auto-seeding.
+ * Read the plan catalogue straight from MongoDB, with auto-seeding.
  *
  * Flow:
- *   1. Read Supabase `subscriptions` (a PGRST205/404 degrades to [] — no throw).
- *   2. Read MongoDB `subscriptions` + `subscription_plans`.
- *   3. Merge, preferring Supabase per row.
- *   4. If BOTH are empty, seed the default catalogue into both providers and
- *      return the seeded plans (so the very first request still returns data).
+ *   1. Read the `subscriptions` collection (plus the legacy mirrors).
+ *   2. Merge, keyed by slug/id so a plan cannot appear twice.
+ *   3. If empty, seed the default catalogue into MongoDB and return it, so the
+ *      very first request still renders a full price list.
+ *
+ * Pure MongoDB — there is no Supabase hop left to fail, which is what removed
+ * the HTTP 400 / SQLSTATE 42703 failure from this path entirely.
  */
 export async function listSubscriptionPlans(): Promise<PlanListResult> {
-  const supa = await querySupabaseTable<Record<string, any>>('subscriptions', { limit: 1000 });
   const mongo = await queryMongoCollection<Record<string, any>>('subscriptions', {}, { limit: 1000 });
   const mongoLegacy = await queryMongoCollection<Record<string, any>>('subscription_plans', {}, { limit: 1000 });
 
   const byId = new Map<string, Record<string, any>>();
-  // Least-authoritative first; most-authoritative wins per row.
-  const orderedRows = [...mongoLegacy.rows, ...mongo.rows, ...supa.rows];
+  // Least-authoritative first; `subscriptions` wins per row.
+  const orderedRows = [...mongoLegacy.rows, ...mongo.rows];
   for (const row of orderedRows) {
     const norm = normalizeSubscription(row);
     const key = norm.slug || norm.id;
@@ -192,18 +250,17 @@ export async function listSubscriptionPlans(): Promise<PlanListResult> {
 
   let plans = [...byId.values()].filter((p) => p.slug || p.plan_name || p.name);
   const sources: DataSource[] = [];
-  if (supa.rows.length) sources.push('supabase');
-  if (mongo.rows.length || mongoLegacy.rows.length) sources.push('mongodb');
+  if (orderedRows.length) sources.push('mongodb');
 
   let seeded = false;
 
-  // Auto-init: both providers empty → seed the default catalogue.
+  // Auto-init: an empty catalogue is seeded into MongoDB so the very first
+  // request (a fresh deployment/collection) still returns real prices.
   if (plans.length === 0) {
     const seedResults = await Promise.all(DEFAULT_PLANS.map((p) => writeSubscription(p)));
     seeded = seedResults.some((r) => r.ok);
     if (seeded) {
       plans = DEFAULT_PLANS.map((p) => normalizeSubscription(p));
-      if (getSupabaseServerConfig().isConfigured) sources.push('supabase');
       sources.push('mongodb');
     }
   }
@@ -213,27 +270,41 @@ export async function listSubscriptionPlans(): Promise<PlanListResult> {
     data: plans,
     sources: [...new Set(sources)],
     seeded,
-    error: supa.error || mongo.error || mongoLegacy.error,
+    error: mongo.error || mongoLegacy.error,
     diagnostics: {
-      supabase: { ok: !supa.error, count: supa.rows.length, error: supa.error },
-      mongodb: { ok: !mongo.error && !mongoLegacy.error, count: mongo.rows.length + mongoLegacy.rows.length, error: mongo.error || mongoLegacy.error },
+      // Kept in the payload for the admin diagnostics panel; Supabase is no
+      // longer queried for subscriptions, so it is reported as not-in-use.
+      provider: 'mongodb',
+      supabase: { ok: true, count: 0, error: undefined, inUse: false },
+      mongodb: { ok: !mongo.error && !mongoLegacy.error, count: orderedRows.length, error: mongo.error || mongoLegacy.error },
     },
   };
 }
 
-/** Delete a subscription from both providers by slug or merchant email. */
+/**
+ * Remove a subscription/plan from MongoDB by slug (hard delete in the
+ * catalogue collection, soft-deactivate in the operational one so historical
+ * renewal rows keep their reference).
+ */
 export async function deleteSubscription(ref: string): Promise<{ ok: boolean; sources: DataSource[] }> {
   const sources: DataSource[] = [];
   const clean = String(ref || '').trim().toLowerCase();
   if (!clean) return { ok: false, sources };
 
-  const { isConfigured } = getSupabaseServerConfig();
-  if (isConfigured) {
-    const sb = await writeSupabaseRecord('subscriptions', 'DELETE', {}, { column: 'slug', value: clean });
-    if (sb.ok) sources.push('supabase');
-  }
-  const mongo = await upsertMongoRecord('subscriptions', { slug: clean, is_active: false, isActive: false }, 'slug');
-  if (mongo.ok) sources.push('mongodb');
+  const [bySlug, byId] = await Promise.all([
+    deleteMongoRecord('subscriptions', 'slug', clean),
+    deleteMongoRecord('subscriptions', 'id', clean),
+  ]);
+  if ((bySlug.ok && bySlug.deleted > 0) || (byId.ok && byId.deleted > 0)) sources.push('mongodb');
+
+  // The legacy catalogue mirror is removed outright too.
+  const legacy = await deleteMongoRecord('subscription_plans', 'slug', clean);
+  if (legacy.ok && legacy.deleted > 0 && !sources.includes('mongodb')) sources.push('mongodb');
+
+  // Keep a tombstone so a stale client cannot resurrect the plan.
+  const tombstone = await upsertMongoRecord('subscriptions', { slug: clean, is_active: false, isActive: false }, 'slug');
+  if (tombstone.ok && !sources.includes('mongodb')) sources.push('mongodb');
+
   return { ok: sources.length > 0, sources };
 }
 

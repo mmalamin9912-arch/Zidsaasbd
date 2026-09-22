@@ -69,6 +69,7 @@ import {
 import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from '../types';
 import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingDays, getPlanDisplayName } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
+import { savePlan } from '../lib/plansApi';
 import { safeJson } from '../lib/storeApi';
 
 interface SuperAdminPortalViewProps {
@@ -767,10 +768,19 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     setTimeout(() => setSaveSuccess(null), 3000);
   };
 
-  const handleSavePlans = (e: React.FormEvent) => {
+  const handleSavePlans = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaveSuccess(null);
+    // Persist to MongoDB FIRST, then report success — so the confirmation the
+    // admin sees always reflects a durable write and a refresh cannot revert
+    // the new price. `onUpdatePlatformPlans` writes the same records in the
+    // background for the merchant-facing catalogue.
+    const results = await Promise.all(plansForm.map((plan) => savePlan(plan)));
+    const failed = plansForm.filter((_, i) => !results[i]);
     onUpdatePlatformPlans(plansForm);
-    setSaveSuccess('Subscription plans updated successfully!');
+    setSaveSuccess(failed.length === 0
+      ? 'Subscription plans saved to MongoDB successfully!'
+      : `Saved ${plansForm.length - failed.length}/${plansForm.length} plans — could not persist: ${failed.map((p) => p.id).join(', ')}`);
     setTimeout(() => setSaveSuccess(null), 3000);
   };
 

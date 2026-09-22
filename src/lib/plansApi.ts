@@ -54,12 +54,11 @@ export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan 
 }
 
 /**
- * Load the live plan catalogue.
+ * Load the live plan catalogue from MongoDB-backed `/api/subscriptions`.
  *
- * Primary source is `/api/subscriptions`, which reads Supabase first and
- * transparently falls back to MongoDB (and auto-seeds defaults), so it ALWAYS
- * answers 200 with a plan list — the merchant modal therefore never crashes on
- * a missing Supabase table (PGRST205). `/api/subscription-plans` is kept as a
+ * Subscriptions are served by MongoDB only (see lib/subscriptionStore.ts), so
+ * this call cannot fail with the Supabase SQLSTATE / missing-column 400 that
+ * used to break the merchant modal. `/api/subscription-plans` is kept as a
  * secondary source for older deployments.
  */
 export async function fetchPlans(): Promise<SubscriptionPlan[]> {
@@ -127,8 +126,9 @@ export async function savePlan(plan: SubscriptionPlan): Promise<boolean> {
       is_popular: Boolean(plan.isPopular),
       isPopular: Boolean(plan.isPopular),
     };
-    // Save through the dual-database endpoint so the write survives a missing
-    // Supabase table (it falls back to the MongoDB `subscriptions` collection).
+    // Save through the MongoDB-backed catalogue endpoint so the admin price
+    // edit is durable the moment the configurator reports success (no refresh
+    // can revert it).
     const res = await fetch('/api/subscriptions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -137,7 +137,7 @@ export async function savePlan(plan: SubscriptionPlan): Promise<boolean> {
     const data = await safeJson<{ ok: boolean }>(res);
     if (data?.ok) return true;
 
-    // Secondary: the admin catalogue endpoint.
+    // Secondary: the admin catalogue endpoint (same MongoDB store).
     const adminRes = await fetch('/api/admin/subscription-plans', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
