@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, OrderItem } from '../../types';
-import { safeAmount, safeDate, toNumber, normalizeOrders } from '../../utils/orderUtils';
+import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders } from '../../utils/orderUtils';
 import SafeImage from '../SafeImage';
 import {
   ShoppingBag,
@@ -197,7 +197,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         if (stored) merchantSettings = JSON.parse(stored);
       } catch (e) {}
 
-      const res = await fetch('/api/courier/steadfast', {
+      const courierMap: Record<string, string> = {
+        'Steadfast Courier': '/api/courier/steadfast',
+        'Pathao Courier': '/api/courier/pathao',
+        'RedX Logistics': '/api/courier/redx',
+        'Paperfly': '/api/courier/paperfly',
+      };
+      const courierEndpoint = courierMap[dispatchCourier] || '/api/courier/steadfast';
+      const courierName = dispatchCourier || 'Steadfast Courier';
+
+      const res = await fetch(courierEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -218,21 +227,44 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
       const data = await res.json();
       if (data.success) {
-        const trackingCode = data.tracking_code || `STF-${Math.floor(100000 + Math.random() * 900000)}`;
+        const trackingCode = data.tracking_code || `${courierName.split(' ')[0].substring(0, 2).toUpperCase()}-${Math.floor(100000 + Math.random() * 900000)}`;
+
+        try {
+          await fetch(`/api/orders/${encodeURIComponent(String(ord.id))}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              status: 'In delivery',
+              fulfillmentStatus: 'In Transit',
+              shipping_courier: courierName,
+              courier_name: courierName,
+              courierName: courierName,
+              tracking_code: trackingCode,
+              trackingCode: trackingCode,
+              consignment_id: trackingCode,
+              consignmentId: trackingCode,
+              merchantId: merchantId,
+              storeSlug: storeSlug,
+            }),
+          });
+        } catch (mongoErr) {
+          console.warn('Courier dispatch MongoDB update notice:', mongoErr);
+        }
+
         const updated = orders.map(o => {
           if (o.id === ord.id) {
             return {
               ...o,
               status: 'In delivery' as const,
               fulfillmentStatus: 'In Transit' as const,
-              courierName: 'Steadfast Courier',
+              courierName: courierName,
               trackingCode: trackingCode,
             };
           }
           return o;
         });
         onUpdateOrders(updated);
-        alert(`Booked Successfully! Tracking ID: ${trackingCode}`);
+        alert(`Booked Successfully via ${courierName}! Tracking ID: ${trackingCode}`);
       } else {
         alert('Booking failed: ' + (typeof data.message === 'object' ? JSON.stringify(data.message) : (data.message || data.error || 'Unknown error')));
       }
@@ -432,7 +464,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     );
   };
 
-  const handleBulkUpdateStatus = (newStatus: Order['status']) => {
+  const handleBulkUpdateStatus = async (newStatus: Order['status']) => {
+    const prevOrders = [...orders];
     const updated = orders.map(ord => {
       if (selectedOrderIds.includes(ord.id)) {
         return {
@@ -446,9 +479,26 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     onUpdateOrders(updated);
     setSelectedOrderIds([]);
     setBulkActionModal(null);
+
+    for (const ord of orders.filter(o => selectedOrderIds.includes(o.id))) {
+      try {
+        await fetch(`/api/orders/${encodeURIComponent(ord.id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            status: newStatus,
+            merchantId: merchantId,
+            storeSlug: storeSlug,
+          }),
+        });
+      } catch (err) {
+        console.warn(`Bulk status update error for order ${ord.id}:`, err);
+      }
+    }
   };
 
-  const handleBulkUpdatePaymentStatus = (newPaymentStatus: Order['paymentStatus']) => {
+  const handleBulkUpdatePaymentStatus = async (newPaymentStatus: Order['paymentStatus']) => {
+    const prevOrders = [...orders];
     const updated = orders.map(ord => {
       if (selectedOrderIds.includes(ord.id)) {
         return {
@@ -461,22 +511,60 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     onUpdateOrders(updated);
     setSelectedOrderIds([]);
     setBulkActionModal(null);
+
+    for (const ord of orders.filter(o => selectedOrderIds.includes(o.id))) {
+      try {
+        await fetch(`/api/orders/${encodeURIComponent(ord.id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            paymentStatus: newPaymentStatus,
+            merchantId: merchantId,
+            storeSlug: storeSlug,
+          }),
+        });
+      } catch (err) {
+        console.warn(`Bulk payment status update error for order ${ord.id}:`, err);
+      }
+    }
   };
 
-  const handleQuickUpdatePaymentStatus = (orderId: string, newPaymentStatus: Order['paymentStatus']) => {
+  const handleQuickUpdatePaymentStatus = async (orderId: string, newPaymentStatus: Order['paymentStatus']) => {
+    const prevOrders = [...orders];
     const updated = orders.map(ord => {
       if (ord.id === orderId) {
-        return {
-          ...ord,
-          paymentStatus: newPaymentStatus
-        };
+        return { ...ord, paymentStatus: newPaymentStatus };
       }
       return ord;
     });
     onUpdateOrders(updated);
+
+    try {
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentStatus: newPaymentStatus,
+          merchantId: merchantId,
+          storeSlug: storeSlug,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok && data.order) {
+        const serverOrder = normalizeOrder(data.order);
+        onUpdateOrders(prevOrders.map(o => o.id === orderId ? serverOrder : o));
+      } else if (!data.ok) {
+        console.warn('Payment status update notice:', data.error);
+        onUpdateOrders(prevOrders);
+      }
+    } catch (err) {
+      console.warn('Payment status update network error:', err);
+      onUpdateOrders(prevOrders);
+    }
   };
 
-  const handleQuickUpdateStatus = (orderId: string, newStatus: Order['status']) => {
+  const handleQuickUpdateStatus = async (orderId: string, newStatus: Order['status']) => {
+    const prevOrders = [...orders];
     const updated = orders.map(ord => {
       if (ord.id === orderId) {
         return {
@@ -488,6 +576,29 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       return ord;
     });
     onUpdateOrders(updated);
+
+    try {
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: newStatus,
+          merchantId: merchantId,
+          storeSlug: storeSlug,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok && data.order) {
+        const serverOrder = normalizeOrder(data.order);
+        onUpdateOrders(prevOrders.map(o => o.id === orderId ? serverOrder : o));
+      } else if (!data.ok) {
+        console.warn('Order status update notice:', data.error);
+        onUpdateOrders(prevOrders);
+      }
+    } catch (err) {
+      console.warn('Order status update network error:', err);
+      onUpdateOrders(prevOrders);
+    }
   };
 
   const handleDuplicateSelectedOrders = () => {

@@ -78,6 +78,13 @@ import {
 } from './adminTeamConfig.js';
 import { generateFaqFromPolicies } from './faqGenerator.js';
 import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
+import {
+  canonicalOrderStatus,
+  canonicalPaymentStatus,
+  fulfillmentForStatus,
+  updateOrderFields,
+  recordCourierDispatch,
+} from './orderStatus.js';
 
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
@@ -6394,6 +6401,162 @@ app.post('/api/courier/steadfast/fraud-check', handleSteadfastFraudCheck);
 app.get('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 
+// Pathao Courier 1-Click Booking API
+app.post('/api/courier/pathao', async (req, res) => {
+  try {
+    const { order, merchantConfig } = req.body || {};
+    if (!order || !merchantConfig) {
+      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
+    }
+
+    const clientId = merchantConfig.pathao_client_id || process.env.PATHAO_CLIENT_ID || '';
+    const clientSecret = merchantConfig.pathao_client_secret || process.env.PATHAO_CLIENT_SECRET || '';
+    const storeId = merchantConfig.pathao_store_id || process.env.PATHAO_STORE_ID || '';
+
+    const payload = {
+      store_id: storeId,
+      recipient_name: order.customer_name || order.name || 'Customer',
+      recipient_phone: order.customer_phone || order.phone || '',
+      recipient_address: order.shipping_address || order.address || '',
+      recipient_city: order.customer_city || 'Dhaka',
+      cod_amount: order.cod_amount ?? order.total ?? 0,
+      note: order.customer_note || order.note || 'Handle with care',
+      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+    };
+
+    const tokenRes = await fetch('https://api.pathao.com/v1/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials`,
+    }).catch(() => null);
+
+    let bearerToken = '';
+    if (tokenRes && tokenRes.ok) {
+      const tokenData = await tokenRes.json().catch(() => ({}));
+      bearerToken = tokenData.access_token || '';
+    }
+
+    const response = await fetch('https://api.pathao.com/v1/parcel', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: bearerToken ? `Bearer ${bearerToken}` : '',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (data.success || data.status === 'success' || data.booking_id || data.tracking_code) {
+      return res.json({
+        success: true,
+        tracking_code: data.tracking_code || data.consignment_id || data.booking_id || `PAD-${Date.now()}`,
+        consignment: data,
+      });
+    } else {
+      return res.json({ success: false, message: data.error || data.message || 'Pathao booking failed' });
+    }
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to Pathao API' });
+  }
+});
+
+// RedX Logistics 1-Click Booking API
+app.post('/api/courier/redx', async (req, res) => {
+  try {
+    const { order, merchantConfig } = req.body || {};
+    if (!order || !merchantConfig) {
+      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
+    }
+
+    const apiKey = merchantConfig.redx_api_key || merchantConfig.redx_key || process.env.REDX_API_KEY || '';
+    const secretKey = merchantConfig.redx_secret_key || merchantConfig.redx_secret || process.env.REDX_SECRET_KEY || '';
+
+    const payload = {
+      store_id: merchantConfig.redx_store_id || '',
+      recipient_name: order.customer_name || order.name || 'Customer',
+      recipient_phone: order.customer_phone || order.phone || '',
+      recipient_address: order.shipping_address || order.address || '',
+      recipient_city: order.customer_city || 'Dhaka',
+      cod_amount: order.cod_amount ?? order.total ?? 0,
+      note: order.customer_note || order.note || 'Handle with care',
+      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+    };
+
+    const response = await fetch('https://api.redx.com.bd/v1/parcel', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Api-Key': apiKey,
+        'Secret-Key': secretKey,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (data.status === 'success' || data.success || data.tracking_code || data.parcel_id) {
+      return res.json({
+        success: true,
+        tracking_code: data.tracking_code || data.parcel_id || `RED-${Date.now()}`,
+        consignment: data,
+      });
+    } else {
+      return res.json({ success: false, message: data.error || data.message || 'RedX booking failed' });
+    }
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to RedX API' });
+  }
+});
+
+// Paperfly 1-Click Booking API
+app.post('/api/courier/paperfly', async (req, res) => {
+  try {
+    const { order, merchantConfig } = req.body || {};
+    if (!order || !merchantConfig) {
+      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
+    }
+
+    const apiKey = merchantConfig.paperfly_api_key || merchantConfig.paperfly_key || process.env.PAPERFLY_API_KEY || '';
+    const secretKey = merchantConfig.paperfly_secret_key || merchantConfig.paperfly_secret || process.env.PAPERFLY_SECRET_KEY || '';
+
+    const payload = {
+      merchant_id: merchantConfig.paperfly_store_id || '',
+      recipient_name: order.customer_name || order.name || 'Customer',
+      recipient_phone: order.customer_phone || order.phone || '',
+      recipient_address: order.shipping_address || order.address || '',
+      recipient_city: order.customer_city || 'Dhaka',
+      cod_amount: order.cod_amount ?? order.total ?? 0,
+      note: order.customer_note || order.note || 'Handle with care',
+      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+    };
+
+    const response = await fetch('https://api.paperfly.com.bd/v1/parcel', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Api-Key': apiKey,
+        'Secret-Key': secretKey,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (data.status === 'success' || data.success || data.tracking_code || data.consignment_id) {
+      return res.json({
+        success: true,
+        tracking_code: data.tracking_code || data.consignment_id || `PF-${Date.now()}`,
+        consignment: data,
+      });
+    } else {
+      return res.json({ success: false, message: data.error || data.message || 'Paperfly booking failed' });
+    }
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to Paperfly API' });
+  }
+});
+
 // ── Orders ──────────────────────
 // Orders are persisted in MongoDB. The API still accepts the same store refs
 // (store_code, UUID, or slug) and resolves them via Supabase 'stores' lookup,
@@ -6418,6 +6581,58 @@ function toValidDate(value: unknown): Date {
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
   return new Date();
+}
+
+/**
+ * Shape a raw `orders` document for the dashboard.
+ *
+ * The UI reads camelCase (`paymentStatus`, `trackingCode`, `totalBDT`) while the
+ * collection stores snake_case columns, and it renders several fields with
+ * `.toLocaleString()`. Returning the raw Mongo row therefore blanked the app on
+ * an `undefined` amount. Every value below is present and of the right type, and
+ * `_id` is serialised so the client can echo it back on the next update.
+ */
+function normalizeOrderRow(raw: Record<string, any> | null | undefined): Record<string, any> | null {
+  if (!raw) return null;
+  const createdAt = toValidDate(raw.created_at ?? raw.createdAt ?? raw.date);
+  const items = (() => {
+    if (Array.isArray(raw.items)) return raw.items;
+    if (typeof raw.items === 'string') {
+      try {
+        const parsed = JSON.parse(raw.items);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  })();
+
+  return {
+    ...raw,
+    id: String(raw.id || raw.order_number || raw._id || ''),
+    _id: raw._id ? String(raw._id) : undefined,
+    orderNumber: String(raw.order_number || raw.orderNumber || raw.id || '').replace(/^#/, ''),
+    status: canonicalOrderStatus(raw.status) || 'New',
+    paymentStatus: canonicalPaymentStatus(raw.payment_status ?? raw.paymentStatus) || 'Unpaid',
+    payment_status: canonicalPaymentStatus(raw.payment_status ?? raw.paymentStatus) || 'Unpaid',
+    fulfillmentStatus: raw.fulfillment_status || raw.fulfillmentStatus || fulfillmentForStatus(raw.status),
+    courierName: raw.shipping_courier || raw.courier_name || raw.courierName || '',
+    shipping_courier: raw.shipping_courier || raw.courier_name || raw.courierName || '',
+    trackingCode: raw.tracking_code || raw.trackingCode || raw.consignment_id || '',
+    tracking_code: raw.tracking_code || raw.trackingCode || raw.consignment_id || '',
+    totalBDT: toNumeric(raw.total_price ?? raw.totalBDT ?? raw.cod_amount, 0),
+    subtotalBDT: toNumeric(raw.subtotal_bdt ?? raw.subtotalBDT, 0),
+    deliveryCharge: toNumeric(raw.delivery_charge ?? raw.deliveryCharge, 0),
+    customerName: raw.customer_name || raw.customerName || 'Customer',
+    customerPhone: raw.customer_phone || raw.customerPhone || '',
+    customerCity: raw.customer_city || raw.customerCity || '',
+    address: raw.shipping_address || raw.address || '',
+    paymentMethod: raw.payment_method || raw.paymentMethod || 'COD',
+    createdAt: createdAt.toISOString(),
+    created_at: createdAt,
+    items,
+  };
 }
 
 /**
@@ -6704,6 +6919,88 @@ app.post('/api/orders', async (req, res) => {
     return res.status(200).json({ ok: false, success: false, synced: 0, error: err?.message || 'Order sync failed' });
   }
 });
+
+// ── PUT / PATCH /api/orders/:id — update status / payment_status ──────────────
+//
+// The Status and Payment Status dropdowns post here. The identifiers and the
+// persisted value both matter:
+//  • `:id` is the app-level identifier the dashboard holds (`order_number` or a
+//    client `ord-…` string), NOT necessarily the Mongo `_id` — `updateOrderFields`
+//    probes both.
+//  • The status is CANONICALISED (`in_delivery`/`Delivered`/`shipped` →
+//    `In delivery`) so the value written is one the read path maps into a status
+//    tab; otherwise the 4-second poll would overwrite the change and the badge
+//    would snap back.
+//
+// Answers 200 with the FRESH document so the UI renders server truth.
+const handleOrderUpdate = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, error: 'An order id is required.' });
+
+    const body = req.body || {};
+    // Accept the field under any of its known spellings — the dashboard sends
+    // `status`/`paymentStatus`, other callers use the snake_case columns.
+    const rawStatus = body.status ?? body.order_status ?? body.orderStatus;
+    const rawPayment = body.paymentStatus ?? body.payment_status;
+    const rawFulfillment = body.fulfillmentStatus ?? body.fulfillment_status;
+
+    const status = canonicalOrderStatus(rawStatus);
+    const paymentStatus = canonicalPaymentStatus(rawPayment);
+
+    const fields: Record<string, any> = {};
+    if (status) {
+      fields.status = status;
+      // The fulfilment badge follows the order status unless the caller was
+      // explicit, so the two never disagree in the table.
+      const implied = rawFulfillment ? String(rawFulfillment) : fulfillmentForStatus(status);
+      if (implied) {
+        fields.fulfillment_status = implied;
+        fields.fulfillmentStatus = implied;
+      }
+    }
+    if (paymentStatus) {
+      fields.payment_status = paymentStatus;
+      fields.paymentStatus = paymentStatus;
+    }
+    // Extra pass-through fields the UI may patch alongside a status change.
+    for (const key of ['courier_name', 'courierName', 'shipping_courier', 'tracking_code', 'trackingCode', 'note', 'tags']) {
+      if (body[key] !== undefined) fields[key] = body[key];
+    }
+
+    const result = await updateOrderFields(id, fields, {
+      store_slug: req.query.store_slug || req.query.storeSlug || body.store_slug || body.storeSlug,
+      store_id: req.query.store_id || body.store_id,
+      merchant_id: req.query.merchant_id || body.merchant_id,
+    });
+
+    if (!result.ok) {
+      console.warn('[Server] order update notice:', result.error);
+      // A missing order is a legitimate 404-shaped answer, but we keep 200 so a
+      // stale row in a polling UI cannot surface as a red network error.
+      return res.status(200).json({
+        ok: false,
+        error: result.error || 'The order could not be updated.',
+        order: null,
+      });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      updated: result.updated,
+      // The UI applies this document directly, so the badge changes without a
+      // manual reload.
+      order: normalizeOrderRow(result.order),
+    });
+  } catch (err: any) {
+    console.error('[Server] PUT /api/orders/:id error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Order update failed.', order: null });
+  }
+};
+
+app.put('/api/orders/:id', handleOrderUpdate);
+app.patch('/api/orders/:id', handleOrderUpdate);
 
 // ── Customers ───────────────────────────────
 // GET /api/customers — list every customer for a store (no filter → all rows).
