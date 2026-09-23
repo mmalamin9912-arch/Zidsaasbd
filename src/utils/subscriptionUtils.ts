@@ -1,6 +1,83 @@
 import { SubscriptionPlanId } from '../types';
 
 /**
+ * Standard free-trial length. Referenced everywhere so the header, the billing
+ * page and the server can never disagree about what a "30-day trial" is.
+ */
+export const TRIAL_DURATION_DAYS = 30;
+
+/**
+ * Normalise any timestamp-ish value to epoch milliseconds using UTC semantics.
+ *
+ * Dates from MongoDB arrive as BSON `Date`, ISO strings, or `YYYY-MM-DD`
+ * strings. A bare `YYYY-MM-DD` is parsed by `Date` as UTC midnight, which is the
+ * only reading that gives the same answer in every browser timezone — using
+ * local parsing here was what made the trial counter differ between Dhaka and a
+ * machine set to another timezone.
+ */
+export const toUtcMs = (value?: string | number | Date | null): number => {
+  if (value === undefined || value === null || value === '') return 0;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isNaN(t) ? 0 : t;
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+
+  const raw = String(value).trim();
+  if (!raw) return 0;
+
+  // A date-only string is anchored to UTC midnight explicitly.
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (dateOnly) {
+    return Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]));
+  }
+
+  const parsed = new Date(raw).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+/**
+ * Days of free trial remaining, computed deterministically.
+ *
+ *   remaining = max(0, trialDays - floor((now - trialStart) / 86400000))
+ *
+ * This is a PURE function of two inputs — the trial start timestamp stored when
+ * the account was created, and the current time. It reads no localStorage, keeps
+ * no cached anchor and has no random fallback, so refreshing the page (or opening
+ * it on another device) cannot change the answer.
+ *
+ * `floor` (not `ceil`) is deliberate: it matches the "whole days elapsed"
+ * semantics the badge promises, so a trial started 29d 6h ago shows 1 day left,
+ * and a trial started 29d 20h ago still shows 1 day rather than jumping to 0.
+ *
+ * Returns `null` when no usable start timestamp exists — the caller should then
+ * fall back to whatever signed-in record it has, and should NOT invent "now",
+ * which is what made the counter reset to 30 on every refresh.
+ */
+export const calculateTrialDaysRemaining = (
+  trialStartValue?: string | number | Date | null,
+  options: { now?: number; trialDays?: number } = {}
+): number | null => {
+  const startMs = toUtcMs(trialStartValue);
+  if (!startMs) return null;
+
+  const now = options.now ?? Date.now();
+  const trialDays = options.trialDays ?? TRIAL_DURATION_DAYS;
+  const elapsedDays = Math.floor((now - startMs) / (1000 * 60 * 60 * 24));
+  return Math.max(0, trialDays - elapsedDays);
+};
+
+/**
+ * UTC date string (`YYYY-MM-DD`) for a timestamp, so a date shown on screen does
+ * not shift by a day depending on the viewer's timezone.
+ */
+export const toUtcDateString = (value: number | string | Date): string => {
+  const ms = toUtcMs(value);
+  if (!ms) return '';
+  return new Date(ms).toISOString().slice(0, 10);
+};
+
+/**
  * Maps plan ID to its exact duration in days:
  * - Free Trial / 1 Month: 30 days
  * - Starter Plan / 3 Months: 90 days

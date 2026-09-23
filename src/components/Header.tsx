@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { MerchantProfile, SubscriptionRequest } from '../types';
-import { calculateRemainingDays, getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive } from '../utils/subscriptionUtils';
+import { calculateRemainingDays, getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive, toUtcMs, TRIAL_DURATION_DAYS } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
@@ -116,12 +116,24 @@ export const Header: React.FC<HeaderProps> = ({
   }, []);
 
   // Dynamic Subscription & Trial Calculations
+  //
+  // A request is only treated as "awaiting approval" when BOTH the local record
+  // and the database agree. The admin approves against MongoDB, so relying on the
+  // localStorage copy alone left the banner stuck on PENDING_APPROVAL in a tab
+  // that had been open before the approval.
+  const [dbSubscriptionStatus, setDbSubscriptionStatus] = useState<string | null>(null);
+
   const pendingRequest = pendingRequests?.find(
     r => r.status === 'pending' && (
       (r.email && merchant?.email && r.email.toLowerCase() === merchant.email.toLowerCase()) ||
       (r.storeName && merchant?.storeName && r.storeName.toLowerCase() === merchant.storeName.toLowerCase())
     )
   );
+
+  // The database is authoritative: once it reports ACTIVE, the pending banner is
+  // suppressed even if a stale request row still says 'pending' locally.
+  const dbReportsActive = (dbSubscriptionStatus || '').toUpperCase() === 'ACTIVE';
+  const showPendingBanner = Boolean(pendingRequest) && !dbReportsActive;
 
   // Supabase fetched active subscription record
   const [supabaseSub, setSupabaseSub] = useState<{
@@ -280,36 +292,69 @@ export const Header: React.FC<HeaderProps> = ({
     };
   }, [merchant?.email, merchant?.storeSlug]);
 
-  // Stable fallback start time ref initialized ONCE per component instance
-  const initialMountTimeRef = useRef<number>(Date.now());
+  // ── Deterministic trial / plan countdown ──────────────────────────────────
+  //
+  // WHY THIS WAS UNSTABLE (30 → 28 → 30 on refresh)
+  //
+  // The old implementation anchored on `getStablePlanStartMs`, which — when the
+  // merchant record carried no start timestamp yet — wrote `Date.now()` into
+  // localStorage and used that as the trial start. The Supabase subscription row
+  // then arrived a moment later with a DIFFERENT start date, so the anchor moved
+  // and the counter recomputed from a new baseline. Whichever of the two landed
+  // last decided whether the badge said 30 or 28.
+  //
+  // The fix is to remove every source of variance:
+  //   • ONE anchor — the account creation timestamp the server stores
+  //     (`trial_start_date`, else `created_at`), fetched from MongoDB.
+  //   • ONE formula — `calculateTrialDaysRemaining` (UTC, floor), shared with the
+  //     server and the billing page.
+  //   • NO localStorage anchor, NO `Date.now()` fallback, NO random jitter.
+  //
+  // When no anchor is available we report `null` and the badge shows a neutral
+  // "trial" label rather than inventing a number that changes on refresh.
+  const [trialAnchorIso, setTrialAnchorIso] = useState<string | null>(null);
 
-  // Persisted stable plan start timestamp. Prevents the countdown from resetting to
-  // 30/29 days on every page refresh: the first time we resolve a start time for this
-  // merchant we freeze it in localStorage keyed by email, and reuse it afterwards.
-  const getStablePlanStartMs = (rawStartTime: any): number => {
-    const parsed = rawStartTime && !isNaN(new Date(rawStartTime).getTime())
-      ? new Date(rawStartTime).getTime()
-      : 0;
-    if (parsed > 0) {
+  useEffect(() => {
+    let cancelled = false;
+    const email = (merchant?.email || '').trim().toLowerCase();
+    const slug = (merchant?.storeSlug || merchant?.storeName || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+    if (!email && !slug) return;
+
+    const loadAnchor = async () => {
       try {
-        const key = `zid_plan_start_${(merchant?.email || 'user').toLowerCase()}`;
-        const stored = Number(localStorage.getItem(key) || 0);
-        // Keep the earliest known start (registration/plan purchase date)
-        if (!stored || parsed < stored) localStorage.setItem(key, String(parsed));
-      } catch { /* storage unavailable */ }
-      return parsed;
-    }
-    try {
-      const key = `zid_plan_start_${(merchant?.email || 'user').toLowerCase()}`;
-      const stored = Number(localStorage.getItem(key) || 0);
-      if (stored > 0) return stored;
-      const fallback = initialMountTimeRef.current;
-      localStorage.setItem(key, String(fallback));
-      return fallback;
-    } catch {
-      return initialMountTimeRef.current;
-    }
-  };
+        const params = new URLSearchParams();
+        if (email) params.set('email', email);
+        if (slug) params.set('store_slug', slug);
+        const res = await fetch(`/api/subscription/status?${params.toString()}`, {
+          headers: { Accept: 'application/json' },
+        });
+        const data = await res.json().catch(() => null);
+        if (cancelled || !data?.ok || !data.store) return;
+        // The database's activation state is authoritative — it is what the admin
+        // approval writes and what gates the PENDING_APPROVAL banner.
+        if (data.store.subscription_status) {
+          setDbSubscriptionStatus(String(data.store.subscription_status));
+        }
+        // `trial_start_date` is authoritative; `created_at` is the fallback that
+        // is always present on a real MongoDB store document.
+        const anchor = data.store.trial_start_date || data.store.created_at || null;
+        if (anchor) setTrialAnchorIso(String(anchor));
+      } catch {
+        // Keep whatever anchor we already have — never replace it with "now".
+      }
+    };
+
+    loadAnchor();
+    // Re-read periodically so an admin approval in another browser lands here.
+    const timer = setInterval(loadAnchor, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [merchant?.email, merchant?.storeSlug, merchant?.storeName]);
 
   // Real-time ticking countdown clock state
   const [timeLeft, setTimeLeft] = useState<{
@@ -330,67 +375,69 @@ export const Header: React.FC<HeaderProps> = ({
     const durationDays = getPlanDurationInDays(activePlan);
     const durationMs = durationDays * 24 * 60 * 60 * 1000;
 
-    let targetTimestamp: number;
-
-    if (isPaidPlanActive) {
-      // For paid plan: check start time and explicit expiry
-      const rawStartTime =
-        merchant?.plan_started_at ||
+    // A paid plan's window is anchored on the plan start the SERVER recorded.
+    // `toUtcMs` keeps a date-only string from being shifted by the viewer's
+    // timezone, which is the other half of why two browsers disagreed.
+    const planStartMs = toUtcMs(
+      merchant?.plan_started_at ||
         (merchant as any)?.planStartedAt ||
         merchant?.subscriptionStartDate ||
         supabaseSub?.plan_started_at ||
         supabaseSub?.plan_start_date ||
-        supabaseSub?.created_at;
+        supabaseSub?.created_at
+    );
 
-      const planStartTimeMs = getStablePlanStartMs(rawStartTime);
+    let targetTimestamp: number;
 
-      const explicitExpiry =
+    if (isPaidPlanActive) {
+      const explicitExpiryMs = toUtcMs(
         merchant?.expires_at ||
-        (merchant as any)?.expiresAt ||
-        merchant?.subscriptionExpiry ||
-        merchant?.subscriptionEndDate ||
-        supabaseSub?.expires_at ||
-        supabaseSub?.subscription_expiry ||
-        supabaseSub?.subscription_end_date;
+          (merchant as any)?.expiresAt ||
+          merchant?.subscriptionExpiry ||
+          merchant?.subscriptionEndDate ||
+          supabaseSub?.expires_at ||
+          supabaseSub?.subscription_expiry ||
+          supabaseSub?.subscription_end_date
+      );
 
-      const explicitExpiryMs = explicitExpiry && !isNaN(new Date(explicitExpiry).getTime())
-        ? new Date(explicitExpiry).getTime()
-        : 0;
-
-      // If explicitExpiry exists and matches the plan duration scope, use it; otherwise compute from start time + durationMs
-      if (explicitExpiryMs > 0 && explicitExpiryMs > Date.now() + (durationDays - 15) * 86400000) {
+      // Trust an explicit expiry that is close to the plan's real duration;
+      // otherwise recompute from the start so a legacy row cannot show a bogus
+      // multi-year window. Never re-anchor to "now" — an expired plan must read
+      // as expired, not silently restart.
+      if (explicitExpiryMs > 0 && explicitExpiryMs > planStartMs + (durationDays - 15) * 86400000) {
         targetTimestamp = explicitExpiryMs;
+      } else if (planStartMs > 0) {
+        targetTimestamp = planStartMs + durationMs;
       } else {
-        const calculatedFromStart = planStartTimeMs + durationMs;
-        // Never re-anchor to "now": if the calculated window has passed, show it expired.
-        targetTimestamp = calculatedFromStart;
+        targetTimestamp = explicitExpiryMs;
       }
     } else {
-      // For free trial (30 days)
-      const trialExpiry =
+      // Free trial. An explicit trial end wins; otherwise 30 days from the
+      // account-creation anchor the server gave us. If neither exists the
+      // countdown stays at zero rather than inventing a start date.
+      const trialExpiryMs = toUtcMs(
         merchant?.expires_at ||
-        (merchant as any)?.expiresAt ||
-        merchant?.trialEndsAt ||
-        supabaseSub?.expires_at ||
-        supabaseSub?.trial_ends_at;
+          (merchant as any)?.expiresAt ||
+          merchant?.trialEndsAt ||
+          supabaseSub?.expires_at ||
+          supabaseSub?.trial_ends_at
+      );
 
-      if (trialExpiry && !isNaN(new Date(trialExpiry).getTime())) {
-        targetTimestamp = new Date(trialExpiry).getTime();
+      const anchorMs = toUtcMs(trialAnchorIso);
+
+      if (trialExpiryMs > 0) {
+        targetTimestamp = trialExpiryMs;
+      } else if (anchorMs > 0) {
+        targetTimestamp = anchorMs + TRIAL_DURATION_DAYS * 86400000;
       } else {
-        const rawStartTime =
-          merchant?.plan_started_at ||
-          (merchant as any)?.planStartedAt ||
-          merchant?.trialStartDate ||
-          merchant?.createdAt;
-
-        const trialStartTimeMs = getStablePlanStartMs(rawStartTime);
-
-        targetTimestamp = trialStartTimeMs + (30 * 24 * 60 * 60 * 1000);
+        targetTimestamp = 0;
       }
     }
 
     const computeTimeLeft = () => {
-      // Offline Continuous Calculation: Remaining Time = expires_at - Date.now()
+      if (!targetTimestamp) {
+        return { days: 0, hours: 0, minutes: 0, seconds: 0, totalSeconds: 0, totalDaysFloat: 0 };
+      }
       const now = Date.now();
       const diffMs = Math.max(0, targetTimestamp - now);
       const totalSeconds = Math.floor(diffMs / 1000);
@@ -415,6 +462,7 @@ export const Header: React.FC<HeaderProps> = ({
     return () => clearInterval(timer);
   }, [
     supabaseSub,
+    trialAnchorIso,
     merchant?.expires_at,
     (merchant as any)?.expiresAt,
     merchant?.plan_started_at,
@@ -422,16 +470,14 @@ export const Header: React.FC<HeaderProps> = ({
     merchant?.subscriptionStartDate,
     merchant?.subscriptionEndDate,
     merchant?.subscriptionExpiry,
-    merchant?.trialStartDate,
     merchant?.trialEndsAt,
-    merchant?.createdAt,
     merchant?.selectedPlanDays,
     merchant?.subscriptionPlan
   ]);
 
   const paidDaysRemaining = timeLeft.days;
   const trialDaysRemaining = timeLeft.days;
-  const trialDaysTotal = merchant?.trialDaysTotal ?? merchant?.selectedPlanDays ?? 30;
+  const trialDaysTotal = merchant?.trialDaysTotal ?? merchant?.selectedPlanDays ?? TRIAL_DURATION_DAYS;
   const trialPercentage = Math.min(100, Math.max(0, Math.round(((trialDaysTotal - trialDaysRemaining) / trialDaysTotal) * 100)));
 
   const notificationsList = [
@@ -484,7 +530,7 @@ export const Header: React.FC<HeaderProps> = ({
       )}
 
       {/* Subscription / Trial Status Banner */}
-      {pendingRequest ? (
+      {showPendingBanner ? (
         // PENDING APPROVAL BANNER
         <div className="bg-gradient-to-r from-[#241E14] via-[#332A1C] to-[#241E14] border border-amber-500/40 rounded-xl p-3 shadow-md">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">

@@ -236,6 +236,22 @@ function calculatePlanTimestamps(planId?: string, startDate: Date = new Date()) 
   return { plan_started_at, expires_at, expiryDate, durationDays, durationMs };
 }
 
+/**
+ * Human-readable plan label ('Pro Plan'), mirroring the client helper in
+ * src/utils/subscriptionUtils.ts. Kept in step deliberately: the admin portal
+ * shows this string and `plan_name` is persisted to MongoDB, so the two must
+ * agree or the merchant sees a different plan name than the admin approved.
+ */
+function getPlanDisplayName(planId?: string): string {
+  if (!planId || planId === 'free_trial' || planId === 'trial') return 'Free Trial (30 Days)';
+  const lower = planId.toLowerCase();
+  if (lower.includes('12m') || lower.includes('enterprise')) return 'Enterprise Plan (12 Months)';
+  if (lower.includes('6m') || lower.includes('pro')) return 'Pro Plan (6 Months)';
+  if (lower.includes('3m') || lower.includes('starter')) return 'Starter Plan (3 Months)';
+  if (lower.includes('1m') || lower.includes('month')) return '1-Month Plan';
+  return planId.replace(/_/g, ' ').toUpperCase();
+}
+
 function cleanEnvUrl(raw?: string): string {
   if (!raw) return '';
   let str = String(raw).trim();
@@ -3615,6 +3631,261 @@ app.post('/api/subscription/update', async (req, res) => {
     });
   } catch (err: any) {
     res.status(500).json({ status: 'error', error: err?.message });
+  }
+});
+
+/**
+ * POST /api/subscription/approve — record an admin approval in MongoDB.
+ *
+ * THE PROBLEM THIS SOLVES
+ * ----------------------
+ * The Super Admin Portal's approve button only wrote to localStorage and
+ * Supabase. MongoDB — which the merchant dashboard actually reads — was never
+ * touched, so the merchant stayed on "STATUS: PENDING_APPROVAL" forever after an
+ * admin had visibly approved the payment.
+ *
+ * This route is the missing half: it marks the request approved, and writes the
+ * activated plan onto BOTH the `stores` document (the tenant record the
+ * dashboard header reads) and the `subscriptions` collection (the renewal
+ * history).
+ *
+ * Every failure degrades to HTTP 200 with `ok: false` and a reason, because the
+ * admin UI should never show a red network error for a shape it can explain.
+ */
+app.post('/api/subscription/approve', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const planId = String(body.planId || body.plan_id || body.subscription_plan || '').trim();
+    const email = String(body.email || '').trim().toLowerCase();
+    const storeSlug = String(body.storeSlug || body.store_slug || '')
+      .trim()
+      .toLowerCase();
+    const storeName = String(body.storeName || body.store_name || '').trim();
+    const requestId = String(body.requestId || body.request_id || body.id || '').trim();
+
+    if (!planId) {
+      return res.status(200).json({ ok: false, error: 'A plan id is required to approve a subscription.' });
+    }
+    if (!email && !storeSlug && !storeName) {
+      return res.status(200).json({
+        ok: false,
+        error: 'A merchant email, store slug or store name is required to identify the store.',
+      });
+    }
+
+    // Approval starts the paid window TODAY. Any remaining free-trial days are
+    // deliberately NOT added on top — the purchased duration is what was paid
+    // for, and the trial is superseded rather than banked.
+    const startDate = new Date();
+    const computed = calculatePlanTimestamps(planId, startDate);
+    const duration_days = Number(body.duration_days ?? body.durationDays) || computed.durationDays;
+    const plan_started_at = String(body.plan_started_at || computed.plan_started_at);
+    const expires_at = String(body.expires_at || computed.expires_at);
+    const expiryDate = String(body.expiryDate || computed.expiryDate);
+    const planName = getPlanDisplayName(planId);
+
+    const activationFields: Record<string, any> = {
+      // Canonical activation state. The dashboard compares this
+      // case-insensitively, and 'ACTIVE' is what the admin UI reports.
+      subscription_status: 'ACTIVE',
+      subscriptionStatus: 'ACTIVE',
+      status: 'active',
+      plan_name: planName,
+      planName: planName,
+      subscription_plan: planId,
+      subscriptionPlan: planId,
+      subscription_expiry: expiryDate,
+      subscriptionExpiry: expiryDate,
+      plan_started_at,
+      planStartedAt: plan_started_at,
+      expires_at,
+      expiresAt: expires_at,
+      duration_days,
+      durationDays: duration_days,
+      selectedPlanDays: duration_days,
+      // The trial is over the moment a paid plan is approved.
+      trial_days_remaining: 0,
+      trialDaysRemaining: 0,
+      trial_ends_at: null,
+      trialEndsAt: null,
+      is_locked: false,
+      isLocked: false,
+      payment_approved_at: startDate.toISOString(),
+      updated_at: startDate.toISOString(),
+    };
+    if (requestId) activationFields.last_approved_request_id = requestId;
+    if (body.transactionId || body.transaction_id) {
+      activationFields.transaction_id = String(body.transactionId || body.transaction_id);
+    }
+
+    const mongoSources: string[] = [];
+    let mongoError: string | undefined;
+
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+
+    if (!db) {
+      mongoError = 'MongoDB is not configured or unavailable.';
+    } else {
+      // ── 1. The tenant document the dashboard reads.
+      // Match flexibly: a storefront-registered merchant may only carry the
+      // slug, while an admin-created one may only carry the email.
+      const storeOr: Record<string, any>[] = [];
+      if (email) {
+        storeOr.push({ email });
+        storeOr.push({ email: String(body.email).trim() });
+      }
+      if (storeSlug) {
+        storeOr.push({ store_slug: storeSlug });
+        storeOr.push({ storeSlug });
+      }
+      if (storeName) storeOr.push({ store_name: storeName }, { storeName });
+
+      try {
+        const storeResult = await db
+          .collection('stores')
+          .updateMany({ $or: storeOr }, { $set: activationFields });
+        if (storeResult.matchedCount > 0) {
+          mongoSources.push(`stores:${storeResult.modifiedCount}/${storeResult.matchedCount}`);
+        } else {
+          console.warn('[Server] subscription approve: no matching store document for', { email, storeSlug, storeName });
+        }
+      } catch (err: any) {
+        console.warn('[Server] subscription approve stores write failed:', err?.message || err);
+        mongoError = err?.message || 'The store document could not be updated.';
+      }
+
+      // ── 2. Mark the request row itself approved, so the portal's list is
+      // authoritative from the database rather than only from localStorage.
+      if (requestId) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          const requestOr: Record<string, any>[] = [{ id: requestId }];
+          if (/^[a-f0-9]{24}$/i.test(requestId)) {
+            requestOr.unshift({ _id: new ObjectId(requestId) });
+          }
+          if (email) requestOr.push({ merchant_email: email }, { email });
+          if (body.transactionId) requestOr.push({ transaction_id: String(body.transactionId) });
+
+          await db.collection('subscription_requests').updateMany(
+            { $or: requestOr },
+            {
+              $set: {
+                status: 'approved',
+                approved_at: startDate.toISOString(),
+                subscription_status: 'ACTIVE',
+                plan_id: planId,
+                plan_name: planName,
+                plan_started_at,
+                expires_at,
+                duration_days,
+                updated_at: startDate.toISOString(),
+              },
+            }
+          );
+          mongoSources.push('subscription_requests');
+        } catch (err: any) {
+          console.warn('[Server] subscription approve request-row write failed:', err?.message || err);
+        }
+      }
+    }
+
+    // ── 3. Renewal record, so `/api/subscription/list` and analytics see it.
+    let subscriptionWrite: any = null;
+    try {
+      subscriptionWrite = await writeSubscription({
+        merchant_email: email,
+        store_slug: storeSlug,
+        store_name: storeName,
+        subscription_plan: planId,
+        plan_name: planName,
+        plan_started_at,
+        expires_at,
+        subscription_expiry: expiryDate,
+        duration_days,
+        transaction_id: body.transactionId || body.transaction_id,
+        payment_method: body.paymentMethod || body.payment_method,
+        status: 'active',
+      });
+    } catch (err: any) {
+      console.warn('[Server] subscription approve renewal write failed:', err?.message || err);
+    }
+
+    const ok = mongoSources.length > 0;
+    return res.status(200).json({
+      ok,
+      status: 'ok',
+      plan_id: planId,
+      plan_name: planName,
+      subscription_status: 'ACTIVE',
+      plan_started_at,
+      expires_at,
+      expiry_date: expiryDate,
+      duration_days,
+      sources: [...mongoSources, ...(subscriptionWrite?.sources || [])],
+      error: ok ? undefined : mongoError || 'No store document matched this merchant, so nothing was updated.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/subscription/approve error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not record the subscription approval.' });
+  }
+});
+
+/**
+ * GET /api/subscription/status — the merchant's live activation state.
+ *
+ * The dashboard polls this so an approval performed by an admin in another
+ * browser (or before this tab was opened) is reflected without a hard refresh.
+ * Reads MongoDB first, falls back to the in-memory mirror.
+ */
+app.get('/api/subscription/status', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const email = String(req.query.email || '').trim().toLowerCase();
+    const slug = String(req.query.store_slug || req.query.storeSlug || req.query.slug || '')
+      .trim()
+      .toLowerCase();
+
+    if (!email && !slug) {
+      return res.status(200).json({ ok: false, error: 'Provide an email or store slug.', store: null });
+    }
+
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) {
+      return res.status(200).json({ ok: false, error: 'MongoDB is unavailable.', store: null });
+    }
+
+    const or: Record<string, any>[] = [];
+    if (email) or.push({ email }, { merchant_email: email });
+    if (slug) or.push({ store_slug: slug }, { storeSlug: slug });
+
+    const store = await db.collection('stores').findOne({ $or: or });
+    if (!store) {
+      return res.status(200).json({ ok: false, error: 'No matching store found.', store: null });
+    }
+
+    // The trial anchor is the account creation timestamp — the single value that
+    // cannot be changed by a page refresh, a plan edit or a client cache.
+    const trialStart =
+      store.trial_start_date || store.trialStartDate || store.created_at || store.createdAt || null;
+
+    return res.status(200).json({
+      ok: true,
+      store: {
+        subscription_status: store.subscription_status || store.subscriptionStatus || null,
+        plan_name: store.plan_name || store.planName || null,
+        subscription_plan: store.subscription_plan || store.subscriptionPlan || null,
+        subscription_expiry: store.subscription_expiry || store.subscriptionExpiry || null,
+        plan_started_at: store.plan_started_at || store.planStartedAt || null,
+        expires_at: store.expires_at || store.expiresAt || null,
+        duration_days: store.duration_days ?? store.durationDays ?? null,
+        trial_start_date: trialStart,
+        created_at: store.created_at || store.createdAt || null,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/subscription/status error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not read the subscription status.', store: null });
   }
 });
 

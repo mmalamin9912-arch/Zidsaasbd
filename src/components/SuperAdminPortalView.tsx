@@ -1244,6 +1244,56 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       }
     }
 
+    // ── MongoDB activation sync ──────────────────────────────────────────────
+    //
+    // Everything above this point writes localStorage and Supabase, neither of
+    // which the merchant dashboard reads for its header state. Without this call
+    // the store document in MongoDB kept its old `subscription_status`, so the
+    // merchant stayed on "STATUS: PENDING_APPROVAL" even though the admin had
+    // just approved the payment. The store is identified by email AND slug/name
+    // because an admin-created merchant may only have one of them.
+    const storeSlugForSync = (req.storeSlug || req.storeName || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+
+    void (async () => {
+      try {
+        const res = await fetch('/api/subscription/approve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requestId: req.id,
+            email: req.email,
+            storeSlug: storeSlugForSync,
+            storeName: req.storeName,
+            planId: req.planId,
+            transactionId: (req as any).transactionId || (req as any).trxId,
+            paymentMethod: (req as any).paymentMethod,
+            plan_started_at,
+            expires_at,
+            expiryDate,
+            duration_days: durationDays,
+          }),
+        });
+        const data = await safeJson<any>(res);
+        if (data && data.ok === false) {
+          console.warn('Subscription approval MongoDB sync notice:', data.error);
+          setSaveSuccess(
+            `Approved locally, but the store record could not be updated: ${data.error} The merchant may still see the old status until this is retried.`
+          );
+          setTimeout(() => setSaveSuccess(null), 6000);
+        } else {
+          console.log('[Admin] Subscription approval synced to MongoDB:', data?.sources);
+        }
+      } catch (err: any) {
+        console.warn('Subscription approval MongoDB sync failed:', err?.message || err);
+        setSaveSuccess(
+          'Approved locally, but the database could not be reached. The merchant may still see the previous status until this is retried.'
+        );
+        setTimeout(() => setSaveSuccess(null), 6000);
+      }
+    })();
+
     setSaveSuccess(`Subscription for "${req?.storeName || 'Store'}" approved! Active plan: ${planName} (${durationDays} Days from today, valid until ${expiryDate}). Remaining free trial days cleared.`);
     setTimeout(() => setSaveSuccess(null), 4000);
   };
