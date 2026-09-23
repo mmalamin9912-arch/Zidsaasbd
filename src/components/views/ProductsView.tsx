@@ -164,30 +164,60 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
 
   const handleSaveProduct = async (savedProduct: Product) => {
     try {
-      // 1. Prepare productData and fallback schema payload structure
       const anyProd = savedProduct as any;
-      const productData = {
+      
+      // Send ALL product fields to the API for full MongoDB persistence
+      const payload: Record<string, any> = {
         id: savedProduct.id,
+        title: savedProduct.title,
+        titleBn: savedProduct.titleBn || '',
         name: savedProduct.title || anyProd.name || 'Untitled Product',
-        title: savedProduct.title || anyProd.name || 'Untitled Product',
+        priceBDT: savedProduct.priceBDT,
         price: Number(savedProduct.priceBDT ?? anyProd.price) || 0,
+        costPriceBDT: savedProduct.costPriceBDT,
+        compareAtPriceBDT: savedProduct.compareAtPriceBDT,
         stock: Number(savedProduct.stock ?? anyProd.quantity ?? anyProd.stock_quantity) || 0,
+        stock_quantity: Number(savedProduct.stock ?? anyProd.quantity ?? anyProd.stock_quantity) || 0,
         quantity: Number(savedProduct.stock ?? anyProd.quantity ?? anyProd.stock_quantity) || 0,
         category: savedProduct.category || 'General',
+        categoryId: savedProduct.categoryId || '',
         image: savedProduct.image || anyProd.imageUrl || anyProd.image_url || '',
         imageUrl: savedProduct.image || anyProd.imageUrl || anyProd.image_url || '',
-        store_slug: activeStoreSlug
-      };
-
-      const payload: Record<string, any> = {
-        name: productData.name,
-        price: Number(productData.price) || 0,
-        stock: Number(productData.stock || productData.quantity) || 0,
-        stock_quantity: Number(productData.stock || productData.quantity) || 0,
-        category: productData.category || 'General',
-        image: productData.image || productData.imageUrl || '',
-        image_url: productData.image || productData.imageUrl || '',
-        store_slug: activeStoreSlug
+        image_url: savedProduct.image || anyProd.imageUrl || anyProd.image_url || '',
+        additionalImages: savedProduct.additionalImages || [],
+        descriptionEn: savedProduct.descriptionEn || '',
+        descriptionBn: savedProduct.descriptionBn || '',
+        descriptionAr: savedProduct.descriptionAr || '',
+        brand: savedProduct.brand || '',
+        sku: savedProduct.sku || '',
+        status: savedProduct.status || 'Active',
+        taxRatePercent: savedProduct.taxRatePercent || 0,
+        maxOrderQuantity: savedProduct.maxOrderQuantity || 99,
+        customizationEnabled: savedProduct.customizationEnabled || false,
+        customizationLabel: savedProduct.customizationLabel || 'Custom instructions',
+        seoTitle: savedProduct.seoTitle || '',
+        seoDescription: savedProduct.seoDescription || '',
+        seoSlug: savedProduct.seoSlug || '',
+        templateStyle: savedProduct.templateStyle || 'standard',
+        requiresShipping: savedProduct.requiresShipping !== false,
+        isTaxExempt: savedProduct.isTaxExempt || false,
+        hasDiscount: savedProduct.hasDiscount || false,
+        variants: savedProduct.variants || [],
+        variantsCount: savedProduct.variantsCount || (Array.isArray(savedProduct.variants) ? savedProduct.variants.length : 1),
+        salesCount: savedProduct.salesCount || 0,
+        createdAt: savedProduct.createdAt || new Date().toISOString().split('T')[0],
+        updatedAt: new Date().toISOString().split('T')[0],
+        // Per-product delivery charges
+        deliveryRates: savedProduct.deliveryRates || [],
+        inside_city_fee: savedProduct.inside_city_fee,
+        outside_city_fee: savedProduct.outside_city_fee,
+        insideCityFee: savedProduct.insideCityFee,
+        outsideCityFee: savedProduct.outsideCityFee,
+        colorImages: savedProduct.colorImages || {},
+        selectedFilter: savedProduct.selectedFilter || '',
+        customFields: savedProduct.customFields || [],
+        store_slug: activeStoreSlug,
+        storeSlug: activeStoreSlug,
       };
 
       // 2. Persist via Express API (MongoDB + file payload)
@@ -236,10 +266,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         console.warn('[ProductsView] Supabase persistence notice:', supabaseErrorMsg);
       }
 
-      // 3. Update UI State after persistence
+      // 4. Update UI State after persistence
       const updatedProduct = mapApiProduct({
         ...savedProduct,
-        ...productData,
         ...payload,
         stock: payload.stock_quantity,
         priceBDT: payload.price,

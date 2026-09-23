@@ -2658,13 +2658,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                           (falling back to the store's COD config), so the label is
                           always the amount the customer will actually be charged. */}
                       <option value="Dhaka">
-                        Inside City ({insideAreaLabel} \u09F3{insideAreaFee.toLocaleString()})
+                        Inside City ({insideAreaLabel} ৳{insideAreaFee.toLocaleString()})
                       </option>
                       <option value="Chittagong">
-                        Outside City ({outsideAreaLabel} \u09F3{outsideAreaFee.toLocaleString()})
+                        Outside City ({outsideAreaLabel} ৳{outsideAreaFee.toLocaleString()})
                       </option>
                       <option value="Sylhet">
-                        Outside City \u2014 Sylhet (\u09F3{outsideAreaFee.toLocaleString()})
+                        Outside City \u2014 Sylhet (৳{outsideAreaFee.toLocaleString()})
                       </option>
                     </select>
                   </div>
@@ -2684,7 +2684,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                           <span className="text-xs text-slate-100 font-semibold">
                             Add gift wrapping
                             {Number(giftConfig.giftPackagingFee) > 0
-                              ? ` (+\u09F3${Number(giftConfig.giftPackagingFee).toLocaleString()})`
+                              ? ` (+৳${Number(giftConfig.giftPackagingFee).toLocaleString()})`
                               : ' (free)'}
                           </span>
                         </label>
@@ -2823,7 +2823,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       </div>
                       <div className="flex justify-between text-slate-600">
                         <span>Shipping Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'}):</span>
-                        <span className="font-semibold text-slate-900">\u09F3{shippingFee.toLocaleString()}</span>
+                        <span className="font-semibold text-slate-900">৳{shippingFee.toLocaleString()}</span>
                       </div>
                       {/* Tax breakdown (Settings -> Tax) */}
                       {showTaxBreakdown && taxPercent > 0 && (
@@ -3473,8 +3473,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     <span>Delivery Fee</span>
                     <span className="text-emerald-400 font-bold">
                       {insideAreaFee === outsideAreaFee
-                        ? `\u09F3${insideAreaFee.toLocaleString()}`
-                        : `Inside \u09F3${insideAreaFee.toLocaleString()} / Outside \u09F3${outsideAreaFee.toLocaleString()}`}
+                        ? `৳${insideAreaFee.toLocaleString()}`
+                        : `Inside ৳${insideAreaFee.toLocaleString()} / Outside ৳${outsideAreaFee.toLocaleString()}`}
                     </span>
                   </div>
                   <div className="border-t border-slate-800 pt-2 flex justify-between items-center text-sm">
