@@ -122,6 +122,13 @@ export const Header: React.FC<HeaderProps> = ({
   // localStorage copy alone left the banner stuck on PENDING_APPROVAL in a tab
   // that had been open before the approval.
   const [dbSubscriptionStatus, setDbSubscriptionStatus] = useState<string | null>(null);
+  // The DB-resolved plan name and expiry, so the header can render the ACTIVE
+  // plan directly rather than inferring it from a stale local merchant record.
+  const [dbPlanName, setDbPlanName] = useState<string | null>(null);
+  const [dbExpiresAt, setDbExpiresAt] = useState<string | null>(null);
+  const [dbPlanStartedAt, setDbPlanStartedAt] = useState<string | null>(null);
+  const [dbDurationDays, setDbDurationDays] = useState<number | null>(null);
+  const [dbPlanId, setDbPlanId] = useState<string | null>(null);
 
   const pendingRequest = pendingRequests?.find(
     r => r.status === 'pending' && (
@@ -151,12 +158,17 @@ export const Header: React.FC<HeaderProps> = ({
   } | null>(null);
 
   const isPaid = useMemo(() => {
-    // Paid if the local merchant profile OR the live Supabase record shows a paid plan.
-    // This prevents the FREE TRIAL banner from showing after the merchant has purchased a plan.
+    // SINGLE SOURCE OF TRUTH, in priority order:
+    //   1. MongoDB `subscription_status === 'ACTIVE'` — what an admin approval
+    //      writes. This WINS outright, so an approved store can never fall back
+    //      to the trial countdown just because its local profile is stale.
+    //   2. A paid plan on the local merchant profile (fast first paint).
+    //   3. A paid plan on the legacy Supabase record.
+    if (dbReportsActive) return true;
     if (isPaidSubscriptionActive(merchant)) return true;
     const subPlan = supabaseSub?.subscription_plan;
     return Boolean(subPlan && subPlan !== 'free_trial' && subPlan !== 'trial');
-  }, [merchant, supabaseSub]);
+  }, [dbReportsActive, merchant, supabaseSub]);
 
   // 1. Connect to Supabase: Fetch active merchant's real subscription record directly from Supabase & Listen to Realtime changes
   useEffect(() => {
@@ -176,6 +188,20 @@ export const Header: React.FC<HeaderProps> = ({
         // can turn the generated request into HTTP 400. Equality filters are
         // encoded safely by the Supabase client and have the same semantics for
         // these canonical identity fields.
+        // ── Supabase is a BEST-EFFORT fallback, never the source of truth ─────
+        //
+        // MongoDB is authoritative (see the `/api/subscription/status` effect).
+        // This legacy read used to run unconditionally and produced the failing
+        // `subscriptions?select=*&merchant_email=eq.…` request in the network
+        // tab: the live Supabase schema lacks that column, so PostgREST answered
+        // HTTP 400 with SQLSTATE 42703.
+        //
+        // It is skipped entirely once MongoDB has already reported an ACTIVE
+        // plan, because there is nothing left for it to contribute — and when it
+        // does run, a missing table/column is treated as "no data" rather than
+        // an error worth retrying on every render.
+        if (dbReportsActive) return;
+
         let subData: any = null;
         let subError: any = null;
         if (email) {
@@ -201,8 +227,15 @@ export const Header: React.FC<HeaderProps> = ({
           subError = result.error;
         }
 
-        if (subError && !/does not exist|PGRST205|schema cache/i.test(subError.message || '')) {
+        // A missing table or column is an expected deployment state, not a
+        // failure — logged once at debug level, never surfaced as a red row.
+        if (subError && !/does not exist|PGRST205|schema cache|42703|invalid input/i.test(subError.message || '')) {
           console.warn('Supabase subscriptions read notice:', subError.message);
+        }
+        if (subError) {
+          // Do not proceed to the `stores` fallback in Supabase either: the same
+          // schema drift would produce a second failing request.
+          return;
         }
 
         if (subData && isMounted) {
@@ -333,11 +366,23 @@ export const Header: React.FC<HeaderProps> = ({
         });
         const data = await res.json().catch(() => null);
         if (cancelled || !data?.ok || !data.store) return;
-        // The database's activation state is authoritative — it is what the admin
-        // approval writes and what gates the PENDING_APPROVAL banner.
-        if (data.store.subscription_status) {
-          setDbSubscriptionStatus(String(data.store.subscription_status));
+        // ── SINGLE SOURCE OF TRUTH ────────────────────────────────────────────
+        // MongoDB is authoritative for activation state. An approved store MUST
+        // render its ACTIVE paid plan and must never fall through to the trial
+        // countdown, so every value the header needs is captured here.
+        const status = data.store.subscription_status ? String(data.store.subscription_status) : null;
+        if (status) setDbSubscriptionStatus(status);
+
+        const planId = data.store.subscription_plan ? String(data.store.subscription_plan) : null;
+        if (planId) setDbPlanId(planId);
+
+        if (data.store.plan_name) setDbPlanName(String(data.store.plan_name));
+        if (data.store.expires_at) setDbExpiresAt(String(data.store.expires_at));
+        if (data.store.plan_started_at) setDbPlanStartedAt(String(data.store.plan_started_at));
+        if (data.store.duration_days !== null && data.store.duration_days !== undefined) {
+          setDbDurationDays(Number(data.store.duration_days));
         }
+
         // `trial_start_date` is authoritative; `created_at` is the fallback that
         // is always present on a real MongoDB store document.
         const anchor = data.store.trial_start_date || data.store.created_at || null;
@@ -368,36 +413,46 @@ export const Header: React.FC<HeaderProps> = ({
 
   // 2. Real-Time Dynamic Clock: 1-second interval calculating Remaining Time = expires_at - Date.now()
   useEffect(() => {
-    const activePlan = supabaseSub?.subscription_plan || merchant?.subscriptionPlan || 'free_trial';
-    const isPaidPlanActive = activePlan !== 'free_trial' && activePlan !== 'trial';
+    // The plan the badge reflects. The DB-resolved plan id WINS when the store is
+    // ACTIVE, so an approved Pro plan renders as Pro even if the local merchant
+    // record still says `free_trial`.
+    const activePlan =
+      (dbReportsActive && dbPlanId) ||
+      supabaseSub?.subscription_plan ||
+      merchant?.subscriptionPlan ||
+      'free_trial';
+    const isPaidPlanActive = dbReportsActive || (activePlan !== 'free_trial' && activePlan !== 'trial');
 
-    // Determine Duration in Days (30, 90, 180, 365, etc) dynamically based on active plan
-    const durationDays = getPlanDurationInDays(activePlan);
+    // Duration comes from the DB when it recorded one, so a 180-day Pro plan is
+    // not silently recomputed as a 30-day window from the plan-id guess.
+    const durationDays = dbDurationDays && dbDurationDays > 0
+      ? dbDurationDays
+      : getPlanDurationInDays(activePlan);
     const durationMs = durationDays * 24 * 60 * 60 * 1000;
-
-    // A paid plan's window is anchored on the plan start the SERVER recorded.
-    // `toUtcMs` keeps a date-only string from being shifted by the viewer's
-    // timezone, which is the other half of why two browsers disagreed.
-    const planStartMs = toUtcMs(
-      merchant?.plan_started_at ||
-        (merchant as any)?.planStartedAt ||
-        merchant?.subscriptionStartDate ||
-        supabaseSub?.plan_started_at ||
-        supabaseSub?.plan_start_date ||
-        supabaseSub?.created_at
-    );
 
     let targetTimestamp: number;
 
     if (isPaidPlanActive) {
+      // The DB's expiry is authoritative for an ACTIVE store.
       const explicitExpiryMs = toUtcMs(
-        merchant?.expires_at ||
+        dbExpiresAt ||
+          merchant?.expires_at ||
           (merchant as any)?.expiresAt ||
           merchant?.subscriptionExpiry ||
           merchant?.subscriptionEndDate ||
           supabaseSub?.expires_at ||
           supabaseSub?.subscription_expiry ||
           supabaseSub?.subscription_end_date
+      );
+
+      const planStartMs = toUtcMs(
+        dbPlanStartedAt ||
+          merchant?.plan_started_at ||
+          (merchant as any)?.planStartedAt ||
+          merchant?.subscriptionStartDate ||
+          supabaseSub?.plan_started_at ||
+          supabaseSub?.plan_start_date ||
+          supabaseSub?.created_at
       );
 
       // Trust an explicit expiry that is close to the plan's real duration;
@@ -463,6 +518,12 @@ export const Header: React.FC<HeaderProps> = ({
   }, [
     supabaseSub,
     trialAnchorIso,
+    dbReportsActive,
+    dbPlanId,
+    dbPlanName,
+    dbExpiresAt,
+    dbPlanStartedAt,
+    dbDurationDays,
     merchant?.expires_at,
     (merchant as any)?.expiresAt,
     merchant?.plan_started_at,
@@ -474,6 +535,19 @@ export const Header: React.FC<HeaderProps> = ({
     merchant?.selectedPlanDays,
     merchant?.subscriptionPlan
   ]);
+
+  // The label shown for an ACTIVE plan (e.g. "ACTIVE PLAN: PRO PLAN (6 MONTHS)").
+  // Built from the DB's `plan_name` first so the header states exactly what the
+  // admin approved, and only falls back to deriving it from the plan id.
+  const activePlanLabel = useMemo(() => {
+    if (!isPaid) return null;
+    const name = dbPlanName || getPlanDisplayName(dbPlanId || merchant?.subscriptionPlan);
+    return name.toUpperCase();
+  }, [isPaid, dbPlanName, dbPlanId, merchant?.subscriptionPlan]);
+
+  const activePlanDaysLabel = dbDurationDays && dbDurationDays > 0
+    ? `${dbDurationDays} DAYS`
+    : `${getPlanDurationInDays(dbPlanId || merchant?.subscriptionPlan)} DAYS`;
 
   const paidDaysRemaining = timeLeft.days;
   const trialDaysRemaining = timeLeft.days;
@@ -587,7 +661,9 @@ export const Header: React.FC<HeaderProps> = ({
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-[#00D68F] bg-[#00D68F]/10 px-2 py-0.5 rounded-full border border-[#00D68F]/30 flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#00D68F] animate-pulse"></span>
-                    Active Plan: {getPlanDisplayName(merchant?.subscriptionPlan)}
+                    {/* Label comes from the MongoDB `plan_name`, so the header states
+                        exactly what the admin approved — e.g. "Active Plan: PRO PLAN (6 MONTHS) (180 DAYS)". */}
+                    Active Plan: {activePlanLabel} ({activePlanDaysLabel})
                   </span>
                   <span className="text-xs text-slate-400 font-medium hidden sm:inline">
                     • Pure SaaS — 0% Order Fees

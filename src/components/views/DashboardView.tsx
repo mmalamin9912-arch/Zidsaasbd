@@ -125,7 +125,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     if (!storeSlug) return;
     setSavingStep(true);
     try {
-      const status = await completeOnboardingStep(storeSlug, step, value);
+      // Pass the merchant's email and id as well as the slug. The server uses
+      // them as additional match keys, because a store created during signup may
+      // be keyed by email — without them the step write matched no document and
+      // the checklist could never reach 100%.
+      const status = await completeOnboardingStep(storeSlug, step, value, {
+        email: merchant?.email,
+        store_id: (merchant as any)?.storeId,
+        merchant_id: (merchant as any)?.merchantId || (merchant as any)?.id,
+      });
       if (status?.ok) {
         setOnboarding(status);
         setOnboardingError(null);

@@ -43,6 +43,32 @@ export const BillingView: React.FC<BillingViewProps> = ({
     ? Math.max(0, Math.ceil((trialEndsAtDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
     : (merchant?.trialDaysRemaining ?? 0);
 
+  /**
+   * The plans that are actually sellable.
+   *
+   * `subscriptionPlans` is the seeded catalogue, but a legacy tenant renewal row
+   * could previously be merged into it — which is how zero-value cards such as
+   * `mmalamin9912@gmail.com` / `0 BDT / 30d` and `sub-1790184996113` appeared in
+   * this grid. The server now filters those out; this is the last line of
+   * defence in the UI so a cached or stale payload cannot reintroduce them.
+   *
+   * Deduplicated by id as well, so the same plan cannot render twice.
+   */
+  const visiblePlans = React.useMemo(() => {
+    const seen = new Set<string>();
+    return (subscriptionPlans || []).filter(plan => {
+      const id = String(plan?.id || '').trim().toLowerCase();
+      const price = Number(plan?.price ?? 0);
+      const durationDays = Number(plan?.durationDays ?? 0);
+      // A sellable plan needs an identity, a price and a duration.
+      if (!id || !Number.isFinite(price) || price <= 0) return false;
+      if (!Number.isFinite(durationDays) || durationDays <= 0) return false;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }, []);
+
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
       <div className="flex justify-between items-center mb-6">
@@ -145,7 +171,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             <p className="text-[11px] text-slate-400">Unlock these exclusive AI features with any paid subscription</p>
           </div>
         </div>
-        
+
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           {[
             { title: 'AI Description Generator', desc: 'Generate professional product copy instantly.' },
@@ -165,7 +191,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
       <div>
         <h2 className="text-base font-bold text-white mb-3">Merchant Subscription Options (Standard SaaS)</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {subscriptionPlans.map((plan) => (
+          {visiblePlans.map((plan) => (
             <div
               key={plan.id}
               className={`bg-[#202533] border rounded-2xl p-5 flex flex-col justify-between relative ${

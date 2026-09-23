@@ -39,13 +39,27 @@ async function safeJson<T>(res: Response): Promise<T | null> {
   }
 }
 
-/** Map a raw API plan row into the client `SubscriptionPlan` shape. */
-export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan {
+/**
+ * Map a raw API plan row into the client `SubscriptionPlan` shape.
+ *
+ * Returns `null` for a row that is not a sellable plan, so a stray tenant
+ * renewal record (which carries `plan_name` but no price) can never become a
+ * card. The server filters these too — this is the client-side half of the same
+ * guarantee, because a cached/stale response could otherwise still render one.
+ */
+export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan | null {
+  const price = Number(row.priceBDT ?? 0);
+  const durationDays = Number(row.durationDays ?? 0);
+  // A plan with no identity, no price or no duration is not sellable.
+  if (!row || !row.id) return null;
+  if (!Number.isFinite(price) || price <= 0) return null;
+  if (!Number.isFinite(durationDays) || durationDays <= 0) return null;
+
   return {
     id: String(row.id || '').toLowerCase(),
     name: String(row.name || 'Plan'),
-    price: Number(row.priceBDT || 0),
-    durationDays: Number(row.durationDays || 0),
+    price,
+    durationDays,
     badge: String(row.badge || row.id || '').toUpperCase(),
     features: Array.isArray(row.features) ? row.features : [],
     isActive: row.isActive !== false,
@@ -63,7 +77,10 @@ export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan 
  */
 export async function fetchPlans(): Promise<SubscriptionPlan[]> {
   const map = (rows: ApiPlanRow[] | undefined) =>
-    (Array.isArray(rows) ? rows : []).map(mapApiPlanToSubscriptionPlan).filter(p => p.id);
+    (Array.isArray(rows) ? rows : [])
+      .map(mapApiPlanToSubscriptionPlan)
+      // `mapApiPlanToSubscriptionPlan` returns null for an unsellable row.
+      .filter((p): p is SubscriptionPlan => Boolean(p && p.id));
 
   // 1. Dual-database endpoint (Supabase → MongoDB fallback + auto-seed).
   try {

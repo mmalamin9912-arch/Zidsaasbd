@@ -223,12 +223,68 @@ export async function listSubscriptions(): Promise<HybridResult<Record<string, a
 }
 
 /**
+ * The plan-catalogue slugs. A row is only a PLAN when its identity is one of
+ * these (or when it looks like a catalogue row in every other respect).
+ */
+export const PLAN_CATALOGUE_SLUGS = DEFAULT_PLANS.map((p) => String(p.slug));
+
+/**
+ * Is this row a catalogue PLAN, or a tenant renewal/request record?
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The `subscriptions` collection historically held TWO kinds of document:
+ * catalogue plans (keyed by `slug`, e.g. `pro_6m`) and tenant renewals (keyed by
+ * `merchant_email`, carrying `plan_name`). `readMongoSubscriptions` also merges
+ * the legacy `subscription_requests` collection, whose rows carry `plan_name`
+ * too. The catalogue filter `p.slug || p.plan_name || p.name` therefore let
+ * tenant rows through, and each one rendered as a bogus plan card in the
+ * merchant's plan grid — the `mmalamin9912@gmail.com` / `0 BDT / 30d` and
+ * `sub-1790184996113` cards in the reported bug.
+ *
+ * A real plan is distinguished by what it is NOT:
+ *   • no owning merchant (`merchant_email` / `email` / `store_slug`),
+ *   • no activation lifecycle on the row itself (`subscription_status`,
+ *     `approved_at`, `transaction_id`),
+ *   • a usable price and duration (> 0).
+ * That keeps the four standard plans and drops every tenant record, without
+ * hard-coding the slug list so an admin-created custom plan still appears.
+ */
+export function isCataloguePlan(row: Record<string, any>): boolean {
+  if (!row || typeof row !== 'object') return false;
+
+  const slug = String(row.slug || row.plan_id || row.planId || '').trim();
+  const knownSlug = slug && PLAN_CATALOGUE_SLUGS.includes(slug);
+
+  // A tenant record is positively identified by an owner or a renewal lifecycle.
+  const owner = String(row.merchant_email || row.merchantEmail || row.email || row.store_slug || row.storeSlug || '').trim();
+  const hasLifecycle =
+    Boolean(row.subscription_status || row.subscriptionStatus) ||
+    Boolean(row.approved_at) ||
+    Boolean(row.transaction_id || row.transactionId) ||
+    Boolean(row.expires_at || row.expiresAt || row.subscription_expiry || row.subscriptionExpiry);
+  if (owner || hasLifecycle) return false;
+
+  // A zero-value or zero-duration row is a data artefact, never a sellable plan.
+  const price = Number(row.price_bdt ?? row.priceBDT ?? row.price ?? row.amount_bdt ?? NaN);
+  const duration = Number(row.duration_days ?? row.durationDays ?? row.duration ?? row.days ?? NaN);
+  const hasPrice = Number.isFinite(price) && price > 0;
+  const hasDuration = Number.isFinite(duration) && duration > 0;
+  if (!hasPrice || !hasDuration) return false;
+
+  const name = String(row.plan_name || row.planName || row.name || row.title || '').trim();
+  return Boolean(name || knownSlug);
+}
+
+/**
  * Read the plan catalogue straight from MongoDB, with auto-seeding.
  *
  * Flow:
  *   1. Read the `subscriptions` collection (plus the legacy mirrors).
- *   2. Merge, keyed by slug/id so a plan cannot appear twice.
- *   3. If empty, seed the default catalogue into MongoDB and return it, so the
+ *   2. Keep ONLY catalogue plans — tenant renewals and request rows are filtered
+ *      out by `isCataloguePlan` so they cannot render as phantom cards.
+ *   3. Merge, keyed by slug/id so a plan cannot appear twice.
+ *   4. If empty, seed the default catalogue into MongoDB and return it, so the
  *      very first request still renders a full price list.
  *
  * Pure MongoDB — there is no Supabase hop left to fail, which is what removed
@@ -243,12 +299,14 @@ export async function listSubscriptionPlans(): Promise<PlanListResult> {
   const orderedRows = [...mongoLegacy.rows, ...mongo.rows];
   for (const row of orderedRows) {
     const norm = normalizeSubscription(row);
+    // Drop tenant renewals / requests BEFORE they can be keyed as a plan.
+    if (!isCataloguePlan(norm)) continue;
     const key = norm.slug || norm.id;
     if (!key) continue;
     byId.set(String(key), { ...(byId.get(String(key)) || {}), ...norm });
   }
 
-  let plans = [...byId.values()].filter((p) => p.slug || p.plan_name || p.name);
+  let plans = [...byId.values()];
   const sources: DataSource[] = [];
   if (orderedRows.length) sources.push('mongodb');
 

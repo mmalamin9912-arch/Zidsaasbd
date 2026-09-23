@@ -3319,10 +3319,38 @@ app.post('/api/onboarding/complete-step', async (req, res) => {
       }
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-        await mongoose.connection.db.collection('stores').updateOne(
-          { $or: [{ store_slug: storeRef }, { storeSlug: storeRef }, { store_code: storeRef }, { slug: storeRef }] },
+        // Match on EVERY identity a store document may carry.
+        //
+        // The original filter only looked at slug-ish columns. A store created
+        // during signup is frequently keyed by `email` (and by `merchant_id`),
+        // so `updateOne` matched NOTHING and the step value was silently dropped
+        // — which is exactly why `support_contact` / `pickup_address` never
+        // reached MongoDB and the checklist could not reach 100%.
+        const storeOr: Record<string, any>[] = [
+          { store_slug: storeRef },
+          { storeSlug: storeRef },
+          { store_code: storeRef },
+          { slug: storeRef },
+        ];
+        const emailRef = String(body.email || body.merchant_email || '').trim().toLowerCase();
+        const idRef = String(body.store_id || body.merchant_id || body.merchantId || '').trim();
+        if (emailRef) storeOr.push({ email: emailRef }, { merchant_email: emailRef });
+        if (idRef) storeOr.push({ merchant_id: idRef }, { store_id: idRef }, { id: idRef });
+
+        const updateResult = await mongoose.connection.db.collection('stores').updateOne(
+          { $or: storeOr },
           { $set: { ...patch, updated_at: new Date() } }
         );
+
+        // If the `email` fallback is what matched (or nothing matched at all),
+        // try the slug as a SUBSTRING-free exact `store_slug` once more and log
+        // the outcome, so a future misconfiguration is visible in the logs
+        // instead of presenting as an eternally-incomplete checklist.
+        if (updateResult.matchedCount === 0) {
+          console.warn('[Server] complete-step: no store matched', { storeRef, emailRef, idRef, step });
+        }
+      } else {
+        console.warn('[Server] complete-step: MongoDB is not connected; step value not persisted.');
       }
       // Mirror to Supabase (best-effort; a drifted table must not fail the step).
       try {
@@ -3837,31 +3865,66 @@ app.post('/api/subscription/approve', async (req, res) => {
  * The dashboard polls this so an approval performed by an admin in another
  * browser (or before this tab was opened) is reflected without a hard refresh.
  * Reads MongoDB first, falls back to the in-memory mirror.
+ *
+ * Registered for GET/POST/PUT and with optional trailing-slash tolerance so a
+ * client that calls it either way never receives a 404/405 — a red network row
+ * for a request the server simply did not recognise.
  */
-app.get('/api/subscription/status', async (req, res) => {
+const handleSubscriptionStatus = async (req: any, res: any) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const email = String(req.query.email || '').trim().toLowerCase();
-    const slug = String(req.query.store_slug || req.query.storeSlug || req.query.slug || '')
-      .trim()
-      .toLowerCase();
+    const body = req.body || {};
+    const query = req.query || {};
+
+    // Accept the identifier from the query string OR a JSON body, so the same
+    // route works for a poll and for a POST-shaped client.
+    const email = sanitizeSubscriptionFilter(
+      query.email || query.merchant_email || body.email || body.merchant_email
+    );
+    const slug = sanitizeSubscriptionFilter(
+      query.store_slug || query.storeSlug || query.slug || body.store_slug || body.storeSlug || body.slug
+    );
 
     if (!email && !slug) {
-      return res.status(200).json({ ok: false, error: 'Provide an email or store slug.', store: null });
+      return res.status(200).json({
+        ok: false,
+        error: 'Provide an email or store slug.',
+        store: null,
+        // A null status is what the header reads as "unknown" — it must NOT be
+        // mistaken for a reason to fall back to a trial countdown.
+        subscription_status: null,
+      });
     }
 
     const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
     if (!db) {
-      return res.status(200).json({ ok: false, error: 'MongoDB is unavailable.', store: null });
+      return res.status(200).json({
+        ok: false,
+        error: 'MongoDB is unavailable.',
+        store: null,
+        subscription_status: null,
+      });
     }
 
     const or: Record<string, any>[] = [];
     if (email) or.push({ email }, { merchant_email: email });
-    if (slug) or.push({ store_slug: slug }, { storeSlug: slug });
+    if (slug) or.push({ store_slug: slug }, { storeSlug: slug }, { store_code: slug });
 
-    const store = await db.collection('stores').findOne({ $or: or });
+    let store: Record<string, any> | null = null;
+    try {
+      store = (await db.collection('stores').findOne({ $or: or })) as Record<string, any> | null;
+    } catch (err: any) {
+      // An unexpected query failure is reported in shape, never as a 500.
+      console.warn('[Server] GET /api/subscription/status lookup warning:', err?.message || err);
+    }
+
     if (!store) {
-      return res.status(200).json({ ok: false, error: 'No matching store found.', store: null });
+      return res.status(200).json({
+        ok: false,
+        error: 'No matching store found.',
+        store: null,
+        subscription_status: null,
+      });
     }
 
     // The trial anchor is the account creation timestamp — the single value that
@@ -3869,10 +3932,21 @@ app.get('/api/subscription/status', async (req, res) => {
     const trialStart =
       store.trial_start_date || store.trialStartDate || store.created_at || store.createdAt || null;
 
+    // `subscription_status` is resolved once, here, from every spelling an admin
+    // write may have used, so the client has ONE value to branch on.
+    const subscriptionStatus =
+      store.subscription_status ||
+      store.subscriptionStatus ||
+      (store.is_locked === false && (store.subscription_plan || store.subscriptionPlan) ? 'ACTIVE' : null) ||
+      store.status ||
+      null;
+
     return res.status(200).json({
       ok: true,
+      subscription_status: subscriptionStatus,
+      plan_name: store.plan_name || store.planName || null,
       store: {
-        subscription_status: store.subscription_status || store.subscriptionStatus || null,
+        subscription_status: subscriptionStatus,
         plan_name: store.plan_name || store.planName || null,
         subscription_plan: store.subscription_plan || store.subscriptionPlan || null,
         subscription_expiry: store.subscription_expiry || store.subscriptionExpiry || null,
@@ -3881,13 +3955,25 @@ app.get('/api/subscription/status', async (req, res) => {
         duration_days: store.duration_days ?? store.durationDays ?? null,
         trial_start_date: trialStart,
         created_at: store.created_at || store.createdAt || null,
+        support_contact: store.support_contact ?? store.supportContact ?? null,
+        pickup_address: store.pickup_address ?? store.pickupAddress ?? null,
       },
     });
   } catch (err: any) {
-    console.error('[Server] GET /api/subscription/status error:', err);
-    return res.status(200).json({ ok: false, error: err?.message || 'Could not read the subscription status.', store: null });
+    console.error('[Server] /api/subscription/status error:', err);
+    return res.status(200).json({
+      ok: false,
+      error: err?.message || 'Could not read the subscription status.',
+      store: null,
+      subscription_status: null,
+    });
   }
-});
+};
+
+app.get('/api/subscription/status', handleSubscriptionStatus);
+app.get('/api/subscription/status/', handleSubscriptionStatus);
+app.post('/api/subscription/status', handleSubscriptionStatus);
+app.put('/api/subscription/status', handleSubscriptionStatus);
 
 /**
  * GET /api/subscription/list — all subscriptions from Supabase + MongoDB.
@@ -4849,7 +4935,12 @@ app.all('/api/subscriptions', async (req, res) => {
     let seeded = false;
     if (wantsPlans) {
       const planResult = await listSubscriptionPlans();
-      plans = planResult.data.map(normalizePlanRow).filter((p) => p.id && p.isActive !== false);
+      plans = planResult.data
+        .map(normalizePlanRow)
+        // Belt-and-braces: `listSubscriptionPlans` already filters tenant rows,
+        // but a legacy document could still reach here. A plan with no price or
+        // no duration is unsellable and must never render as a card.
+        .filter((p) => p.id && p.isActive !== false && p.priceBDT > 0 && p.durationDays > 0);
       planSources = planResult.sources;
       seeded = planResult.seeded;
     }
