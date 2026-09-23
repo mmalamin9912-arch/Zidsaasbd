@@ -117,6 +117,7 @@ interface SingleProductFormProps {
   merchant?: MerchantProfile;
   platformSettings?: any;
   onOpenSubscriptionModal?: () => void;
+  onToast?: (type: 'success' | 'error' | 'warning', message: string) => void;
 }
 
 interface CustomizationField {
@@ -196,6 +197,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   merchant,
   platformSettings,
   onOpenSubscriptionModal,
+  onToast,
 }) => {
   // 1. Basic Info State - English & Bengali Names
   const [title, setTitle] = useState(initialData?.title || '');
@@ -386,7 +388,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       // service is unreachable — no silent canned-text fallback.
       const failed = [resultEn, resultBn].find(r => !r.ok);
       if (failed) {
-        alert(aiErrorMessage(failed));
+        onToast?.('error', aiErrorMessage(failed));
         return;
       }
 
@@ -395,7 +397,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
 
     } catch (error) {
       console.error('AI Generation Error:', error);
-      alert('Failed to generate AI description. Please try again.');
+      onToast?.('error', 'Failed to generate AI description. Please try again.');
     } finally {
       setIsGeneratingDescription(false);
     }

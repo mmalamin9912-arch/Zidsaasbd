@@ -70,7 +70,7 @@ export async function generateAiText(
     const res = await fetch(AI_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, systemInstruction, model: 'gemini-1.5-flash' })
+      body: JSON.stringify({ prompt, systemInstruction, model: 'gemini-2.5-flash' })
     });
 
     const data = await res.json().catch(() => ({}));

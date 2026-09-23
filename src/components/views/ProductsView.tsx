@@ -307,6 +307,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         merchant={merchant}
         platformSettings={platformSettings}
         onOpenSubscriptionModal={onOpenSubscriptionModal}
+        onToast={setToastNotification}
       />
     );
   }

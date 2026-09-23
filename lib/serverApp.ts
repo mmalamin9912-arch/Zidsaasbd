@@ -1678,7 +1678,7 @@ async function handleAnalyticsSummary(req: express.Request, res: express.Respons
   }
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
     const providerRes = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1754,7 +1754,7 @@ app.post('/api/ai/generate-text', async (req, res) => {
       });
     }
 
-    const model = 'gemini-2.0-flash';
+    const model = 'gemini-2.5-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
     const payload: Record<string, unknown> = {

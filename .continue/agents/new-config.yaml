@@ -5,7 +5,7 @@ schema: v2
 models:
   - name: Gemini 1.5 Flash
     provider: gemini
-    model: gemini-1.5-flash
+    model: gemini-2.5-flash
     apiKey: AQ.Ab8RN6K...আপনার_আসল_API_KEY
 # This is an example configuration file
 # To learn more, see the full config.yaml reference: https://docs.continue.dev/reference
