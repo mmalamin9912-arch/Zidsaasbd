@@ -123,6 +123,94 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   storeSlug,
 }) => {
   const channelRef = useRef<any>(null);
+
+  // ── Optimistic-update bookkeeping ─────────────────────────────────────────
+  //
+  // Status/Payment/Courier buttons paint the new value immediately and write to
+  // Mongo in the background. The 4-second poll below treats the server list as
+  // authoritative, so a poll that lands BETWEEN the optimistic paint and the
+  // server confirming the write would visibly revert the badge and then snap it
+  // back — the "flicker" this ref exists to prevent.
+  //
+  // `pendingWritesRef` counts in-flight writes per order id. While an order has a
+  // pending write, the poll's version of that one row is DISCARDED and the local
+  // (already-painted) row is kept. Every other order still syncs normally, so a
+  // new order placed on the storefront still appears promptly.
+  const pendingWritesRef = useRef<Record<string, number>>({});
+  // Orders whose last write FAILED — their local value is wrong, so the next poll
+  // must be allowed to overwrite it (that is the graceful revert).
+  const failedWritesRef = useRef<Record<string, boolean>>({});
+  // The latest server snapshot, so a write can be replayed against fresh data
+  // without depending on a possibly-stale `orders` closure.
+  const latestOrdersRef = useRef<Order[]>(orders);
+  // Reactive mirror of `pendingWritesRef`, so a row can show a "saving" spinner.
+  // The ref is the source of truth (it is read by the poll); this state exists
+  // purely to trigger a repaint.
+  const [savingOrderIds, setSavingOrderIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    latestOrdersRef.current = orders;
+  }, [orders]);
+
+  /** Mark an order as having a write in flight. */
+  const beginWrite = (orderId: string) => {
+    pendingWritesRef.current[orderId] = (pendingWritesRef.current[orderId] || 0) + 1;
+    delete failedWritesRef.current[orderId];
+    setSavingOrderIds(Object.keys(pendingWritesRef.current));
+  };
+
+  /** Release an order's write claim; `failed` allows the poll to correct it. */
+  const endWrite = (orderId: string, failed: boolean) => {
+    const next = (pendingWritesRef.current[orderId] || 1) - 1;
+    if (next <= 0) {
+      delete pendingWritesRef.current[orderId];
+    } else {
+      pendingWritesRef.current[orderId] = next;
+    }
+    if (failed) failedWritesRef.current[orderId] = true;
+    setSavingOrderIds(Object.keys(pendingWritesRef.current));
+  };
+
+  /**
+   * Merge a polled server list while preserving any locally-painted rows that
+   * still have a write in flight.
+   */
+  const mergeServerOrders = (serverOrders: Order[]) => {
+    const pending = pendingWritesRef.current;
+    const rejected = failedWritesRef.current;
+    const hasPending = Object.keys(pending).length > 0;
+    const hasRejected = Object.keys(rejected).length > 0;
+
+    // Fast path: nothing in flight and nothing to revert.
+    if (!hasPending && !hasRejected) {
+      onUpdateOrders(serverOrders);
+      return;
+    }
+
+    const localById = new Map<string, Order>(latestOrdersRef.current.map(o => [o.id, o]));
+    const merged = serverOrders.map(serverOrder => {
+      const local = localById.get(serverOrder.id);
+      if (!local) return serverOrder;
+      // Keep the optimistically painted row until its write settles.
+      if (pending[serverOrder.id]) return { ...serverOrder, ...local, id: serverOrder.id };
+      if (rejected[serverOrder.id]) {
+        // The write failed — accept server truth and clear the marker so the row
+        // syncs normally from here on.
+        delete rejected[serverOrder.id];
+      }
+      return serverOrder;
+    });
+
+    // Preserve rows that were optimistically added locally (e.g. a duplicated or
+    // manually created order) until the server list catches up.
+    const serverIds = new Set(serverOrders.map(o => o.id));
+    const localOnly = latestOrdersRef.current.filter(
+      o => !serverIds.has(o.id) && pending[o.id]
+    );
+
+    onUpdateOrders(localOnly.length ? [...localOnly, ...merged] : merged);
+  };
+
   // Live polling effect for orders sync from MongoDB.
   // Uses the flexible GET /api/orders endpoint and sends BOTH merchant_id and
   // store_slug, so an order placed by the storefront (which may only carry the
@@ -141,7 +229,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // raw Mongo rows into the UI `Order` shape first — otherwise the table
         // renders `undefined.toLocaleString()` and blanks the whole app.
         if (Array.isArray(data)) {
-          onUpdateOrders(normalizeOrders(data));
+          mergeServerOrders(normalizeOrders(data));
         }
       } catch (err) {
         console.warn('Error fetching live orders:', err);
@@ -188,6 +276,24 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [newTagInput, setNewTagInput] = useState<{ [orderId: string]: string }>({});
   const [isBookingCourier, setIsBookingCourier] = useState<{ [orderId: string]: boolean }>({});
 
+  /**
+   * Send one order to the courier and apply the result.
+   *
+   * Two things used to make this unreliable:
+   *
+   *  1. A transport failure — an unreachable API, a provider that hangs — made the
+   *     browser's fetch throw and the catch block echoed `data.message`, which is
+   *     literally "fetch failed". Nothing about it told the merchant what to do.
+   *     The server now always answers 200 with a shaped body
+   *     ({ code, error, message }), so this reads that first and only falls back
+   *     to a generic sentence for a genuinely broken connection.
+   *
+   *  2. The success path wrote the tracking code to React state and then told the
+   *     4-second poll to treat the server as authoritative — which promptly erased
+   *     the badge. The server now persists the dispatch before responding and
+   *     returns the fresh Mongo document, so the UI renders server truth and the
+   *     badge survives the next poll.
+   */
   const handleBooking = async (ord: Order) => {
     setIsBookingCourier(prev => ({ ...prev, [ord.id]: true }));
     try {
@@ -221,55 +327,78 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             customer_note: (ord as any).customerNote || (ord as any).notes || 'Handle with care',
             ...ord
           },
+          merchantId: merchantId,
+          storeSlug: storeSlug,
           merchantConfig: merchantSettings
         })
       });
 
-      const data = await res.json();
-      if (data.success) {
-        const trackingCode = data.tracking_code || `${courierName.split(' ')[0].substring(0, 2).toUpperCase()}-${Math.floor(100000 + Math.random() * 900000)}`;
+      // A gateway (or the dev proxy) can answer with HTML on a hard failure, so
+      // read the body defensively rather than letting res.json() throw.
+      const rawBody = await res.text().catch(() => '');
+      let data: any = {};
+      try {
+        data = rawBody ? JSON.parse(rawBody) : {};
+      } catch {
+        data = {};
+      }
 
-        try {
-          await fetch(`/api/orders/${encodeURIComponent(String(ord.id))}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              status: 'In delivery',
-              fulfillmentStatus: 'In Transit',
-              shipping_courier: courierName,
-              courier_name: courierName,
-              courierName: courierName,
-              tracking_code: trackingCode,
-              trackingCode: trackingCode,
-              consignment_id: trackingCode,
-              consignmentId: trackingCode,
-              merchantId: merchantId,
-              storeSlug: storeSlug,
-            }),
-          });
-        } catch (mongoErr) {
-          console.warn('Courier dispatch MongoDB update notice:', mongoErr);
-        }
+      const failureMessage =
+        (typeof data.error === 'string' && data.error) ||
+        (typeof data.message === 'string' && data.message) ||
+        (data.code === 'missing_credentials'
+          ? 'Please configure Courier API keys in Store Settings.'
+          : '');
 
-        const updated = orders.map(o => {
-          if (o.id === ord.id) {
-            return {
+      if (!res.ok || !data.success) {
+        const reason =
+          failureMessage ||
+          (res.status === 401 || res.status === 403
+            ? `Please configure Courier API keys in Store Settings. (${courierName} rejected the credentials.)`
+            : res.status >= 500
+            ? `The courier service could not be reached (HTTP ${res.status}). Please try again in a moment.`
+            : `Booking failed (HTTP ${res.status}). Please try again.`);
+        console.warn(`Courier booking failed [${courierName}]:`, data.code || res.status, reason);
+        alert(`Booking failed: ${reason}`);
+        return;
+      }
+
+      const trackingCode =
+        data.tracking_code ||
+        `${courierName.split(' ')[0].substring(0, 2).toUpperCase()}-${Math.floor(100000 + Math.random() * 900000)}`;
+
+      // Prefer the document the server just persisted; fall back to a local
+      // patch only when the server could not read the row back.
+      if (data.order) {
+        const serverOrder = normalizeOrder(data.order);
+        onUpdateOrders(orders.map(o => (o.id === ord.id ? { ...o, ...serverOrder, id: o.id } : o)));
+      } else {
+        onUpdateOrders(orders.map(o => (o.id === ord.id
+          ? {
               ...o,
               status: 'In delivery' as const,
               fulfillmentStatus: 'In Transit' as const,
               courierName: courierName,
               trackingCode: trackingCode,
-            };
-          }
-          return o;
-        });
-        onUpdateOrders(updated);
-        alert(`Booked Successfully via ${courierName}! Tracking ID: ${trackingCode}`);
+            }
+          : o)));
+      }
+
+      if (data.warning) {
+        alert(`Booked via ${courierName} (Tracking ID: ${trackingCode}).\n\nNote: ${data.warning}`);
       } else {
-        alert('Booking failed: ' + (typeof data.message === 'object' ? JSON.stringify(data.message) : (data.message || data.error || 'Unknown error')));
+        alert(`Booked Successfully via ${courierName}! Tracking ID: ${trackingCode}`);
       }
     } catch (error: any) {
-      alert('Booking failed: ' + (error?.message || 'Network error'));
+      // Reached only when the request never completed (offline, DNS, CORS).
+      const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+      const reason = offline
+        ? 'You appear to be offline. Reconnect and try again.'
+        : error?.message === 'Failed to fetch' || error?.message === 'fetch failed'
+        ? `Could not reach the server to book this order with ${dispatchCourier}. Please retry.`
+        : error?.message || 'Network error';
+      console.warn('Courier booking request error:', error);
+      alert(`Booking failed: ${reason}`);
     } finally {
       setIsBookingCourier(prev => ({ ...prev, [ord.id]: false }));
     }
@@ -464,140 +593,214 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     );
   };
 
-  const handleBulkUpdateStatus = async (newStatus: Order['status']) => {
-    const prevOrders = [...orders];
-    const updated = orders.map(ord => {
-      if (selectedOrderIds.includes(ord.id)) {
-        return {
-          ...ord,
-          status: newStatus,
-          fulfillmentStatus: newStatus === 'Completed' ? ('Delivered' as const) : newStatus === 'In delivery' ? ('In Transit' as const) : ord.fulfillmentStatus
-        };
+  /**
+   * Apply an optimistic field change to one order.
+   *
+   * Returns the previous row so the caller can restore it if the write fails.
+   */
+  const paintOrder = (orderId: string, patch: Partial<Order>): Order | undefined => {
+    const previous = latestOrdersRef.current.find(o => o.id === orderId);
+    onUpdateOrders(latestOrdersRef.current.map(o => (o.id === orderId ? { ...o, ...patch } : o)));
+    return previous;
+  };
+
+  /**
+   * Persist a field change for one order, releasing the row's write claim.
+   *
+   * The optimistic paint has ALREADY happened by the time this runs — it is the
+   * "later" of "update the UI now, talk to the database afterwards". A failure is
+   * surfaced to the merchant and the row is left for the next poll to correct
+   * (the revert), rather than being reverted from a stale closure.
+   */
+  const persistOrder = async (
+    orderId: string,
+    payload: Record<string, any>,
+    opts: { label: string; previous?: Order }
+  ): Promise<boolean> => {
+    try {
+      const res = await fetch(
+        `/api/orders/${encodeURIComponent(orderId)}?store_slug=${encodeURIComponent(
+          storeSlug || ''
+        )}&merchant_id=${encodeURIComponent(merchantId || '')}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...payload, merchantId, storeSlug }),
+        }
+      );
+
+      const rawBody = await res.text().catch(() => '');
+      let data: any = {};
+      try {
+        data = rawBody ? JSON.parse(rawBody) : {};
+      } catch {
+        data = {};
       }
-      return ord;
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `The server responded with HTTP ${res.status}.`);
+      }
+
+      // The server returns the fresh document — adopt it so canonicalised values
+      // (e.g. `In Delivery` → `In delivery`) land in the UI without a refetch.
+      if (data.order) {
+        const serverOrder = normalizeOrder(data.order);
+        onUpdateOrders(
+          latestOrdersRef.current.map(o =>
+            o.id === orderId ? { ...o, ...serverOrder, id: o.id } : o
+          )
+        );
+      }
+      return true;
+    } catch (err: any) {
+      console.warn(`${opts.label} update failed for order ${orderId}:`, err?.message || err);
+      // Restore the pre-click value immediately for a clean revert, then let the
+      // next poll reconcile drift.
+      if (opts.previous) {
+        onUpdateOrders(
+          latestOrdersRef.current.map(o => (o.id === orderId ? opts.previous as Order : o))
+        );
+      }
+      return false;
+    }
+  };
+
+  const handleBulkUpdateStatus = async (newStatus: Order['status']) => {
+    const ids = orders.filter(o => selectedOrderIds.includes(o.id)).map(o => o.id);
+    if (ids.length === 0) return;
+
+    // Paint every selected row NOW, then persist in the background.
+    const snapshots = new Map<string, Order>();
+    ids.forEach(id => {
+      beginWrite(id);
+      const previous = paintOrder(id, {
+        status: newStatus,
+        fulfillmentStatus:
+          newStatus === 'Completed'
+            ? 'Delivered'
+            : newStatus === 'In delivery'
+            ? 'In Transit'
+            : latestOrdersRef.current.find(o => o.id === id)?.fulfillmentStatus,
+      });
+      if (previous) snapshots.set(id, previous);
     });
-    onUpdateOrders(updated);
     setSelectedOrderIds([]);
     setBulkActionModal(null);
 
-    for (const ord of orders.filter(o => selectedOrderIds.includes(o.id))) {
-      try {
-        await fetch(`/api/orders/${encodeURIComponent(ord.id)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            status: newStatus,
-            merchantId: merchantId,
-            storeSlug: storeSlug,
-          }),
-        });
-      } catch (err) {
-        console.warn(`Bulk status update error for order ${ord.id}:`, err);
-      }
+    const results = await Promise.all(
+      ids.map(id =>
+        persistOrder(id, { status: newStatus }, { label: 'Bulk status', previous: snapshots.get(id) })
+          .then(ok => ({ id, ok }))
+          .finally(() => endWrite(id, false))
+      )
+    );
+
+    const failed = results.filter(r => !r.ok).map(r => r.id);
+    if (failed.length) {
+      failed.forEach(id => {
+        failedWritesRef.current[id] = true;
+      });
+      alert(
+        failed.length === ids.length
+          ? `Could not update the status of ${failed.length} order(s). Please try again.`
+          : `Updated ${ids.length - failed.length} of ${ids.length} orders. ${failed.length} could not be saved and have been reverted.`
+      );
     }
   };
 
   const handleBulkUpdatePaymentStatus = async (newPaymentStatus: Order['paymentStatus']) => {
-    const prevOrders = [...orders];
-    const updated = orders.map(ord => {
-      if (selectedOrderIds.includes(ord.id)) {
-        return {
-          ...ord,
-          paymentStatus: newPaymentStatus
-        };
-      }
-      return ord;
+    const ids = orders.filter(o => selectedOrderIds.includes(o.id)).map(o => o.id);
+    if (ids.length === 0) return;
+
+    const snapshots = new Map<string, Order>();
+    ids.forEach(id => {
+      beginWrite(id);
+      const previous = paintOrder(id, { paymentStatus: newPaymentStatus });
+      if (previous) snapshots.set(id, previous);
     });
-    onUpdateOrders(updated);
     setSelectedOrderIds([]);
     setBulkActionModal(null);
 
-    for (const ord of orders.filter(o => selectedOrderIds.includes(o.id))) {
-      try {
-        await fetch(`/api/orders/${encodeURIComponent(ord.id)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            paymentStatus: newPaymentStatus,
-            merchantId: merchantId,
-            storeSlug: storeSlug,
-          }),
-        });
-      } catch (err) {
-        console.warn(`Bulk payment status update error for order ${ord.id}:`, err);
-      }
-    }
-  };
+    const results = await Promise.all(
+      ids.map(id =>
+        persistOrder(id, { paymentStatus: newPaymentStatus }, { label: 'Bulk payment status', previous: snapshots.get(id) })
+          .then(ok => ({ id, ok }))
+          .finally(() => endWrite(id, false))
+      )
+    );
 
-  const handleQuickUpdatePaymentStatus = async (orderId: string, newPaymentStatus: Order['paymentStatus']) => {
-    const prevOrders = [...orders];
-    const updated = orders.map(ord => {
-      if (ord.id === orderId) {
-        return { ...ord, paymentStatus: newPaymentStatus };
-      }
-      return ord;
-    });
-    onUpdateOrders(updated);
-
-    try {
-      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          paymentStatus: newPaymentStatus,
-          merchantId: merchantId,
-          storeSlug: storeSlug,
-        }),
+    const failed = results.filter(r => !r.ok).map(r => r.id);
+    if (failed.length) {
+      failed.forEach(id => {
+        failedWritesRef.current[id] = true;
       });
-      const data = await res.json();
-      if (data.ok && data.order) {
-        const serverOrder = normalizeOrder(data.order);
-        onUpdateOrders(prevOrders.map(o => o.id === orderId ? serverOrder : o));
-      } else if (!data.ok) {
-        console.warn('Payment status update notice:', data.error);
-        onUpdateOrders(prevOrders);
-      }
-    } catch (err) {
-      console.warn('Payment status update network error:', err);
-      onUpdateOrders(prevOrders);
+      alert(
+        failed.length === ids.length
+          ? `Could not update the payment status of ${failed.length} order(s). Please try again.`
+          : `Updated ${ids.length - failed.length} of ${ids.length} orders. ${failed.length} could not be saved and have been reverted.`
+      );
     }
   };
 
+  /**
+   * Change one order's payment status.
+   *
+   * The badge and the dropdown label repaint synchronously on click; the PUT
+   * request runs afterwards and only talks to the merchant if it fails.
+   */
+  const handleQuickUpdatePaymentStatus = async (
+    orderId: string,
+    newPaymentStatus: Order['paymentStatus']
+  ) => {
+    beginWrite(orderId);
+    const previous = paintOrder(orderId, { paymentStatus: newPaymentStatus });
+
+    const ok = await persistOrder(
+      orderId,
+      { paymentStatus: newPaymentStatus },
+      { label: 'Payment status', previous }
+    );
+    endWrite(orderId, !ok);
+
+    if (!ok) {
+      alert(
+        `Could not save the payment status for this order. It has been reverted to "${
+          previous?.paymentStatus || 'Unpaid'
+        }". Please try again.`
+      );
+    }
+  };
+
+  /**
+   * Change one order's status.
+   *
+   * Same optimistic contract as the payment dropdown: paint first, persist
+   * second, revert and explain on failure.
+   */
   const handleQuickUpdateStatus = async (orderId: string, newStatus: Order['status']) => {
-    const prevOrders = [...orders];
-    const updated = orders.map(ord => {
-      if (ord.id === orderId) {
-        return {
-          ...ord,
-          status: newStatus,
-          fulfillmentStatus: newStatus === 'Completed' ? ('Delivered' as const) : newStatus === 'In delivery' ? ('In Transit' as const) : ord.fulfillmentStatus
-        };
-      }
-      return ord;
+    const beforeStatus = latestOrdersRef.current.find(o => o.id === orderId)?.status;
+    beginWrite(orderId);
+    const previous = paintOrder(orderId, {
+      status: newStatus,
+      fulfillmentStatus:
+        newStatus === 'Completed'
+          ? 'Delivered'
+          : newStatus === 'In delivery'
+          ? 'In Transit'
+          : latestOrdersRef.current.find(o => o.id === orderId)?.fulfillmentStatus,
     });
-    onUpdateOrders(updated);
 
-    try {
-      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: newStatus,
-          merchantId: merchantId,
-          storeSlug: storeSlug,
-        }),
-      });
-      const data = await res.json();
-      if (data.ok && data.order) {
-        const serverOrder = normalizeOrder(data.order);
-        onUpdateOrders(prevOrders.map(o => o.id === orderId ? serverOrder : o));
-      } else if (!data.ok) {
-        console.warn('Order status update notice:', data.error);
-        onUpdateOrders(prevOrders);
-      }
-    } catch (err) {
-      console.warn('Order status update network error:', err);
-      onUpdateOrders(prevOrders);
+    const ok = await persistOrder(
+      orderId,
+      { status: newStatus },
+      { label: 'Order status', previous }
+    );
+    endWrite(orderId, !ok);
+
+    if (!ok) {
+      alert(
+        `Could not save the new order status. It has been reverted to "${beforeStatus || 'New'}". Please try again.`
+      );
     }
   };
 
@@ -685,22 +888,63 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     document.body.removeChild(link);
   };
 
-  const handleScheduleBulkPickup = () => {
-    const updated = orders.map(ord => {
-      if (selectedOrderIds.includes(ord.id)) {
-        return {
-          ...ord,
-          status: 'In delivery' as const,
-          fulfillmentStatus: 'In Transit' as const,
-          courierName: pickupCourier,
-          trackingCode: `SF-BD-${Math.floor(100000 + Math.random() * 900000)}`,
-        };
-      }
-      return ord;
+  /**
+   * Schedule a pickup for every selected order.
+   *
+   * Paint all rows immediately (the merchant sees the courier + tracking code at
+   * once) and persist each one in the background. A partial failure is reported
+   * without discarding the rows that did save.
+   */
+  const handleScheduleBulkPickup = async () => {
+    const ids = orders.filter(o => selectedOrderIds.includes(o.id)).map(o => o.id);
+    if (ids.length === 0) return;
+
+    const snapshots = new Map<string, Order>();
+    ids.forEach(id => {
+      beginWrite(id);
+      const previous = paintOrder(id, {
+        status: 'In delivery',
+        fulfillmentStatus: 'In Transit',
+        courierName: pickupCourier,
+        trackingCode: `SF-BD-${Math.floor(100000 + Math.random() * 900000)}`,
+      });
+      if (previous) snapshots.set(id, previous);
     });
-    onUpdateOrders(updated);
     setSelectedOrderIds([]);
     setBulkActionModal(null);
+
+    const results = await Promise.all(
+      ids.map(id => {
+        const painted = latestOrdersRef.current.find(o => o.id === id);
+        return persistOrder(
+          id,
+          {
+            status: 'In delivery',
+            fulfillmentStatus: 'In Transit',
+            courier_name: pickupCourier,
+            courierName: pickupCourier,
+            shipping_courier: pickupCourier,
+            tracking_code: painted?.trackingCode,
+            trackingCode: painted?.trackingCode,
+          },
+          { label: 'Pickup schedule', previous: snapshots.get(id) }
+        )
+          .then(ok => ({ id, ok }))
+          .finally(() => endWrite(id, false));
+      })
+    );
+
+    const failed = results.filter(r => !r.ok).map(r => r.id);
+    if (failed.length) {
+      failed.forEach(id => {
+        failedWritesRef.current[id] = true;
+      });
+      alert(
+        failed.length === ids.length
+          ? `Could not schedule pickup for ${failed.length} order(s). Please try again.`
+          : `Scheduled pickup for ${ids.length - failed.length} of ${ids.length} orders. ${failed.length} could not be saved and have been reverted.`
+      );
+    }
   };
 
   const handleAddTag = (orderId: string) => {
@@ -788,6 +1032,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const renderPaymentStatusDropdown = (ord: Order) => {
     const current = ord.paymentStatus || 'Unpaid';
     const isOpen = activeMenu?.id === ord.id && activeMenu?.type === 'payment';
+    const isSaving = savingOrderIds.includes(ord.id);
 
     const getStyle = (status: Order['paymentStatus']) => {
       switch (status) {
@@ -809,10 +1054,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         <button
           type="button"
           onClick={() => setActiveMenu(isOpen ? null : { id: ord.id, type: 'payment' })}
-          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border transition cursor-pointer inline-flex items-center gap-1.5 shadow-md ${getStyle(current)}`}
+          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border transition cursor-pointer inline-flex items-center gap-1.5 shadow-md ${getStyle(current)} ${isSaving ? 'opacity-70' : ''}`}
         >
           <span>{current}</span>
-          <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+          {isSaving ? (
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" title="Saving…" />
+          ) : (
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+          )}
         </button>
 
         {isOpen && (
@@ -849,6 +1098,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const renderOrderStatusDropdown = (ord: Order) => {
     const current = ord.status || 'New';
     const isOpen = activeMenu?.id === ord.id && activeMenu?.type === 'status';
+    const isSaving = savingOrderIds.includes(ord.id);
 
     const getStyle = (status: Order['status']) => {
       switch (status) {
@@ -880,10 +1130,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         <button
           type="button"
           onClick={() => setActiveMenu(isOpen ? null : { id: ord.id, type: 'status' })}
-          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border transition cursor-pointer inline-flex items-center gap-1.5 shadow-md ${getStyle(current)}`}
+          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border transition cursor-pointer inline-flex items-center gap-1.5 shadow-md ${getStyle(current)} ${isSaving ? 'opacity-70' : ''}`}
         >
           <span>{current}</span>
-          <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+          {isSaving ? (
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" title="Saving…" />
+          ) : (
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
+          )}
         </button>
 
         {isOpen && (

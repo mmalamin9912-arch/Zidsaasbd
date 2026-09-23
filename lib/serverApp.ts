@@ -6198,96 +6198,443 @@ app.post('/api/store/test-webhook', async (req, res) => {
   }
 });
 
-// Steadfast Courier 1-Click Booking API
-app.post('/api/courier/steadfast', async (req, res) => {
-  try {
-    const { order, merchantConfig } = req.body || {};
-    if (!order || !merchantConfig) {
-      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
+/* ────────────────────────────
+ * Courier 1-Click Booking
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS SHARED RATHER THAN COPIED PER PROVIDER
+ *
+ * The original per-provider handlers each did a bare `await fetch(provider)`. In
+ * a serverless runtime a failed outbound request throws the undici
+ * `TypeError('fetch failed')` — a message that tells the merchant nothing. That
+ * exact string surfaced in the UI as `Booking failed: fetch failed`.
+ *
+ * Every failure mode now returns a shaped, human-readable result instead of
+ * throwing:
+ *   • credentials absent                       → configuration guidance
+ *   • DNS/TLS/connection refused               → provider-unreachable message
+ *   • no response within the deadline          → timeout message
+ *   • non-JSON or unexpected response body     → provider-response message
+ *   • provider-side rejection                  → the provider's own reason
+ *
+ * `readJson` is used instead of `res.json()` because a crashed provider (or an
+ * HTML gateway error page) makes `.json()` throw a SyntaxError that would
+ * otherwise masquerade as a transport failure.
+ *
+ * On success the booking is persisted before responding, so the tracking code
+ * can never be held only in React state and lost on the next poll.
+ */
+
+/** How long an outbound courier request may take before it is abandoned. */
+const COURIER_FETCH_TIMEOUT_MS = 15000;
+
+/** Deep-search an arbitrary provider payload for a tracking/consignment id. */
+function extractTrackingCode(payload: any): string {
+  if (!payload || typeof payload !== 'object') return '';
+
+  const direct =
+    payload.tracking_code ||
+    payload.trackingCode ||
+    payload.consignment_id ||
+    payload.consignmentId ||
+    payload.consignment?.consignment_id ||
+    payload.consignment?.tracking_code ||
+    payload.parcel_id ||
+    payload.parcelId ||
+    payload.booking_id ||
+    payload.bookingId ||
+    payload.data?.tracking_code ||
+    payload.data?.consignment_id ||
+    payload.data?.consignment?.consignment_id;
+  if (direct) return String(direct);
+
+  // Providers wrap the parcel under varied keys; walk one level of objects.
+  for (const value of Object.values(payload)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const nested = extractTrackingCode(value);
+      if (nested) return nested;
     }
-
-    const payload = {
-      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-      recipient_name: order.customer_name || order.name || 'Customer',
-      recipient_phone: order.customer_phone || order.phone || '',
-      recipient_address: order.shipping_address || order.address || '',
-      cod_amount: order.cod_amount ?? order.total ?? 0,
-      note: order.customer_note || order.note || "Handle with care"
-    };
-
-    const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
-    const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
-
-    const response = await fetch("https://portal.steadfast.com.bd/api/v1/create_order", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Api-Key": apiKey,
-        "Secret-Key": secretKey
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (data.status === 200 || data.status === 'success' || data.success) {
-      return res.json({
-        success: true,
-        tracking_code: data.consignment?.consignment_id || data.tracking_code || `STF-${Date.now()}`,
-        consignment: data.consignment || data
-      });
-    } else {
-      return res.json({ success: false, message: data.errors || data.message || 'Steadfast booking failed' });
-    }
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to Steadfast API' });
   }
-});
+  return '';
+}
 
-app.post('/api/courier/steadfast/route', async (req, res) => {
+/** True when the provider payload looks like an accepted booking. */
+function isBookingAccepted(data: any, tracking: string): boolean {
+  if (!data || typeof data !== 'object') return Boolean(tracking);
+  const status = data.status;
+  return Boolean(
+    tracking ||
+    data.success === true ||
+    status === 'success' ||
+    status === 200 ||
+    status === '200'
+  );
+}
+
+/**
+ * Read a provider response body defensively.
+ * A non-JSON body (HTML error page, empty 502 from a gateway) becomes
+ * `{ __raw: '<first 300 chars>' }` so the caller can still report what happened
+ * instead of throwing a parse error.
+ */
+async function readJson(response: Response): Promise<any> {
+  const text = await response.text().catch(() => '');
+  if (!text) return {};
   try {
-    const { order, merchantConfig } = req.body || {};
-    if (!order || !merchantConfig) {
-      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
-    }
-
-    const payload = {
-      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-      recipient_name: order.customer_name || order.name || 'Customer',
-      recipient_phone: order.customer_phone || order.phone || '',
-      recipient_address: order.shipping_address || order.address || '',
-      cod_amount: order.cod_amount ?? order.total ?? 0,
-      note: order.customer_note || order.note || "Handle with care"
-    };
-
-    const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
-    const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
-
-    const response = await fetch("https://portal.steadfast.com.bd/api/v1/create_order", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Api-Key": apiKey,
-        "Secret-Key": secretKey
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (data.status === 200 || data.status === 'success' || data.success) {
-      return res.json({
-        success: true,
-        tracking_code: data.consignment?.consignment_id || data.tracking_code || `STF-${Date.now()}`,
-        consignment: data.consignment || data
-      });
-    } else {
-      return res.json({ success: false, message: data.errors || data.message || 'Steadfast booking failed' });
-    }
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to Steadfast API' });
+    return JSON.parse(text);
+  } catch {
+    return { __raw: text.slice(0, 300), __status: response.status };
   }
-});
+}
+
+/** Turn a provider payload into a sentence a merchant can act on. */
+function describeProviderFailure(data: any, fallback: string): string {
+  if (!data || typeof data !== 'object') return fallback;
+
+  const candidates = [
+    data.errors,
+    data.error,
+    data.message,
+    data.detail,
+    data.data?.errors,
+    data.data?.message,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (typeof candidate === 'string') return candidate;
+    // `errors` is often an object keyed by field name.
+    if (typeof candidate === 'object') {
+      const flattened = Object.values(candidate).filter(Boolean).map(String).join(' ');
+      if (flattened) return flattened;
+    }
+    return String(candidate);
+  }
+
+  if (typeof data.__raw === 'string' && data.__raw.trim()) {
+    return `${fallback} The provider replied with a non-JSON body (HTTP ${data.__status || 'unknown'}).`;
+  }
+  return fallback;
+}
+
+/**
+ * Execute one outbound provider call.
+ *
+ * Never throws: a transport failure, timeout or unparseable body is folded into
+ * `{ ok: false, message }`.
+ */
+async function courierRequest(
+  provider: string,
+  url: string,
+  init: RequestInit
+): Promise<{ ok: boolean; response?: Response; data?: any; message?: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COURIER_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    const data = await readJson(response);
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        response,
+        data,
+        message:
+          describeProviderFailure(data, '') ||
+          `${provider} rejected the booking (HTTP ${response.status}).`,
+      };
+    }
+    return { ok: true, response, data };
+  } catch (err: any) {
+    const aborted = err?.name === 'AbortError';
+    const hint = err?.cause?.code || err?.code || '';
+    if (aborted) {
+      return {
+        ok: false,
+        message: `${provider} did not respond within ${Math.round(COURIER_FETCH_TIMEOUT_MS / 1000)} seconds. Please try again.`,
+      };
+    }
+    console.error(`[Courier] ${provider} request failed:`, hint || err?.message || err);
+    return {
+      ok: false,
+      message: `Could not reach the ${provider} API${
+        hint ? ` (${hint})` : ''
+      }. Check the server's network access and try again.`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Obtain a Pathao bearer token.
+ *
+ * Pathao requires an OAuth client-credentials token before it accepts a parcel.
+ * The token is cached process-wide until shortly before expiry so a burst of
+ * bookings does not trigger one OAuth round-trip per parcel.
+ *
+ * Never throws: a failed exchange returns `{ token: '', error }` so the route can
+ * report the real cause (unreachable provider / bad credentials) instead of
+ * POSTing a parcel with an empty Authorization header and surfacing a
+ * misleading 401.
+ */
+const pathaoTokenCache: { token: string; expiresAt: number } = { token: '', expiresAt: 0 };
+
+async function ensurePathaoToken(
+  clientId: string,
+  clientSecret: string
+): Promise<{ token: string; error?: string }> {
+  const now = Date.now();
+  // 60s of slack so a cached token cannot expire mid-flight.
+  if (pathaoTokenCache.token && pathaoTokenCache.expiresAt - 60_000 > now) {
+    return { token: pathaoTokenCache.token };
+  }
+
+  const result = await courierRequest('Pathao Courier', 'https://api.pathao.com/v1/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials`,
+  });
+
+  if (!result.ok) {
+    return { token: '', error: result.message || 'Pathao authentication failed.' };
+  }
+
+  const token = result.data?.access_token || '';
+  if (!token) {
+    return {
+      token: '',
+      error: 'Pathao did not return an access token. Re-check the Pathao Client ID and Secret in Store Settings.',
+    };
+  }
+
+  const ttlSeconds = Number(result.data?.expires_in) || 3600;
+  pathaoTokenCache.token = String(token);
+  pathaoTokenCache.expiresAt = now + ttlSeconds * 1000;
+  return { token: pathaoTokenCache.token };
+}
+
+/**
+ * Send one booking to a provider and respond with a shaped result.
+ *
+ * `buildRequest` is called only after the credentials check passes, and returns
+ * either the request to send or a configuration error to report verbatim.
+ */
+async function handleCourierBooking(
+  req: any,
+  res: any,
+  provider: {
+    /** Human label used in messages ('Steadfast', 'Pathao', …). */
+    name: string;
+    /** Stored/known key for this provider, e.g. `steadfast`. */
+    key: string;
+    /** Prefix for a locally generated tracking code when the provider omits one. */
+    codePrefix: string;
+    buildRequest: (
+      order: Record<string, any>,
+      merchantConfig: Record<string, any>,
+      auth: Record<string, string>
+    ) => { url: string; init: RequestInit; payload: Record<string, any> } | { configError: string };
+    /**
+     * Optional pre-flight credential step (Pathao's OAuth exchange). Return a
+     * `configError` to abort with configuration guidance, or `auth` values to
+     * hand to `buildRequest`.
+     */
+    resolveAuth?: (
+      merchantConfig: Record<string, any>
+    ) => Promise<{ auth?: Record<string, string>; configError?: string }>;
+  }
+) {
+  res.setHeader('Content-Type', 'application/json');
+
+  const body = req.body || {};
+  const order: Record<string, any> = body.order || {};
+  // Older callers posted the order at the top level (no `order` wrapper).
+  const merchantConfig: Record<string, any> = body.merchantConfig || {};
+  const storeRef = {
+    store_slug: body.store_slug || body.storeSlug || order.store_slug || order.storeSlug,
+    store_id: body.store_id || order.store_id,
+    merchant_id: body.merchant_id || body.merchantId || order.merchant_id || order.merchantId,
+  };
+
+  if (!order || Object.keys(order).length === 0) {
+    return res.status(200).json({
+      success: false,
+      code: 'no_order',
+      error: 'No order was supplied to the courier booking request.',
+      message: 'No order was supplied to the courier booking request.',
+    });
+  }
+
+  // ── 1. Credentials / auth. Checked BEFORE fetch() so a missing key can never
+  //       surface as a raw transport error.
+  let auth: Record<string, string> = {};
+  if (provider.resolveAuth) {
+    const resolved = await provider.resolveAuth(merchantConfig);
+    if (resolved.configError) {
+      return res.status(200).json({
+        success: false,
+        code: 'missing_credentials',
+        error: resolved.configError,
+        message: resolved.configError,
+      });
+    }
+    auth = resolved.auth || {};
+  }
+
+  const built = provider.buildRequest(order, merchantConfig, auth);
+  if ('configError' in built) {
+    return res.status(200).json({
+      success: false,
+      code: 'missing_credentials',
+      error: built.configError,
+      message: built.configError,
+    });
+  }
+
+  // ── 2. Dispatch.
+  const call = await courierRequest(provider.name, built.url, built.init);
+  if (!call.ok) {
+    return res.status(200).json({
+      success: false,
+      code: 'provider_unreachable',
+      error: call.message,
+      message: call.message,
+    });
+  }
+
+  const data = call.data || {};
+  const tracking = extractTrackingCode(data);
+
+  if (!isBookingAccepted(data, tracking)) {
+    const reason = describeProviderFailure(data, `${provider.name} rejected the booking.`);
+    return res.status(200).json({
+      success: false,
+      code: 'booking_rejected',
+      provider: provider.key,
+      error: reason,
+      message: reason,
+      provider_response: data,
+    });
+  }
+
+  // A provider that accepts without echoing an id still needs SOMETHING for the
+  // tracking column — generate a deterministic placeholder from the booking so
+  // the badge is renderable and idempotent across retries.
+  const trackingCode =
+    tracking ||
+    `${provider.codePrefix}-${String(order.invoice_id || order.id || Date.now()).replace(/[^a-zA-Z0-9]/g, '').slice(-6)}`;
+
+  // ── 3. Persist BEFORE responding, so the tracking code is never React-only.
+  let orderUpdate: any = null;
+  let persisted = false;
+  try {
+    const result = await recordCourierDispatch(
+      String(order.invoice_id || order.id || order.order_number || '').trim(),
+      { name: provider.name, key: provider.key },
+      trackingCode,
+      data,
+      storeRef
+    );
+    persisted = Boolean(result?.ok);
+    orderUpdate = result?.order ? normalizeOrderRow(result.order) : null;
+    if (!persisted) {
+      console.warn(`[Courier] ${provider.name} dispatch could not be persisted:`, result?.error);
+    }
+  } catch (err: any) {
+    console.warn(`[Courier] ${provider.name} dispatch persistence error:`, err?.message || err);
+  }
+
+  return res.status(200).json({
+    success: true,
+    provider: provider.key,
+    courier_name: provider.name,
+    tracking_code: trackingCode,
+    consignment: data.consignment || data.consignment_id ? data.consignment || data : data,
+    persisted,
+    order: orderUpdate,
+    // The booking itself succeeded; surface persistence problems as a warning
+    // rather than a failure so the merchant does not re-book a real parcel.
+    warning: persisted
+      ? undefined
+      : 'The parcel was booked, but the tracking code could not be saved to this order. Re-open the dashboard to confirm.',
+  });
+}
+
+app.post('/api/courier/steadfast', (req, res) =>
+  handleCourierBooking(req, res, {
+    name: 'Steadfast Courier',
+    key: 'steadfast',
+    codePrefix: 'STF',
+    buildRequest: (order, merchantConfig) => {
+      const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
+      const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
+      if (!apiKey || !secretKey) {
+        return {
+          configError:
+            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Steadfast.',
+        };
+      }
+      return {
+        url: 'https://portal.steadfast.com.bd/api/v1/create_order',
+        init: {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Api-Key': apiKey,
+            'Secret-Key': secretKey,
+          },
+          body: JSON.stringify({
+            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+            recipient_name: order.customer_name || order.name || 'Customer',
+            recipient_phone: order.customer_phone || order.phone || '',
+            recipient_address: order.shipping_address || order.address || '',
+            cod_amount: order.cod_amount ?? order.total ?? 0,
+            note: order.customer_note || order.note || 'Handle with care',
+          }),
+        },
+        payload: {},
+      };
+    },
+  })
+);
+
+// Back-compat alias for the `/route` suffix used by an earlier client build.
+app.post('/api/courier/steadfast/route', (req, res) =>
+  handleCourierBooking(req, res, {
+    name: 'Steadfast Courier',
+    key: 'steadfast',
+    codePrefix: 'STF',
+    buildRequest: (order, merchantConfig) => {
+      const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
+      const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
+      if (!apiKey || !secretKey) {
+        return {
+          configError:
+            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Steadfast.',
+        };
+      }
+      return {
+        url: 'https://portal.steadfast.com.bd/api/v1/create_order',
+        init: {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Api-Key': apiKey,
+            'Secret-Key': secretKey,
+          },
+          body: JSON.stringify({
+            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+            recipient_name: order.customer_name || order.name || 'Customer',
+            recipient_phone: order.customer_phone || order.phone || '',
+            recipient_address: order.shipping_address || order.address || '',
+            cod_amount: order.cod_amount ?? order.total ?? 0,
+            note: order.customer_note || order.note || 'Handle with care',
+          }),
+        },
+        payload: {},
+      };
+    },
+  })
+);
 
 // Steadfast Courier Customer Fraud & Delivery History Check API
 const handleSteadfastFraudCheck = async (req: any, res: any) => {
@@ -6402,158 +6749,196 @@ app.get('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 
 // Pathao Courier 1-Click Booking API
-app.post('/api/courier/pathao', async (req, res) => {
-  try {
-    const { order, merchantConfig } = req.body || {};
-    if (!order || !merchantConfig) {
-      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
-    }
-
-    const clientId = merchantConfig.pathao_client_id || process.env.PATHAO_CLIENT_ID || '';
-    const clientSecret = merchantConfig.pathao_client_secret || process.env.PATHAO_CLIENT_SECRET || '';
-    const storeId = merchantConfig.pathao_store_id || process.env.PATHAO_STORE_ID || '';
-
-    const payload = {
-      store_id: storeId,
-      recipient_name: order.customer_name || order.name || 'Customer',
-      recipient_phone: order.customer_phone || order.phone || '',
-      recipient_address: order.shipping_address || order.address || '',
-      recipient_city: order.customer_city || 'Dhaka',
-      cod_amount: order.cod_amount ?? order.total ?? 0,
-      note: order.customer_note || order.note || 'Handle with care',
-      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-    };
-
-    const tokenRes = await fetch('https://api.pathao.com/v1/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials`,
-    }).catch(() => null);
-
-    let bearerToken = '';
-    if (tokenRes && tokenRes.ok) {
-      const tokenData = await tokenRes.json().catch(() => ({}));
-      bearerToken = tokenData.access_token || '';
-    }
-
-    const response = await fetch('https://api.pathao.com/v1/parcel', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: bearerToken ? `Bearer ${bearerToken}` : '',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (data.success || data.status === 'success' || data.booking_id || data.tracking_code) {
-      return res.json({
-        success: true,
-        tracking_code: data.tracking_code || data.consignment_id || data.booking_id || `PAD-${Date.now()}`,
-        consignment: data,
-      });
-    } else {
-      return res.json({ success: false, message: data.error || data.message || 'Pathao booking failed' });
-    }
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to Pathao API' });
-  }
-});
+//
+// Pathao issues a short-lived OAuth bearer token before accepting a parcel, so
+// this provider needs two calls. The token exchange is guarded separately: if
+// Pathao is unreachable for the token we must NOT proceed to POST a parcel with
+// an empty Authorization header, because Pathao answers 401 and the merchant
+// sees a misleading "unauthorized" instead of a connectivity problem.
+app.post('/api/courier/pathao', (req, res) =>
+  handleCourierBooking(req, res, {
+    name: 'Pathao Courier',
+    key: 'pathao',
+    codePrefix: 'PAD',
+    resolveAuth: async (merchantConfig) => {
+      const clientId = merchantConfig.pathao_client_id || process.env.PATHAO_CLIENT_ID || '';
+      const clientSecret = merchantConfig.pathao_client_secret || process.env.PATHAO_CLIENT_SECRET || '';
+      if (!clientId || !clientSecret) {
+        return {
+          configError:
+            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Pathao.',
+        };
+      }
+      const token = await ensurePathaoToken(clientId, clientSecret);
+      if (!token.token) {
+        return { configError: token.error || 'Pathao authentication failed.' };
+      }
+      return { auth: { bearer: String(token.token) } };
+    },
+    buildRequest: (order, merchantConfig, auth) => {
+      const storeId = merchantConfig.pathao_store_id || process.env.PATHAO_STORE_ID || '';
+      if (!storeId) {
+        return {
+          configError:
+            'A Pathao Store ID is required. Add it in Store Settings → Courier Integration.',
+        };
+      }
+      return {
+        url: 'https://api.pathao.com/v1/parcel',
+        init: {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${auth.bearer || ''}`,
+          },
+          body: JSON.stringify({
+            store_id: storeId,
+            recipient_name: order.customer_name || order.name || 'Customer',
+            recipient_phone: order.customer_phone || order.phone || '',
+            recipient_address: order.shipping_address || order.address || '',
+            recipient_city: order.customer_city || 'Dhaka',
+            cod_amount: order.cod_amount ?? order.total ?? 0,
+            note: order.customer_note || order.note || 'Handle with care',
+            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+          }),
+        },
+        payload: {},
+      };
+    },
+  })
+);
 
 // RedX Logistics 1-Click Booking API
-app.post('/api/courier/redx', async (req, res) => {
-  try {
-    const { order, merchantConfig } = req.body || {};
-    if (!order || !merchantConfig) {
-      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
-    }
-
-    const apiKey = merchantConfig.redx_api_key || merchantConfig.redx_key || process.env.REDX_API_KEY || '';
-    const secretKey = merchantConfig.redx_secret_key || merchantConfig.redx_secret || process.env.REDX_SECRET_KEY || '';
-
-    const payload = {
-      store_id: merchantConfig.redx_store_id || '',
-      recipient_name: order.customer_name || order.name || 'Customer',
-      recipient_phone: order.customer_phone || order.phone || '',
-      recipient_address: order.shipping_address || order.address || '',
-      recipient_city: order.customer_city || 'Dhaka',
-      cod_amount: order.cod_amount ?? order.total ?? 0,
-      note: order.customer_note || order.note || 'Handle with care',
-      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-    };
-
-    const response = await fetch('https://api.redx.com.bd/v1/parcel', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Api-Key': apiKey,
-        'Secret-Key': secretKey,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (data.status === 'success' || data.success || data.tracking_code || data.parcel_id) {
-      return res.json({
-        success: true,
-        tracking_code: data.tracking_code || data.parcel_id || `RED-${Date.now()}`,
-        consignment: data,
-      });
-    } else {
-      return res.json({ success: false, message: data.error || data.message || 'RedX booking failed' });
-    }
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to RedX API' });
-  }
-});
+app.post('/api/courier/redx', (req, res) =>
+  handleCourierBooking(req, res, {
+    name: 'RedX Logistics',
+    key: 'redx',
+    codePrefix: 'RED',
+    buildRequest: (order, merchantConfig) => {
+      const apiKey = merchantConfig.redx_api_key || merchantConfig.redx_key || process.env.REDX_API_KEY || '';
+      const secretKey = merchantConfig.redx_secret_key || merchantConfig.redx_secret || process.env.REDX_SECRET_KEY || '';
+      if (!apiKey || !secretKey) {
+        return {
+          configError:
+            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to RedX.',
+        };
+      }
+      return {
+        url: 'https://api.redx.com.bd/v1/parcel',
+        init: {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Api-Key': apiKey,
+            'Secret-Key': secretKey,
+          },
+          body: JSON.stringify({
+            store_id: merchantConfig.redx_store_id || '',
+            recipient_name: order.customer_name || order.name || 'Customer',
+            recipient_phone: order.customer_phone || order.phone || '',
+            recipient_address: order.shipping_address || order.address || '',
+            recipient_city: order.customer_city || 'Dhaka',
+            cod_amount: order.cod_amount ?? order.total ?? 0,
+            note: order.customer_note || order.note || 'Handle with care',
+            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+          }),
+        },
+        payload: {},
+      };
+    },
+  })
+);
 
 // Paperfly 1-Click Booking API
-app.post('/api/courier/paperfly', async (req, res) => {
-  try {
-    const { order, merchantConfig } = req.body || {};
-    if (!order || !merchantConfig) {
-      return res.status(400).json({ success: false, error: 'Order and merchantConfig are required' });
-    }
+app.post('/api/courier/paperfly', (req, res) =>
+  handleCourierBooking(req, res, {
+    name: 'Paperfly',
+    key: 'paperfly',
+    codePrefix: 'PF',
+    buildRequest: (order, merchantConfig) => {
+      const apiKey = merchantConfig.paperfly_api_key || merchantConfig.paperfly_key || process.env.PAPERFLY_API_KEY || '';
+      const secretKey = merchantConfig.paperfly_secret_key || merchantConfig.paperfly_secret || process.env.PAPERFLY_SECRET_KEY || '';
+      if (!apiKey || !secretKey) {
+        return {
+          configError:
+            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Paperfly.',
+        };
+      }
+      return {
+        url: 'https://api.paperfly.com.bd/v1/parcel',
+        init: {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Api-Key': apiKey,
+            'Secret-Key': secretKey,
+          },
+          body: JSON.stringify({
+            merchant_id: merchantConfig.paperfly_store_id || '',
+            recipient_name: order.customer_name || order.name || 'Customer',
+            recipient_phone: order.customer_phone || order.phone || '',
+            recipient_address: order.shipping_address || order.address || '',
+            recipient_city: order.customer_city || 'Dhaka',
+            cod_amount: order.cod_amount ?? order.total ?? 0,
+            note: order.customer_note || order.note || 'Handle with care',
+            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+          }),
+        },
+        payload: {},
+      };
+    },
+  })
+);
 
-    const apiKey = merchantConfig.paperfly_api_key || merchantConfig.paperfly_key || process.env.PAPERFLY_API_KEY || '';
-    const secretKey = merchantConfig.paperfly_secret_key || merchantConfig.paperfly_secret || process.env.PAPERFLY_SECRET_KEY || '';
+// Generic dispatch endpoint.
+// The dashboard routes to a provider-specific URL, so this is the fallback for
+// callers that only know the courier NAME (an integration sending
+// `{ courier: 'Pathao Courier' }` with no endpoint of its own).
+const COURIER_KEY_BY_NAME: Record<string, string> = {
+  steadfast: 'steadfast',
+  steadfastcourier: 'steadfast',
+  pathao: 'pathao',
+  pathaocourier: 'pathao',
+  redx: 'redx',
+  redxlogistics: 'redx',
+  paperfly: 'paperfly',
+};
 
-    const payload = {
-      merchant_id: merchantConfig.paperfly_store_id || '',
-      recipient_name: order.customer_name || order.name || 'Customer',
-      recipient_phone: order.customer_phone || order.phone || '',
-      recipient_address: order.shipping_address || order.address || '',
-      recipient_city: order.customer_city || 'Dhaka',
-      cod_amount: order.cod_amount ?? order.total ?? 0,
-      note: order.customer_note || order.note || 'Handle with care',
-      invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-    };
+app.post('/api/courier/send', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const rawName = String(
+    req.body?.courier || req.body?.courierName || req.body?.order?.courier_name || ''
+  );
+  const key = COURIER_KEY_BY_NAME[rawName.toLowerCase().replace(/[^a-z0-9]/g, '')];
 
-    const response = await fetch('https://api.paperfly.com.bd/v1/parcel', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Api-Key': apiKey,
-        'Secret-Key': secretKey,
-      },
-      body: JSON.stringify(payload),
+  if (!key) {
+    return res.status(200).json({
+      success: false,
+      code: 'unknown_courier',
+      error: rawName
+        ? `"${rawName}" is not a supported courier. Choose Steadfast, Pathao, RedX or Paperfly.`
+        : 'Select a courier before sending this order.',
     });
+  }
 
-    const data = await response.json().catch(() => ({}));
-
-    if (data.status === 'success' || data.success || data.tracking_code || data.consignment_id) {
-      return res.json({
-        success: true,
-        tracking_code: data.tracking_code || data.consignment_id || `PF-${Date.now()}`,
-        consignment: data,
-      });
-    } else {
-      return res.json({ success: false, message: data.error || data.message || 'Paperfly booking failed' });
-    }
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error?.message || 'Server error connecting to Paperfly API' });
+  // Re-dispatch through the provider route so credential handling, timeouts and
+  // persistence live in exactly one implementation.
+  const forwarded = { ...(req.body || {}) };
+  try {
+    const response = await fetch(`${req.protocol}://${req.get('host')}/api/courier/${key}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(forwarded),
+    });
+    const data = await readJson(response);
+    return res.status(200).json(data);
+  } catch (err: any) {
+    console.error('[Courier] /api/courier/send dispatch error:', err?.message || err);
+    return res.status(200).json({
+      success: false,
+      code: 'dispatch_failed',
+      error: 'The courier dispatch could not be completed. Please try again.',
+    });
   }
 });
 
