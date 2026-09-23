@@ -60,6 +60,22 @@ export function mapApiProduct(raw: any): any {
     descriptionEn: raw.descriptionEn || raw.description || raw.description_en || '',
     variantsCount: Number(raw.variantsCount ?? raw.variants_count ?? (Array.isArray(raw.variants) ? raw.variants.length : 1)),
     salesCount: Number(raw.salesCount ?? raw.sales_count ?? 0),
+    // Per-product delivery charges, carried through for the storefront and
+    // checkout. Both the zone list and the explicit pair are mapped so a product
+    // saved before this existed still resolves a fee.
+    deliveryRates: Array.isArray(raw.deliveryRates)
+      ? raw.deliveryRates
+      : Array.isArray(raw.delivery_rates)
+      ? raw.delivery_rates
+      : undefined,
+    delivery_rates: Array.isArray(raw.delivery_rates)
+      ? raw.delivery_rates
+      : Array.isArray(raw.deliveryRates)
+      ? raw.deliveryRates
+      : undefined,
+    inside_city_fee: raw.inside_city_fee != null ? Number(raw.inside_city_fee) : (raw.insideCityFee != null ? Number(raw.insideCityFee) : undefined),
+    outside_city_fee: raw.outside_city_fee != null ? Number(raw.outside_city_fee) : (raw.outsideCityFee != null ? Number(raw.outsideCityFee) : undefined),
+    requiresShipping: raw.requiresShipping !== false,
   };
 }
 

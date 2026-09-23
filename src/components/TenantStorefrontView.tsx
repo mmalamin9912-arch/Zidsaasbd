@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig, CodConfig, Order, OrderItem, ThemeConfig } from '../types';
 import { buildCategoryDbPayload, buildProductDbPayload, maxCatalogId, packCatalogItem, toCatalogSlug, ensureCategory, mapApiProduct, mapApiCategory } from '../utils/catalogPayload';
+import { resolveDeliveryCharge, resolveProductDeliveryRates } from '../utils/deliveryCharges';
 import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play } from 'lucide-react';
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
@@ -832,9 +833,90 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const selectedMobileMethod = (enabledMobileMethods || []).find((method) => method.provider === payMethod);
 
   const storefrontCodConfig = (liveStoreData.codConfig as CodConfig) || undefined;
-  const insideFee = Number(storefrontCodConfig?.insideDhakaFee) || 80;
-  const outsideFee = Number(storefrontCodConfig?.outsideDhakaFee) || 150;
-  const shippingFee = (custCity || 'Dhaka').toLowerCase().includes('dhaka') ? insideFee : outsideFee;
+
+  // ── Delivery charge ───────────────────────────────────────────────────────
+  //
+  // Resolved from the SELECTED PRODUCT first, falling back to the store's COD
+  // configuration only when the product stores no usable charge.
+  //
+  // Previously this read the store-level COD config ONLY, so the per-product
+  // "Shipping & Delivery Charges" the merchant had just filled in on the product
+  // form had no effect on the storefront, and the city dropdown's labels were
+  // hardcoded to "৳80" / "৳150".
+  const shippingArea: 'inside' | 'outside' = (() => {
+    const value = String(custCity || '').trim().toLowerCase();
+    if (value === 'inside' || value === 'outside') return value;
+    return value.includes('dhaka') ? 'inside' : 'outside';
+  })();
+
+  // Which product(s) this checkout is about: the whole cart when present, else
+  // the single product being viewed.
+  const cartProducts = (cart || [])
+    .map((item: any) => item.product)
+    .filter(Boolean);
+  const chargeProducts = cartProducts.length > 0
+    ? cartProducts
+    : (selectedProduct ? [selectedProduct] : []);
+
+  const storeInsideFee = Number(storefrontCodConfig?.insideDhakaFee);
+  const storeOutsideFee = Number(storefrontCodConfig?.outsideDhakaFee);
+
+  // Every product in the cart is charged, so a mixed cart uses the SUM of each
+  // product's own fee — the honest reading of "this product costs ৳60 to deliver".
+  const deliveryCharge = (() => {
+    let fee = 0;
+    let source: 'product' | 'store' | 'none' = 'none';
+    for (const product of chargeProducts) {
+      const resolved = resolveDeliveryCharge({
+        product,
+        city: shippingArea === 'inside' ? 'dhaka' : 'outside',
+        storeInsideFee,
+        storeOutsideFee,
+      });
+      fee += resolved.fee;
+      if (resolved.source === 'product') source = 'product';
+      else if (source === 'none') source = resolved.source;
+    }
+    if (chargeProducts.length === 0) {
+      const resolved = resolveDeliveryCharge({
+        city: shippingArea === 'inside' ? 'dhaka' : 'outside',
+        storeInsideFee,
+        storeOutsideFee,
+      });
+      fee = resolved.fee;
+      source = resolved.source;
+    }
+    return { fee, source };
+  })();
+
+  const shippingFee = deliveryCharge.fee;
+
+  // True when at least one product carries its own charge, so the UI can say so.
+  const usesProductDeliveryFee = deliveryCharge.source === 'product';
+
+  // Labels + fees for the two shipping areas, used by the city dropdown and the
+  // product page so the customer sees the real number before reaching checkout.
+  // The product's own charge wins; the store COD config is the fallback.
+  const insideArea = resolveDeliveryCharge({
+    product: chargeProducts[0],
+    city: 'dhaka',
+    storeInsideFee,
+    storeOutsideFee,
+  });
+  const outsideArea = resolveDeliveryCharge({
+    product: chargeProducts[0],
+    city: 'outside',
+    storeInsideFee,
+    storeOutsideFee,
+  });
+  const insideAreaFee = insideArea.fee;
+  const outsideAreaFee = outsideArea.fee;
+  const insideAreaLabel = insideArea.source === 'product'
+    ? (insideArea.label || 'Inside City')
+    : 'Inside City';
+  const outsideAreaLabel = outsideArea.source === 'product'
+    ? (outsideArea.label || 'Outside City')
+    : 'Outside City';
 
   const cartTotal = (cart || []).reduce((sum, item) => sum + ((item.product?.priceBDT ?? 0) * item.quantity), 0);
   const itemsSubtotal = (cart || []).length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0);
@@ -1813,6 +1895,22 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                                 ৳{(p.compareAtPriceBDT ?? 0).toLocaleString()}
                               </div>
                             )}
+                            {/* This product's own delivery charge, so the customer
+                                knows the landed cost before opening the cart. */}
+                            {(() => {
+                              const own = resolveProductDeliveryRates(p);
+                              if (!own.hasProductRates) return null;
+                              const insideFee = own.insideFee;
+                              const outsideFee = own.outsideFee;
+                              if (insideFee === null && outsideFee === null) return null;
+                              return (
+                                <div className="text-[9px] text-emerald-400 font-semibold pt-0.5">
+                                  {insideFee !== null && outsideFee !== null && insideFee !== outsideFee
+                                    ? `Delivery: ৳${insideFee} / ৳${outsideFee}`
+                                    : `+ ৳${insideFee ?? outsideFee} delivery`}
+                                </div>
+                              );
+                            })()}
                           </div>
 
                           <button
@@ -2556,9 +2654,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       onChange={(e) => setCustCity(e.target.value)}
                       className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400 font-medium"
                     >
-                      <option value="Dhaka">Dhaka (Inside Dhaka - ৳80)</option>
-                      <option value="Chittagong">Chittagong (Outside Dhaka - ৳150)</option>
-                      <option value="Sylhet">Sylhet (Outside Dhaka - ৳150)</option>
+                      {/* Fees come from the SELECTED PRODUCT's own delivery charges
+                          (falling back to the store's COD config), so the label is
+                          always the amount the customer will actually be charged. */}
+                      <option value="Dhaka">
+                        Inside City ({insideAreaLabel} \u09F3{insideAreaFee.toLocaleString()})
+                      </option>
+                      <option value="Chittagong">
+                        Outside City ({outsideAreaLabel} \u09F3{outsideAreaFee.toLocaleString()})
+                      </option>
+                      <option value="Sylhet">
+                        Outside City \u2014 Sylhet (\u09F3{outsideAreaFee.toLocaleString()})
+                      </option>
                     </select>
                   </div>
 
@@ -2715,8 +2822,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         <span className="font-semibold text-slate-900">৳{itemsSubtotal.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between text-slate-600">
-                        <span>Shipping Fee ({custCity || 'Dhaka'}):</span>
-                        <span className="font-semibold text-slate-900">৳{shippingFee}</span>
+                        <span>Shipping Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'}):</span>
+                        <span className="font-semibold text-slate-900">\u09F3{shippingFee.toLocaleString()}</span>
                       </div>
                       {/* Tax breakdown (Settings -> Tax) */}
                       {showTaxBreakdown && taxPercent > 0 && (
@@ -3364,7 +3471,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   </div>
                   <div className="flex justify-between text-slate-400">
                     <span>Delivery Fee</span>
-                    <span className="text-emerald-400 font-bold">Calculated at Checkout</span>
+                    <span className="text-emerald-400 font-bold">
+                      {insideAreaFee === outsideAreaFee
+                        ? `\u09F3${insideAreaFee.toLocaleString()}`
+                        : `Inside \u09F3${insideAreaFee.toLocaleString()} / Outside \u09F3${outsideAreaFee.toLocaleString()}`}
+                    </span>
                   </div>
                   <div className="border-t border-slate-800 pt-2 flex justify-between items-center text-sm">
                     <span className="font-bold text-slate-200">Total Payable</span>

@@ -2396,6 +2396,152 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
+/**
+ * Resolve a product's inside/outside delivery charges for persistence.
+ *
+ * Reads the merchant's `deliveryRates` zone list (which is what the "Shipping &
+ * Delivery Charges" section produces) and writes the result as an explicit
+ * `inside_city_fee` / `outside_city_fee` pair, so a reader does not have to
+ * interpret zone names. The original list is preserved on the document.
+ *
+ * Zone matching mirrors src/utils/deliveryCharges.ts deliberately — the two must
+ * agree or the form and the storefront would disagree about a fee. Order of
+ * preference: a recognised zone name, then positional order (the form seeds the
+ * list with "Inside City" then "Outside City").
+ *
+ * Never throws: an unparseable configuration yields 0/0, which the storefront
+ * treats as "fall back to the store's COD configuration".
+ */
+function buildProductDeliveryFields(body: Record<string, any>): Record<string, any> {
+  // An explicit pair on the payload already wins — the client computed it.
+  const explicitInside = toNumeric(body.inside_city_fee ?? body.insideCityFee, NaN);
+  const explicitOutside = toNumeric(body.outside_city_fee ?? body.outsideCityFee, NaN);
+
+  const rates = Array.isArray(body.deliveryRates)
+    ? body.deliveryRates
+    : Array.isArray(body.delivery_rates)
+    ? body.delivery_rates
+    : [];
+
+  const feeOf = (rate: any): number | null => {
+    const raw = rate?.fee ?? rate?.amount ?? rate?.charge;
+    if (raw === '' || raw === null || raw === undefined) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+
+  let inside: number | null = Number.isFinite(explicitInside) ? explicitInside : null;
+  let outside: number | null = Number.isFinite(explicitOutside) ? explicitOutside : null;
+
+  if (rates.length > 0) {
+    const used = new Set<number>();
+    const match = (patterns: RegExp[]): { fee: number; index: number } | null => {
+      for (const pattern of patterns) {
+        for (let i = 0; i < rates.length; i++) {
+          if (used.has(i)) continue;
+          const zoneName = String(rates[i]?.zoneName ?? rates[i]?.zone_name ?? rates[i]?.name ?? '');
+          if (!zoneName || !pattern.test(zoneName)) continue;
+          const fee = feeOf(rates[i]);
+          if (fee === null) continue;
+          return { fee, index: i };
+        }
+      }
+      return null;
+    };
+
+    if (inside === null) {
+      const hit = match([/inside/i, /\bcity\b/i, /dhaka/i, /within/i]);
+      if (hit) {
+        inside = hit.fee;
+        used.add(hit.index);
+      }
+    }
+    if (outside === null) {
+      const hit = match([/outside/i, /out of/i, /other/i, /sub\s*-?\s*(city|dhaka)/i, /district/i]);
+      if (hit) {
+        outside = hit.fee;
+        used.add(hit.index);
+      }
+    }
+
+    // Positional fallback for unnamed zones (the form's seeded order).
+    if (inside === null || outside === null) {
+      for (let i = 0; i < rates.length; i++) {
+        if (used.has(i)) continue;
+        const fee = feeOf(rates[i]);
+        if (fee === null) continue;
+        if (inside === null) {
+          inside = fee;
+          used.add(i);
+        } else if (outside === null) {
+          outside = fee;
+          used.add(i);
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  const safeInside = inside ?? 0;
+  const safeOutside = outside ?? 0;
+  return {
+    inside_city_fee: safeInside,
+    outside_city_fee: safeOutside,
+    insideCityFee: safeInside,
+    outsideCityFee: safeOutside,
+  };
+}
+
+/**
+ * Mark a store as having products and stamp the derived onboarding flags.
+ *
+ * The onboarding checklist derives its "Add product" step from a live product
+ * COUNT, but that count and this write can resolve the store by different keys
+ * (a signup-created store is keyed by email, not a slug), which is how the step
+ * could stay incomplete on a store that plainly had products. Writing
+ * `has_products` explicitly gives the checklist a durable, unambiguous signal.
+ *
+ * Never throws — the product is already saved, so this cannot be allowed to fail
+ * the create.
+ */
+async function markStoreHasProducts(
+  storeSlug: string,
+  storeId?: string | null,
+  email?: string
+): Promise<boolean> {
+  try {
+    if (!storeSlug && !storeId && !email) return false;
+    const db = await getMongoDb(ORDERS_DB_NAME);
+    if (!db) return false;
+
+    const or: Record<string, any>[] = [];
+    if (storeSlug) or.push({ store_slug: storeSlug }, { storeSlug }, { store_code: storeSlug }, { slug: storeSlug });
+    if (storeId) or.push({ store_id: storeId }, { id: storeId });
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (cleanEmail) or.push({ email: cleanEmail }, { merchant_email: cleanEmail });
+
+    const res = await db.collection('stores').updateOne(
+      { $or: or },
+      {
+        $set: {
+          has_products: true,
+          hasProducts: true,
+          has_products_updated_at: new Date(),
+          updated_at: new Date(),
+        },
+      }
+    );
+    if (res.matchedCount === 0) {
+      console.warn('[Server] markStoreHasProducts matched no store:', { storeSlug, storeId, cleanEmail });
+    }
+    return res.matchedCount > 0;
+  } catch (err: any) {
+    console.warn('[Server] markStoreHasProducts warning:', err?.message || err);
+    return false;
+  }
+}
+
 app.post('/api/products', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -2420,6 +2566,10 @@ app.post('/api/products', async (req, res) => {
     const stock_quantity = parseInt(body.stock_quantity ?? body.stock ?? 0, 10) || 0;
     const stock = stock_quantity;
 
+    // Set when the Supabase mirror rejects the row; surfaced as a warning rather
+    // than failing an already-successful MongoDB save.
+    let supabaseMirrorWarning: string | undefined;
+
     const id = String(body.id || `prod-${Date.now()}`).trim();
     const title = String(body.title || body.name || 'Untitled Product').trim();
 
@@ -2434,6 +2584,12 @@ app.post('/api/products', async (req, res) => {
       stock,
       status: body.status || 'active',
       is_published: body.is_published !== false,
+      // Per-product delivery charges, persisted as an explicit inside/outside
+      // pair so the storefront and checkout can read a fee directly instead of
+      // having to interpret the `deliveryRates` zone names. `deliveryRates`
+      // itself is preserved (it arrives in `body`), which keeps custom zone
+      // names and any extra zones the merchant configured.
+      ...buildProductDeliveryFields(body),
     };
 
     // 1. Memory store
@@ -2538,20 +2694,20 @@ app.post('/api/products', async (req, res) => {
 
         if (!sbRes.ok) {
           const errText = await sbRes.text().catch(() => '');
-          console.warn('[Server] Supabase product upsert error status:', sbRes.status, errText);
-          if (sbRes.status >= 400 && sbRes.status < 500) {
-            return res.status(400).json({
-              ok: false,
-              error: `Supabase schema error: ${errText || 'Invalid product payload or missing column'}`,
-            });
-          }
+          // A Supabase mirror failure must NOT fail the request.
+          //
+          // MongoDB is the authoritative store for products, and by this point
+          // the product has ALREADY been written there. Returning 400 here made
+          // a successful save look like a failure to the merchant — who would
+          // then retry and create a duplicate — purely because a schema-drifted
+          // mirror rejected a column. The mirror is best-effort, so a failure is
+          // reported in the response body instead of thrown.
+          console.warn('[Server] Supabase product mirror warning:', sbRes.status, errText.slice(0, 200));
+          supabaseMirrorWarning = `Saved to MongoDB. The Supabase mirror rejected this product (HTTP ${sbRes.status}).`;
         }
       } catch (sbErr: any) {
-        console.warn('[Server] Supabase product error:', sbErr);
-        return res.status(400).json({
-          ok: false,
-          error: `Supabase database query failed: ${sbErr?.message || 'Database error'}`,
-        });
+        console.warn('[Server] Supabase product mirror error:', sbErr?.message || sbErr);
+        supabaseMirrorWarning = 'Saved to MongoDB. The Supabase mirror could not be reached.';
       }
     }
 
@@ -2560,12 +2716,19 @@ app.post('/api/products', async (req, res) => {
     //    the admin table both flip immediately. Best-effort — the product is
     //    already saved, so a stamping failure must not fail the create.
     try {
+      // Set the durable flag the storefront/onboarding reads, then recompute.
+      // Writing `has_products` explicitly (rather than relying only on a product
+      // count) means the checklist reflects a real product even if the count
+      // query and the onboarding read resolve the store by different keys.
+      await markStoreHasProducts(store_slug, storeId, String(body.email || body.merchant_email || ''));
+
       const stored = await checkOnboardingStatus(store_slug, { persist: true });
       const addProduct = stored.steps.find((s) => s.id === 'add_product');
       return res.status(200).json({
         ok: true,
         success: true,
         product,
+        warning: supabaseMirrorWarning,
         onboarding: {
           progress: stored.progress,
           completedCount: stored.completedCount,
@@ -2576,7 +2739,7 @@ app.post('/api/products', async (req, res) => {
       });
     } catch (onbErr: any) {
       console.warn('[Server] product onboarding stamp warning:', onbErr?.message || onbErr);
-      return res.status(200).json({ ok: true, success: true, product });
+      return res.status(200).json({ ok: true, success: true, product, warning: supabaseMirrorWarning });
     }
   } catch (err: any) {
     console.error('[Server] POST /api/products error:', err);

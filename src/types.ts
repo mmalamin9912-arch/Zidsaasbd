@@ -148,6 +148,19 @@ export interface Product {
   customFields?: ProductCustomField[];
   colorImages?: Record<string, string>;
   deliveryRates?: { zoneName: string; fee: number }[];
+  /**
+   * Per-product delivery charges, taken from the "Shipping & Delivery Charges"
+   * section of the product form.
+   *
+   * Stored BOTH as an explicit pair of columns (so the storefront/checkout can
+   * read a charge without understanding the `deliveryRates` array) and as the
+   * original list, which preserves any extra custom zones and the merchant's own
+   * zone names.
+   */
+  inside_city_fee?: number;
+  outside_city_fee?: number;
+  insideCityFee?: number;
+  outsideCityFee?: number;
   selectedFilter?: string;
 }
 
