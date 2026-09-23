@@ -25,6 +25,25 @@ import { getMongoUri, describeMongoError, DB_NAME } from './db.js';
 import { getSupabaseServerConfig, querySupabaseTable } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
 
+/**
+ * Remove keys MongoDB will not accept inside `$set`.
+ *
+ * `_id` is immutable: including it in an update operator aborts the whole write
+ * with error code 66, and because the caller's record may be a row read back from
+ * Mongo it is not guaranteed to be free of it. `$`-prefixed keys are operator
+ * names rather than data and must never be written as fields.
+ */
+function stripImmutableKeys(record: Record<string, any>): Record<string, any> {
+  if (!record || typeof record !== 'object') return {};
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (key === '_id' || key.startsWith('$')) continue;
+    if (value === undefined) continue;
+    clean[key] = value;
+  }
+  return clean;
+}
+
 export interface AuthMerchantRecord {
   id: string;
   storeId: string;
@@ -143,13 +162,18 @@ async function upsertMongoRecord(
     const existing = await db.collection('stores').findOne({ email: emailRegex });
 
     const now = new Date().toISOString();
+    // `_id` (and `$`-prefixed operator keys) must never reach an update operator:
+    // MongoDB aborts the entire write with error 66 when `$set` targets the
+    // immutable `_id`. `record` can originate from a row previously read back
+    // from Mongo, so it is not guaranteed to be free of it.
+    const cleanRecord = stripImmutableKeys(record);
     if (existing) {
       await db.collection('stores').updateOne(
         { email: emailRegex },
-        { $set: { ...record, updated_at: now, updatedAt: now } }
+        { $set: { ...cleanRecord, updated_at: now, updatedAt: now } }
       );
     } else {
-      await db.collection('stores').insertOne({ ...record, created_at: now, createdAt: now });
+      await db.collection('stores').insertOne({ ...cleanRecord, created_at: now, createdAt: now });
     }
     return { ok: true };
   } catch (err: any) {

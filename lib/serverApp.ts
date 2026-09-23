@@ -184,6 +184,32 @@ export async function getMongoDb(dbName: string = DB_NAME) {
 
 // ── Express app ───────────────────────────────
 
+/**
+ * Silence the vendored `[DEP0169] url.parse()` deprecation warning.
+ *
+ * WHY THIS IS A FILTER RATHER THAN A FIX
+ * --------------------------------------
+ * Vercel surfaces this warning at level `error`, so it dominates the error feed
+ * even though it is informational. There are two sources:
+ *
+ *   1. `express` → `parseurl` — handled properly by scripts/patch-url-parse.cjs,
+ *      which rewrites that module to use the WHATWG `URL` API.
+ *   2. `follow-redirects` (via the MongoDB driver) — a large, security-sensitive
+ *      module we should NOT hand-rewrite in a postinstall step.
+ *
+ * So the remaining warning is suppressed at the process level, narrowly: only
+ * DEP0169, and only the deprecation-warning type. Every other warning — including
+ * any real deprecation we introduce later — still surfaces normally.
+ */
+const DEP0169_PATTERN = /url\.parse\(\) behavior is not standardized/i;
+process.on('warning', (warning: any) => {
+  const name = String(warning?.name || '');
+  if (name !== 'DeprecationWarning') return;
+  const text = `${warning?.message || ''} ${warning?.stack || ''}`;
+  if (!DEP0169_PATTERN.test(text)) return;
+  // Handled here so it does not reach the platform logger. Swallow and return.
+});
+
 const app = express();
 app.use(express.json());
 
@@ -2457,7 +2483,10 @@ app.post('/api/products', async (req, res) => {
           { id: product.id },
           {
             $set: {
-              ...product,
+              // `product` may be a row the client read back from the API, so it
+              // can carry `_id`. Passing `_id` to `$set` aborts the whole upsert
+              // with Mongo error 66 and the product silently never saves.
+              ...sanitizeMongoPatch(product),
               store_slug: store_slug,
               storeSlug: store_slug,
               ...(storeId ? { store_id: storeId } : {}),
@@ -3104,18 +3133,28 @@ app.post('/api/stores/update', async (req, res) => {
         if (storeId) filterOr.push({ id: storeId }, { store_id: storeId });
 
         if (filterOr.length > 0) {
-          await mongoose.connection.db.collection('stores').updateOne(
-            { $or: filterOr },
-            {
-              $set: {
-                ...m,
-                store_slug: storeSlug || m.storeSlug,
-                storeSlug: storeSlug || m.storeSlug,
-                updated_at: new Date(),
-              }
-            },
-            { upsert: true }
-          );
+          // The incoming merchant object is one the client previously READ from
+          // the API, so it still carries `_id`. $set-ing `_id` aborts the whole
+          // update with Mongo error 66, which is what produced the "would modify
+          // the immutable field '_id'" warning on every settings save. Strip it
+          // (and any operator keys) before building $set.
+          const cleanPatch = sanitizeMongoPatch(m);
+          if (Object.keys(cleanPatch).length === 0) {
+            console.warn('[Server] /api/stores/update: nothing to update after sanitizing the patch.');
+          } else {
+            await mongoose.connection.db.collection('stores').updateOne(
+              { $or: filterOr },
+              {
+                $set: {
+                  ...cleanPatch,
+                  store_slug: storeSlug || m.storeSlug,
+                  storeSlug: storeSlug || m.storeSlug,
+                  updated_at: new Date(),
+                }
+              },
+              { upsert: true }
+            );
+          }
         }
       } catch (mongoErr) {
         console.warn('[Server] POST /api/stores/update MongoDB warning:', mongoErr);
@@ -7314,6 +7353,39 @@ app.post('/api/courier/send', async (req, res) => {
 function toNumeric(value: unknown, fallback = 0): number {
   const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
   return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Strip keys that MongoDB refuses to accept inside an update operator.
+ *
+ * THE BUG THIS FIXES
+ * ------------------
+ * `/api/stores/update` built its `$set` with `{ ...merchant, ... }`, and the
+ * merchant object the dashboard echoes back is one it previously READ from the
+ * API — so it carries `_id`. Passing `_id` to `$set` makes MongoDB abort the
+ * whole write with error code 66:
+ *
+ *   "Performing an update on the path '_id' would modify the immutable field '_id'"
+ *
+ * The store update silently did nothing, on every settings save. `$`-prefixed
+ * keys are removed for the same reason: they are operator names, not fields, and
+ * a body containing `$set`/`$where` would either corrupt the document or be
+ * rejected outright.
+ *
+ * Returns a shallow copy, so the caller's object is never mutated.
+ */
+function sanitizeMongoPatch(patch: Record<string, any>): Record<string, any> {
+  if (!patch || typeof patch !== 'object') return {};
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(patch)) {
+    // `_id` is immutable; operator keys are not data.
+    if (key === '_id' || key.startsWith('$')) continue;
+    // `undefined` would be dropped by the driver anyway; skip it so it cannot
+    // mask a genuine field with a null-ish value.
+    if (value === undefined) continue;
+    clean[key] = value;
+  }
+  return clean;
 }
 
 /**

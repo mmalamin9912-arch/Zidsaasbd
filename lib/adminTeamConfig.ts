@@ -20,6 +20,25 @@ import { getSupabaseServerConfig, querySupabaseTable, queryMongoCollection } fro
 import type { DataSource } from './hybridDb.js';
 import { readConfigDocument, writeConfigDocument } from './platformConfig.js';
 
+/**
+ * Remove keys MongoDB will not accept inside `$set`.
+ *
+ * `_id` is immutable: including it in an update operator aborts the entire write
+ * with error code 66. A caller's record may be a row that was previously read
+ * back from Mongo, so it is not guaranteed to be free of `_id`. `$`-prefixed keys
+ * are operator names rather than data and must never be persisted as fields.
+ */
+function stripImmutableKeys(record: Record<string, any>): Record<string, any> {
+  if (!record || typeof record !== 'object') return {};
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (key === '_id' || key.startsWith('$')) continue;
+    if (value === undefined) continue;
+    clean[key] = value;
+  }
+  return clean;
+}
+
 export interface TeamResult<T = Record<string, any>> {
   ok: boolean;
   data: T | null;
@@ -65,7 +84,7 @@ async function deleteSupabaseRow(
   table: string,
   matchColumn: string,
   matchValue: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; skipped?: boolean; error?: string }> {
   const { supabaseUrl, supabaseKey, isConfigured } = getSupabaseServerConfig();
   if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
   try {
@@ -78,6 +97,13 @@ async function deleteSupabaseRow(
       }
     );
     if (res.ok) return { ok: true };
+    // A missing ROW (or a table that this deployment never provisioned) is not a
+    // failure for a MIRROR provider: the canonical delete already happened in
+    // MongoDB, so there is nothing left to remove. PostgREST answers 404 for an
+    // absent table and 200 with an empty body for an absent row, so a 404 here
+    // is a "nothing to do" outcome — treating it as an error produced a steady
+    // stream of `Supabase admin_team DELETE responded 404` warnings.
+    if (res.status === 404) return { ok: false, skipped: true, error: `Supabase ${table} has no matching row to delete (HTTP 404).` };
     return { ok: false, error: `Supabase ${table} DELETE responded ${res.status}` };
   } catch (err: any) {
     return { ok: false, error: err?.message || `Supabase ${table} delete failed` };
@@ -108,9 +134,13 @@ async function upsertMongoById(
 
   const now = new Date().toISOString();
   try {
+    // `_id` cannot appear in `$set` — MongoDB rejects the whole write with error
+    // 66. `record` may originate from a previously-read row, so strip it (and any
+    // `$`-prefixed operator keys) before building the update.
+    const cleanRecord = stripImmutableKeys(record);
     await db.collection(collection).updateOne(
       { id },
-      { $set: { ...record, updated_at: now, updatedAt: now }, $setOnInsert: { created_at: now, createdAt: now } },
+      { $set: { ...cleanRecord, updated_at: now, updatedAt: now }, $setOnInsert: { created_at: now, createdAt: now } },
       { upsert: true }
     );
     return { ok: true };
@@ -220,7 +250,7 @@ export async function deleteAdminMember(
 
   const sb = await deleteSupabaseRow('admin_team', 'id', id);
   if (sb.ok) sources.push('supabase');
-  else console.warn('[adminTeamConfig] admin_team Supabase delete warning:', sb.error);
+  else if (!sb.skipped) console.warn('[adminTeamConfig] admin_team Supabase delete warning:', sb.error);
 
   const mongo = await deleteMongoById('admin_team', id);
   if (mongo.ok) sources.push('mongodb');

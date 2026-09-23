@@ -28,6 +28,9 @@ const path = require('path');
 
 const MARKER = 'patched: WHATWG URL (DEP0169 fix)';
 
+/** Marker written into follow-redirects so a re-run is idempotent. */
+const FOLLOW_REDIRECTS_MARKER = 'patched: WHATWG URL (DEP0169 fix)';
+
 const NEW_SOURCE = `/*!
  * parseurl
  * Copyright(c) 2014 Jonathan Ong
@@ -227,4 +230,64 @@ try {
 } catch (err) {
   // Never fail the install because of an optional optimisation.
   console.warn('[patch-url-parse] non-fatal:', err && err.message ? err.message : err);
+}
+
+/**
+ * Patch `follow-redirects` (a transitive dependency of the MongoDB driver) to
+ * stop calling the deprecated `url.parse()`.
+ *
+ * WHY A ONE-LINE SUBSTITUTION AND NOT A REWRITE
+ * ---------------------------------------------
+ * `follow-redirects` is security-sensitive (it decides which host a redirect may
+ * target), so replacing the module wholesale is not appropriate. Only ONE call
+ * site remains on the legacy API — line 587's `validateUrl(url.parse(input))` —
+ * and the modern `URL` equivalent is available directly above it. The
+ * substitution is therefore a drop-in: `validateUrl` only reads `.protocol`,
+ * `.hostname` and `.pathname`, all of which the WHATWG `URL` instance provides
+ * with the same semantics for an absolute URL.
+ *
+ * `new URL()` throws on an invalid absolute URL, which is exactly the guard
+ * `validateUrl(url.parse(...))` was performing, so the error contract is kept.
+ */
+function patchFollowRedirects() {
+  const target = path.join(__dirname, '..', 'node_modules', 'follow-redirects', 'index.js');
+
+  if (!fs.existsSync(target)) {
+    return { patched: false, reason: 'follow-redirects not installed' };
+  }
+
+  const current = fs.readFileSync(target, 'utf8');
+
+  // Already migrated → nothing to do.
+  if (current.includes(FOLLOW_REDIRECTS_MARKER)) {
+    return { patched: false, reason: 'already patched' };
+  }
+
+  const legacyCall = 'parsed = validateUrl(url.parse(input));';
+  if (!current.includes(legacyCall)) {
+    return { patched: false, reason: 'no legacy url.parse call found' };
+  }
+
+  // `new URL(input)` throws TypeError on a malformed URL, preserving the
+  // validation behaviour and message shape callers rely on.
+  const replacement =
+    `// ${FOLLOW_REDIRECTS_MARKER}\n` +
+    `    // Was: validateUrl(url.parse(input)) — url.parse() is deprecated (DEP0169).\n` +
+    `    // \`new URL\` throws on an invalid absolute URL, which is the same guard.\n` +
+    `    parsed = validateUrl(new URL(input));`;
+
+  const updated = current.replace(legacyCall, replacement);
+  if (updated === current) {
+    return { patched: false, reason: 'substitution produced no change' };
+  }
+
+  fs.writeFileSync(target, updated, 'utf8');
+  return { patched: true, reason: 'rewrote follow-redirects url.parse → WHATWG URL' };
+}
+
+try {
+  const result = patchFollowRedirects();
+  console.log(`[patch-url-parse/follow-redirects] ${result.patched ? 'OK' : 'skip'}: ${result.reason}`);
+} catch (err) {
+  console.warn('[patch-url-parse/follow-redirects] non-fatal:', err && err.message ? err.message : err);
 }

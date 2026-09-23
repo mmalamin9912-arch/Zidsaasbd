@@ -34,6 +34,47 @@
 
 import { getSupabaseServerConfig } from './hybridDb.js';
 
+/* ────────────────── optional Supabase mirror circuit-breaker ────────────────── */
+
+/**
+ * Whether the onboarding status may still be mirrored to Supabase, plus why not.
+ *
+ * The `stores` Supabase table only carries the `onboarding` / `onboarding_progress`
+ * columns on a migrated schema. On a drifted deployment the PATCH answers HTTP 400
+ * every time, and because `checkOnboardingStatus` runs on every dashboard load
+ * that produced a steady stream of failing requests and warnings.
+ *
+ * MongoDB is authoritative for onboarding, so the mirror is a nicety. Once the
+ * provider has positively rejected the write for a schema reason we stop trying,
+ * which turns a per-request warning into a single informational line.
+ */
+const supabaseOnboardingMirror: {
+  disabled: boolean;
+  reason?: string;
+} = { disabled: false };
+
+export function isSupabaseOnboardingMirrorEnabled(): boolean {
+  return !supabaseOnboardingMirror.disabled;
+}
+
+function disableSupabaseOnboardingMirror(reason: string | number): void {
+  if (supabaseOnboardingMirror.disabled) return;
+  supabaseOnboardingMirror.disabled = true;
+  supabaseOnboardingMirror.reason = String(reason);
+  console.warn(
+    `[onboarding] Supabase onboarding mirror disabled (${reason}): the \`stores\` table is ` +
+      'missing the onboarding columns. MongoDB remains the source of truth — this is informational only.'
+  );
+}
+
+/**
+ * Resolve once whether the mirror should be attempted. Exposed as a function so
+ * the call site reads naturally and the decision stays in one place.
+ */
+async function shouldMirrorOnboardingToSupabase(): Promise<boolean> {
+  return isSupabaseOnboardingMirrorEnabled();
+}
+
 /* ────────────────────────── step catalogue ────────────────────────── */
 
 export type OnboardingStepId =
@@ -418,43 +459,81 @@ export async function stampOnboardingStatus(
     if (getMongoUri()) {
       const db = await getMongoDb(DB_NAME);
       if (db) {
-        const res = await db.collection('stores').updateOne(
-          { $or: [{ store_slug: clean }, { storeSlug: clean }, { store_code: clean }, { slug: clean }] },
-          { $set: flags }
-        );
+        // Match every identity a store document may carry. A store created during
+        // signup is often keyed by `email` rather than a slug, and matching only
+        // slug-shaped columns meant the stamp silently hit nothing and the
+        // checklist could never show as complete.
+        const or: Record<string, any>[] = [
+          { store_slug: clean },
+          { storeSlug: clean },
+          { store_code: clean },
+          { slug: clean },
+        ];
+        const storeEmail = String(opts.store?.email || '').trim().toLowerCase();
+        const storeId = String(opts.store?.id || opts.store?.store_id || '').trim();
+        if (storeEmail) or.push({ email: storeEmail }, { merchant_email: storeEmail });
+        if (storeId) or.push({ store_id: storeId }, { id: storeId });
+
+        const res = await db.collection('stores').updateOne({ $or: or }, { $set: flags });
         if (res.matchedCount > 0 || res.modifiedCount > 0) sources.push('mongodb');
+        else console.warn('[onboarding] status stamp matched no store document:', { clean, storeEmail, storeId });
       }
     }
   } catch (err: any) {
     console.warn('[onboarding] MongoDB status stamp warning:', err?.message || err);
   }
 
-  // 2. Supabase — mirror, restricted to columns the `stores` table actually has.
-  try {
-    const { supabaseUrl, supabaseKey, isConfigured } = getSupabaseServerConfig();
-    if (isConfigured) {
-      // `onboarding`/`onboarding_progress` are JSONB/int columns added with the
-      // stores table; a drifted table simply rejects the write and we keep Mongo.
-      const res = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(clean)}`, {
-        method: 'PATCH',
-        headers: {
-          apikey: supabaseKey,
-          Authorization: `Bearer ${supabaseKey}`,
-          'Content-Type': 'application/json',
-          Prefer: 'return=minimal',
-        },
-        body: JSON.stringify({
-          onboarding,
-          onboarding_progress: status.progress,
-          updated_at: now,
-        }),
-        signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
-      });
-      if (res.ok) sources.push('supabase');
-      else console.warn('[onboarding] Supabase status stamp warning:', res.status);
+  // 2. Supabase — optional mirror, restricted to columns the `stores` table has.
+  //
+  // WHY THIS IS GUARDED RATHER THAN ALWAYS ATTEMPTED
+  // ------------------------------------------------
+  // `onboarding` is a JSONB column that only exists on a migrated `stores` table.
+  // On a drifted schema this PATCH answers HTTP 400 on EVERY call — and because
+  // it fires from check-status, that meant one guaranteed-failing request per
+  // dashboard load, which is what made the logs noisy. MongoDB is authoritative,
+  // so the mirror is a bonus: we attempt it once, remember the outcome, and skip
+  // it afterwards instead of repeating a known-doomed request.
+  const supabaseMirrorEnabled = await shouldMirrorOnboardingToSupabase();
+  if (supabaseMirrorEnabled) {
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getSupabaseServerConfig();
+      if (isConfigured) {
+        const res = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(clean)}`, {
+          method: 'PATCH',
+          headers: {
+            apikey: supabaseKey,
+            Authorization: `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify({
+            onboarding,
+            onboarding_progress: status.progress,
+            updated_at: now,
+          }),
+          signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+        });
+        if (res.ok) {
+          sources.push('supabase');
+        } else {
+          // 400/404 means the column or table is absent — disable the mirror so
+          // this warning is emitted ONCE per process rather than per request.
+          if (res.status === 400 || res.status === 404) {
+            disableSupabaseOnboardingMirror(res.status);
+          } else {
+            console.warn('[onboarding] Supabase status stamp warning:', res.status);
+          }
+        }
+      }
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      // A timeout/network error is transient; only a schema rejection is sticky.
+      if (/timeout|abort/i.test(message)) {
+        console.warn('[onboarding] Supabase status stamp timed out; MongoDB holds the status.');
+      } else {
+        console.warn('[onboarding] Supabase status stamp warning:', message);
+      }
     }
-  } catch (err: any) {
-    console.warn('[onboarding] Supabase status stamp warning:', err?.message || err);
   }
 
   return { ok: sources.length > 0, sources, error: sources.length ? undefined : 'Could not stamp the onboarding status in any provider.' };
