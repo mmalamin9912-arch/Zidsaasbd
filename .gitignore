@@ -4,8 +4,24 @@ dist/
 coverage/
 .DS_Store
 *.log
+
+# Temporary verification logs — build/type-check output kept as scratch files.
 build_check.txt
 lint_check.txt
+build_exit.txt
+tsc_exit.txt
+tsc_check.txt
+
+# One-off local scratch tooling (codemod/rewrite helpers, ad-hoc grep dumps).
+_grep.cjs
+_show.cjs
+_show.js
+_head.txt
+clean_checkout_defaults.cjs
+clean_fallbacks.cjs
+patch.js
+rewrite.js
+
 .env*
 !.env.example
 

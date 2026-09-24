@@ -34,7 +34,54 @@ function mapSupabaseProduct(p: any): Product {
     variants: Array.isArray(p.variants) ? p.variants : [],
     variantsCount: Array.isArray(p.variants) ? p.variants.length : (p.variantsCount ?? 0),
     salesCount: p.salesCount ?? 0,
+    // Per-product delivery charges MUST survive this mapping. Without them
+    // `resolveProductDeliveryRates()` sees an undefined rate, reports
+    // `hasProductRates: false`, and the checkout falls back to an amusing
+    // "৳0" — the price the merchant saved in Mongo never reaches the UI.
+    //
+    // The API hands back a NUMBER for the explicit pair and either an ARRAY or
+    // a single OBJECT for `deliveryRates` (a one-zone product serialises as an
+    // object), so normalise the list shape here rather than downstream.
+    deliveryRates: normalizeDeliveryRates(p.deliveryRates ?? p.delivery_rates),
+    inside_city_fee: pickFee(p.inside_city_fee, p.insideCityFee),
+    outside_city_fee: pickFee(p.outside_city_fee, p.outsideCityFee),
+    insideCityFee: pickFee(p.insideCityFee, p.inside_city_fee),
+    outsideCityFee: pickFee(p.outsideCityFee, p.outside_city_fee),
+    requiresShipping: p.requiresShipping !== false,
   };
+}
+
+/** First of `a`/`b` that is a usable non-negative number, else undefined. */
+function pickFee(a: unknown, b: unknown): number | undefined {
+  for (const v of [a, b]) {
+    if (v === null || v === undefined || v === '') continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return undefined;
+}
+
+/**
+ * Coerce the API's delivery-rate payload to a zone list.
+ *
+ * A product with one zone comes back as a bare object rather than a
+ * one-element array; trusting `Array.isArray` alone silently discarded it and
+ * left the product looking unconfigured.
+ */
+function normalizeDeliveryRates(raw: any): { zoneName: string; fee: number }[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === 'object'
+    ? [raw]
+    : [];
+  return list
+    .map((rate: any) => ({
+      zoneName: String(rate?.zoneName ?? rate?.zone_name ?? rate?.name ?? '').trim(),
+      fee: Number(rate?.fee ?? rate?.amount ?? rate?.charge),
+    }))
+    .filter((rate: { zoneName: string; fee: number }) =>
+      rate.zoneName !== '' && Number.isFinite(rate.fee) && rate.fee >= 0
+    );
 }
 
 function mapSupabaseCategory(c: any) {
@@ -1819,6 +1866,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   ) : displayProducts.map(p => (
                     <div
                       key={p.id}
+                      data-testid="product-card"
+                      data-product-id={p.id}
                       className={`group flex flex-col justify-between bg-slate-900/80 backdrop-blur-md rounded-2xl overflow-hidden border border-slate-800/80 hover:border-amber-500/40 hover:shadow-[0_0_25px_rgba(212,175,55,0.15)] transition-all duration-300 relative ${
                         resolvedTheme.productsLayout === 'Carousel' ? 'snap-start shrink-0 w-[220px]' : ''
                       } ${
@@ -2674,17 +2723,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                               type="radio"
                               name="delivery-zone"
                               value={zone.value}
+                              data-testid={`delivery-zone-${zone.value}`}
                               checked={checked}
                               onChange={() => setCustCity(zone.value)}
                               className="w-4 h-4 accent-amber-400"
                             />
                             <span className="leading-tight">
+                              {/* "Inside City (৳60)" — the price shown is the one
+                                  the merchant actually saved in Mongo, and it is
+                                  omitted entirely when nothing was saved, so an
+                                  unconfigured zone never reads "৳0". */}
                               {zone.value === 'inside' ? 'Inside City' : 'Outside City'}
-                              {zone.configured && (
-                                <span className="block text-[11px] font-black mt-0.5">
-                                  ৳{zone.fee.toLocaleString()}
-                                </span>
-                              )}
+                              {zone.configured ? ` (৳${zone.fee.toLocaleString()})` : ''}
                             </span>
                           </label>
                         );

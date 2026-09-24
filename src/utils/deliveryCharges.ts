@@ -85,7 +85,7 @@ export function resolveProductDeliveryRates(product: any): DeliveryRates {
   };
   if (!product || typeof product !== 'object') return empty;
 
-  const rates = Array.isArray(product.deliveryRates)
+  const rates: any[] = Array.isArray(product.deliveryRates)
     ? product.deliveryRates
     : Array.isArray(product.delivery_rates)
     ? product.delivery_rates
@@ -220,19 +220,31 @@ export function resolveDeliveryCharge(options: {
  *
  * Written to the product document as an explicit pair so a reader does not have
  * to interpret zone names, while `deliveryRates` keeps the full list.
+ *
+ * A zone the merchant did NOT price is left ABSENT, not stored as `0`. This
+ * matters: `?? 0` used to fabricate a real ৳0 for every unnamed zone, and a
+ * stored 0 is indistinguishable from a deliberate "free delivery" — so the
+ * checkout honestly rendered "Outside City (৳0)" for a fee nobody ever set.
+ * An absent field leaves the zone visibly unconfigured instead, which is the
+ * truthful reading and lets the UI say "To be confirmed" rather than inventing
+ * free shipping.
  */
 export function buildDeliveryFeeFields(
   rates: { zoneName?: string; fee?: number | string }[] | undefined
-): { inside_city_fee: number; outside_city_fee: number; insideCityFee: number; outsideCityFee: number } {
+): Partial<Pick<import('../types').Product, 'inside_city_fee' | 'outside_city_fee' | 'insideCityFee' | 'outsideCityFee'>> {
   const resolved = resolveProductDeliveryRates({ deliveryRates: rates || [] });
-  const inside = resolved.insideFee ?? 0;
-  const outside = resolved.outsideFee ?? 0;
-  return {
-    inside_city_fee: inside,
-    outside_city_fee: outside,
-    insideCityFee: inside,
-    outsideCityFee: outside,
-  };
+  const fields: Partial<
+    Pick<import('../types').Product, 'inside_city_fee' | 'outside_city_fee' | 'insideCityFee' | 'outsideCityFee'>
+  > = {};
+  if (resolved.insideFee !== null) {
+    fields.inside_city_fee = resolved.insideFee;
+    fields.insideCityFee = resolved.insideFee;
+  }
+  if (resolved.outsideFee !== null) {
+    fields.outside_city_fee = resolved.outsideFee;
+    fields.outsideCityFee = resolved.outsideFee;
+  }
+  return fields;
 }
 
 export default {
