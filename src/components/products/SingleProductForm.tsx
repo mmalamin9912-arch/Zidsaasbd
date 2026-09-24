@@ -45,7 +45,8 @@ import {
   Image as LucideImage,
   FileUp,
   X,
-  Truck
+  Truck,
+  Loader2
 } from 'lucide-react';
 
 /**
@@ -112,7 +113,9 @@ async function optimizeImageForStorefront(source: string): Promise<string> {
 
 interface SingleProductFormProps {
   initialData?: Product | null;
-  onSave: (product: Product) => void;
+  // May be async: the form awaits it so the save spinner stays up for the
+  // actual round-trip, not just the synchronous part of the handler.
+  onSave: (product: Product) => void | Promise<void>;
   onCancel: () => void;
   merchant?: MerchantProfile;
   platformSettings?: any;
@@ -358,6 +361,12 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
   const [isEnhancingImage, setIsEnhancingImage] = useState(false);
   const [aiPricingData, setAiPricingData] = useState<any>(null);
+
+  // Save state. The submit button flips to a spinner on the SAME tick as the
+  // click, so the merchant gets instant feedback while the network round-trip
+  // runs. `savingAs` distinguishes Save Draft from Save & Publish.
+  const [saveState, setSaveState] = useState<'idle' | 'draft' | 'publish'>('idle');
+  const isSaving = saveState !== 'idle';
 
   const isFreeTier = merchant?.subscriptionPlan === 'free_trial';
 
@@ -783,8 +792,12 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     setNewCfValue('');
   };
 
-  const handleFormSubmit = (e: React.FormEvent) => {
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Guard against a double-click / double-submit creating duplicate rows while
+    // a previous save is still in flight.
+    if (isSaving) return;
 
     // ── Validation ──────────────────────────
     // Checked in the order the merchant filled the form, and reported on the
@@ -904,7 +917,15 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       selectedFilter,
     };
 
-    onSave(buildProductDbPayload(savedProduct, merchant) as Product);
+    // The button already shows its spinner (set synchronously by the click
+    // handler), so this await is purely for the round-trip; the state is reset
+    // in `finally` so a failure can never leave the form permanently disabled.
+    setSaveState(status === 'Draft' ? 'draft' : 'publish');
+    try {
+      await onSave(buildProductDbPayload(savedProduct, merchant) as Product);
+    } finally {
+      setSaveState('idle');
+    }
   };
 
   // AI Feature Lock Logic
@@ -973,20 +994,30 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
 
           <button
             type="submit"
-            onClick={() => setStatus('Draft')}
-            className="px-4 py-2 bg-[#282E3F] hover:bg-[#32394E] text-amber-400 border border-amber-500/30 font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer"
+            disabled={isSaving}
+            onClick={() => { setStatus('Draft'); setSaveState('draft'); }}
+            className="px-4 py-2 bg-[#282E3F] hover:bg-[#32394E] text-amber-400 border border-amber-500/30 font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <Save className="w-4 h-4" />
-            <span>Save Draft</span>
+            {saveState === 'draft' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
+            <span>{saveState === 'draft' ? 'Saving…' : 'Save Draft'}</span>
           </button>
 
           <button
             type="submit"
-            onClick={() => setStatus('Active')}
-            className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-lg flex items-center gap-1.5"
+            disabled={isSaving}
+            onClick={() => { setStatus('Active'); setSaveState('publish'); }}
+            className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-lg flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <Check className="w-4 h-4 stroke-[3]" />
-            <span>Save & Publish</span>
+            {saveState === 'publish' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Check className="w-4 h-4 stroke-[3]" />
+            )}
+            <span>{saveState === 'publish' ? 'Saving…' : 'Save & Publish'}</span>
           </button>
         </div>
       </div>

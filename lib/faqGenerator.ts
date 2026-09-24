@@ -111,59 +111,86 @@ export async function generateFaqFromPolicies(
     };
   }
 
-  const model = 'gemini-2.5-flash';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  // Active model ids in preference order. Google retires ids periodically; a
+  // retired id (`models/gemini-2.0-flash`) answers 404, so we walk the chain
+  // rather than failing the FAQ generator outright.
+  const modelCandidates = ['gemini-2.5-flash', 'gemini-1.5-flash'];
 
-  try {
-    const providerRes = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: buildPrompt(policies, storeName) }] }],
-        generationConfig: { temperature: 0.4, maxOutputTokens: 2048, responseMimeType: 'application/json' },
-      }),
-    });
+  let lastError: { status: number; message: string } = { status: 0, message: '' };
 
-    if (providerRes.status === 400 || providerRes.status === 403) {
-      const detail = await providerRes.json().catch(() => ({}));
-      return {
-        ok: false,
-        faq: [],
-        chatbotScript: '',
-        error: 'invalid_api_key',
-        message: `The configured GEMINI_API_KEY is invalid or lacks access: ${(detail as any)?.error?.message || ''}`,
+  for (const model of modelCandidates) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    // Bound each attempt so a hung provider cannot stall the merchant's UI.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    try {
+      const providerRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: buildPrompt(policies, storeName) }] }],
+          generationConfig: { temperature: 0.4, maxOutputTokens: 2048, responseMimeType: 'application/json' },
+        }),
+        signal: controller.signal,
+      });
+
+      if (providerRes.status === 400 || providerRes.status === 403) {
+        const detail = await providerRes.json().catch(() => ({}));
+        return {
+          ok: false,
+          faq: [],
+          chatbotScript: '',
+          error: 'invalid_api_key',
+          message: `The configured GEMINI_API_KEY is invalid or lacks access: ${(detail as any)?.error?.message || ''}`,
+        };
+      }
+      if (providerRes.status === 429) {
+        return { ok: false, faq: [], chatbotScript: '', error: 'rate_limited', message: 'AI request limit reached. Please try again shortly.' };
+      }
+      if (providerRes.status === 404 || !providerRes.ok) {
+        const detail = await providerRes.json().catch(() => ({}));
+        lastError = {
+          status: providerRes.status,
+          message: (detail as any)?.error?.message || 'Unknown error',
+        };
+        console.warn(`[faqGenerator] model "${model}" failed (${providerRes.status}); trying the next candidate.`);
+        continue;
+      }
+
+      const data = await providerRes.json();
+      const text: string =
+        data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
+
+      const parsed = extractJson(text);
+      if (!parsed) {
+        return { ok: false, faq: [], chatbotScript: '', error: 'parse_error', message: 'The AI returned an unreadable response. Please try again.' };
+      }
+
+      const { faq, chatbotScript } = normalizeFaqResult(parsed);
+      if (!faq.length) {
+        return { ok: false, faq: [], chatbotScript, error: 'empty_response', message: 'The AI did not return any FAQ pairs. Please try again.' };
+      }
+
+      return { ok: true, faq, chatbotScript };
+    } catch (err: any) {
+      // Abort/timeout and transport errors both fall through to the next model.
+      lastError = {
+        status: 0,
+        message: err?.name === 'AbortError' ? 'the provider did not respond within 20s' : (err?.message || 'provider request failed'),
       };
+      console.warn(`[faqGenerator] model "${model}" error: ${lastError.message}`);
+    } finally {
+      clearTimeout(timeoutId);
     }
-    if (providerRes.status === 429) {
-      return { ok: false, faq: [], chatbotScript: '', error: 'rate_limited', message: 'AI request limit reached. Please try again shortly.' };
-    }
-    if (!providerRes.ok) {
-      const detail = await providerRes.json().catch(() => ({}));
-      return {
-        ok: false,
-        faq: [],
-        chatbotScript: '',
-        error: 'server_error',
-        message: `AI provider error (${providerRes.status}): ${(detail as any)?.error?.message || 'Unknown error'}`,
-      };
-    }
-
-    const data = await providerRes.json();
-    const text: string =
-      data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
-
-    const parsed = extractJson(text);
-    if (!parsed) {
-      return { ok: false, faq: [], chatbotScript: '', error: 'parse_error', message: 'The AI returned an unreadable response. Please try again.' };
-    }
-
-    const { faq, chatbotScript } = normalizeFaqResult(parsed);
-    if (!faq.length) {
-      return { ok: false, faq: [], chatbotScript, error: 'empty_response', message: 'The AI did not return any FAQ pairs. Please try again.' };
-    }
-
-    return { ok: true, faq, chatbotScript };
-  } catch (err: any) {
-    return { ok: false, faq: [], chatbotScript: '', error: 'server_error', message: err?.message || 'Unexpected error generating the FAQ.' };
   }
+
+  // Every candidate failed — report the last provider signal rather than a
+  // generic error so the merchant (and the logs) know what actually went wrong.
+  return {
+    ok: false,
+    faq: [],
+    chatbotScript: '',
+    error: 'server_error',
+    message: `AI provider error${lastError.status ? ` (${lastError.status})` : ''}: ${lastError.message || 'all configured models failed'}`,
+  };
 }

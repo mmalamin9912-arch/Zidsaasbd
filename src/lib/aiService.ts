@@ -20,6 +20,32 @@ export interface AiTextResult {
 const AI_ENDPOINT = '/api/ai/generate-text';
 
 /**
+ * Current active Gemini models, in preference order.
+ *
+ * `models/gemini-2.0-flash` and other 2.0 ids were retired by the provider and
+ * now answer `404 NOT_FOUND` / "no longer available", which surfaced in the UI as
+ * a frozen AI button. The server owns the actual provider call and reads this
+ * list to fall back down the chain, so a single retired id can never take the
+ * whole feature offline.
+ *
+ * Keep this in sync with lib/serverApp.ts (`GEMINI_MODEL_CANDIDATES`).
+ */
+export const GEMINI_MODEL_CANDIDATES = ['gemini-2.5-flash', 'gemini-1.5-flash'] as const;
+
+/** The model the client asks for first. The server overrides it if retired. */
+export const DEFAULT_GEMINI_MODEL = GEMINI_MODEL_CANDIDATES[0];
+
+/**
+ * Hard ceiling on a single AI request.
+ *
+ * Without this, a provider that accepts the socket but never answers leaves the
+ * awaiting handler pending forever — the spinner never clears and the AI buttons
+ * look "frozen". Aborting turns that into a normal, catchable error the caller
+ * already knows how to render.
+ */
+const AI_REQUEST_TIMEOUT_MS = 20000;
+
+/**
  * Canonical system instruction for the Zid AI Assistant.
  *
  * The assistant is BOTH a Sales Copilot (growth/marketing/sales insights)
@@ -66,11 +92,18 @@ export async function generateAiText(
   prompt: string,
   systemInstruction?: string
 ): Promise<AiTextResult> {
+  // AbortController so a hung provider cannot freeze the caller indefinitely.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+
   try {
     const res = await fetch(AI_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, systemInstruction, model: 'gemini-2.5-flash' })
+      // The server validates this against its own candidate list, so a retired
+      // id here degrades to the next active model instead of failing the request.
+      body: JSON.stringify({ prompt, systemInstruction, model: DEFAULT_GEMINI_MODEL }),
+      signal: controller.signal,
     });
 
     const data = await res.json().catch(() => ({}));
@@ -93,11 +126,22 @@ export async function generateAiText(
 
     return { ok: true, text: data.text };
   } catch (err: any) {
+    // An abort is our own timeout, not a user-visible network failure — report it
+    // with a message that tells the merchant the request can simply be retried.
+    if (err?.name === 'AbortError') {
+      return {
+        ok: false,
+        error: 'network_error',
+        message: 'The AI took too long to respond. Please try again.'
+      };
+    }
     return {
       ok: false,
       error: 'network_error',
       message: 'Could not reach the AI service. Check your internet connection and try again.'
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

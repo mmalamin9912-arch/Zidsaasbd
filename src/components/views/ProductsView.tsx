@@ -240,33 +240,29 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         console.warn('[ProductsView] API save warning:', apiErrorMsg);
       }
 
-      // 3. Direct Supabase insert (kept as secondary persistence)
-      let supabaseErrorMsg: string | null = null;
-      let inserted = false;
-      try {
-        const { supabase } = await import('../../lib/supabase');
-        if (supabase) {
+      // 3. Direct Supabase insert — best-effort MIRROR, deliberately fire-and-forget.
+      //
+      // MongoDB is authoritative and the /api/products call above already wrote
+      // there. Awaiting this second network round-trip *before* updating the UI
+      // was pure added latency on the merchant's critical path: the modal stayed
+      // open while a mirror they never asked for finished. Kicking it off without
+      // awaiting lets the success toast and list update land immediately.
+      void (async () => {
+        try {
+          const { supabase } = await import('../../lib/supabase');
+          if (!supabase) return;
           const { data, error } = await supabase.from('products').insert([payload]).select();
           if (error) {
-            console.error('[ProductsView] Supabase insert error:', error.message, error);
-            supabaseErrorMsg = error.message;
-          } else {
-            inserted = true;
-            if (data && data[0]) {
-              payload.id = (data[0] as any).id;
-            }
+            console.warn('[ProductsView] Supabase mirror rejected the product:', error.message);
+          } else if (data && data[0]) {
+            payload.id = (data[0] as any).id;
           }
+        } catch (e: any) {
+          console.warn('[ProductsView] Supabase mirror error:', e?.message || e);
         }
-      } catch (e: any) {
-        console.error('[ProductsView] Supabase exception:', e);
-        supabaseErrorMsg = e?.message || 'Supabase exception';
-      }
+      })();
 
-      if (supabaseErrorMsg) {
-        console.warn('[ProductsView] Supabase persistence notice:', supabaseErrorMsg);
-      }
-
-      // 4. Update UI State after persistence
+      // 4. Update UI State immediately after the authoritative write
       const updatedProduct = mapApiProduct({
         ...savedProduct,
         ...payload,

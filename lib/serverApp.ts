@@ -1678,15 +1678,26 @@ async function handleAnalyticsSummary(req: express.Request, res: express.Respons
   }
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
-    const providerRes = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData, dbMetrics) }] }],
-        generationConfig: { temperature: 0.6, maxOutputTokens: 600 },
-      }),
-    });
+    // Bounded provider call: `grading`-style advisory summaries are non-critical,
+    // so a slow provider degrades to the computed fallback instead of holding the
+    // dashboard request open.
+    const providerController = new AbortController();
+    const providerTimeout = setTimeout(() => providerController.abort(), 15000);
+    let providerRes: Response;
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+      providerRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: buildAnalyticsSummaryPrompt(analyticsData, dbMetrics) }] }],
+          generationConfig: { temperature: 0.6, maxOutputTokens: 600 },
+        }),
+        signal: providerController.signal,
+      });
+    } finally {
+      clearTimeout(providerTimeout);
+    }
 
     if (!providerRes.ok) {
       console.warn('[Server] analytics-summary AI provider status:', providerRes.status);
@@ -1737,10 +1748,22 @@ app.post('/api/ai/generate-faq', async (req, res) => {
 });
 
 // POST /api/ai/generate-text — Gemini AI text generation
+//
+// Model IDs are resolved through a fallback chain. Google retires model ids
+// regularly (`models/gemini-2.0-flash` now answers 404 NOT_FOUND), and a single
+// retired id used to take the whole AI feature down with a cryptic provider
+// error. Requesting the candidates in order means a deprecation degrades to the
+// next active model instead of surfacing as "AI is broken".
+const GEMINI_MODEL_CANDIDATES = ['gemini-2.5-flash', 'gemini-1.5-flash'] as const;
+
 app.post('/api/ai/generate-text', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const { prompt, systemInstruction } = (req.body || {}) as { prompt?: string; systemInstruction?: string };
+    const { prompt, systemInstruction, model: requestedModel } = (req.body || {}) as {
+      prompt?: string;
+      systemInstruction?: string;
+      model?: string;
+    };
 
     if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'bad_request', message: 'A non-empty "prompt" is required.' });
@@ -1754,50 +1777,106 @@ app.post('/api/ai/generate-text', async (req, res) => {
       });
     }
 
-    const model = 'gemini-2.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
     const payload: Record<string, unknown> = {
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.8, maxOutputTokens: 1024 }
     };
-    if (systemInstruction) {
-      payload.systemInstruction = { parts: [{ text: `${ZID_AI_SYSTEM_INSTRUCTION}\n\n## ADDITIONAL CONTEXT FROM THE CALLING FEATURE\n${systemInstruction}` }] };
-    } else {
-      payload.systemInstruction = { parts: [{ text: ZID_AI_SYSTEM_INSTRUCTION }] };
+    payload.systemInstruction = {
+      parts: [{
+        text: systemInstruction
+          ? `${ZID_AI_SYSTEM_INSTRUCTION}\n\n## ADDITIONAL CONTEXT FROM THE CALLING FEATURE\n${systemInstruction}`
+          : ZID_AI_SYSTEM_INSTRUCTION,
+      }],
+    };
+
+    // A caller-supplied model is tried FIRST (it is normally the same as the
+    // head of the chain), then the shared candidates, de-duplicated.
+    const requested = typeof requestedModel === 'string' ? requestedModel.trim() : '';
+    const candidates = Array.from(
+      new Set([requested, ...GEMINI_MODEL_CANDIDATES].filter(Boolean))
+    );
+
+    let invalidKeyMessage: string | null = null;
+    let rateLimited = false;
+    let lastProviderStatus = 0;
+    let lastProviderMessage = '';
+
+    for (const model of candidates) {
+      // Providers occasionally accept the socket and then never answer. Without
+      // a deadline the request (and the merchant's spinner) hangs forever.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const providerRes = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+
+        // The key itself is bad — trying more models cannot help.
+        if (providerRes.status === 400 || providerRes.status === 403) {
+          const detail = await providerRes.json().catch(() => ({}));
+          invalidKeyMessage = (detail as any)?.error?.message || 'The AI provider rejected the API key.';
+          break;
+        }
+        if (providerRes.status === 429) {
+          rateLimited = true;
+          break;
+        }
+        // A retired/unknown model id answers 404 — fall through to the next one.
+        if (providerRes.status === 404) {
+          lastProviderStatus = 404;
+          lastProviderMessage = `model "${model}" is no longer available`;
+          console.warn(`[Server] AI model "${model}" unavailable (404); trying the next candidate.`);
+          continue;
+        }
+        if (!providerRes.ok) {
+          const detail = await providerRes.json().catch(() => ({}));
+          lastProviderStatus = providerRes.status;
+          lastProviderMessage = (detail as any)?.error?.message || 'Unknown error';
+          console.warn(`[Server] AI model "${model}" failed (${providerRes.status}); trying the next candidate.`);
+          continue;
+        }
+
+        const data = await providerRes.json();
+        const text: string =
+          data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
+
+        if (!text) {
+          lastProviderStatus = providerRes.status;
+          lastProviderMessage = 'empty provider response';
+          continue;
+        }
+
+        return res.status(200).json({ text, model });
+      } catch (providerErr: any) {
+        // Abort/timeout and transport errors both fall through to the next model.
+        lastProviderStatus = 0;
+        lastProviderMessage = providerErr?.name === 'AbortError'
+          ? 'the provider did not respond within 20s'
+          : (providerErr?.message || 'provider request failed');
+        console.warn(`[Server] AI model "${model}" error: ${lastProviderMessage}`);
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
 
-    const providerRes = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    if (providerRes.status === 400 || providerRes.status === 403) {
-      const detail = await providerRes.json().catch(() => ({}));
-      const msg = (detail as any)?.error?.message || 'The AI provider rejected the API key.';
-      return res.status(401).json({ error: 'invalid_api_key', message: `The configured GEMINI_API_KEY is invalid or lacks access: ${msg}` });
-    }
-    if (providerRes.status === 429) {
-      return res.status(429).json({ error: 'rate_limited', message: 'AI request limit reached. Please try again in a moment.' });
-    }
-    if (!providerRes.ok) {
-      const detail = await providerRes.json().catch(() => ({}));
-      return res.status(500).json({
-        error: 'server_error',
-        message: `AI provider error (${providerRes.status}): ${(detail as any)?.error?.message || 'Unknown error'}`
+    if (invalidKeyMessage !== null) {
+      return res.status(401).json({
+        error: 'invalid_api_key',
+        message: `The configured GEMINI_API_KEY is invalid or lacks access: ${invalidKeyMessage}`,
       });
     }
-
-    const data = await providerRes.json();
-    const text: string =
-      data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
-
-    if (!text) {
-      return res.status(500).json({ error: 'empty_response', message: 'The AI returned an empty response. Please try again.' });
+    if (rateLimited) {
+      return res.status(429).json({ error: 'rate_limited', message: 'AI request limit reached. Please try again in a moment.' });
     }
 
-    return res.status(200).json({ text });
+    return res.status(500).json({
+      error: 'server_error',
+      message: `AI provider error${lastProviderStatus ? ` (${lastProviderStatus})` : ''}: ${lastProviderMessage || 'all configured models failed'}`,
+    });
   } catch (err: any) {
     console.error('[/api/ai/generate-text] error:', err?.message || err);
     return res.status(500).json({ error: 'server_error', message: 'Unexpected server error while generating AI text.' });
@@ -2711,36 +2790,28 @@ app.post('/api/products', async (req, res) => {
       }
     }
 
-    // 5. Onboarding trigger: a store with >= 1 product has satisfied "Add
-    //    product". Recompute + stamp the status so the dashboard checklist and
-    //    the admin table both flip immediately. Best-effort — the product is
-    //    already saved, so a stamping failure must not fail the create.
-    try {
-      // Set the durable flag the storefront/onboarding reads, then recompute.
-      // Writing `has_products` explicitly (rather than relying only on a product
-      // count) means the checklist reflects a real product even if the count
-      // query and the onboarding read resolve the store by different keys.
-      await markStoreHasProducts(store_slug, storeId, String(body.email || body.merchant_email || ''));
+    // 5. Respond as soon as the AUTHORITATIVE write is done.
+    //
+    // The onboarding stamp below is a derived side-effect ("this store has >= 1
+    // product") — the merchant's save is already durable in MongoDB and the
+    // storefront payload at this point. Awaiting it held the HTTP response open
+    // for a second set of DB round-trips, so it is now kicked off without
+    // blocking the reply and any failure is only logged.
+    void (async () => {
+      try {
+        await markStoreHasProducts(store_slug, storeId, String(body.email || body.merchant_email || ''));
+        await checkOnboardingStatus(store_slug, { persist: true });
+      } catch (onbErr: any) {
+        console.warn('[Server] product onboarding stamp warning:', onbErr?.message || onbErr);
+      }
+    })();
 
-      const stored = await checkOnboardingStatus(store_slug, { persist: true });
-      const addProduct = stored.steps.find((s) => s.id === 'add_product');
-      return res.status(200).json({
-        ok: true,
-        success: true,
-        product,
-        warning: supabaseMirrorWarning,
-        onboarding: {
-          progress: stored.progress,
-          completedCount: stored.completedCount,
-          totalCount: stored.totalCount,
-          steps: stored.steps,
-          addProductCompleted: Boolean(addProduct?.completed),
-        },
-      });
-    } catch (onbErr: any) {
-      console.warn('[Server] product onboarding stamp warning:', onbErr?.message || onbErr);
-      return res.status(200).json({ ok: true, success: true, product, warning: supabaseMirrorWarning });
-    }
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      product,
+      warning: supabaseMirrorWarning,
+    });
   } catch (err: any) {
     console.error('[Server] POST /api/products error:', err);
     return res.status(400).json({ ok: false, error: err?.message || 'Invalid product request' });
