@@ -342,14 +342,74 @@ export default function App() {
     }
   };
 
+  // ── MongoDB-authoritative subscription status ──────────────────────────────
+  //
+  // `merchant.subscriptionPlan` is a LOCAL profile field and can be stale: a
+  // store whose admin approval was written to MongoDB may still carry
+  // `free_trial` in localStorage/its Supabase mirror, which made the app shell
+  // render the trial countdown on top of an already-ACTIVE paid plan.
+  //
+  // `/api/subscription/status` resolves `subscription_status` from every spelling
+  // an admin write may have used (see lib/serverApp.ts), so it is the ONE value
+  // we branch on here. Until it answers we keep it `null` and fall back to the
+  // local profile, so a first paint never flashes the trial bar incorrectly.
+  const [dbSubscriptionStatus, setDbSubscriptionStatus] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    const email = (merchant?.email || '').trim().toLowerCase();
+    const slug = (merchant?.storeSlug || merchant?.storeName || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+    if (!email && !slug) return;
+
+    let cancelled = false;
+    const loadStatus = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (email) params.set('email', email);
+        if (slug) params.set('store_slug', slug);
+        const res = await fetch(`/api/subscription/status?${params.toString()}`, {
+          headers: { Accept: 'application/json' },
+        });
+        const data = await res.json().catch(() => null);
+        if (cancelled || !data?.ok) return;
+        const status =
+          data.subscription_status ?? data.store?.subscription_status ?? null;
+        setDbSubscriptionStatus(status ? String(status).toUpperCase() : null);
+      } catch {
+        // Network hiccup — keep the last known status rather than clearing it,
+        // so the banner cannot reappear because of one failed request.
+      }
+    };
+
+    loadStatus();
+    // Re-read periodically so an admin approval in another browser lands here.
+    const timer = setInterval(loadStatus, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [merchant?.email, merchant?.storeSlug, merchant?.storeName]);
+
   // Trial & Subscription Logic
-  const isPaidPlan = !!merchant?.subscriptionPlan && merchant.subscriptionPlan !== 'free_trial' && merchant.subscriptionPlan !== 'trial';
+  //
+  // `isPaidPlan` is the single source of truth for "this store is on a paid
+  // plan", and it consults the DB status FIRST. Any one of these is sufficient:
+  //   1. MongoDB `subscription_status === 'ACTIVE'` (what an admin approval writes).
+  //   2. A paid plan id on the resolved merchant profile.
+  const dbReportsActive = (dbSubscriptionStatus || '').toUpperCase() === 'ACTIVE';
+  const localPlanId = merchant?.subscriptionPlan;
+  const hasPaidPlanId = !!localPlanId && localPlanId !== 'free_trial' && localPlanId !== 'trial';
+  const isPaidPlan = dbReportsActive || hasPaidPlanId;
   const trialEndsAtDate = merchant?.trialEndsAt ? new Date(merchant.trialEndsAt) : null;
   const now = new Date();
   const trialDaysRemaining = trialEndsAtDate
     ? Math.max(0, Math.ceil((trialEndsAtDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
     : (merchant?.trialDaysRemaining ?? 0);
   const isTrialExpired = !isPaidPlan && trialDaysRemaining <= 0;
+  // Shown ONLY for a strict trial account: no DB-confirmed ACTIVE plan and no
+  // paid plan id. Never alongside an active paid plan.
   const isTrialActive = !isPaidPlan && trialDaysRemaining > 0;
 
   const prevSlugRef = React.useRef<string>(merchant?.storeSlug || '');
@@ -1871,10 +1931,12 @@ export default function App() {
         </div>
       )}
 
-      {/* Trial Countdown Banner — only for genuine trial accounts. A store with an
-          approved paid plan must not see this duplicate bar, which is what made
-          the header look cluttered when an ACTIVE plan was already displayed. */}
-      {isTrialActive && !isPaidPlan && (
+      {/* Trial Countdown Banner — STRICTLY for the initial trial state.
+          `isTrialActive` is already false for any store with a paid plan id, and
+          `isPaidPlan` additionally covers a MongoDB `subscription_status: ACTIVE`
+          that the local profile has not caught up with yet. Belt-and-braces on
+          purpose: an approved PRO PLAN store must never see this bar. */}
+      {isTrialActive && !isPaidPlan && !dbReportsActive && (
         <div className="bg-indigo-600/10 border-b border-indigo-500/20 py-2.5 px-4">
           <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
