@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { MerchantProfile, SubscriptionRequest } from '../types';
-import { calculateRemainingDays, getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive, toUtcMs, TRIAL_DURATION_DAYS } from '../utils/subscriptionUtils';
+import { getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive, toUtcMs, TRIAL_DURATION_DAYS } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
@@ -401,18 +401,13 @@ export const Header: React.FC<HeaderProps> = ({
     };
   }, [merchant?.email, merchant?.storeSlug, merchant?.storeName]);
 
-  // Real-time ticking countdown clock state
-  const [timeLeft, setTimeLeft] = useState<{
-    days: number;
-    hours: number;
-    minutes: number;
-    seconds: number;
-    totalSeconds: number;
-    totalDaysFloat: number;
-  }>({ days: 0, hours: 0, minutes: 0, seconds: 0, totalSeconds: 0, totalDaysFloat: 99 });
-
-  // 2. Real-Time Dynamic Clock: 1-second interval calculating Remaining Time = expires_at - Date.now()
-  useEffect(() => {
+  // Static countdown snapshot — computed ONCE per relevant input change.
+  //
+  // The previous implementation re-ran this on a 1-second interval, which
+  // re-rendered the entire header (and forced React to reconcile the whole
+  // dashboard tree on every tick). We now compute whole days only, which is all
+  // the badge ever needs to communicate, so no interval is required at all.
+  const timeLeft = useMemo(() => {
     // The plan the badge reflects. The DB-resolved plan id WINS when the store is
     // ACTIVE, so an approved Pro plan renders as Pro even if the local merchant
     // record still says `free_trial`.
@@ -489,32 +484,19 @@ export const Header: React.FC<HeaderProps> = ({
       }
     }
 
+    // Whole days remaining — the only granularity the static badge shows.
     const computeTimeLeft = () => {
       if (!targetTimestamp) {
-        return { days: 0, hours: 0, minutes: 0, seconds: 0, totalSeconds: 0, totalDaysFloat: 0 };
+        return { days: 0, totalDaysFloat: 0 };
       }
-      const now = Date.now();
-      const diffMs = Math.max(0, targetTimestamp - now);
-      const totalSeconds = Math.floor(diffMs / 1000);
-      const totalDaysFloat = diffMs / (1000 * 60 * 60 * 24);
-
-      const days = Math.floor(totalSeconds / (24 * 3600));
-      const hours = Math.floor((totalSeconds % (24 * 3600)) / 3600);
-      const minutes = Math.floor((totalSeconds % 3600) / 60);
-      const seconds = totalSeconds % 60;
-
-      return { days, hours, minutes, seconds, totalSeconds, totalDaysFloat };
+      const diffMs = Math.max(0, targetTimestamp - Date.now());
+      return {
+        days: Math.floor(diffMs / (1000 * 60 * 60 * 24)),
+        totalDaysFloat: diffMs / (1000 * 60 * 60 * 24),
+      };
     };
 
-    // Calculate immediately
-    setTimeLeft(computeTimeLeft());
-
-    // 3. Live Decrement every 1 second (1000ms)
-    const timer = setInterval(() => {
-      setTimeLeft(computeTimeLeft());
-    }, 1000);
-
-    return () => clearInterval(timer);
+    return computeTimeLeft();
   }, [
     supabaseSub,
     trialAnchorIso,
@@ -548,6 +530,34 @@ export const Header: React.FC<HeaderProps> = ({
   const activePlanDaysLabel = dbDurationDays && dbDurationDays > 0
     ? `${dbDurationDays} DAYS`
     : `${getPlanDurationInDays(dbPlanId || merchant?.subscriptionPlan)} DAYS`;
+
+  // Static expiry date (YYYY-MM-DD) for the ACTIVE plan badge. UTC-rendered so
+  // the date does not shift by a day depending on the viewer's timezone.
+  const activePlanExpiry = useMemo(() => {
+    if (!isPaid) return null;
+    const ms = toUtcMs(
+      dbExpiresAt ||
+        merchant?.expires_at ||
+        (merchant as any)?.expiresAt ||
+        merchant?.subscriptionExpiry ||
+        merchant?.subscriptionEndDate ||
+        supabaseSub?.expires_at ||
+        supabaseSub?.subscription_expiry ||
+        supabaseSub?.subscription_end_date
+    );
+    if (!ms) return null;
+    return new Date(ms).toISOString().slice(0, 10);
+  }, [
+    isPaid,
+    dbExpiresAt,
+    merchant?.expires_at,
+    (merchant as any)?.expiresAt,
+    merchant?.subscriptionExpiry,
+    merchant?.subscriptionEndDate,
+    supabaseSub?.expires_at,
+    supabaseSub?.subscription_expiry,
+    supabaseSub?.subscription_end_date,
+  ]);
 
   const paidDaysRemaining = timeLeft.days;
   const trialDaysRemaining = timeLeft.days;
@@ -590,7 +600,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span>
               ⚠️ Super Admin Notice: Your subscription plan expires in{' '}
               <span className="font-mono font-black underline bg-red-700/60 px-1.5 py-0.5 rounded">
-                {timeLeft.days}d : {String(timeLeft.hours).padStart(2, '0')}h : {String(timeLeft.minutes).padStart(2, '0')}m : {String(timeLeft.seconds).padStart(2, '0')}s
+                {timeLeft.days} {timeLeft.days === 1 ? 'day' : 'days'}
               </span>! Please renew your plan immediately.
             </span>
           </div>
@@ -650,42 +660,32 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
       ) : isPaid ? (
-        // ACTIVE PAID SUBSCRIPTION BANNER WITH TICKING COUNTDOWN CLOCK
+        // ACTIVE PAID SUBSCRIPTION — STATIC PLAN BADGE (no live ticking clock)
         <div className="bg-gradient-to-r from-[#142328] via-[#1A2E35] to-[#142328] border border-[#00D68F]/30 rounded-xl p-3 shadow-md">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="flex items-center space-x-3">
               <div className="w-9 h-9 rounded-lg bg-[#00D68F]/20 border border-[#00D68F]/40 flex items-center justify-center text-[#00D68F] shrink-0">
-                <Sparkles className="w-4 h-4 animate-pulse" />
+                <Sparkles className="w-4 h-4" />
               </div>
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-[#00D68F] bg-[#00D68F]/10 px-2 py-0.5 rounded-full border border-[#00D68F]/30 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-[#00D68F] animate-pulse"></span>
+                    <CheckCircle2 className="w-3 h-3 text-[#00D68F]" />
                     {/* Label comes from the MongoDB `plan_name`, so the header states
-                        exactly what the admin approved — e.g. "Active Plan: PRO PLAN (6 MONTHS) (180 DAYS)". */}
+                        exactly what the admin approved — e.g. "ACTIVE PLAN: PRO PLAN (6 MONTHS)". */}
                     Active Plan: {activePlanLabel} ({activePlanDaysLabel})
                   </span>
                   <span className="text-xs text-slate-400 font-medium hidden sm:inline">
                     • Pure SaaS — 0% Order Fees
                   </span>
                 </div>
-                <div className="flex items-center gap-2 mt-1 flex-wrap">
-                  <span className="text-xs text-slate-200 font-medium">Remaining Time:</span>
-                  <div className="flex items-center gap-1 bg-slate-900/90 border border-[#00D68F]/40 px-2.5 py-1 rounded-lg font-mono text-xs font-bold text-white shadow-inner">
-                    <Clock className="w-3.5 h-3.5 text-[#00D68F] animate-spin" style={{ animationDuration: '6s' }} />
-                    <span className="text-[#00D68F]">{String(timeLeft.days).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">d</span>
-                    <span className="text-slate-500">:</span>
-                    <span className="text-[#00D68F]">{String(timeLeft.hours).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">h</span>
-                    <span className="text-slate-500">:</span>
-                    <span className="text-[#00D68F]">{String(timeLeft.minutes).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">m</span>
-                    <span className="text-slate-500">:</span>
-                    <span className="text-[#00D68F]">{String(timeLeft.seconds).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">s</span>
-                  </div>
-                </div>
+                {/* Static expiry date — no per-second re-render. */}
+                <p className="text-xs text-slate-300 font-medium mt-1">
+                  Expires:{' '}
+                  <span className="font-mono font-bold text-[#00D68F]">
+                    {activePlanExpiry || paidDaysRemaining + ' days left'}
+                  </span>
+                </p>
               </div>
             </div>
 
@@ -710,12 +710,12 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
       ) : (
-        // FREE TRIAL BANNER WITH TICKING COUNTDOWN CLOCK
+        // FREE TRIAL BANNER — STATIC DAYS-LEFT LABEL (no live ticking clock)
         <div className="bg-gradient-to-r from-[#202636] via-[#2A3146] to-[#202636] border border-[#3A435E] rounded-xl p-3 shadow-md">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="flex items-center space-x-3">
               <div className="w-9 h-9 rounded-lg bg-[#D4AF37]/15 border border-[#D4AF37]/30 flex items-center justify-center text-[#E6C587] shrink-0">
-                <Clock className="w-4 h-4 animate-pulse" />
+                <Clock className="w-4 h-4" />
               </div>
               <div>
                 <div className="flex items-center gap-2">
@@ -726,23 +726,13 @@ export const Header: React.FC<HeaderProps> = ({
                     • 0% Platform Order Fees
                   </span>
                 </div>
-                <div className="flex items-center gap-2 mt-1 flex-wrap">
-                  <span className="text-xs text-slate-200 font-medium">Trial Countdown:</span>
-                  <div className="flex items-center gap-1 bg-slate-900/90 border border-[#D4AF37]/40 px-2.5 py-1 rounded-lg font-mono text-xs font-bold text-white shadow-inner">
-                    <Clock className="w-3.5 h-3.5 text-[#E6C587] animate-spin" style={{ animationDuration: '6s' }} />
-                    <span className="text-[#E6C587]">{String(timeLeft.days).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">d</span>
-                    <span className="text-slate-500">:</span>
-                    <span className="text-[#E6C587]">{String(timeLeft.hours).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">h</span>
-                    <span className="text-slate-500">:</span>
-                    <span className="text-[#E6C587]">{String(timeLeft.minutes).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">m</span>
-                    <span className="text-slate-500">:</span>
-                    <span className="text-[#E6C587]">{String(timeLeft.seconds).padStart(2, '0')}</span>
-                    <span className="text-slate-400 text-[10px]">s</span>
-                  </div>
-                </div>
+                {/* Static day count derived from the store-creation anchor. */}
+                <p className="text-xs text-slate-200 font-medium mt-1">
+                  Trial Period:{' '}
+                  <span className="font-mono font-bold text-[#E6C587]">
+                    {trialDaysRemaining} {trialDaysRemaining === 1 ? 'Day' : 'Days'} Left
+                  </span>
+                </p>
               </div>
             </div>
 

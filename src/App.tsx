@@ -1871,8 +1871,10 @@ export default function App() {
         </div>
       )}
 
-      {/* Trial Countdown Banner */}
-      {isTrialActive && (
+      {/* Trial Countdown Banner — only for genuine trial accounts. A store with an
+          approved paid plan must not see this duplicate bar, which is what made
+          the header look cluttered when an ACTIVE plan was already displayed. */}
+      {isTrialActive && !isPaidPlan && (
         <div className="bg-indigo-600/10 border-b border-indigo-500/20 py-2.5 px-4">
           <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
