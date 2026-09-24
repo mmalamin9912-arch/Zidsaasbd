@@ -4,6 +4,8 @@ dist/
 coverage/
 .DS_Store
 *.log
+build_check.txt
+lint_check.txt
 .env*
 !.env.example
 

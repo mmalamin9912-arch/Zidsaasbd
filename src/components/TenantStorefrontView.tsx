@@ -858,8 +858,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     ? cartProducts
     : (selectedProduct ? [selectedProduct] : []);
 
-  const storeInsideFee = Number(storefrontCodConfig?.insideDhakaFee);
-  const storeOutsideFee = Number(storefrontCodConfig?.outsideDhakaFee);
+  // Passed RAW (not `Number(...)`) into resolveDeliveryCharge. `Number('')` is
+  // `0`, which is exactly how an empty COD field used to surface as a phantom
+  // "৳0" delivery charge; the resolver's `toFee` rejects ''/NaN as "not set".
+  const storeInsideFee = storefrontCodConfig?.insideDhakaFee;
+  const storeOutsideFee = storefrontCodConfig?.outsideDhakaFee;
 
   // Every product in the cart is charged, so a mixed cart uses the SUM of each
   // product's own fee — the honest reading of "this product costs ৳60 to deliver".
@@ -911,12 +914,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   });
   const insideAreaFee = insideArea.fee;
   const outsideAreaFee = outsideArea.fee;
-  const insideAreaLabel = insideArea.source === 'product'
-    ? (insideArea.label || 'Inside City')
-    : 'Inside City';
-  const outsideAreaLabel = outsideArea.source === 'product'
-    ? (outsideArea.label || 'Outside City')
-    : 'Outside City';
+  // `configured` distinguishes a real saved price from "nothing set". The
+  // selector renders the amount ONLY when configured, so an unconfigured store
+  // never shows the misleading "৳0" the merchant never entered.
+  const insideConfigured = insideArea.configured;
+  const outsideConfigured = outsideArea.configured;
 
   const cartTotal = (cart || []).reduce((sum, item) => sum + ((item.product?.priceBDT ?? 0) * item.quantity), 0);
   const itemsSubtotal = (cart || []).length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0);
@@ -2648,25 +2650,46 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
                 <div className="space-y-3">
                   <div>
-                    <label className="block mb-1 font-bold text-xs text-slate-300">City / District</label>
-                    <select
-                      value={custCity}
-                      onChange={(e) => setCustCity(e.target.value)}
-                      className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400 font-medium"
-                    >
-                      {/* Fees come from the SELECTED PRODUCT's own delivery charges
-                          (falling back to the store's COD config), so the label is
-                          always the amount the customer will actually be charged. */}
-                      <option value="Dhaka">
-                        Inside City ({insideAreaLabel} ৳{insideAreaFee.toLocaleString()})
-                      </option>
-                      <option value="Chittagong">
-                        Outside City ({outsideAreaLabel} ৳{outsideAreaFee.toLocaleString()})
-                      </option>
-                      <option value="Sylhet">
-                        Outside City \u2014 Sylhet (৳{outsideAreaFee.toLocaleString()})
-                      </option>
-                    </select>
+                    <label className="block mb-1.5 font-bold text-xs text-slate-300">Delivery Zone</label>
+                    {/* Two explicit zones. The amount shown is the price the
+                        merchant actually saved for this product / store — and
+                        when none was saved the zone is shown WITHOUT a price,
+                        never as a phantom "৳0". */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {([
+                        { value: 'inside', fee: insideAreaFee, configured: insideConfigured },
+                        { value: 'outside', fee: outsideAreaFee, configured: outsideConfigured },
+                      ] as const).map((zone) => {
+                        const checked = shippingArea === zone.value;
+                        return (
+                          <label
+                            key={zone.value}
+                            className={`flex items-center gap-2.5 rounded-xl px-3.5 py-3 border text-xs font-semibold cursor-pointer transition ${
+                              checked
+                                ? 'bg-amber-400/10 border-amber-400 text-amber-300'
+                                : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="delivery-zone"
+                              value={zone.value}
+                              checked={checked}
+                              onChange={() => setCustCity(zone.value)}
+                              className="w-4 h-4 accent-amber-400"
+                            />
+                            <span className="leading-tight">
+                              {zone.value === 'inside' ? 'Inside City' : 'Outside City'}
+                              {zone.configured && (
+                                <span className="block text-[11px] font-black mt-0.5">
+                                  ৳{zone.fee.toLocaleString()}
+                                </span>
+                              )}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
                   </div>
 
                   {/* Gift options (Settings -> Gift options) */}
@@ -2823,7 +2846,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       </div>
                       <div className="flex justify-between text-slate-600">
                         <span>Shipping Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'}):</span>
-                        <span className="font-semibold text-slate-900">৳{shippingFee.toLocaleString()}</span>
+                        {/* Only print a price when one was actually saved for the
+                            selected zone; an unconfigured zone must not read "৳0". */}
+                        <span className="font-semibold text-slate-900">
+                          {(shippingArea === 'inside' ? insideConfigured : outsideConfigured)
+                            ? `৳${shippingFee.toLocaleString()}`
+                            : 'To be confirmed'}
+                        </span>
                       </div>
                       {/* Tax breakdown (Settings -> Tax) */}
                       {showTaxBreakdown && taxPercent > 0 && (
@@ -3472,9 +3501,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   <div className="flex justify-between text-slate-400">
                     <span>Delivery Fee</span>
                     <span className="text-emerald-400 font-bold">
-                      {insideAreaFee === outsideAreaFee
+                      {!insideConfigured && !outsideConfigured
+                        ? 'To be confirmed'
+                        : insideAreaFee === outsideAreaFee
                         ? `৳${insideAreaFee.toLocaleString()}`
-                        : `Inside ৳${insideAreaFee.toLocaleString()} / Outside ৳${outsideAreaFee.toLocaleString()}`}
+                        : `Inside ${insideConfigured ? `৳${insideAreaFee.toLocaleString()}` : '—'} / Outside ${outsideConfigured ? `৳${outsideAreaFee.toLocaleString()}` : '—'}`}
                     </span>
                   </div>
                   <div className="border-t border-slate-800 pt-2 flex justify-between items-center text-sm">

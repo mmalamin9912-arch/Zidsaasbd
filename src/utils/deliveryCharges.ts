@@ -180,7 +180,20 @@ export function resolveDeliveryCharge(options: {
   city?: unknown;
   storeInsideFee?: unknown;
   storeOutsideFee?: unknown;
-}): { fee: number; source: 'product' | 'store' | 'none'; isInside: boolean; label: string } {
+}): {
+  fee: number;
+  source: 'product' | 'store' | 'none';
+  isInside: boolean;
+  label: string;
+  /**
+   * True only when a real fee was found (product or store). A fee of exactly ৳0
+   * that the merchant deliberately saved is `configured: true` with `fee: 0`;
+   * a missing configuration is `configured: false`. Callers must use this flag to
+   * decide whether to RENDER a price — otherwise an unconfigured store shows a
+   * misleading "৳0" that reads like free shipping.
+   */
+  configured: boolean;
+} {
   const isInside = isInsideCity(options.city);
   const product = resolveProductDeliveryRates(options.product);
 
@@ -189,15 +202,17 @@ export function resolveDeliveryCharge(options: {
     const label = isInside
       ? product.insideLabel || 'Inside City'
       : product.outsideLabel || 'Outside City';
-    return { fee: productFee, source: 'product', isInside, label };
+    return { fee: productFee, source: 'product', isInside, label, configured: true };
   }
 
   const storeFee = toFee(isInside ? options.storeInsideFee : options.storeOutsideFee);
   if (storeFee !== null) {
-    return { fee: storeFee, source: 'store', isInside, label: isInside ? 'Inside City' : 'Outside City' };
+    return { fee: storeFee, source: 'store', isInside, label: isInside ? 'Inside City' : 'Outside City', configured: true };
   }
 
-  return { fee: 0, source: 'none', isInside, label: isInside ? 'Inside City' : 'Outside City' };
+  // Nothing was ever configured for this zone. Report `configured: false` so the
+  // UI does not print a phantom "৳0"; the fee stays 0 so order math is unaffected.
+  return { fee: 0, source: 'none', isInside, label: isInside ? 'Inside City' : 'Outside City', configured: false };
 }
 
 /**
