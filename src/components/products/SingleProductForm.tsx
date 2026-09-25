@@ -113,15 +113,25 @@ async function optimizeImageForStorefront(source: string): Promise<string> {
 
 interface SingleProductFormProps {
   initialData?: Product | null;
-  // May be async: the form awaits it so the save spinner stays up for the
-  // actual round-trip, not just the synchronous part of the handler.
-  onSave: (product: Product) => void | Promise<void>;
+  // May be async. The form awaits it only until the DATABASE WRITE resolves;
+  // any follow-up work the parent does afterwards (closing a modal, refreshing a
+  // list) must not extend the "Saving…" spinner.
+  onSave: (product: Product) => void | Promise<unknown>;
   onCancel: () => void;
   merchant?: MerchantProfile;
   platformSettings?: any;
   onOpenSubscriptionModal?: () => void;
   onToast?: (type: 'success' | 'error' | 'warning', message: string) => void;
 }
+
+/**
+ * How long the Save button may stay in its "Saving…" state before it is forced
+ * back to idle. This is a SAFETY NET, not a normal path: it exists so a request
+ * that never settles (a dropped connection, a proxy that swallows the response)
+ * cannot leave the merchant with a permanently disabled form and no way to
+ * retry. Comfortably longer than a healthy round-trip.
+ */
+const SAVE_SPINNER_WATCHDOG_MS = 15000;
 
 interface CustomizationField {
   id: string;
@@ -364,9 +374,15 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
 
   // Save state. The submit button flips to a spinner on the SAME tick as the
   // click, so the merchant gets instant feedback while the network round-trip
-  // runs. `savingAs` distinguishes Save Draft from Save & Publish.
+  // runs. `saveState` distinguishes Save Draft from Save & Publish.
   const [saveState, setSaveState] = useState<'idle' | 'draft' | 'publish'>('idle');
   const isSaving = saveState !== 'idle';
+
+  // Unmount safety: the save promise can resolve after the form has already been
+  // torn down (the parent closes it on success), which would otherwise be a
+  // setState-on-unmounted-component warning.
+  const isMountedRef = useRef(true);
+  useEffect(() => () => { isMountedRef.current = false; }, []);
 
   const isFreeTier = merchant?.subscriptionPlan === 'free_trial';
 
@@ -918,13 +934,24 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     };
 
     // The button already shows its spinner (set synchronously by the click
-    // handler), so this await is purely for the round-trip; the state is reset
-    // in `finally` so a failure can never leave the form permanently disabled.
+    // handler). The spinner is cleared the MOMENT the database write resolves —
+    // not when the parent's follow-up work finishes — so "Saving…" can never
+    // outlive a save that has already landed.
     setSaveState(status === 'Draft' ? 'draft' : 'publish');
+    // Watchdog: a hung/lost request must not leave the form permanently
+    // disabled with a spinning button and no way out for the merchant.
+    const releaseWatchdog = window.setTimeout(() => {
+      if (isMountedRef.current) setSaveState('idle');
+    }, SAVE_SPINNER_WATCHDOG_MS);
     try {
-      await onSave(buildProductDbPayload(savedProduct, merchant) as Product);
+      await Promise.resolve(onSave(buildProductDbPayload(savedProduct, merchant) as Product)).catch((err: any) => {
+        // The parent owns user-facing error reporting; the form only guarantees
+        // that a rejected save still releases the spinner.
+        console.error('[SingleProductForm] Save failed:', err);
+      });
     } finally {
-      setSaveState('idle');
+      window.clearTimeout(releaseWatchdog);
+      if (isMountedRef.current) setSaveState('idle');
     }
   };
 

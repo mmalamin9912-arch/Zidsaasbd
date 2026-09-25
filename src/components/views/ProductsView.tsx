@@ -165,8 +165,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   const handleSaveProduct = async (savedProduct: Product) => {
     try {
       const anyProd = savedProduct as any;
-      
-      // Send ALL product fields to the API for full MongoDB persistence
+            // Send ALL product fields to the API for full MongoDB persistence
       const payload: Record<string, any> = {
         id: savedProduct.id,
         title: savedProduct.title,
@@ -262,7 +261,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         }
       })();
 
-      // 4. Update UI State immediately after the authoritative write
+      // 4. Update UI State immediately after the authoritative write.
       const updatedProduct = mapApiProduct({
         ...savedProduct,
         ...payload,
@@ -282,6 +281,20 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
 
       setIsFormViewActive(false);
       setEditingProduct(null);
+
+      // ── Release the form's "Saving…" state NOW ───────────────────────────
+      //
+      // The database write above is the contract: once it has returned, the
+      // product is saved. Anything the caller (the form) does after that —
+      // closing a modal, re-fetching a list, a toast animation — must NOT keep
+      // the Save button spinning. Because `SingleProductForm` awaits this
+      // handler before clearing `saveState`, a long tail here left the merchant
+      // staring at a frozen "Saving…" button on an already-saved product.
+      //
+      // Returning here resolves the promise immediately; the fire-and-forget
+      // Supabase mirror above continues in the background and reports only to
+      // the console.
+      return;
     } catch (e: any) {
       console.error('[ProductsView] Network save product error:', e);
       setToastNotification({

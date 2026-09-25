@@ -2974,15 +2974,42 @@ app.get('/api/storefront/:slug', async (req, res) => {
       }
     }
 
-    // Build storefront with only the data needed by the public customer link
+    // Build storefront with only the data needed by the public customer link.
+    //
+    // The local payload file is a best-effort mirror; MongoDB (`stores`) is
+    // authoritative. When the file has no merchant (a fresh serverless instance,
+    // a sync that only ever wrote Mongo) the store is resolved from MongoDB so
+    // the storefront still renders — and, critically, so `codConfig` reaches the
+    // checkout and the delivery zones price themselves (Inside City / Outside
+    // City) instead of falling back to "To be confirmed".
+    let merchantRecord: any = payload.merchant || null;
+    if (!merchantRecord) {
+      try {
+        merchantRecord = await resolveStoreRecordFlexible(slug);
+      } catch (resolveErr: any) {
+        console.warn('[Server] GET /api/storefront/:slug store resolve warning:', resolveErr?.message || resolveErr);
+      }
+    }
+
+    // Mongo FIRST for the delivery/COD settings (the source of truth the
+    // merchant edits in Settings), then the resolved store record, then the
+    // local payload — so a stale file copy can never mask a real fee change.
+    const codConfig = merchantRecord?.codConfig
+      || payload.codConfig
+      || null;
+
     const storefront = {
-      merchant: payload.merchant || null,
+      merchant: merchantRecord,
       products: storeProducts,
       categories: Array.isArray(payload.categories) ? payload.categories : [],
       themes: Array.isArray(payload.themes) ? payload.themes : [],
-      bankAccounts: Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [],
-      mobileBanking: Array.isArray(payload.mobileBanking) ? payload.mobileBanking : [],
-      codConfig: payload.codConfig || null,
+      bankAccounts: Array.isArray(merchantRecord?.bankAccounts)
+        ? merchantRecord.bankAccounts
+        : (Array.isArray(payload.bankAccounts) ? payload.bankAccounts : []),
+      mobileBanking: Array.isArray(merchantRecord?.mobileBanking)
+        ? merchantRecord.mobileBanking
+        : (Array.isArray(payload.mobileBanking) ? payload.mobileBanking : []),
+      codConfig,
     };
 
     return res.json({ ok: true, store_slug: slug, storefront });
@@ -5115,17 +5142,56 @@ app.post('/api/security/register', (req, res, next) => {
  * `ilike.` operator prefix. We only accept the scalar value after the supported
  * operator and reject wildcard/control characters; the value is then compared
  * in memory against the merged provider result.
+ *
+ * NEVER throws. A malformed encoding (a lone `%`, rarely "URI malformed") or a
+ * value that is not a string at all resolves to `''` — i.e. "no filter" — rather
+ * than propagating as an HTTP 400/500, which is exactly how a missing or junk
+ * query parameter used to surface as a red failed request in the dashboard.
  */
 function sanitizeSubscriptionFilter(raw: unknown): string {
+  if (raw === undefined || raw === null) return '';
   if (Array.isArray(raw)) return sanitizeSubscriptionFilter(raw[0]);
-  let value = String(raw ?? '').trim();
+  if (typeof raw === 'object') return '';
+  let value: string;
+  try {
+    value = String(raw).trim();
+  } catch {
+    return '';
+  }
   if (!value) return '';
-  try { value = decodeURIComponent(value); } catch { /* Express may have decoded it already. */ }
+  // `decodeURIComponent` throws a URIError on a malformed percent-escape. Express
+  // may have decoded the value already, so a failure here just means "use as-is".
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    /* Express may have decoded it already, or the encoding is malformed. */
+  }
   const operatorMatch = value.match(/^(?:eq|ilike|like)\.(.*)$/i);
   if (operatorMatch) value = operatorMatch[1];
   // Treat PostgREST wildcards as non-identifying input rather than passing them
   // to another query language. Email/slug lookups are exact after normalization.
-  return value.replace(/[\x00-\x1F\x7F]/g, '').trim().toLowerCase();
+  try {
+    return value.replace(/[\x00-\x1F\x7F]/g, '').trim().toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Read a scalar query/body value that may arrive as a string, an array
+ * (`?slug=a&slug=b`) or not at all.
+ *
+ * Express's default query parser yields an ARRAY for a repeated key. Reading the
+ * first element is the honest interpretation ("use the first of the repeated
+ * filters") and, more importantly, prevents a value that is not a string from
+ * reaching `String(...)`/`decodeURIComponent` and throwing — the source of the
+ * 400 this route used to answer with when a parameter was missing or malformed.
+ */
+function firstQueryValue(raw: unknown): string {
+  if (raw === undefined || raw === null) return '';
+  if (Array.isArray(raw)) return firstQueryValue(raw[0]);
+  if (typeof raw === 'object') return '';
+  return String(raw);
 }
 
 /** Normalise a raw plan row (Supabase table / Mongo doc) into the API shape. */
@@ -5163,7 +5229,14 @@ function normalizePlanRow(plan: Record<string, any>) {
 app.all('/api/subscriptions', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const body = req.body || {};
+    const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+
+    // Query reads go through `firstQueryValue` / `sanitizeSubscriptionFilter`,
+    // both of which tolerate a MISSING, repeated or malformed parameter. A
+    // request such as `/api/subscriptions?slug=%` therefore degrades to "no
+    // filter" and still answers 200 with a JSON payload instead of a 400.
+    const query = (req.query && typeof req.query === 'object') ? req.query as Record<string, unknown> : {};
+    const queryString = (key: string) => firstQueryValue(query[key]);
 
     // POST → persist a plan record (Admin Configurator save).
     if (req.method === 'POST' && (body.slug || body.plan_id || body.id || body.plan_name)) {
@@ -5191,14 +5264,14 @@ app.all('/api/subscriptions', async (req, res) => {
 
     // Query filters are sanitised before use. In particular, never pass a raw
     // PostgREST operator value (`ilike.email@example.com`) into a lookup.
-    const requestedEmail = sanitizeSubscriptionFilter(req.query.merchant_email || req.query.email);
+    const requestedEmail = sanitizeSubscriptionFilter(queryString('merchant_email') || queryString('email'));
     const requestedStore = sanitizeSubscriptionFilter(
-      req.query.store_slug || req.query.slug || req.query.store_id
+      queryString('store_slug') || queryString('slug') || queryString('store_id')
       || (body && (body.store_slug || body.slug || body.store_id))
     );
     const storeRef = cleanStoreRef(requestedStore);
     const hasRenewalRef = Boolean(requestedEmail || storeRef);
-    const wantsPlans = !hasRenewalRef || String(req.query.type || '') === 'plans';
+    const wantsPlans = !hasRenewalRef || queryString('type').trim().toLowerCase() === 'plans';
 
     // 1. Live plan catalogue — read straight from MongoDB (auto-seeds the
     //    default catalogue when the collection is empty). It never throws, so
@@ -5221,7 +5294,7 @@ app.all('/api/subscriptions', async (req, res) => {
     // 2. Tenant renewal record (when an email/store ref is supplied), read from
     //    the MongoDB `subscriptions` collection; stores fill any remaining gaps.
     let matchedSubscription: Record<string, any> | null = null;
-    if (hasRenewalRef && String(req.query.type || '') !== 'plans') {
+    if (hasRenewalRef && queryString('type').trim().toLowerCase() !== 'plans') {
       const mergedSubscriptions = await listSubscriptions();
       matchedSubscription = mergedSubscriptions.data.find((row: Record<string, any>) => {
         const rowEmail = String(row.merchant_email || row.merchantEmail || row.email || '').trim().toLowerCase();
@@ -5243,7 +5316,8 @@ app.all('/api/subscriptions', async (req, res) => {
     };
 
     // Accept the `select=*` shape PostgREST clients expect: an array of rows.
-    if (typeof req.query.select === 'string') {
+    // `select` is read leniently so a repeated/malformed value still works.
+    if (queryString('select') !== '') {
       return res.status(200).json(plans.length > 0 ? plans : [subscription]);
     }
     return res.status(200).json({

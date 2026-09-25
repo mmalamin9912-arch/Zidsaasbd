@@ -31,6 +31,10 @@ export interface ApiPlanRow {
 
 async function safeJson<T>(res: Response): Promise<T | null> {
   try {
+    // A non-JSON error body (an HTML error page, an empty 400/500) must resolve
+    // to `null` — never throw — so a caller degrades to "no data" and its own
+    // fallback runs instead of the whole call rejecting.
+    if (!res || typeof res.text !== 'function') return null;
     const text = await res.text();
     if (!text || text.trimStart().startsWith('<')) return null;
     return JSON.parse(text) as T;
@@ -74,6 +78,10 @@ export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan 
  * this call cannot fail with the Supabase SQLSTATE / missing-column 400 that
  * used to break the merchant modal. `/api/subscription-plans` is kept as a
  * secondary source for older deployments.
+ *
+ * `type=plans` is always sent explicitly: without it the endpoint interprets a
+ * stray `slug`/`store_slug` (or a request with NO parameters at all) as a tenant
+ * renewal lookup, which is not what the catalogue modal wants.
  */
 export async function fetchPlans(): Promise<SubscriptionPlan[]> {
   const map = (rows: ApiPlanRow[] | undefined) =>
@@ -83,11 +91,17 @@ export async function fetchPlans(): Promise<SubscriptionPlan[]> {
       .filter((p): p is SubscriptionPlan => Boolean(p && p.id));
 
   // 1. Dual-database endpoint (Supabase → MongoDB fallback + auto-seed).
+  //    A 400 from this route is treated as "no catalogue" and falls through to
+  //    the legacy endpoint below rather than surfacing as an error.
   try {
     const res = await fetch('/api/subscriptions?type=plans', { headers: { Accept: 'application/json' } });
-    const data = await safeJson<{ ok: boolean; plans: ApiPlanRow[] }>(res);
-    const plans = map(data?.plans);
-    if (plans.length > 0) return plans;
+    if (res.ok) {
+      const data = await safeJson<{ ok: boolean; plans: ApiPlanRow[] }>(res);
+      const plans = map(data?.plans);
+      if (plans.length > 0) return plans;
+    } else {
+      console.warn(`[plansApi] fetchPlans (/api/subscriptions) answered HTTP ${res.status}; using the legacy endpoint.`);
+    }
   } catch (err) {
     console.warn('[plansApi] fetchPlans (/api/subscriptions) failed:', err);
   }

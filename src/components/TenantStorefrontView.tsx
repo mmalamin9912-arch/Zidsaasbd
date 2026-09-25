@@ -186,6 +186,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     const loadStorefront = async () => {
       try {
         let apiProducts: any[] = [];
+        let apiCodConfig: any = null;
+        let apiStoreRecord: any = null;
+        let apiBankAccounts: any[] = [];
+        let apiMobileBanking: any[] = [];
         const slug = effectiveSlug || storeSlug || 'bd';
 
         // Load full storefront payload from Express API
@@ -195,6 +199,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         if (storefrontData && storefrontData.storefront) {
           const payload = storefrontData.storefront;
           apiProducts = Array.isArray(payload.products) ? payload.products : [];
+          // Delivery/COD settings, payment accounts and the store record itself
+          // come from the SAME payload. They used to be ignored here, so the
+          // checkout's delivery zones were priced from whatever stale copy sat
+          // in localStorage — or, on a fresh device, from nothing at all.
+          apiCodConfig = payload.codConfig || null;
+          apiStoreRecord = payload.merchant || null;
+          apiBankAccounts = Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [];
+          apiMobileBanking = Array.isArray(payload.mobileBanking) ? payload.mobileBanking : [];
         }
 
         // Load the merchant's saved themeConfig from the store payload
@@ -219,6 +231,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               merchant: dbMerchant,
               themeCustomization: themeRow.themeConfig || existingBefore?.themeCustomization || {},
               products: Array.isArray(apiProducts) && apiProducts.length > 0 ? apiProducts : (existingBefore?.products || []),
+              // Carry the delivery/COD + payment config through the same merge so
+              // the checkout's zone prices are always the merchant's live values.
+              ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
+              ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
+              ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
             };
             writeZidStoreData(mergedTheme as ZidStoreData, storeSlug);
             setLiveStoreData(mergedTheme as ZidStoreData);
@@ -233,6 +250,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           const merged = {
             ...existing,
             products: Array.isArray(apiProducts) && apiProducts.length > 0 ? apiProducts : (existing?.products || []),
+            // `codConfig` drives the delivery-zone prices at checkout, so the
+            // server's value must win over a stale localStorage copy.
+            ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
+            ...(apiStoreRecord ? { merchant: { ...(existing?.merchant || {}), ...apiStoreRecord } } : {}),
+            ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
+            ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
           };
           writeZidStoreData(merged as ZidStoreData, storeSlug);
           setLiveStoreData(merged as ZidStoreData);
@@ -854,7 +877,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [custName, setCustName] = useState('');
   const [custPhone, setCustPhone] = useState('');
   const [payMethod, setPayMethod] = useState<'bkash' | 'nagad' | 'bank' | 'cod'>('bkash');
-  const [custCity, setCustCity] = useState('Dhaka');
+  // `inside` | `outside` rather than a free-text city: the delivery-zone selector
+  // is the single control for this, so the shipping area can never drift out of
+  // sync with what the customer picked (and the total updates with it).
+  const [shippingArea, setShippingArea] = useState<'inside' | 'outside'>('inside');
   const [custAddress, setCustAddress] = useState('');
   const [custTxId, setCustTxId] = useState('');
   const [confirmedOrderNum, setConfirmedOrderNum] = useState('');
@@ -890,12 +916,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // "Shipping & Delivery Charges" the merchant had just filled in on the product
   // form had no effect on the storefront, and the city dropdown's labels were
   // hardcoded to "৳80" / "৳150".
-  const shippingArea: 'inside' | 'outside' = (() => {
-    const value = String(custCity || '').trim().toLowerCase();
-    if (value === 'inside' || value === 'outside') return value;
-    return value.includes('dhaka') ? 'inside' : 'outside';
-  })();
-
+  //
   // Which product(s) this checkout is about: the whole cart when present, else
   // the single product being viewed.
   const cartProducts = (cart || [])
@@ -946,24 +967,41 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   // Labels + fees for the two shipping areas, used by the city dropdown and the
   // product page so the customer sees the real number before reaching checkout.
-  // The product's own charge wins; the store COD config is the fallback.
-  const insideArea = resolveDeliveryCharge({
-    product: chargeProducts[0],
-    city: 'dhaka',
-    storeInsideFee,
-    storeOutsideFee,
-  });
-  const outsideArea = resolveDeliveryCharge({
-    product: chargeProducts[0],
-    city: 'outside',
-    storeInsideFee,
-    storeOutsideFee,
-  });
+  //
+  // The fee for a zone is the SAME SUM the cart computes (`deliveryCharge`), not
+  // the first product's own rate: a one-item checkout therefore resolves to
+  // exactly that item's charge, while a multi-item cart shows the full delivery
+  // cost it will actually be billed. `configured` distinguishes a real saved
+  // price (including a deliberate ৳0) from "nothing set", so an unconfigured
+  // store never shows the misleading "৳0" the merchant never entered.
+  const zoneFeeFor = (area: 'inside' | 'outside'): { fee: number; configured: boolean } => {
+    if (chargeProducts.length === 0) {
+      const resolved = resolveDeliveryCharge({
+        city: area,
+        storeInsideFee,
+        storeOutsideFee,
+      });
+      return { fee: resolved.fee, configured: resolved.configured };
+    }
+    let fee = 0;
+    let configured = false;
+    for (const product of chargeProducts) {
+      const resolved = resolveDeliveryCharge({
+        product,
+        city: area,
+        storeInsideFee,
+        storeOutsideFee,
+      });
+      fee += resolved.fee;
+      if (resolved.configured) configured = true;
+    }
+    return { fee, configured };
+  };
+
+  const insideArea = zoneFeeFor('inside');
+  const outsideArea = zoneFeeFor('outside');
   const insideAreaFee = insideArea.fee;
   const outsideAreaFee = outsideArea.fee;
-  // `configured` distinguishes a real saved price from "nothing set". The
-  // selector renders the amount ONLY when configured, so an unconfigured store
-  // never shows the misleading "৳0" the merchant never entered.
   const insideConfigured = insideArea.configured;
   const outsideConfigured = outsideArea.configured;
 
@@ -1213,8 +1251,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       source: 'Store',
       customerName: customerSession?.name || custName,
       customerPhone: customerSession?.phone || custPhone,
-      customerCity: custCity,
-      deliveryZone: custCity.toLowerCase().includes('dhaka') ? 'Inside Dhaka' : 'Outside Dhaka',
+      customerCity: shippingArea === 'inside' ? 'Inside City' : 'Outside City',
+      deliveryZone: shippingArea === 'inside' ? 'Inside Dhaka' : 'Outside Dhaka',
       address: custAddress,
       platform: 'Mobile web',
       totalBDT: total,
@@ -2636,9 +2674,41 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   </div>
                 ) : null}
 
-                <div className="border-t border-slate-800 pt-2 flex justify-between items-center text-xs">
-                  <span className="font-bold text-slate-400">Total Payable:</span>
-                  <span className="text-base font-black text-amber-400">৳{totalAmount.toLocaleString()}</span>
+                <div className="border-t border-slate-800 pt-2 space-y-1.5 text-xs">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">
+                      Delivery — {shippingArea === 'inside' ? 'Inside City' : 'Outside City'}
+                    </span>
+                    <span className="font-bold text-slate-200">
+                      {(shippingArea === 'inside' ? insideConfigured : outsideConfigured)
+                        ? `৳${shippingFee.toLocaleString()}`
+                        : 'To be confirmed'}
+                    </span>
+                  </div>
+                  {giftWrapFee > 0 && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Gift Wrapping</span>
+                      <span className="font-bold text-slate-200">+৳{giftWrapFee.toLocaleString()}</span>
+                    </div>
+                  )}
+                  {taxPercent > 0 && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">VAT ({taxPercent}%)</span>
+                      <span className="font-bold text-slate-200">
+                        {taxIncludedInPrices ? 'Included' : `+৳${taxAmount.toLocaleString()}`}
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-center pt-1">
+                    <span className="font-bold text-slate-400">Total Payable:</span>
+                    {/* Recomputes on every delivery-zone switch: `shippingFee`,
+                        the VAT base and the mobile cash-out fee all derive from
+                        `shippingArea`, so the header, the breakdown and the
+                        submit button always quote the same number. */}
+                    <span data-testid="checkout-summary-total" className="text-base font-black text-amber-400">
+                      ৳{totalAmount.toLocaleString()}
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -2725,7 +2795,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                               value={zone.value}
                               data-testid={`delivery-zone-${zone.value}`}
                               checked={checked}
-                              onChange={() => setCustCity(zone.value)}
+                              onChange={() => setShippingArea(zone.value)}
                               className="w-4 h-4 accent-amber-400"
                             />
                             <span className="leading-tight">
@@ -3073,11 +3143,20 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     disabled={minOrderShortfall > 0 || qtyLimitBreached}
                     className="w-full py-3.5 bg-[#00D68F] text-slate-950 font-black rounded-xl text-sm hover:bg-[#00E699] disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer shadow-lg"
                   >
+                    {/* Every branch recomputes when the delivery zone changes:
+                          • mobile  → the goods + the SELECTED zone's fee + VAT +
+                            the wallet cash-out %, i.e. exactly `totalAmount`
+                            (previously it quoted `baseTotalAmount`, which
+                            silently omitted the cash-out fee the customer then
+                            had to pay).
+                          • COD+advance → the upfront delivery fee and the
+                            remaining balance, both of which move with the zone.
+                          • COD    → the full payable for the selected zone. */}
                     Confirm Order • ৳{
                       ['bkash', 'nagad', 'rocket'].includes(payMethod)
-                        ? finalPayableMobile.toLocaleString()
+                        ? totalAmount.toLocaleString()
                         : payMethod === 'cod' && requiresAdvanceFee
-                        ? `${totalAdvancePayable} Upfront (৳${remainingCodBalance.toLocaleString()} COD)`
+                        ? `${totalAdvancePayable.toLocaleString()} Upfront (৳${remainingCodBalance.toLocaleString()} COD)`
                         : baseTotalAmount.toLocaleString()
                     }
                   </button>
@@ -3541,7 +3620,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               )}
             </div>
 
-            {cart.length > 0 && (
+            {cart.length > 0 && (() => {
+              // The drawer quotes the SELECTED zone's real charge — the same
+              // resolver, the same fee and the same VAT-inclusive math the
+              // checkout button uses — so the two totals can never disagree.
+              const zoneFee = shippingArea === 'inside' ? insideAreaFee : outsideAreaFee;
+              const zoneConfigured = shippingArea === 'inside' ? insideConfigured : outsideConfigured;
+              const freeRemaining = Math.max(0, checkoutMinOrder - itemsSubtotal);
+              return (
               <div className="p-5 border-t border-slate-800/80 bg-slate-950/90 space-y-3">
                 <div className="space-y-1.5 text-xs">
                   <div className="flex justify-between text-slate-400">
@@ -3549,18 +3635,49 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     <span className="font-extrabold text-slate-200">৳{cartTotal.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between text-slate-400">
-                    <span>Delivery Fee</span>
+                    <span>Delivery Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'})</span>
                     <span className="text-emerald-400 font-bold">
-                      {!insideConfigured && !outsideConfigured
-                        ? 'To be confirmed'
-                        : insideAreaFee === outsideAreaFee
-                        ? `৳${insideAreaFee.toLocaleString()}`
-                        : `Inside ${insideConfigured ? `৳${insideAreaFee.toLocaleString()}` : '—'} / Outside ${outsideConfigured ? `৳${outsideAreaFee.toLocaleString()}` : '—'}`}
+                      {zoneConfigured ? `৳${zoneFee.toLocaleString()}` : 'To be confirmed'}
                     </span>
+                  </div>
+                  {giftWrapFee > 0 && (
+                    <div className="flex justify-between text-slate-400">
+                      <span>Gift Wrapping</span>
+                      <span className="font-bold text-emerald-400">+৳{giftWrapFee.toLocaleString()}</span>
+                    </div>
+                  )}
+                  {taxPercent > 0 && (
+                    <div className="flex justify-between text-slate-400">
+                      <span>VAT ({taxPercent}%)</span>
+                      <span className="font-bold text-slate-200">
+                        {taxIncludedInPrices ? 'Included' : `+৳${taxAmount.toLocaleString()}`}
+                      </span>
+                    </div>
+                  )}
+                  {/* The delivery zone is chosen on the checkout step below, so
+                      the drawer shows the currently-selected zone and links to
+                      the picker instead of leaving the customer to guess. */}
+                  <div className="flex justify-between items-center text-[10px] text-slate-500 pt-0.5">
+                    <span>Delivery zone</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCartOpen(false);
+                        setCheckoutStep('checkout');
+                      }}
+                      className="font-bold text-amber-400 hover:text-amber-300 transition cursor-pointer"
+                    >
+                      {freeRemaining > 0 ? `Add ৳${freeRemaining.toLocaleString()} — min order` : 'Change zone at checkout'}
+                    </button>
                   </div>
                   <div className="border-t border-slate-800 pt-2 flex justify-between items-center text-sm">
                     <span className="font-bold text-slate-200">Total Payable</span>
-                    <span className="text-xl font-black text-amber-400">৳{cartTotal.toLocaleString()}</span>
+                    <span
+                      data-testid="cart-total"
+                      className="text-xl font-black text-amber-400"
+                    >
+                      ৳{baseTotalAmount.toLocaleString()}
+                    </span>
                   </div>
                 </div>
 
@@ -3575,7 +3692,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}
