@@ -1,15 +1,16 @@
 import React, { useState } from 'react';
 import { ProductType, MerchantProfile } from '../../types';
-import { 
-  Package, 
-  Boxes, 
-  Ticket, 
-  FileCode2, 
-  Layers, 
-  Lock, 
-  Sparkles, 
-  X, 
-  ChevronRight, 
+import {  isProAccessGranted, peekSubscriptionStatus } from '../../lib/subscriptionStatusCache';
+import {
+  Package,
+  Boxes,
+  Ticket,
+  FileCode2,
+  Layers,
+  Lock,
+  Sparkles,
+  X,
+  ChevronRight,
   Crown,
   CheckCircle2
 } from 'lucide-react';
@@ -41,13 +42,28 @@ export const ProductTypeModal: React.FC<ProductTypeModalProps> = ({
 }) => {
   const [lockedAlertOption, setLockedAlertOption] = useState<TypeOption | null>(null);
 
-  if (!isOpen) return null;
-
-  const isProPlanActive = Boolean(
-    merchant?.subscriptionPlan && 
-    merchant.subscriptionPlan !== 'free_trial' && 
-    merchant.subscriptionPlan !== 'trial'
+  // ── Pro access, resolved WITHOUT waiting for a request ─────────────────────
+  //
+  // The badge used to depend solely on `merchant.subscriptionPlan`, which is
+  // `undefined` until the merchant profile hydrates. That produced the reported
+  // flicker: every Pro card painted a locked "Unlock" badge for a frame, then
+  // flipped to "PRO UNLOCKED" once the profile arrived — and flipped back
+  // whenever the profile was rewritten, e.g. by one of the other store fetches.
+  //
+  // Three signals are consulted, in order of authority, and ALL of them are
+  // available synchronously on the first render:
+  //   1. the cached MongoDB status (already resolved by App/Header),
+  //   2. the local profile's plan id,
+  //   3. — nothing is invented; an unknown store stays locked.
+  // So an approved Pro store renders "PRO UNLOCKED" immediately and stays that
+  // way, because every consumer now reads the same cached value.
+  const cachedStatus = peekSubscriptionStatus(merchant?.email, merchant?.storeSlug || merchant?.storeName);
+  const isProPlanActive = isProAccessGranted(
+    cachedStatus?.planId ?? merchant?.subscriptionPlan,
+    cachedStatus?.status
   );
+
+  if (!isOpen) return null;
 
   const typeOptions: TypeOption[] = [
     {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { NavigationTab, ProductSubTab, CustomerSubTab, StoreSubTab, SettingsSubTab, MerchantProfile, BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig, CourierService, Order, Product, Customer, AdminPaymentGatewayConfig, SubscriptionRequest, ThemeConfig, ThemePurchaseRequest, SubscriptionPlan, PlatformTheme, SupportTicket, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from './types';
 
 import {
@@ -65,6 +65,11 @@ import {
   saveRolePermissions,
 } from './lib/adminTeamApi';
 import { fetchPlans, ensurePlansSeeded, savePlan, deletePlan } from './lib/plansApi';
+import {
+  subscribeToSubscriptionStatus,
+  primeSubscriptionStatus,
+  type SubscriptionStatusSnapshot,
+} from './lib/subscriptionStatusCache';
 
 import { DashboardView } from './components/views/DashboardView';
 import { PaymentsView } from './components/views/PaymentsView';
@@ -354,42 +359,31 @@ export default function App() {
   // we branch on here. Until it answers we keep it `null` and fall back to the
   // local profile, so a first paint never flashes the trial bar incorrectly.
   const [dbSubscriptionStatus, setDbSubscriptionStatus] = useState<string | null>(null);
+  const [dbSubscriptionSnapshot, setDbSubscriptionSnapshot] = useState<SubscriptionStatusSnapshot | null>(null);
+
+  // Prime the shared cache from the local profile BEFORE subscribing, so a store
+  // that is already on a paid plan paints "Pro" on the very first frame. Without
+  // this the shell renders one locked frame, then flips to unlocked a moment
+  // later — the "UNLOCKED" badge flicker.
+  useMemo(() => {
+    primeSubscriptionStatus(merchant?.email, merchant?.storeSlug || merchant?.storeName, merchant);
+  }, [merchant?.subscriptionPlan, merchant?.subscription_status]);
 
   React.useEffect(() => {
-    const email = (merchant?.email || '').trim().toLowerCase();
+    const email = (merchant?.email || '').trim();
     const slug = (merchant?.storeSlug || merchant?.storeName || '')
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '');
     if (!email && !slug) return;
 
-    let cancelled = false;
-    const loadStatus = async () => {
-      try {
-        const params = new URLSearchParams();
-        if (email) params.set('email', email);
-        if (slug) params.set('store_slug', slug);
-        const res = await fetch(`/api/subscription/status?${params.toString()}`, {
-          headers: { Accept: 'application/json' },
-        });
-        const data = await res.json().catch(() => null);
-        if (cancelled || !data?.ok) return;
-        const status =
-          data.subscription_status ?? data.store?.subscription_status ?? null;
-        setDbSubscriptionStatus(status ? String(status).toUpperCase() : null);
-      } catch {
-        // Network hiccup — keep the last known status rather than clearing it,
-        // so the banner cannot reappear because of one failed request.
-      }
-    };
-
-    loadStatus();
-    // Re-read periodically so an admin approval in another browser lands here.
-    const timer = setInterval(loadStatus, 30000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    // ONE shared subscription per identity. The cache dedupes the request,
+    // serves the primed/cached value synchronously (no locked first frame) and
+    // owns a single background timer instead of a per-component `setInterval`.
+    return subscribeToSubscriptionStatus(email, slug, (snapshot) => {
+      setDbSubscriptionSnapshot(snapshot);
+      if (snapshot.status) setDbSubscriptionStatus(snapshot.status);
+    });
   }, [merchant?.email, merchant?.storeSlug, merchant?.storeName]);
 
   // Trial & Subscription Logic

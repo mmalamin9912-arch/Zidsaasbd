@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { MerchantProfile, SubscriptionRequest } from '../types';
 import { getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive, toUtcMs, TRIAL_DURATION_DAYS } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
+import { subscribeToSubscriptionStatus } from '../lib/subscriptionStatusCache';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
 import {
@@ -347,58 +348,42 @@ export const Header: React.FC<HeaderProps> = ({
   // "trial" label rather than inventing a number that changes on refresh.
   const [trialAnchorIso, setTrialAnchorIso] = useState<string | null>(null);
 
+  // ONE shared read per store identity.
+  //
+  // This effect used to own its own `fetch` + 30s `setInterval` while `App` ran a
+  // second, identical loop for the same endpoint. `App` also rewrites `merchant`
+  // on nearly every load, which re-ran the effect's dependency array and started
+  // yet another interval — so each render cycle added requests that never
+  // settled. The 80+ pending/400 rows in DevTools were this.
+  //
+  // `subscribeToSubscriptionStatus` collapses both loops into one cached
+  // subscription: the request is deduped across every consumer, the result is
+  // cached, and ONE shared timer (not one per component) refreshes it. It also
+  // calls back SYNCHRONOUSLY with any cached value, so a store that is already
+  // Pro paints as Pro on the first frame instead of flashing a locked badge.
   useEffect(() => {
-    let cancelled = false;
-    const email = (merchant?.email || '').trim().toLowerCase();
+    const email = (merchant?.email || '').trim();
     const slug = (merchant?.storeSlug || merchant?.storeName || '')
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '');
     if (!email && !slug) return;
 
-    const loadAnchor = async () => {
-      try {
-        const params = new URLSearchParams();
-        if (email) params.set('email', email);
-        if (slug) params.set('store_slug', slug);
-        const res = await fetch(`/api/subscription/status?${params.toString()}`, {
-          headers: { Accept: 'application/json' },
-        });
-        const data = await res.json().catch(() => null);
-        if (cancelled || !data?.ok || !data.store) return;
-        // ── SINGLE SOURCE OF TRUTH ────────────────────────────────────────────
-        // MongoDB is authoritative for activation state. An approved store MUST
-        // render its ACTIVE paid plan and must never fall through to the trial
-        // countdown, so every value the header needs is captured here.
-        const status = data.store.subscription_status ? String(data.store.subscription_status) : null;
-        if (status) setDbSubscriptionStatus(status);
-
-        const planId = data.store.subscription_plan ? String(data.store.subscription_plan) : null;
-        if (planId) setDbPlanId(planId);
-
-        if (data.store.plan_name) setDbPlanName(String(data.store.plan_name));
-        if (data.store.expires_at) setDbExpiresAt(String(data.store.expires_at));
-        if (data.store.plan_started_at) setDbPlanStartedAt(String(data.store.plan_started_at));
-        if (data.store.duration_days !== null && data.store.duration_days !== undefined) {
-          setDbDurationDays(Number(data.store.duration_days));
-        }
-
-        // `trial_start_date` is authoritative; `created_at` is the fallback that
-        // is always present on a real MongoDB store document.
-        const anchor = data.store.trial_start_date || data.store.created_at || null;
-        if (anchor) setTrialAnchorIso(String(anchor));
-      } catch {
-        // Keep whatever anchor we already have — never replace it with "now".
-      }
-    };
-
-    loadAnchor();
-    // Re-read periodically so an admin approval in another browser lands here.
-    const timer = setInterval(loadAnchor, 30000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    return subscribeToSubscriptionStatus(email, slug, (snapshot) => {
+      // ── SINGLE SOURCE OF TRUTH ────────────────────────────────────────────
+      // MongoDB is authoritative for activation state. An approved store MUST
+      // render its ACTIVE paid plan and must never fall through to the trial
+      // countdown, so every value the header needs is captured here.
+      if (snapshot.status) setDbSubscriptionStatus(snapshot.status);
+      if (snapshot.planId) setDbPlanId(snapshot.planId);
+      if (snapshot.planName) setDbPlanName(snapshot.planName);
+      if (snapshot.expiresAt) setDbExpiresAt(snapshot.expiresAt);
+      if (snapshot.planStartedAt) setDbPlanStartedAt(snapshot.planStartedAt);
+      if (snapshot.durationDays) setDbDurationDays(snapshot.durationDays);
+      // `trial_start_date` is authoritative; `created_at` is the fallback that
+      // is always present on a real MongoDB store document.
+      if (snapshot.anchorIso) setTrialAnchorIso(snapshot.anchorIso);
+    });
   }, [merchant?.email, merchant?.storeSlug, merchant?.storeName]);
 
   // Static countdown snapshot — computed ONCE per relevant input change.

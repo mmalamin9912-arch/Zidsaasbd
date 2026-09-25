@@ -324,8 +324,6 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   // Image Selector Modal State
   const [showImageModal, setShowImageModal] = useState<boolean>(false);
   const [imageModalTarget, setImageModalTarget] = useState<'main' | 'additional'>('main');
-  const [customUrl, setCustomUrl] = useState<string>('');
-  const [activeModalTab, setActiveModalTab] = useState<'preset' | 'custom' | 'upload'>('preset');
 
   // File Input Refs
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -2614,7 +2612,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
             <div className="p-4 border-b border-[#2E3548] flex items-center justify-between">
               <div>
                 <h3 className="text-base font-bold text-white">Select Product Image</h3>
-                <p className="text-xs text-slate-400">Choose a beautiful preset, enter a custom URL, or upload from device</p>
+                <p className="text-xs text-slate-400">Upload a product image from your device</p>
               </div>
               <button
                 type="button"
@@ -2624,111 +2622,12 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
-
-            {/* Tabs */}
-            <div className="flex border-b border-[#2E3548] bg-[#181B26] p-1 gap-1">
-              <button
-                type="button"
-                onClick={() => setActiveModalTab('preset')}
-                className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                  activeModalTab === 'preset' ? 'bg-[#00D68F] text-slate-950' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Preset Catalog
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveModalTab('custom')}
-                className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                  activeModalTab === 'custom' ? 'bg-[#00D68F] text-slate-950' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Web URL
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveModalTab('upload')}
-                className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
-                  activeModalTab === 'upload' ? 'bg-[#00D68F] text-slate-950' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Upload File
-              </button>
-            </div>
+              <div className="border-b border-[#2E3548] bg-[#181B26] px-4 py-3">
+                <p className="text-xs font-bold text-[#00D68F]">Upload File</p>
+              </div>
 
             {/* Content */}
             <div className="p-5 flex-1 overflow-y-auto">
-              {activeModalTab === 'preset' && (
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                  {PRESET_PRODUCT_IMAGES.map((img, idx) => (
-                    <div
-                      key={idx}
-                      onClick={() => {
-                        if (imageModalTarget === 'main') {
-                          setImage(img.url);
-                        } else {
-                          setAdditionalImages(prev => [...prev, img.url]);
-                        }
-                        setShowImageModal(false);
-                      }}
-                      className="group relative cursor-pointer bg-[#181B26] border border-[#2E3548] hover:border-[#00D68F] rounded-xl overflow-hidden transition"
-                    >
-                      <div className="aspect-square w-full bg-slate-900 overflow-hidden">
-                        <SafeImage
-                          src={img.url || 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=200'}
-                          alt={img.name}
-                          className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                        />
-                      </div>
-                      <div className="p-2 bg-slate-900/90 border-t border-[#2E3548] min-h-[54px] flex flex-col justify-center">
-                        <p className="text-[10px] font-bold text-white line-clamp-1">{img.name}</p>
-                        <span className="text-[8px] font-black text-[#00D68F] uppercase tracking-wider">{img.category}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {activeModalTab === 'custom' && (
-                <div className="space-y-4 py-4">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                      Paste Image URL (JPEG, PNG, WEBP)
-                    </label>
-                    <input
-                      type="url"
-                      value={customUrl}
-                      onChange={(e) => setCustomUrl(e.target.value)}
-                      placeholder="https://images.unsplash.com/photo-..."
-                      className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#00D68F]"
-                    />
-                  </div>
-                  {customUrl && (
-                    <div className="border border-[#2E3548] rounded-xl p-2 bg-[#181B26] max-w-xs mx-auto">
-                      <p className="text-[10px] text-slate-400 mb-2 text-center font-semibold">URL Preview</p>
-                      <SafeImage src={customUrl} alt="Preview" className="w-full h-32 object-cover rounded-lg" />
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!customUrl.trim()) return;
-                      if (imageModalTarget === 'main') {
-                        setImage(customUrl.trim());
-                      } else {
-                        setAdditionalImages(prev => [...prev, customUrl.trim()]);
-                      }
-                      setCustomUrl('');
-                      setShowImageModal(false);
-                    }}
-                    className="w-full py-2.5 bg-[#00D68F] text-slate-950 font-bold text-xs rounded-xl hover:bg-[#00b579] transition"
-                  >
-                    Use Custom URL
-                  </button>
-                </div>
-              )}
-
-              {activeModalTab === 'upload' && (
                 <div className="py-8 flex flex-col items-center justify-center border-2 border-dashed border-[#2E3548] rounded-xl bg-[#181B26] text-center p-6">
                   <Upload className="w-8 h-8 text-[#00D68F] mb-3" />
                   <p className="text-xs font-bold text-slate-200 mb-1">Click to select files from your device</p>
@@ -2744,7 +2643,6 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                     Open Device File Picker
                   </button>
                 </div>
-              )}
             </div>
           </div>
         </div>
