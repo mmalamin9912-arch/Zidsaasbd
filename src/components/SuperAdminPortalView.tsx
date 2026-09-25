@@ -71,6 +71,7 @@ import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingD
 import { supabase } from '../lib/supabase';
 import { savePlan } from '../lib/plansApi';
 import { safeJson } from '../lib/storeApi';
+import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 
 interface SuperAdminPortalViewProps {
   currentMerchant: MerchantProfile;
@@ -1116,11 +1117,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     // Update request status
     const updatedPending = pendingRequests.map(r => r.id === reqId ? { ...r, status: 'approved' as const } : r);
     onUpdatePendingRequests(updatedPending);
-    try {
-      localStorage.setItem('ZID_PENDING_REQUESTS', JSON.stringify(updatedPending));
-    } catch (e) {
-      console.error(e);
-    }
+    safeSetItem('ZID_PENDING_REQUESTS', updatedPending);
 
     // Update allMerchants list with purchased plan validity starting today, deactivating free trial
     const updatedMerchants = allMerchants.map(m => {
@@ -1141,14 +1138,14 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
           isLocked: false
         };
         // Also update merchant store database if slug exists
-        if (m.storeSlug) {
+if (m.storeSlug) {
           try {
             const key = `ZID_MERCHANT_STORE_DATA_${m.storeSlug}`;
             const existing = localStorage.getItem(key);
             if (existing) {
               const parsed = JSON.parse(existing);
               parsed.merchant = updatedM;
-              localStorage.setItem(key, JSON.stringify(parsed));
+              safeSetItem(key, parsed);
             }
           } catch (err) {}
         }
@@ -1159,7 +1156,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
     onUpdateAllMerchants(updatedMerchants);
     try {
-      localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(updatedMerchants));
+      safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
     } catch (e) {
       console.error(e);
     }
@@ -1216,18 +1213,18 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
       try {
         // Direct sync with main store and auth session in localStorage
-        const savedSession = localStorage.getItem('zid_auth_session');
+        const savedSession = safeGetItem('zid_auth_session');
         if (savedSession) {
-          const parsed = JSON.parse(savedSession);
+          const parsed = typeof savedSession === 'string' ? JSON.parse(savedSession) : savedSession;
           parsed.userProfile = updatedCurrent;
-          localStorage.setItem('zid_auth_session', JSON.stringify(parsed));
+          safeSetItem('zid_auth_session', parsed);
         }
 
-        const savedStore = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
+        const savedStore = safeGetItem('ZID_MERCHANT_STORE_DATA');
         if (savedStore) {
-          const parsed = JSON.parse(savedStore);
+          const parsed = typeof savedStore === 'string' ? JSON.parse(savedStore) : savedStore;
           parsed.merchant = updatedCurrent;
-          localStorage.setItem('ZID_MERCHANT_STORE_DATA', JSON.stringify(parsed));
+          safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
         }
 
         if (updatedCurrent.storeSlug) {
@@ -1236,7 +1233,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
           if (existing) {
             const parsed = JSON.parse(existing);
             parsed.merchant = updatedCurrent;
-            localStorage.setItem(key, JSON.stringify(parsed));
+            safeSetItem(key, parsed);
           }
         }
       } catch (e) {
@@ -1377,7 +1374,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
             if (existing) {
               const parsed = JSON.parse(existing);
               parsed.merchant = updatedM;
-              localStorage.setItem(key, JSON.stringify(parsed));
+              safeSetItem(key, parsed);
             }
           } catch (err) {}
         }
@@ -1388,7 +1385,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
     onUpdateAllMerchants(updatedMerchants);
     try {
-      localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(updatedMerchants));
+      safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
     } catch (e) {}
 
     if (storeName === currentMerchant?.storeName) {
@@ -1397,19 +1394,19 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         trialDaysRemaining: updatedRemaining,
         trialEndsAt: updatedEndsAtIso
       };
-      onUpdateMerchant(updatedCurrent);
+onUpdateMerchant(updatedCurrent);
       try {
-        const savedSession = localStorage.getItem('zid_auth_session');
+        const savedSession = safeGetItem('zid_auth_session');
         if (savedSession) {
-          const parsed = JSON.parse(savedSession);
+          const parsed = typeof savedSession === 'string' ? JSON.parse(savedSession) : savedSession;
           parsed.userProfile = updatedCurrent;
-          localStorage.setItem('zid_auth_session', JSON.stringify(parsed));
+          safeSetItem('zid_auth_session', parsed);
         }
-        const savedStore = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
+        const savedStore = safeGetItem('ZID_MERCHANT_STORE_DATA');
         if (savedStore) {
-          const parsed = JSON.parse(savedStore);
+          const parsed = typeof savedStore === 'string' ? JSON.parse(savedStore) : savedStore;
           parsed.merchant = updatedCurrent;
-          localStorage.setItem('ZID_MERCHANT_STORE_DATA', JSON.stringify(parsed));
+          safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
         }
       } catch (e) {}
     }
@@ -1432,7 +1429,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
             if (existing) {
               const parsed = JSON.parse(existing);
               parsed.merchant = updatedM;
-              localStorage.setItem(key, JSON.stringify(parsed));
+              safeSetItem(key, parsed);
             }
           } catch (err) {}
         }
@@ -1443,7 +1440,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
     onUpdateAllMerchants(updatedMerchants);
     try {
-      localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(updatedMerchants));
+      safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
     } catch (e) {}
 
     if (storeName === currentMerchant?.storeName) {
@@ -1457,13 +1454,13 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         if (savedSession) {
           const parsed = JSON.parse(savedSession);
           parsed.userProfile = updatedCurrent;
-          localStorage.setItem('zid_auth_session', JSON.stringify(parsed));
+          safeSetItem('zid_auth_session', parsed);
         }
         const savedStore = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
         if (savedStore) {
           const parsed = JSON.parse(savedStore);
           parsed.merchant = updatedCurrent;
-          localStorage.setItem('ZID_MERCHANT_STORE_DATA', JSON.stringify(parsed));
+          safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
         }
       } catch (e) {}
     }
@@ -1474,7 +1471,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       const updatedMerchants = allMerchants.filter(m => m?.storeSlug !== storeSlug);
       onUpdateAllMerchants(updatedMerchants);
       try {
-        localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(updatedMerchants));
+        safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
         localStorage.removeItem(`ZID_MERCHANT_STORE_DATA_${storeSlug}`);
       } catch (e) {
         console.error('Failed to remove store data', e);
@@ -1604,7 +1601,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
             if (existing) {
               const parsed = JSON.parse(existing);
               parsed.merchant = updatedM;
-              localStorage.setItem(key, JSON.stringify(parsed));
+              safeSetItem(key, parsed);
             }
           } catch (err) {}
         }
@@ -1615,7 +1612,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
     onUpdateAllMerchants(updatedMerchants);
     try {
-      localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(updatedMerchants));
+      safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
     } catch (e) {}
 
     if (storeName === currentMerchant?.storeName) {
@@ -1637,13 +1634,13 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         if (savedSession) {
           const parsed = JSON.parse(savedSession);
           parsed.userProfile = updatedCurrent;
-          localStorage.setItem('zid_auth_session', JSON.stringify(parsed));
+          safeSetItem('zid_auth_session', parsed);
         }
         const savedStore = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
         if (savedStore) {
           const parsed = JSON.parse(savedStore);
           parsed.merchant = updatedCurrent;
-          localStorage.setItem('ZID_MERCHANT_STORE_DATA', JSON.stringify(parsed));
+          safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
         }
       } catch (e) {}
     }

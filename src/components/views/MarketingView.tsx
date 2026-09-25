@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { DiscountCoupon, Customer, MerchantProfile, AdminPaymentGatewayConfig } from '../../types';
 import { initialCoupons, initialCustomers } from '../../data/initialData';
 import { ProFeaturePaymentModal } from '../marketing/ProFeaturePaymentModal';
+import { safeSetItem } from '../../utils/safeStorage';
 import SafeImage from '../SafeImage';
 import { 
   Megaphone, 
@@ -300,7 +301,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
   });
 
   useEffect(() => {
-    localStorage.setItem('zid_bd_app_integrations_v2', JSON.stringify(integrations));
+    safeSetItem('zid_bd_app_integrations_v2', integrations);
   }, [integrations]);
 
   const [selectedApp, setSelectedApp] = useState<AppIntegrationConfig | null>(null);

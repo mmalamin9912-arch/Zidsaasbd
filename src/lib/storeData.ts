@@ -1,4 +1,5 @@
 import type { MerchantProfile, Product, ThemeConfig } from '../types';
+import { safeSetItem } from '../utils/safeStorage';
 
 /** One browser-wide source of truth for the merchant editor and storefront. */
 export const ZID_STORE_DATA_KEY = 'zid_store_data';
@@ -30,7 +31,7 @@ export function readZidStoreData(storeSlug?: string): ZidStoreData {
 export function writeZidStoreData(update: Partial<ZidStoreData>, storeSlug?: string): ZidStoreData {
   const next = { ...readZidStoreData(storeSlug), ...update };
   if (typeof window === 'undefined') return next;
-  window.localStorage.setItem(keyFor(storeSlug), JSON.stringify(next));
+  safeSetItem(keyFor(storeSlug), next);
   // CustomEvent notifies the current tab; the storage event handles other tabs.
   window.dispatchEvent(new CustomEvent(ZID_STORE_DATA_CHANGED, { detail: { storeSlug, data: next } }));
   return next;

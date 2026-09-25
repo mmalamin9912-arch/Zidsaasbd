@@ -5,6 +5,7 @@ import AuthLayout from './AuthLayout';
 import SafeImage from './SafeImage';
 import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
+import { safeSetItem, safeRemoveItem } from '../utils/safeStorage';
 import {
   Mail,
   KeyRound,
@@ -279,14 +280,14 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
    * `finishLogin` so the 2FA gate can call it only AFTER the OTP is verified.
    */
   const completeLogin = (enrichedProfile: MerchantProfile) => {
-    localStorage.setItem('zid_auth_session', JSON.stringify({
+    safeSetItem('zid_auth_session', {
       email: enrichedProfile.email,
       loggedInAt: new Date().toISOString(),
       userProfile: enrichedProfile,
-    }));
+    });
 
-    localStorage.removeItem('zid_pre_payment');
-    localStorage.removeItem('zid_intended_plan');
+    safeRemoveItem('zid_pre_payment');
+    safeRemoveItem('zid_intended_plan');
 
     // Asynchronously push synced subscription to Supabase and Backend
     syncMerchantSubscription({
@@ -1057,7 +1058,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         logoUrl: storeLogo || '',
       }
     ];
-    localStorage.setItem('zid_registered_users', JSON.stringify(updatedUsers));
+    safeSetItem('zid_registered_users', updatedUsers);
 
     setIsLoading(false);
     await finishLogin(newUserProfile);

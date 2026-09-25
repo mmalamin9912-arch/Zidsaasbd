@@ -10,6 +10,7 @@ import {
 import { initialMerchant } from '../data/initialData';
 import { writeZidStoreData } from './storeData';
 import { safeParseJson } from './safeFetch';
+import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 
 export interface SubscriptionSyncOptions {
   merchant: MerchantProfile;
@@ -298,45 +299,30 @@ export async function syncMerchantSubscription(
   }
 
   // 3. Update Local Storage & Cross-Tab Broadcasts
-  try {
-    localStorage.setItem('zid_auth_session', JSON.stringify({
-      email: cleanEmail,
-      loggedInAt: new Date().toISOString(),
-      userProfile: updatedProfile
-    }));
+  // Use safeSetItem (never throws) to avoid QuotaExceededError freezes.
+  // Do NOT persist full merchant list (ZID_ALL_MERCHANTS) — it caused quota issues.
+  // Merchants are kept in React state (sourced from MongoDB/initialAllMerchants).
+  safeSetItem('zid_auth_session', {
+    email: cleanEmail,
+    loggedInAt: new Date().toISOString(),
+    userProfile: updatedProfile
+  });
 
-    writeZidStoreData({ merchant: updatedProfile }, cleanSlug);
+  writeZidStoreData({ merchant: updatedProfile }, cleanSlug);
 
-    // Update registered users registry
-    const registered = localStorage.getItem('zid_registered_users');
-    if (registered) {
-      const users = JSON.parse(registered);
-      if (Array.isArray(users)) {
-        const updated = users.map((u: any) =>
-          u && u.email && u.email.toLowerCase() === cleanEmail
-            ? { ...u, subscriptionPlan: planId, plan_started_at, expires_at, duration_days: durationDays }
-            : u
-        );
-        localStorage.setItem('zid_registered_users', JSON.stringify(updated));
-      }
-    }
-
-    // Update all merchants registry
-    const allM = localStorage.getItem('ZID_ALL_MERCHANTS');
-    if (allM) {
-      const list = JSON.parse(allM);
-      if (Array.isArray(list)) {
-        const updated = list.map((m: any) =>
-          m && ((m.email && m.email.toLowerCase() === cleanEmail) || (m.storeName && m.storeName === updatedProfile.storeName))
-            ? { ...m, ...updatedProfile }
-            : m
-        );
-        localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(updated));
-      }
-    }
-  } catch (lsErr) {
-    console.error('[SubscriptionService] Local storage sync error:', lsErr);
+  // Update registered users registry
+  const registered = safeGetItem('zid_registered_users');
+  if (registered && Array.isArray(registered)) {
+    const updated = registered.map((u: any) =>
+      u && u.email && u.email.toLowerCase() === cleanEmail
+        ? { ...u, subscriptionPlan: planId, plan_started_at, expires_at, duration_days: durationDays }
+        : u
+    );
+    safeSetItem('zid_registered_users', updated);
   }
+
+  // NOTE: Removed ZID_ALL_MERCHANTS full-list sync to prevent QuotaExceededError.
+  // Merchant plan is already persisted via zid_auth_session + ZID_MERCHANT_STORE_DATA.
 
   return { success: true, updatedProfile };
 }
@@ -400,11 +386,11 @@ export function subscribeToMerchantSubscription(
               if (refreshed) {
                 // Update local storage session
                 try {
-                  const saved = localStorage.getItem('zid_auth_session');
+                  const saved = safeGetItem('zid_auth_session');
                   if (saved) {
                     const parsed = JSON.parse(saved);
                     parsed.userProfile = refreshed;
-                    localStorage.setItem('zid_auth_session', JSON.stringify(parsed));
+                    safeSetItem('zid_auth_session', parsed);
                   }
                   writeZidStoreData({ merchant: refreshed }, refreshed.storeSlug || cleanSlug);
                 } catch (e) {}
@@ -447,11 +433,11 @@ export function subscribeToMerchantSubscription(
 
               if (refreshed) {
                 try {
-                  const saved = localStorage.getItem('zid_auth_session');
+                  const saved = safeGetItem('zid_auth_session');
                   if (saved) {
                     const parsed = JSON.parse(saved);
                     parsed.userProfile = refreshed;
-                    localStorage.setItem('zid_auth_session', JSON.stringify(parsed));
+                    safeSetItem('zid_auth_session', parsed);
                   }
                   writeZidStoreData({ merchant: refreshed }, refreshed.storeSlug || cleanSlug);
                 } catch (e) {}

@@ -3,6 +3,7 @@ import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../
 import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug } from '../../utils/catalogPayload';
 import { buildDeliveryFeeFields } from '../../utils/deliveryCharges';
 import { readZidStoreData } from '../../lib/storeData';
+import { safeGetItem } from '../../utils/safeStorage';
 import { isProAccessGranted } from '../../lib/subscriptionStatusCache';
 import SafeImage from '../SafeImage';
 import { generateAiText, aiErrorMessage } from '../../lib/aiService';
@@ -258,23 +259,15 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     let collected: string[] = [];
 
     // 1. Storage Key: zid_store_categories_v2
-    const catsV2 = localStorage.getItem(`zid_store_categories_v2:${targetSlug}`);
-    if (catsV2) {
-      try {
-        collected.push(...parseNames(JSON.parse(catsV2)));
-      } catch (e) {
-        console.error(e);
-      }
+    const catsV2 = safeGetItem<string[]>(`zid_store_categories_v2:${targetSlug}`);
+    if (Array.isArray(catsV2)) {
+      collected.push(...parseNames(catsV2));
     }
 
     // 2. Storage Key: zid_categories_
-    const catsOld = localStorage.getItem(`zid_categories_${targetSlug}`);
-    if (catsOld) {
-      try {
-        collected.push(...parseNames(JSON.parse(catsOld)));
-      } catch (e) {
-        console.error(e);
-      }
+    const catsOld = safeGetItem<string[]>(`zid_categories_${targetSlug}`);
+    if (Array.isArray(catsOld)) {
+      collected.push(...parseNames(catsOld));
     }
 
     // 3. StoreData JSON store
@@ -961,11 +954,14 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       if (isMountedRef.current) setSaveState('idle');
     }, SAVE_SPINNER_WATCHDOG_MS);
     try {
-      await Promise.resolve(onSave(buildProductDbPayload(savedProduct, merchant) as Product)).catch((err: any) => {
-        // The parent owns user-facing error reporting; the form only guarantees
-        // that a rejected save still releases the spinner.
-        console.error('[SingleProductForm] Save failed:', err);
-      });
+      // Defer the callback so a synchronous throw (for example from a storage
+      // write) becomes a rejected promise handled by the catch below. The
+      // finally block always releases the spinner, even when the parent fails.
+      await Promise.resolve()
+        .then(() => onSave(buildProductDbPayload(savedProduct, merchant) as Product))
+        .catch((err: any) => {
+          console.error('[SingleProductForm] Save failed:', err);
+        });
     } finally {
       saveInFlightRef.current = false;
       window.clearTimeout(releaseWatchdog);

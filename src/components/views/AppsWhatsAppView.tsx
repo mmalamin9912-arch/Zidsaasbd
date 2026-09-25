@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { MerchantProfile } from '../../types';
+import { safeSetItem } from '../../utils/safeStorage';
 import { 
   Grid, 
   Smartphone, 
@@ -60,7 +61,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
   });
 
   useEffect(() => {
-    localStorage.setItem('zid_merchant_plan', merchantPlan);
+    safeSetItem('zid_merchant_plan', merchantPlan);
   }, [merchantPlan]);
 
   // Master Apps Integration State with LocalStorage Persistence
@@ -200,7 +201,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
 
   // Save to LocalStorage on update
   useEffect(() => {
-    localStorage.setItem('zid_bd_app_integrations', JSON.stringify(integrations));
+    safeSetItem('zid_bd_app_integrations', integrations);
   }, [integrations]);
 
   // Modal State for Connecting / Configuring an App

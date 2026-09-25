@@ -6,6 +6,7 @@ import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldC
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
+import { safeSetItem } from '../utils/safeStorage';
 import { resolveActiveStoreSlug } from '../lib/activeStore';
 import { fetchStoreByRef, storeIdFromRecord } from '../lib/storeApi';
 import { LanguageToggle } from './LanguageToggle';
@@ -801,13 +802,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   useEffect(() => {
     try {
-      localStorage.setItem(`zid_customer_returns_${storeSlug}`, JSON.stringify(customerReturns));
+      safeSetItem(`zid_customer_returns_${storeSlug}`, customerReturns);
     } catch (e) { /* ignore quota / privacy errors */ }
   }, [customerReturns, storeSlug]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(`zid_customer_reviews_${storeSlug}`, JSON.stringify(customerReviews));
+      safeSetItem(`zid_customer_reviews_${storeSlug}`, customerReviews);
     } catch (e) { /* ignore quota / privacy errors */ }
   }, [customerReviews, storeSlug]);
 
@@ -1081,11 +1082,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     : [];
 
   const handleCustomerSessionPersist = (session: { email: string; name: string; phone: string }) => {
-    try {
-      localStorage.setItem('zid_customer_session', JSON.stringify(session));
-    } catch (e) {
-      console.error(e);
-    }
+    safeSetItem('zid_customer_session', session);
     setCustomerSession(session);
   };
 
@@ -1149,7 +1146,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       phone: cleanPhone,
     }];
 
-    localStorage.setItem('zid_customer_accounts', JSON.stringify(updatedAccounts));
+    safeSetItem('zid_customer_accounts', updatedAccounts);
     handleCustomerSessionPersist({ email: cleanEmail, name: cleanName, phone: cleanPhone });
     setAuthNotice('Your new customer account has been created and synced locally.');
     setIsAuthOpen(false);

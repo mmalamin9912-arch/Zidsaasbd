@@ -751,7 +751,11 @@ export default function App() {
         const updated = exists
           ? filtered.map(m => m?.email === merchant?.email ? merchant : m)
           : (merchant ? [...filtered, merchant] : filtered);
-        safeSetItem('ZID_ALL_MERCHANTS', updated);
+        // Do NOT persist the full merchant list to localStorage — it caused QuotaExceededError.
+        // Merchants are kept in React state (sourced from MongoDB/initialAllMerchants).
+        // Persist only a lightweight index (count + last-updated) so we never bloat
+        // localStorage with the full profile list.
+        safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updated.length });
         return updated;
       });
 
@@ -1383,44 +1387,33 @@ export default function App() {
 
   // Keep admin configurations persisted when modified
   React.useEffect(() => {
-    try {
-      localStorage.setItem('ZID_ADMIN_PAYMENT_CONFIG', JSON.stringify(adminPaymentConfig));
-      localStorage.setItem('ZID_PLATFORM_SETTINGS', JSON.stringify(platformSettings));
-      localStorage.setItem('ZID_PLATFORM_ANNOUNCEMENT', JSON.stringify(platformAnnouncement));
-      localStorage.setItem('ZID_PLATFORM_PLANS', JSON.stringify(platformPlans));
-      localStorage.setItem('ZID_PLATFORM_THEMES', JSON.stringify(platformThemes));
-      localStorage.setItem('ZID_SUPPORT_TICKETS', JSON.stringify(supportTickets));
-      localStorage.setItem('ZID_PLATFORM_ADDONS', JSON.stringify(platformAddons));
-      // Audit history is server-backed; keep only a small recent browser cache.
-      localStorage.setItem('ZID_AUDIT_LOGS', JSON.stringify(auditLogs.slice(0, 50)));
-      localStorage.setItem('ZID_SECURITY_SETTINGS', JSON.stringify(platformSecuritySettings));
-      localStorage.setItem('ZID_BROADCAST_HISTORY', JSON.stringify(broadcastHistory));
-      localStorage.setItem('ZID_AUTOMATION_SETTINGS', JSON.stringify(automationSettings));
-      localStorage.setItem('ZID_ADMIN_TEAM', JSON.stringify(adminTeam));
-      localStorage.setItem('ZID_ROLE_PERMISSIONS', JSON.stringify(rolePermissions));
-    } catch (e) {
-      if (!(e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22))) {
-        console.warn('Admin state cache could not be written:', e);
-      }
-    }
+    // Use safeSetItem (never throws) to avoid QuotaExceededError freezes.
+    // For bulky lists (merchants, audit logs), persist only lightweight index metadata.
+    safeSetItem('ZID_ADMIN_PAYMENT_CONFIG', adminPaymentConfig);
+    safeSetItem('ZID_PLATFORM_SETTINGS', platformSettings);
+    safeSetItem('ZID_PLATFORM_ANNOUNCEMENT', platformAnnouncement);
+    safeSetItem('ZID_PLATFORM_PLANS', platformPlans);
+    safeSetItem('ZID_PLATFORM_THEMES', platformThemes);
+    safeSetItem('ZID_SUPPORT_TICKETS', supportTickets);
+    safeSetItem('ZID_PLATFORM_ADDONS', platformAddons);
+    // Audit history is server-backed; persist only lightweight metadata.
+    safeSetItem('ZID_AUDIT_LOGS_INDEX', { lastUpdated: Date.now(), count: auditLogs.length });
+    safeSetItem('ZID_SECURITY_SETTINGS', platformSecuritySettings);
+    safeSetItem('ZID_BROADCAST_HISTORY', broadcastHistory);
+    safeSetItem('ZID_AUTOMATION_SETTINGS', automationSettings);
+    safeSetItem('ZID_ADMIN_TEAM', adminTeam);
+    safeSetItem('ZID_ROLE_PERMISSIONS', rolePermissions);
   }, [adminPaymentConfig, platformSettings, platformAnnouncement, platformPlans, platformThemes, supportTickets, platformAddons, auditLogs, platformSecuritySettings, broadcastHistory, automationSettings, adminTeam, rolePermissions]);
 
   React.useEffect(() => {
-    try {
-      localStorage.setItem('ZID_PENDING_REQUESTS', JSON.stringify(pendingRequests));
-    } catch (e) {
-      console.error(e);
-    }
+    safeSetItem('ZID_PENDING_REQUESTS', pendingRequests);
   }, [pendingRequests]);
 
   React.useEffect(() => {
-    try {
-      localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(allMerchants.slice(0, 100)));
-    } catch (e) {
-      if (!(e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22))) {
-        console.warn('Merchant cache could not be written:', e);
-      }
-    }
+    // Do NOT persist the full merchant list to localStorage — it caused QuotaExceededError.
+    // Merchants are kept in React state (sourced from MongoDB/initialAllMerchants).
+    // Persist only a lightweight index (count + last-updated).
+    safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: allMerchants.length });
   }, [allMerchants]);
 
   // Enforce Tab Title strictly to "Zid SaaS BD" across all dashboard routing and layout views
@@ -1450,11 +1443,7 @@ export default function App() {
   }, []);
 
   React.useEffect(() => {
-    try {
-      localStorage.setItem('ZID_THEME_PURCHASE_REQUESTS', JSON.stringify(themePurchaseRequests));
-    } catch (e) {
-      console.error(e);
-    }
+    safeSetItem('ZID_THEME_PURCHASE_REQUESTS', themePurchaseRequests);
   }, [themePurchaseRequests]);
 
   const handleAddThemePurchaseRequest = (req: ThemePurchaseRequest) => {
@@ -1667,24 +1656,24 @@ export default function App() {
         mobileBanking={targetMobileBanking}
         themes={targetThemes}
         layout={activeLayout}
-        onPlaceOrder={async (newOrder) => {
-          try {
-            // Persist order details back to that store's custom record
-            const key = `ZID_MERCHANT_STORE_DATA_${storeSlug}`;
-            const customStoreDataStr = localStorage.getItem(key);
-            if (customStoreDataStr) {
-              const parsed = JSON.parse(customStoreDataStr);
-              parsed.orders = [newOrder, ...(parsed.orders || [])];
-              localStorage.setItem(key, JSON.stringify(parsed));
+onPlaceOrder={async (newOrder) => {
+            try {
+              // Persist order details back to that store's custom record
+              const key = `ZID_MERCHANT_STORE_DATA_${storeSlug}`;
+              const customStoreDataStr = localStorage.getItem(key);
+              if (customStoreDataStr) {
+                const parsed = JSON.parse(customStoreDataStr);
+                parsed.orders = [newOrder, ...(parsed.orders || [])];
+                safeSetItem(key, parsed);
+              }
+              // Append to current logged-in orders view if active
+              if (merchant?.storeSlug === storeSlug) {
+                setOrders(prev => [newOrder, ...prev]);
+              }
+            } catch (e) {
+              console.error('Error recording order to database:', e);
             }
-            // Append to current logged-in orders view if active
-            if (merchant?.storeSlug === storeSlug) {
-              setOrders(prev => [newOrder, ...prev]);
-            }
-          } catch (e) {
-            console.error('Error recording order to database:', e);
-          }
-        }}
+          }}
       />
     );
   }
@@ -1836,7 +1825,7 @@ export default function App() {
         }}
         onSelectPlan={(planId) => {
           if (planId === 'free_trial') {
-            localStorage.setItem('zid_intended_plan', planId);
+            safeSetItem('zid_intended_plan', planId);
             setAuthMode('signup');
             setShowLanding(false);
           } else {
@@ -1859,7 +1848,7 @@ export default function App() {
           planId={preAuthCheckoutPlan}
           adminPaymentConfig={adminPaymentConfig}
           onPaymentSuccess={(txId: string) => {
-            localStorage.setItem('zid_pre_payment', JSON.stringify({ planId: preAuthCheckoutPlan, txId }));
+            safeSetItem('zid_pre_payment', { planId: preAuthCheckoutPlan, txId });
             setPreAuthCheckoutPlan(null);
             setAuthMode('signup');
           }}

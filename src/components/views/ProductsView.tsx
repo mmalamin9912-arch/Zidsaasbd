@@ -31,6 +31,8 @@ import {
   FolderTree
 } from 'lucide-react';
 
+const PRODUCT_SAVE_TIMEOUT_MS = 2500;
+
 import { ProductTypeModal } from '../products/ProductTypeModal';
 import { SingleProductForm } from '../products/SingleProductForm';
 import { InventoryView } from '../products/InventoryView';
@@ -221,18 +223,25 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
 
       // 2. Persist via Express API (MongoDB + file payload)
       let apiErrorMsg: string | null = null;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), PRODUCT_SAVE_TIMEOUT_MS);
       try {
         const apiRes = await fetch('/api/products', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
+          signal: controller.signal,
         });
         const apiData = await apiRes.json().catch(() => null);
         if (!apiRes.ok || apiData?.ok === false) {
           apiErrorMsg = apiData?.error || `HTTP ${apiRes.status}`;
         }
       } catch (apiErr: any) {
-        apiErrorMsg = apiErr?.message || 'API request failed';
+        apiErrorMsg = apiErr?.name === 'AbortError'
+          ? `API request timed out after ${PRODUCT_SAVE_TIMEOUT_MS}ms`
+          : apiErr?.message || 'API request failed';
+      } finally {
+        window.clearTimeout(timeoutId);
       }
 
       if (apiErrorMsg) {

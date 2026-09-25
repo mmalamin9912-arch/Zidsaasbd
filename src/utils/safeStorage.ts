@@ -1,7 +1,29 @@
 /**
  * Safe LocalStorage Utility
  * Protects against QuotaExceededError and prevents storing large Base64 blobs.
+ *
+ * Every write goes through `safeSetItem`, which NEVER throws: a QuotaExceededError
+ * (or any other StorageError) is caught, obsolete bulky caches are purged, and the
+ * write degrades gracefully to a lightweight payload (or is skipped entirely).
  */
+
+// Hard ceiling per item. The browser quota is ~5MB; we keep a conservative head
+// room so that multiple writes cannot collectively blow the quota and freeze the
+// app with an unhandled QuotaExceededError.
+const MAX_ITEM_BYTES = 1_500_000;
+
+// Non-critical caches that can be dropped to reclaim space when the quota is tight.
+const RECLAIMABLE_KEYS = [
+  'ZID_AUDIT_LOGS',
+  'ZID_AUDIT_LOGS_INDEX',
+  'ZID_BROADCAST_HISTORY',
+  'ZID_SUPPORT_TICKETS',
+  'ZID_ALL_MERCHANTS',
+  'ZID_ALL_MERCHANTS_INDEX',
+  'zid_bd_app_integrations',
+  'zid_bd_app_integrations_v2',
+  'zid_store_categories_v2',
+];
 
 // Helper to sanitize and strip large Base64 data URLs from objects before caching
 export function sanitizeDataForStorage(data: any, maxDepth = 4): any {
@@ -40,25 +62,26 @@ export function safeSetItem(key: string, value: any): boolean {
   try {
     const sanitized = sanitizeDataForStorage(value);
     const serialized = typeof sanitized === 'string' ? sanitized : JSON.stringify(sanitized);
+
+    // Proactive size guard: refuse oversized payloads before they can trigger a
+    // QuotaExceededError (or even attempt one). The biggest offenders were the
+    // full merchant list and the full audit-log array, which must live in React
+    // state now, not in localStorage.
+    if (serialized.length > MAX_ITEM_BYTES) {
+      console.warn(`[safeStorage] ⚠️ Skipping oversized payload for key "${key}" (${serialized.length} bytes).`);
+      purgeReclaimableKeys();
+      return false;
+    }
+
     localStorage.setItem(key, serialized);
     return true;
   } catch (error: any) {
     console.warn(`[safeStorage] ⚠️ QuotaExceeded or Storage Error on key "${key}". Cleaning obsolete keys...`, error);
-    
-    // Clear non-critical caches to free up storage
-    try {
-      const keysToClear = [
-        'ZID_AUDIT_LOGS',
-        'ZID_BROADCAST_HISTORY',
-        'ZID_SUPPORT_TICKETS',
-        'zid_bd_app_integrations',
-        'zid_bd_app_integrations_v2'
-      ];
-      keysToClear.forEach(k => {
-        try { localStorage.removeItem(k); } catch (e) {}
-      });
 
-      // Try one more time with a very lean payload
+    purgeReclaimableKeys();
+
+    // Try one more time with a very lean payload
+    try {
       if (typeof value === 'object' && value !== null) {
         // Strip heavy subfields
         const leanObj = { ...value };
@@ -66,14 +89,22 @@ export function safeSetItem(key: string, value: any): boolean {
         delete leanObj.customers;
         delete leanObj.auditLogs;
         const leanSerialized = JSON.stringify(sanitizeDataForStorage(leanObj));
-        localStorage.setItem(key, leanSerialized);
-        return true;
+        if (leanSerialized.length <= MAX_ITEM_BYTES) {
+          localStorage.setItem(key, leanSerialized);
+          return true;
+        }
       }
     } catch (secondErr) {
       console.warn(`[safeStorage] Could not write key "${key}" even after cleanup:`, secondErr);
     }
     return false;
   }
+}
+
+function purgeReclaimableKeys(): void {
+  RECLAIMABLE_KEYS.forEach(k => {
+    try { localStorage.removeItem(k); } catch (e) {}
+  });
 }
 
 export function safeGetItem<T = any>(key: string, fallback: T = null as any): T {
