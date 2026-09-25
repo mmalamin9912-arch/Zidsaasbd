@@ -867,7 +867,8 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     setDeliveryValidationError('');
     setFormError('');
 
-    // Auto-save typed custom category to database API
+    // Set saving state after validation passes so the button is never stuck
+    setSaveState(status === 'Draft' ? 'draft' : 'publish');
     if (isCustomCategoryMode && category.trim()) {
       try {
         const newCat = buildCategoryDbPayload({
@@ -941,13 +942,8 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       selectedFilter,
     };
 
-    // The button already shows its spinner (set synchronously by the click
-    // handler). The spinner is cleared the MOMENT the database write resolves —
-    // not when the parent's follow-up work finishes — so "Saving…" can never
-    // outlive a save that has already landed.
     // Close the rapid double-submit window before the request starts.
     saveInFlightRef.current = true;
-    setSaveState(status === 'Draft' ? 'draft' : 'publish');
     // Watchdog: a hung/lost request must not leave the form permanently
     // disabled with a spinning button and no way out for the merchant.
     const releaseWatchdog = window.setTimeout(() => {
@@ -1036,7 +1032,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
           <button
             type="submit"
             disabled={isSaving}
-            onClick={() => { setStatus('Draft'); setSaveState('draft'); }}
+            onClick={() => { setStatus('Draft'); }}
             className="px-4 py-2 bg-[#282E3F] hover:bg-[#32394E] text-amber-400 border border-amber-500/30 font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {saveState === 'draft' ? (
@@ -1050,7 +1046,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
           <button
             type="submit"
             disabled={isSaving}
-            onClick={() => { setStatus('Active'); setSaveState('publish'); }}
+            onClick={() => { setStatus('Active'); }}
             className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-lg flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {saveState === 'publish' ? (
