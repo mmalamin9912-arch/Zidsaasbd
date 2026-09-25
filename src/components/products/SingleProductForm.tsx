@@ -132,7 +132,7 @@ interface SingleProductFormProps {
  * cannot leave the merchant with a permanently disabled form and no way to
  * retry. Comfortably longer than a healthy round-trip.
  */
-const SAVE_SPINNER_WATCHDOG_MS = 15000;
+const SAVE_SPINNER_WATCHDOG_MS = 5000;
 
 interface CustomizationField {
   id: string;
@@ -495,10 +495,21 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
         }),
       });
 
-      const data = await response.json();
-      setAiPricingData(data);
+      const data = await response.json().catch(() => null);
+      setAiPricingData({
+        suggestedPrice: Number(data?.suggestedPrice || data?.currentPrice || priceBDT) || Number(priceBDT) || 0,
+        discountPercentage: Number(data?.discountPercentage) || 0,
+        reasoning: data?.reasoning || 'AI pricing is temporarily unavailable; the current price remains unchanged.',
+        fallback: true,
+      });
     } catch (error) {
-      console.error('AI Pricing Error:', error);
+      console.warn('AI pricing unavailable; product save is unaffected:', error);
+      setAiPricingData({
+        suggestedPrice: Number(priceBDT) || 0,
+        discountPercentage: 0,
+        reasoning: 'AI pricing is temporarily unavailable; the current price remains unchanged.',
+        fallback: true,
+      });
     }
   };
 

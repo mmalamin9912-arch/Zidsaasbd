@@ -115,13 +115,13 @@ export async function generateAiText(
         message:
           data?.message ||
           (res.status === 404
-            ? 'The AI service endpoint was not found. Please redeploy the app so /api/ai/generate-text is available.'
-            : 'AI request failed. Please try again later.')
+            ? 'The AI service is temporarily unavailable. You can continue saving the product.'
+            : 'AI request failed. You can continue saving the product.')
       };
     }
 
     if (!data?.text) {
-      return { ok: false, error: 'server_error', message: 'The AI returned an empty response. Please try again.' };
+      return { ok: false, error: 'server_error', message: 'AI generation is temporarily unavailable. You can continue saving the product.' };
     }
 
     return { ok: true, text: data.text };

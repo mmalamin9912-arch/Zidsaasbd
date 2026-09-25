@@ -1771,9 +1771,10 @@ app.post('/api/ai/generate-text', async (req, res) => {
 
     const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-      return res.status(400).json({
+      return res.status(200).json({
+        text: 'AI content generation is temporarily unavailable. You can continue editing and saving the product.',
+        fallback: true,
         error: 'missing_api_key',
-        message: 'AI features are not configured: GEMINI_API_KEY is missing on the server. Add it in Vercel > Settings > Environment Variables.'
       });
     }
 
@@ -1863,23 +1864,62 @@ app.post('/api/ai/generate-text', async (req, res) => {
       }
     }
 
-    if (invalidKeyMessage !== null) {
-      return res.status(401).json({
-        error: 'invalid_api_key',
-        message: `The configured GEMINI_API_KEY is invalid or lacks access: ${invalidKeyMessage}`,
+    if (invalidKeyMessage !== null || rateLimited || lastProviderMessage) {
+      const message = invalidKeyMessage
+        ? `The configured GEMINI_API_KEY is invalid or lacks access: ${invalidKeyMessage}`
+        : rateLimited
+          ? 'AI request limit reached. Please try again in a moment.'
+          : `AI provider error${lastProviderStatus ? ` (${lastProviderStatus})` : ''}: ${lastProviderMessage || 'all configured models failed'}`;
+      return res.status(200).json({
+        text: 'AI content generation is temporarily unavailable. You can continue editing and saving the product.',
+        fallback: true,
+        error: invalidKeyMessage ? 'invalid_api_key' : rateLimited ? 'rate_limited' : 'server_error',
+        message,
       });
     }
-    if (rateLimited) {
-      return res.status(429).json({ error: 'rate_limited', message: 'AI request limit reached. Please try again in a moment.' });
-    }
-
-    return res.status(500).json({
-      error: 'server_error',
-      message: `AI provider error${lastProviderStatus ? ` (${lastProviderStatus})` : ''}: ${lastProviderMessage || 'all configured models failed'}`,
-    });
+    return res.status(200).json({ text: '', fallback: true, error: 'server_error' });
   } catch (err: any) {
     console.error('[/api/ai/generate-text] error:', err?.message || err);
-    return res.status(500).json({ error: 'server_error', message: 'Unexpected server error while generating AI text.' });
+    return res.status(200).json({ text: 'AI content generation is temporarily unavailable. You can continue editing and saving the product.', fallback: true, error: 'server_error' });
+  }
+});
+
+// POST /api/ai/suggest-pricing — never turn a provider failure into a 404/500
+// response. The product save flow must be usable even when AI is unavailable.
+app.post('/api/ai/suggest-pricing', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = (req.body || {}) as { productName?: string; currentPrice?: number; category?: string };
+  const currentPrice = Number(body.currentPrice);
+  const fallback = {
+    suggestedPrice: Number.isFinite(currentPrice) && currentPrice > 0 ? Math.round(currentPrice) : 0,
+    discountPercentage: 0,
+    reasoning: 'AI pricing is temporarily unavailable. Your current price is ready to save.',
+    fallback: true,
+  };
+
+  try {
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return res.status(200).json(fallback);
+    const prompt = `Suggest a competitive selling price for ${body.productName || 'this product'} in ${body.category || 'General'}. Current price: ${currentPrice || 0} BDT. Return only JSON: {"suggestedPrice":number,"discountPercentage":number,"reasoning":string}.`;
+    const candidates = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    for (const model of candidates) {
+      try {
+        const provider = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }), signal: AbortSignal.timeout(12000),
+        });
+        if (!provider.ok) continue;
+        const data: any = await provider.json();
+        const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('') || '';
+        const match = text.match(/\{[\s\S]*\}/);
+        const parsed = match ? JSON.parse(match[0]) : null;
+        if (parsed && Number(parsed.suggestedPrice) > 0) return res.status(200).json({ ...parsed, fallback: false });
+      } catch { /* try the next model, then use the safe fallback */ }
+    }
+    return res.status(200).json(fallback);
+  } catch (error) {
+    console.warn('[/api/ai/suggest-pricing] provider failure; using fallback:', error);
+    return res.status(200).json(fallback);
   }
 });
 
