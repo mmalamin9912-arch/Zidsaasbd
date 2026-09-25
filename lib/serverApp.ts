@@ -6582,6 +6582,29 @@ function normalizeNbrConfig(raw: any, fallback: Record<string, any> = {}) {
   };
 }
 
+/** Sanitise the loyalty points & customer tiers configuration. */
+function normalizeLoyaltySettings(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    spendPerPointBDT: cfgNum(src.spendPerPointBDT, fallback.spendPerPointBDT || 100),
+    pointRedemptionBDT: cfgNum(src.pointRedemptionBDT, fallback.pointRedemptionBDT || 0.50),
+    minRedeemPoints: cfgNum(src.minRedeemPoints, fallback.minRedeemPoints || 200),
+    birthdayGiftBDT: cfgNum(src.birthdayGiftBDT, fallback.birthdayGiftBDT || 500),
+    birthdayCouponPercent: cfgNum(src.birthdayCouponPercent, fallback.birthdayCouponPercent || 20),
+    anniversaryBonusBDT: cfgNum(src.anniversaryBonusBDT, fallback.anniversaryBonusBDT || 300),
+    firstOrderPoints: cfgNum(src.firstOrderPoints, fallback.firstOrderPoints || 100),
+    isEnabled: cfgBool(src.isEnabled, fallback.isEnabled !== false),
+    tiers: Array.isArray(src.tiers) ? src.tiers.map((t: any) => ({
+      id: t.id || '',
+      name: t.name || '',
+      minSpendBDT: cfgNum(t.minSpendBDT, 0),
+      multiplier: cfgNum(t.multiplier, 1.0),
+      perks: Array.isArray(t.perks) ? t.perks : [],
+      color: t.color || '',
+    })) : (fallback.tiers || []),
+  };
+}
+
 /**
  * Generic per-store config store. Each entry declares how to read/write one key
  * on the store record, so gift/invoice/NBR share the same tested code path as
@@ -6590,8 +6613,6 @@ function normalizeNbrConfig(raw: any, fallback: Record<string, any> = {}) {
 const storeConfigs = {
   gift: {
     key: 'giftOptions',
-    // Records saved before the rename live under `giftConfig`. Read them too so
-    // existing merchants do not silently lose their settings.
     legacyKeys: ['giftConfig'],
     cache: new Map<string, Record<string, any>>(),
     normalize: normalizeGiftConfig,
@@ -6601,6 +6622,7 @@ const storeConfigs = {
   inventory: { key: 'inventoryConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeInventoryConfig },
   tax: { key: 'taxConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeTaxConfig },
   integrations: { key: 'integrationsConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeIntegrationsConfig },
+  loyalty: { key: 'loyaltyConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeLoyaltySettings },
 } as const;
 
 type StoreConfigName = keyof typeof storeConfigs;
@@ -6716,6 +6738,11 @@ function redactIntegrationSecrets(config: Record<string, any>) {
     smsApiKey: marker(config.smsApiKey),
     webhookSecret: marker(config.webhookSecret),
   };
+}
+
+function cfgNum(val: any, fallback: number = 0): number {
+  const n = typeof val === 'number' ? val : Number(fallback);
+  return isFinite(n) ? n : fallback;
 }
 
 const CONFIG_ROUTES: Array<{ name: StoreConfigName; path: string; label: string }> = [
@@ -6971,6 +6998,193 @@ const saveIntegrationProperties = async (req: any, res: any) => {
 
 app.post('/api/store/integration-properties', saveIntegrationProperties);
 app.put('/api/store/integration-properties', saveIntegrationProperties);
+
+/**
+ * GET /api/store/loyalty-settings — load loyalty configuration including tiers.
+ */
+app.get('/api/store/loyalty-settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    const loyaltyConfig = await readStoreConfig('loyalty', storeRef);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      loyaltyConfig,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/loyalty-settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load loyalty settings.' });
+  }
+});
+
+/**
+ * POST/PUT /api/store/loyalty-settings — save loyalty configuration including tiers.
+ */
+const saveLoyaltySettings = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const payload = body.loyaltyConfig || body.loyalty || body;
+    
+    // Validate required fields
+    if (payload.spendPerPointBDT !== undefined && (typeof payload.spendPerPointBDT !== 'number' || payload.spendPerPointBDT <= 0)) {
+      return res.status(400).json({ ok: false, error: 'spendPerPointBDT must be a positive number.' });
+    }
+    if (payload.pointRedemptionBDT !== undefined && (typeof payload.pointRedemptionBDT !== 'number' || payload.pointRedemptionBDT < 0)) {
+      return res.status(400).json({ ok: false, error: 'pointRedemptionBDT must be a non-negative number.' });
+    }
+    if (payload.minRedeemPoints !== undefined && (typeof payload.minRedeemPoints !== 'number' || payload.minRedeemPoints < 0)) {
+      return res.status(400).json({ ok: false, error: 'minRedeemPoints must be a non-negative number.' });
+    }
+    if (payload.tiers !== undefined && !Array.isArray(payload.tiers)) {
+      return res.status(400).json({ ok: false, error: 'tiers must be an array.' });
+    }
+
+    const loyaltyConfig = await writeStoreConfig('loyalty', storeRef, payload);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      loyaltyConfig,
+      message: 'Loyalty settings saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/loyalty-settings error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save loyalty settings.' });
+  }
+};
+
+app.post('/api/store/loyalty-settings', saveLoyaltySettings);
+app.put('/api/store/loyalty-settings', saveLoyaltySettings);
+
+/**
+ * POST /api/store/loyalty-transaction — record manual point adjustment and sync wallet.
+ */
+app.post('/api/store/loyalty-transaction', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const { customerId, delta, reason, action } = body;
+    
+    // Validate required fields
+    if (!customerId || typeof customerId !== 'string') {
+      return res.status(400).json({ ok: false, error: 'customerId is required.' });
+    }
+    if (typeof delta !== 'number' || delta === 0) {
+      return res.status(400).json({ ok: false, error: 'delta must be a non-zero number.' });
+    }
+    if (!reason || typeof reason !== 'string' || reason.trim() === '') {
+      return res.status(400).json({ ok: false, error: 'reason is required.' });
+    }
+    if (!action || !['add', 'deduct'].includes(action)) {
+      return res.status(400).json({ ok: false, error: 'action must be "add" or "deduct".' });
+    }
+
+    // Connect to MongoDB
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
+    }
+
+    const db = mongoose.connection.db;
+    
+    // Find the customer and update their loyalty points
+    const customer = await db.collection('customers').findOne({ id: customerId, store_slug: storeRef });
+    if (!customer) {
+      return res.status(404).json({ ok: false, error: 'Customer not found.' });
+    }
+
+    const currentPoints = customer.loyaltyPoints || 0;
+    const newPoints = Math.max(0, currentPoints + delta);
+
+    // Update customer's loyalty points
+    const updateResult = await db.collection('customers').updateOne(
+      { id: customerId, store_slug: storeRef },
+      { 
+        $set: { 
+          loyaltyPoints: newPoints,
+          updated_at: new Date().toISOString()
+        } 
+      }
+    );
+
+    if (!updateResult.matchedCount) {
+      return res.status(404).json({ ok: false, error: 'Customer not found.' });
+    }
+
+    // Create transaction log entry
+    const transaction = {
+      id: `txn-${Date.now()}`,
+      customerId,
+      customerName: customer.name,
+      delta,
+      action,
+      reason: reason.trim(),
+      previousBalance: currentPoints,
+      newBalance: newPoints,
+      storeSlug: storeRef,
+      createdAt: new Date().toISOString(),
+      source: 'manual_adjustment',
+    };
+
+    await db.collection('loyalty_transactions').insertOne(transaction);
+
+    // Sync with Supabase if available (best-effort)
+    try {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      
+      if (supabaseUrl && supabaseKey) {
+        const supabaseResponse = await fetch(`${supabaseUrl}/rest/v1/customers?id=eq.${customerId}&store_slug=eq.${storeRef}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Prefer': 'return=minimal'
+          },
+          body: JSON.stringify({ 
+            loyalty_points: newPoints,
+            updated_at: new Date().toISOString()
+          })
+        });
+        
+        if (!supabaseResponse.ok) {
+          console.warn('[Server] Supabase sync warning:', await supabaseResponse.text());
+        }
+      }
+    } catch (supabaseErr: any) {
+      // Best-effort sync - don't fail the main operation
+      console.warn('[Server] Supabase sync failed (non-blocking):', supabaseErr?.message || supabaseErr);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Point adjustment recorded and wallet synced.',
+      transaction: {
+        id: transaction.id,
+        customerId,
+        customerName: customer.name,
+        delta,
+        action,
+        reason: reason.trim(),
+        previousBalance: currentPoints,
+        newBalance: newPoints,
+        createdAt: transaction.createdAt,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/loyalty-transaction error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not process point adjustment.' });
+  }
+});
 
 /**
  * POST /api/store/test-webhook — send a real JSON ping to the merchant's URL.

@@ -344,35 +344,109 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
     }, 1200);
   };
 
-  const handleSaveIntegration = (e: React.FormEvent) => {
+  const handleSaveIntegration = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedApp) return;
 
-    setIntegrations(prev => prev.map(item => {
-      if (item.id === selectedApp.id) {
-        return {
-          ...item,
-          isConnected: true,
-          field1Value: f1Val,
-          field2Value: f2Val,
-          field3Value: f3Val
-        };
-      }
-      return item;
-    }));
+    try {
+      // Prepare the integration config payload
+      const payload = {
+        store_slug: merchant?.store_slug || merchant?.storeSlug || merchant?.id || 'default-store',
+        integrationsConfig: {
+          fbPixelId: f1Val,
+          fbCapiToken: f2Val,
+          courierApiKey: f1Val,
+          courierSecretToken: f2Val,
+          smsApiKey: f1Val,
+          webhookSecret: f3Val,
+        }
+      };
 
-    setSelectedApp(null);
-    alert(`Successfully connected and saved configuration for ${selectedApp.name}! Settings applied to store header/footer.`);
+      // Call the API endpoint
+      const response = await fetch('/api/store/integration-properties', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+      
+      if (data.ok) {
+        // Update local state based on the result
+        setIntegrations(prev => prev.map(item => {
+          if (item.id === selectedApp.id) {
+            return {
+              ...item,
+              isConnected: true,
+              field1Value: f1Val,
+              field2Value: f2Val,
+              field3Value: f3Val
+            };
+          }
+          return item;
+        }));
+        setSelectedApp(null);
+        alert(`Successfully connected and saved configuration for ${selectedApp.name}! Settings applied to store header/footer.`);
+      } else {
+        alert(`Error saving configuration: ${data.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error saving integration:', error);
+      alert('Failed to save configuration. Please try again.');
+    }
   };
 
-  const handleToggleConnection = (id: string) => {
+  const handleToggleConnection = async (id: string) => {
+    const app = integrations.find(i => i.id === id);
+    if (!app) return;
+
+    const nextState = !app.isConnected;
+
+    // Optimistic UI update
     setIntegrations(prev => prev.map(item => {
       if (item.id === id) {
-        const nextState = !item.isConnected;
         return { ...item, isConnected: nextState };
       }
       return item;
     }));
+
+    try {
+      // Persist the connection status to the backend
+      const storeSlug = merchant?.store_slug || merchant?.storeSlug || merchant?.id || 'default-store';
+      const response = await fetch('/api/store/integration-properties', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeSlug,
+          integrationsConfig: {
+            [id]: nextState,
+          }
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (!data.ok) {
+        // Roll back on failure
+        setIntegrations(prev => prev.map(item => {
+          if (item.id === id) {
+            return { ...item, isConnected: !nextState };
+          }
+          return item;
+        }));
+        alert(`Failed to update connection status: ${data.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error toggling connection:', error);
+      // Roll back on failure
+      setIntegrations(prev => prev.map(item => {
+        if (item.id === id) {
+          return { ...item, isConnected: !nextState };
+        }
+        return item;
+      }));
+      alert('Failed to update connection status. Please try again.');
+    }
   };
 
   // -------------------------------------------------------------
@@ -584,33 +658,132 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
     }
   ]);
 
-  const handleUpdateTier = (id: string, field: 'minSpendBDT' | 'multiplier', value: string) => {
+  const handleUpdateTier = async (id: string, field: 'minSpendBDT' | 'multiplier', value: string) => {
     const numVal = parseFloat(value) || 0;
+    
+    // Optimistic UI update
     setLoyaltyTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: numVal } : t));
+
+    try {
+      const storeSlug = merchant?.store_slug || merchant?.storeSlug || merchant?.id || 'default-store';
+      const response = await fetch('/api/store/loyalty-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeSlug,
+          loyaltyConfig: {
+            tiers: loyaltyTiers.map(t => ({
+              id: t.id,
+              name: t.name,
+              minSpendBDT: t.minSpendBDT,
+              multiplier: t.multiplier,
+              perks: t.perks,
+              color: t.color,
+            }))
+          },
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (!data.ok) {
+        // Roll back on failure
+        setLoyaltyTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: (t as any)[field] } : t));
+        alert(`Failed to save tier rules: ${data.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error saving tier rules:', error);
+      setLoyaltyTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: (t as any)[field] } : t));
+      alert('Failed to save tier rules. Please try again.');
+    }
   };
 
-  const handleAdjustPoints = (e: React.FormEvent) => {
+  const handleSaveLoyaltyConfig = async (field: keyof typeof loyaltyConfig, value: number) => {
+    setLoyaltyConfig(prev => ({ ...prev, [field]: value }));
+
+    try {
+      const storeSlug = merchant?.store_slug || merchant?.storeSlug || merchant?.id || 'default-store';
+      const response = await fetch('/api/store/loyalty-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeSlug,
+          loyaltyConfig: {
+            [field]: value,
+          },
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (!data.ok) {
+        alert(`Failed to save loyalty config: ${data.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error saving loyalty config:', error);
+      alert('Failed to save loyalty config. Please try again.');
+    }
+  };
+
+  const handleAdjustPoints = async (e: React.FormEvent) => {
     e.preventDefault();
     const cust = customersList.find(c => c.id === selectedCustomerId);
     if (!cust) return;
 
     const delta = (adjAction === 'add' ? 1 : -1) * (parseInt(adjPoints) || 0);
-    const newPoints = Math.max(0, cust.loyaltyPoints + delta);
+    if (delta === 0) {
+      alert('Please enter a valid points amount.');
+      return;
+    }
+    
+    if (!adjReason.trim()) {
+      alert('Please provide a reason for the adjustment.');
+      return;
+    }
 
-    setCustomersList(prev => prev.map(c => c.id === selectedCustomerId ? { ...c, loyaltyPoints: newPoints } : c));
+    try {
+      const storeSlug = merchant?.store_slug || merchant?.storeSlug || merchant?.id || 'default-store';
+      const response = await fetch('/api/store/loyalty-transaction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: storeSlug,
+          customerId: cust.id,
+          delta: delta,
+          action: adjAction,
+          reason: adjReason.trim(),
+        }),
+      });
 
-    setPointHistoryLog([
-      {
-        id: `log-${Date.now()}`,
-        customerName: cust.name,
-        delta: delta,
-        reason: adjReason,
-        date: new Date().toISOString().replace('T', ' ').substring(0, 16)
-      },
-      ...pointHistoryLog
-    ]);
+      const data = await response.json();
+      
+      if (data.ok) {
+        // Update local state with the result from the server
+        setCustomersList(prev => prev.map(c => c.id === selectedCustomerId ? { ...c, loyaltyPoints: data.transaction.newBalance } : c));
 
-    alert(`Successfully ${adjAction === 'add' ? 'awarded' : 'deducted'} ${Math.abs(delta)} points for ${cust.name}! New Balance: ${newPoints} Points.`);
+        setPointHistoryLog([
+          {
+            id: data.transaction.id,
+            customerName: data.transaction.customerName,
+            delta: data.transaction.delta,
+            reason: data.transaction.reason,
+            date: data.transaction.createdAt.replace('T', ' ').substring(0, 16)
+          },
+          ...pointHistoryLog
+        ]);
+
+        // Reset form
+        setAdjPoints('');
+        setAdjReason('');
+
+        alert(`Successfully ${adjAction === 'add' ? 'awarded' : 'deducted'} ${Math.abs(delta)} points for ${cust.name}! New Balance: ${data.transaction.newBalance} Points.`);
+      } else {
+        alert(`Error processing point adjustment: ${data.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error adjusting points:', error);
+      alert('Failed to process point adjustment. Please try again.');
+    }
   };
 
   return (
@@ -1159,36 +1332,36 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-200 mb-1">
-                      Spend Amount for 1 Point (BDT)
-                    </label>
-                    <div className="relative">
-                      <input
-                        type="number"
-                        value={loyaltyConfig.spendPerPointBDT}
-                        onChange={(e) => setLoyaltyConfig({ ...loyaltyConfig, spendPerPointBDT: parseInt(e.target.value) || 100 })}
-                        className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs text-white font-bold focus:border-[#00D68F] focus:outline-none"
-                      />
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs">৳ BDT</span>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-200 mb-1">
+                        Spend Amount for 1 Point (BDT)
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          value={loyaltyConfig.spendPerPointBDT}
+                          onChange={(e) => handleSaveLoyaltyConfig('spendPerPointBDT', parseInt(e.target.value) || 100)}
+                          className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs text-white font-bold focus:border-[#00D68F] focus:outline-none"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs">৳ BDT</span>
+                      </div>
                     </div>
-                  </div>
 
-                  <div>
-                    <label className="block text-xs font-bold text-slate-200 mb-1">
-                      1 Point Store Wallet Credit (BDT)
-                    </label>
-                    <div className="relative">
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={loyaltyConfig.pointRedemptionBDT}
-                        onChange={(e) => setLoyaltyConfig({ ...loyaltyConfig, pointRedemptionBDT: parseFloat(e.target.value) || 0.5 })}
-                        className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs text-white font-bold focus:border-[#00D68F] focus:outline-none"
-                      />
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs">৳ BDT</span>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-200 mb-1">
+                        1 Point Store Wallet Credit (BDT)
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={loyaltyConfig.pointRedemptionBDT}
+                          onChange={(e) => handleSaveLoyaltyConfig('pointRedemptionBDT', parseFloat(e.target.value) || 0.5)}
+                          className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs text-white font-bold focus:border-[#00D68F] focus:outline-none"
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs">৳ BDT</span>
+                      </div>
                     </div>
-                  </div>
                 </div>
 
                 <div className="p-3 bg-[#181B26] rounded-xl border border-[#2E3548] text-xs text-slate-300 flex items-center justify-between">
