@@ -570,21 +570,11 @@ export default function App() {
     if (!merchant) return;
     let isMounted = true;
 
-    // 1. Initial live fetch from Supabase
-    fetchMerchantSubscriptionFromSupabase({
-      email: merchant.email,
-      slug: merchant.storeSlug,
-      userId: merchant.id
-    }).then(liveProfile => {
-      if (isMounted && liveProfile) {
-        setMerchant(prev => ({
-          ...prev,
-          ...liveProfile
-        }));
-      }
-    }).catch(err => console.warn('Live subscription fetch notice:', err));
+    // The MongoDB-backed subscription cache owns the session status read.
+    // Do not repeat a profile/subscription fetch here; this effect is only
+    // responsible for the live realtime channel and explicit plan updates.
 
-    // 2. Connect native Supabase Realtime channel for postgres_changes
+    // Connect native Supabase Realtime channel for postgres_changes
     const unsubscribe = subscribeToMerchantSubscription(merchant, (updatedMerchant, source) => {
       if (!isMounted) return;
       console.log(`[App Realtime] Active subscription updated from ${source}:`, updatedMerchant.subscriptionPlan);

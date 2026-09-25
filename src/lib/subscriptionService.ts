@@ -165,71 +165,13 @@ export async function fetchMerchantSubscriptionFromSupabase(
     }
   }
 
-  // 1. Direct Supabase Query (legacy merchants table fallback)
-  if (supabase) {
-    try {
-      if (!dbMerchant && userId) {
-        const { data: mData } = await supabase
-          .from('stores')
-          .select('*')
-          .or(`auth_user_id.eq.${userId},id.eq.${userId}`)
-          .maybeSingle();
-        if (mData) {
-          dbMerchant = mData;
-          if (mData.email) {
-            const { data: sData } = await supabase
-              .from('subscriptions')
-              .select('*')
-              .eq('merchant_email', String(mData.email).trim().toLowerCase())
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .maybeSingle();
-            if (sData) dbSubscription = sData;
-          }
-        }
-      }
+  // Legacy `subscriptions` Supabase reads are intentionally disabled. The
+  // deployed PostgREST schema does not contain `merchant_email` (SQLSTATE
+  // 42703), and those reads are not authoritative because MongoDB owns
+  // subscription state. Stores may still be read from Supabase above; the
+  // MongoDB-backed status endpoint supplies the plan/status snapshot.
 
-      if (!dbMerchant && cleanEmail) {
-        const { data: mData } = await supabase
-          .from('stores')
-          .select('*')
-          .eq('email', cleanEmail)
-          .maybeSingle();
-        if (mData) dbMerchant = mData;
-
-        const { data: sData } = await supabase
-          .from('subscriptions')
-          .select('*')
-          .eq('merchant_email', cleanEmail)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        if (sData) dbSubscription = sData;
-      } else if (!dbMerchant && cleanSlug) {
-        const { data: mData } = await supabase
-          .from('stores')
-          .select('*')
-          .eq('store_slug', cleanSlug)
-          .maybeSingle();
-        if (mData) dbMerchant = mData;
-
-        if (mData?.email) {
-          const { data: sData } = await supabase
-            .from('subscriptions')
-            .select('*')
-            .eq('merchant_email', String(mData.email).trim().toLowerCase())
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          if (sData) dbSubscription = sData;
-        }
-      }
-    } catch (err) {
-      console.warn('[SubscriptionService] Supabase direct fetch warning:', err);
-    }
-  }
-
-  // 2. Server API fallback check
+  // 1. Server API fallback check
   if (!dbMerchant) {
     try {
       if (cleanEmail) {

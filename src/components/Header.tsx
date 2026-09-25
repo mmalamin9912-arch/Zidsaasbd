@@ -179,101 +179,10 @@ export const Header: React.FC<HeaderProps> = ({
     const email = (merchant.email || '').trim().toLowerCase();
     const storeSlug = (merchant.storeSlug || merchant.storeName || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
-    const fetchSupabaseSubRecord = async () => {
-      try {
-        // Query the 'subscriptions' table in Supabase. When the table is not yet
-        // provisioned (PGRST205 / 404) we fall through to the 'stores' fallback
-        // instead of letting the missing-table error surface as a broken row.
-        // Avoid PostgREST `.or(...)` filter grammar for user-supplied email/
-        // slug values. An empty operand or a special character such as `@`
-        // can turn the generated request into HTTP 400. Equality filters are
-        // encoded safely by the Supabase client and have the same semantics for
-        // these canonical identity fields.
-        // ── Supabase is a BEST-EFFORT fallback, never the source of truth ─────
-        //
-        // MongoDB is authoritative (see the `/api/subscription/status` effect).
-        // This legacy read used to run unconditionally and produced the failing
-        // `subscriptions?select=*&merchant_email=eq.…` request in the network
-        // tab: the live Supabase schema lacks that column, so PostgREST answered
-        // HTTP 400 with SQLSTATE 42703.
-        //
-        // It is skipped entirely once MongoDB has already reported an ACTIVE
-        // plan, because there is nothing left for it to contribute — and when it
-        // does run, a missing table/column is treated as "no data" rather than
-        // an error worth retrying on every render.
-        if (dbReportsActive) return;
-
-        let subData: any = null;
-        let subError: any = null;
-        if (email) {
-          const result = await supabase
-            .from('subscriptions')
-            .select('*')
-            .eq('merchant_email', email)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          subData = result.data;
-          subError = result.error;
-        }
-        if (!subData && !subError && storeSlug) {
-          const result = await supabase
-            .from('subscriptions')
-            .select('*')
-            .eq('store_slug', storeSlug)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          subData = result.data;
-          subError = result.error;
-        }
-
-        // A missing table or column is an expected deployment state, not a
-        // failure — logged once at debug level, never surfaced as a red row.
-        if (subError && !/does not exist|PGRST205|schema cache|42703|invalid input/i.test(subError.message || '')) {
-          console.warn('Supabase subscriptions read notice:', subError.message);
-        }
-        if (subError) {
-          // Do not proceed to the `stores` fallback in Supabase either: the same
-          // schema drift would produce a second failing request.
-          return;
-        }
-
-        if (subData && isMounted) {
-          setSupabaseSub(subData);
-          return;
-        }
-
-        // Fallback: Query 'stores' table in Supabase
-        let mData: any = null;
-        if (email) {
-          const result = await supabase
-            .from('stores')
-            .select('*')
-            .eq('email', email)
-            .maybeSingle();
-          mData = result.data;
-        }
-        if (!mData && storeSlug) {
-          const result = await supabase
-            .from('stores')
-            .select('*')
-            .eq('store_slug', storeSlug)
-            .maybeSingle();
-          mData = result.data;
-        }
-
-        if (mData && isMounted) {
-          setSupabaseSub(mData);
-        }
-      } catch (err) {
-        console.warn('Supabase subscription fetch notice:', err);
-      }
-    };
-
-    // The shared MongoDB subscription cache owns the one session read. This
-    // legacy channel is event-only: no render-time fallback request, while plan
-    // changes still arrive without a page refresh.
+    // The shared MongoDB cache owns subscription reads. Do not query the
+    // legacy Supabase `subscriptions` table here: its deployed schema lacks
+    // `merchant_email` and would recreate the 42703/400 request. The channel is
+    // kept for legitimate event updates without triggering a follow-up fetch.
     // Set up Realtime listener for Postgres Changes on merchants & subscriptions
     const channelId = `header-sub-realtime-${email || storeSlug || 'user'}-${Math.random().toString(36).substring(2, 6)}`;
     const channel = supabase
@@ -293,7 +202,6 @@ export const Header: React.FC<HeaderProps> = ({
           if ((email && recEmail === email) || (storeSlug && recSlug === storeSlug)) {
             console.log('[Header Realtime] Received live subscription update:', newRec);
             setSupabaseSub(newRec);
-            fetchSupabaseSubRecord();
           }
         }
       )
@@ -312,7 +220,6 @@ export const Header: React.FC<HeaderProps> = ({
           if ((email && recEmail === email) || (storeSlug && recSlug === storeSlug)) {
             console.log('[Header Realtime] Received live merchant update:', newRec);
             setSupabaseSub(newRec);
-            fetchSupabaseSubRecord();
           }
         }
       )
