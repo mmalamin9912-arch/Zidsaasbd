@@ -170,6 +170,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
             // Send ALL product fields to the API for full MongoDB persistence
       const payload: Record<string, any> = {
         id: savedProduct.id,
+        type: savedProduct.type || 'single',
         title: savedProduct.title,
         titleBn: savedProduct.titleBn || '',
         name: savedProduct.title || anyProd.name || 'Untitled Product',
@@ -335,10 +336,8 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   };
 
   const handleSelectProductTypeFromModal = (type: ProductType) => {
-    if (type === 'single') {
-      setEditingProduct(null);
-      setIsFormViewActive(true);
-    }
+    setEditingProduct(type ? { ...editingProduct, type } : null);
+    setIsFormViewActive(true);
   };
 
   const handleSubTabChange = (tab: ProductSubTab) => {

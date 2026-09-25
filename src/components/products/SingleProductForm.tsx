@@ -899,7 +899,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       storeSlug: merchant?.storeSlug || initialData?.storeSlug || '',
       title: cleanTitle || cleanTitleBn,
       titleBn: cleanTitleBn || cleanTitle,
-      type: 'single',
+      type: initialData?.type || 'single',
       sku,
       barcode,
       category: cleanCategory,
