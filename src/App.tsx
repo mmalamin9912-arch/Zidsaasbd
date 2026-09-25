@@ -92,8 +92,7 @@ import { calculatePlanTimestamps, getPlanDurationInDays } from './utils/subscrip
 import {
   resolveMerchantSubscription,
   fetchMerchantSubscriptionFromSupabase,
-  syncMerchantSubscription,
-  subscribeToMerchantSubscription
+  syncMerchantSubscription
 } from './lib/subscriptionService';
 import { Menu, ShieldAlert, Clock, ArrowUpRight } from 'lucide-react';
 
@@ -568,26 +567,11 @@ export default function App() {
   // Realtime Supabase Subscription Listener & Live Status Sync
   React.useEffect(() => {
     if (!merchant) return;
-    let isMounted = true;
 
     // The MongoDB-backed subscription cache owns the session status read.
     // Do not repeat a profile/subscription fetch here; this effect is only
-    // responsible for the live realtime channel and explicit plan updates.
-
-    // Connect native Supabase Realtime channel for postgres_changes
-    const unsubscribe = subscribeToMerchantSubscription(merchant, (updatedMerchant, source) => {
-      if (!isMounted) return;
-      console.log(`[App Realtime] Active subscription updated from ${source}:`, updatedMerchant.subscriptionPlan);
-      setMerchant(prev => ({
-        ...prev,
-        ...updatedMerchant
-      }));
-    });
-
-    return () => {
-      isMounted = false;
-      unsubscribe();
-    };
+    // responsible for explicit plan updates via API.
+    // Realtime Supabase channels removed — use simple fetch-on-load instead.
   }, [merchant?.email, merchant?.storeSlug, merchant?.id]);
 
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>(() => {
