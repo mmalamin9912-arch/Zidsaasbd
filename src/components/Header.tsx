@@ -271,9 +271,9 @@ export const Header: React.FC<HeaderProps> = ({
       }
     };
 
-    // Initial fetch
-    fetchSupabaseSubRecord();
-
+    // The shared MongoDB subscription cache owns the one session read. This
+    // legacy channel is event-only: no render-time fallback request, while plan
+    // changes still arrive without a page refresh.
     // Set up Realtime listener for Postgres Changes on merchants & subscriptions
     const channelId = `header-sub-realtime-${email || storeSlug || 'user'}-${Math.random().toString(36).substring(2, 6)}`;
     const channel = supabase

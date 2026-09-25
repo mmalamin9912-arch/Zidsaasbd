@@ -2645,10 +2645,6 @@ app.post('/api/products', async (req, res) => {
     const stock_quantity = parseInt(body.stock_quantity ?? body.stock ?? 0, 10) || 0;
     const stock = stock_quantity;
 
-    // Set when the Supabase mirror rejects the row; surfaced as a warning rather
-    // than failing an already-successful MongoDB save.
-    let supabaseMirrorWarning: string | undefined;
-
     const id = String(body.id || `prod-${Date.now()}`).trim();
     const title = String(body.title || body.name || 'Untitled Product').trim();
 
@@ -2735,16 +2731,16 @@ app.post('/api/products', async (req, res) => {
       }
     }
 
-    // 4. Supabase direct REST upsert
-    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    // 4. Supabase direct REST upsert. This mirror is non-critical: it runs
+    // after the authoritative MongoDB write without extending the HTTP path.
+    void (async () => {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (!isConfigured) return;
 
-    if (isConfigured) {
       try {
         const sbRecord: Record<string, unknown> = {
           id: String(product.id),
           store_slug,
-          // Permanent identity: attach the canonical store UUID (and the
-          // human-readable code when present) to every product create.
           ...(storeId ? { store_id: storeId } : {}),
           ...(String(body.store_code || body.storeCode || '') ? { store_code: String(body.store_code || body.storeCode) } : {}),
           title,
@@ -2773,22 +2769,12 @@ app.post('/api/products', async (req, res) => {
 
         if (!sbRes.ok) {
           const errText = await sbRes.text().catch(() => '');
-          // A Supabase mirror failure must NOT fail the request.
-          //
-          // MongoDB is the authoritative store for products, and by this point
-          // the product has ALREADY been written there. Returning 400 here made
-          // a successful save look like a failure to the merchant — who would
-          // then retry and create a duplicate — purely because a schema-drifted
-          // mirror rejected a column. The mirror is best-effort, so a failure is
-          // reported in the response body instead of thrown.
           console.warn('[Server] Supabase product mirror warning:', sbRes.status, errText.slice(0, 200));
-          supabaseMirrorWarning = `Saved to MongoDB. The Supabase mirror rejected this product (HTTP ${sbRes.status}).`;
         }
       } catch (sbErr: any) {
         console.warn('[Server] Supabase product mirror error:', sbErr?.message || sbErr);
-        supabaseMirrorWarning = 'Saved to MongoDB. The Supabase mirror could not be reached.';
       }
-    }
+    })();
 
     // 5. Respond as soon as the AUTHORITATIVE write is done.
     //
@@ -2810,7 +2796,6 @@ app.post('/api/products', async (req, res) => {
       ok: true,
       success: true,
       product,
-      warning: supabaseMirrorWarning,
     });
   } catch (err: any) {
     console.error('[Server] POST /api/products error:', err);

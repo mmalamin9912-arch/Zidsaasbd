@@ -50,10 +50,8 @@ const EMPTY: SubscriptionStatusSnapshot = {
   store: null,
 };
 
-/** How long a fulfilled read is served from memory before a refresh is allowed. */
+/** How long a fulfilled read is served from memory before a forced refresh is allowed. */
 const CACHE_TTL_MS = 60_000;
-/** How often the shared background refresh re-reads a live subscription. */
-const REFRESH_INTERVAL_MS = 120_000;
 
 type Listener = (snapshot: SubscriptionStatusSnapshot) => void;
 
@@ -65,8 +63,6 @@ const inFlight = new Map<string, Promise<SubscriptionStatusSnapshot>>();
 const entries = new Map<string, { snapshot: SubscriptionStatusSnapshot; expiresAt: number }>();
 /** key → listener set. */
 const listeners = new Map<string, Set<Listener>>();
-/** key → the shared refresh timer. */
-const timers = new Map<string, ReturnType<typeof setInterval>>();
 
 /** Build the cache key + query params for a merchant identity. */
 function identityOf(email?: string | null, storeSlug?: string | null) {
@@ -163,14 +159,6 @@ function emit(key: string, snapshot: SubscriptionStatusSnapshot) {
   });
 }
 
-function stopTimer(key: string) {
-  const timer = timers.get(key);
-  if (timer) {
-    clearInterval(timer);
-    timers.delete(key);
-  }
-}
-
 /**
  * Subscribe to a merchant's subscription status.
  *
@@ -201,15 +189,8 @@ export function subscribeToSubscriptionStatus(
   }
   set.add(onSnapshot);
 
-  // One shared timer per identity, started only once and torn down when the last
-  // subscriber leaves — so N components cost 1 request, not N.
-  if (!timers.has(key)) {
-    const timer = setInterval(() => {
-      void fetchSubscriptionStatus(email, storeSlug, { force: true });
-    }, REFRESH_INTERVAL_MS);
-    timers.set(key, timer);
-  }
-
+  // Do not poll from render. A session has exactly one initial read; explicit
+  // plan mutations call invalidateSubscriptionStatus() when a refresh is needed.
   void fetchSubscriptionStatus(email, storeSlug);
 
   return () => {
@@ -217,7 +198,6 @@ export function subscribeToSubscriptionStatus(
     current?.delete(onSnapshot);
     if (current && current.size === 0) {
       listeners.delete(key);
-      stopTimer(key);
     }
   };
 }

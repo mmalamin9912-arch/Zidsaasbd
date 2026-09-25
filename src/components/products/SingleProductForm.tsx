@@ -3,6 +3,7 @@ import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../
 import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug, upsertCategoryToSupabase } from '../../utils/catalogPayload';
 import { buildDeliveryFeeFields } from '../../utils/deliveryCharges';
 import { readZidStoreData } from '../../lib/storeData';
+import { isProAccessGranted } from '../../lib/subscriptionStatusCache';
 import SafeImage from '../SafeImage';
 import { generateAiText, aiErrorMessage } from '../../lib/aiService';
 import {
@@ -382,7 +383,10 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const isMountedRef = useRef(true);
   useEffect(() => () => { isMountedRef.current = false; }, []);
 
-  const isFreeTier = merchant?.subscriptionPlan === 'free_trial';
+  // Starter is still paid, but only an explicitly active/non-trial plan unlocks
+  // the PRO-labelled AI tools. This is derived synchronously from the merchant's
+  // persisted plan and never starts as an artificial `free_trial` value.
+  const isFreeTier = !isProAccessGranted(merchant?.subscriptionPlan, merchant?.subscription_status);
 
   const generateAiDescription = async () => {
     if (isFreeTier) {
