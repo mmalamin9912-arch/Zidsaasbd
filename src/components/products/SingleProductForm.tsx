@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../types';
-import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug, upsertCategoryToSupabase } from '../../utils/catalogPayload';
+import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug } from '../../utils/catalogPayload';
 import { buildDeliveryFeeFields } from '../../utils/deliveryCharges';
 import { readZidStoreData } from '../../lib/storeData';
 import { isProAccessGranted } from '../../lib/subscriptionStatusCache';
@@ -884,8 +884,11 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
           status: 'published',
           parentId: null,
         }, merchant);
-        postCatalogJson('/api/categories', newCat).catch(err => console.error('Error syncing new category to backend:', err));
-        void upsertCategoryToSupabase(newCat, merchant?.storeSlug || 'bd');
+        void postCatalogJson('/api/categories', newCat).then(result => {
+          if (!result.ok) console.warn('Category sync skipped:', result.error);
+        });
+        // Supabase is a best-effort mirror; MongoDB is authoritative and a mirror
+        // failure must not be retried or block the product save path.
       } catch (err) {
         console.error('Error auto-saving new category:', err);
       }

@@ -337,39 +337,21 @@ export async function upsertCategoryToSupabase(category: any, storeSlugInput?: s
     slug: category.slug || '',
   };
 
-  const slugsToUpsert = Array.from(new Set([slug, 'bd', 'verandabd', 'default']));
+  // Only the ACTIVE tenant slug is written. The previous multi-slug fan-out
+  // issued one Supabase request per alias per category and amplified a schema
+  // rejection into a repeating 400 storm. MongoDB `/api/categories` remains the
+  // authoritative write; this is a best-effort mirror for the real store only.
+  const payload = { ...basePayload, store_slug: slug };
 
   try {
     const { supabase } = await import('../lib/supabase');
     if (supabase) {
-      for (const s of slugsToUpsert) {
-        const payload = { ...basePayload, store_slug: s };
-        const { error } = await supabase.from('categories').upsert(payload, { onConflict: 'id' });
-        if (error) console.warn('Supabase category client upsert notice:', error.message);
-      }
+      const { error } = await supabase
+        .from('categories')
+        .upsert(payload, { onConflict: 'id' });
+      if (error) console.warn('Supabase category mirror skipped:', error.message);
     }
   } catch (e) {
-    console.warn('Supabase category client upsert error:', e);
-  }
-
-  try {
-    const { supabaseUrl, supabaseAnonKey } = await import('../lib/supabase');
-    if (supabaseUrl && supabaseAnonKey) {
-      for (const s of slugsToUpsert) {
-        const payload = { ...basePayload, store_slug: s };
-        await fetch(`${supabaseUrl}/rest/v1/categories`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': supabaseAnonKey,
-            'Authorization': `Bearer ${supabaseAnonKey}`,
-            'Prefer': 'resolution=merge-duplicates',
-          },
-          body: JSON.stringify(payload),
-        }).catch(err => console.warn('Supabase category REST upsert error:', err));
-      }
-    }
-  } catch (e) {
-    console.warn('Supabase category REST upsert warning:', e);
+    console.warn('Supabase category mirror unavailable:', e);
   }
 }
