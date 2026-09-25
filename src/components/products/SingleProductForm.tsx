@@ -376,6 +376,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   // runs. `saveState` distinguishes Save Draft from Save & Publish.
   const [saveState, setSaveState] = useState<'idle' | 'draft' | 'publish'>('idle');
   const isSaving = saveState !== 'idle';
+  const saveInFlightRef = useRef(false);
 
   // Unmount safety: the save promise can resolve after the form has already been
   // torn down (the parent closes it on success), which would otherwise be a
@@ -402,13 +403,13 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     setIsGeneratingDescription(true);
     try {
       const productInfo = `Title: ${title || titleBn}. Category: ${category}. Short Description: ${shortDescEn || shortDescBn || 'N/A'}`;
-      const promptEn = `Generate a catchy, SEO-friendly, professional e-commerce product description for: ${productInfo}. Language: English. Focus on highlighting quality and benefits.`;
-      const promptBn = `Generate a catchy, SEO-friendly, professional e-commerce product description for: ${productInfo}. Language: Bengali. Focus on highlighting quality and benefits.`;
+      const promptEn = `Generate a catchy, SEO-friendly, professional e-commerce product description for: ${productInfo}. Return the entire response in English only. Focus on quality and benefits.`;
+      const promptBn = `Generate a catchy, SEO-friendly, professional e-commerce product description for: ${productInfo}. Return the entire response ONLY in Bengali (বাংলা), using Bengali script. Do not include English prose. Focus on quality and benefits.`;
 
       // Client helper surfaces explicit errors for missing/invalid API key etc.
       const [resultEn, resultBn] = await Promise.all([
         generateAiText(promptEn, 'You are an expert e-commerce copywriter. Return ONLY the high-quality, persuasive description text, no extra commentary or filler.'),
-        generateAiText(promptBn, 'You are an expert e-commerce copywriter. Return ONLY the high-quality, persuasive description text in Bengali, no extra commentary or filler.')
+        generateAiText(promptBn, 'You are an expert Bengali e-commerce copywriter. Return ONLY Bengali (বাংলা) text in Bengali script. Never use English prose.')
       ]);
 
       // Fail fast with a clear message if the API key is missing/invalid or the
@@ -824,9 +825,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Guard against a double-click / double-submit creating duplicate rows while
-    // a previous save is still in flight.
-    if (isSaving) return;
+    if (saveInFlightRef.current || isSaving) return;
 
     // ── Validation ──────────────────────────
     // Checked in the order the merchant filled the form, and reported on the
@@ -950,6 +949,8 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     // handler). The spinner is cleared the MOMENT the database write resolves —
     // not when the parent's follow-up work finishes — so "Saving…" can never
     // outlive a save that has already landed.
+    // Close the rapid double-submit window before the request starts.
+    saveInFlightRef.current = true;
     setSaveState(status === 'Draft' ? 'draft' : 'publish');
     // Watchdog: a hung/lost request must not leave the form permanently
     // disabled with a spinning button and no way out for the merchant.
@@ -963,6 +964,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
         console.error('[SingleProductForm] Save failed:', err);
       });
     } finally {
+      saveInFlightRef.current = false;
       window.clearTimeout(releaseWatchdog);
       if (isMountedRef.current) setSaveState('idle');
     }

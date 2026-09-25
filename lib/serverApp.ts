@@ -2848,17 +2848,17 @@ app.delete('/api/products/:id', async (req, res) => {
   if (!prodId) return res.status(400).json({ ok: false, error: 'Product id required' });
 
   for (const [slug, prods] of productStore.entries()) {
-    productStore.set(slug, prods.filter(p => String(p.id) !== prodId));
+    productStore.set(slug, prods.filter(p => String(p.id) !== prodId && String(p._id) !== prodId));
   }
 
   const payload = await readStorePayload();
   if (Array.isArray(payload.products)) {
-    payload.products = payload.products.filter((p: any) => String(p.id) !== prodId);
+    payload.products = payload.products.filter((p: any) => String(p.id) !== prodId && String(p._id) !== prodId);
   }
   if (payload.stores) {
     for (const sKey of Object.keys(payload.stores)) {
       if (Array.isArray(payload.stores[sKey].products)) {
-        payload.stores[sKey].products = payload.stores[sKey].products.filter((p: any) => String(p.id) !== prodId);
+        payload.stores[sKey].products = payload.stores[sKey].products.filter((p: any) => String(p.id) !== prodId && String(p._id) !== prodId);
       }
     }
   }
@@ -2869,7 +2869,7 @@ app.delete('/api/products/:id', async (req, res) => {
     await connectToMongoDB();
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       await mongoose.connection.db.collection('products').deleteOne({
-        $or: [{ id: prodId }]
+        $or: [{ id: prodId }, { _id: (() => { try { return new mongoose.Types.ObjectId(prodId); } catch { return null; } })() }]
       });
     }
   } catch (mongoDelErr) {
@@ -2896,17 +2896,17 @@ app.delete('/api/products', async (req, res) => {
   if (!prodId) return res.status(400).json({ ok: false, error: 'Product id required' });
 
   for (const [slug, prods] of productStore.entries()) {
-    productStore.set(slug, prods.filter(p => String(p.id) !== prodId));
+    productStore.set(slug, prods.filter(p => String(p.id) !== prodId && String(p._id) !== prodId));
   }
 
   const payload = await readStorePayload();
   if (Array.isArray(payload.products)) {
-    payload.products = payload.products.filter((p: any) => String(p.id) !== prodId);
+    payload.products = payload.products.filter((p: any) => String(p.id) !== prodId && String(p._id) !== prodId);
   }
   if (payload.stores) {
     for (const sKey of Object.keys(payload.stores)) {
       if (Array.isArray(payload.stores[sKey].products)) {
-        payload.stores[sKey].products = payload.stores[sKey].products.filter((p: any) => String(p.id) !== prodId);
+        payload.stores[sKey].products = payload.stores[sKey].products.filter((p: any) => String(p.id) !== prodId && String(p._id) !== prodId);
       }
     }
   }
@@ -2917,7 +2917,7 @@ app.delete('/api/products', async (req, res) => {
     await connectToMongoDB();
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       await mongoose.connection.db.collection('products').deleteOne({
-        $or: [{ id: prodId }]
+        $or: [{ id: prodId }, { _id: (() => { try { return new mongoose.Types.ObjectId(prodId); } catch { return null; } })() }]
       });
     }
   } catch (mongoDelErr) {

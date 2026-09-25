@@ -1391,14 +1391,17 @@ export default function App() {
       localStorage.setItem('ZID_PLATFORM_THEMES', JSON.stringify(platformThemes));
       localStorage.setItem('ZID_SUPPORT_TICKETS', JSON.stringify(supportTickets));
       localStorage.setItem('ZID_PLATFORM_ADDONS', JSON.stringify(platformAddons));
-      localStorage.setItem('ZID_AUDIT_LOGS', JSON.stringify(auditLogs));
+      // Audit history is server-backed; keep only a small recent browser cache.
+      localStorage.setItem('ZID_AUDIT_LOGS', JSON.stringify(auditLogs.slice(0, 50)));
       localStorage.setItem('ZID_SECURITY_SETTINGS', JSON.stringify(platformSecuritySettings));
       localStorage.setItem('ZID_BROADCAST_HISTORY', JSON.stringify(broadcastHistory));
       localStorage.setItem('ZID_AUTOMATION_SETTINGS', JSON.stringify(automationSettings));
       localStorage.setItem('ZID_ADMIN_TEAM', JSON.stringify(adminTeam));
       localStorage.setItem('ZID_ROLE_PERMISSIONS', JSON.stringify(rolePermissions));
     } catch (e) {
-      console.error(e);
+      if (!(e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22))) {
+        console.warn('Admin state cache could not be written:', e);
+      }
     }
   }, [adminPaymentConfig, platformSettings, platformAnnouncement, platformPlans, platformThemes, supportTickets, platformAddons, auditLogs, platformSecuritySettings, broadcastHistory, automationSettings, adminTeam, rolePermissions]);
 
@@ -1412,9 +1415,11 @@ export default function App() {
 
   React.useEffect(() => {
     try {
-      localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(allMerchants));
+      localStorage.setItem('ZID_ALL_MERCHANTS', JSON.stringify(allMerchants.slice(0, 100)));
     } catch (e) {
-      console.error(e);
+      if (!(e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22))) {
+        console.warn('Merchant cache could not be written:', e);
+      }
     }
   }, [allMerchants]);
 

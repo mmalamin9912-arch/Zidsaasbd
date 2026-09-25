@@ -306,17 +306,22 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   };
 
   const handleDeleteProduct = async (id: string) => {
-    if (confirm('Are you sure you want to delete this product listing?')) {
-      const updatedList = products.filter(p => p.id !== id);
-      onUpdateProducts(updatedList);
-      try {
-        const { supabase } = await import('../../lib/supabase');
-        if (supabase) {
-          await supabase.from('products').delete().eq('id', id);
-        }
-      } catch (sbErr) {
-        console.warn('Supabase product direct delete warning:', sbErr);
-      }
+    if (!confirm('Are you sure you want to delete this product listing?')) return;
+    const previous = products;
+    const updatedList = products.filter(p => p.id !== id);
+    onUpdateProducts(updatedList);
+    try {
+      const response = await fetch(`/api/products?id=${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+      // Public storefront reads the same authoritative endpoint; invalidate its
+      // browser cache so a deleted product cannot remain visible in another tab.
+      window.dispatchEvent(new CustomEvent('zid-products-changed'));
+      setToastNotification({ type: 'success', message: 'Product deleted.' });
+    } catch (error) {
+      onUpdateProducts(previous);
+      console.warn('[ProductsView] Product delete failed:', error);
+      setToastNotification({ type: 'error', message: 'Product could not be deleted. Please try again.' });
     }
   };
 
