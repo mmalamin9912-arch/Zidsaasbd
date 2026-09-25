@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Layers, Plus, Trash2, Tag, X } from 'lucide-react';
 import { VariantOptionPreset } from '../../types';
 import { AddOptionTemplateModal } from './AddOptionTemplateModal';
@@ -10,33 +10,93 @@ export const OptionsLibraryView: React.FC = () => {
     { id: 'opt-3', title: 'Fabric & Embroidery Types', values: ['Jamdani Silk', 'Katan Cotton', 'Rajshahi Pure Silk', 'Dhakai Muslin'], type: 'Dropdown List' },
     { id: 'opt-4', title: 'Footwear Sizes (EU)', values: ['EU 39', 'EU 40', 'EU 41', 'EU 42', 'EU 43', 'EU 44'], type: 'Pill Buttons' },
   ]);
-
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [newValueMap, setNewValueMap] = useState<Record<string, string>>({});
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Fetch option templates from API on mount
+  useEffect(() => {
+    let isMounted = true;
+    const fetchOptionTemplates = async () => {
+      try {
+        const res = await fetch('/api/option-templates?store_slug=' + (window.location.href.split('/')[4] || 'bd'));
+        if (res.ok) {
+          const data = await res.json();
+          if (data.ok && Array.isArray(data.templates)) {
+            setOptions(data.templates as VariantOptionPreset[]);
+          }
+        }
+      } catch (err) {
+        console.warn('[OptionsLibrary] Failed to fetch templates:', err);
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    };
+    fetchOptionTemplates();
+    return () => { isMounted = false; };
+  }, []);
 
   const handleAddTemplate = (template: VariantOptionPreset) => {
     setOptions([...options, template]);
+    // Sync to API via POST
+    fetch('/api/option-templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(template),
+    }).catch(err => console.error('[OptionsLibrary] API save error:', err));
   };
 
   const handleAddValueToPreset = (presetId: string) => {
     const val = newValueMap[presetId]?.trim();
     if (!val) return;
 
-    setOptions(options.map(opt => 
-      opt.id === presetId 
+    setOptions(options.map(opt =>
+      opt.id === presetId
         ? { ...opt, values: [...opt.values, val] }
         : opt
     ));
 
     setNewValueMap({ ...newValueMap, [presetId]: '' });
+
+    // Sync to API via PUT
+    const template = options.find(o => o.id === presetId);
+    if (template) {
+      fetch(`/api/option-templates/${template.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...template, values: [...template.values, val] }),
+      }).catch(err => console.error('[OptionsLibrary] API update error:', err));
+    }
   };
 
   const handleRemoveValueFromPreset = (presetId: string, valueIndex: number) => {
-    setOptions(options.map(opt => 
-      opt.id === presetId 
+    setOptions(options.map(opt =>
+      opt.id === presetId
         ? { ...opt, values: opt.values.filter((_, i) => i !== valueIndex) }
         : opt
     ));
+
+    // Sync to API via PUT
+    const template = options.find(o => o.id === presetId);
+    if (template) {
+      fetch(`/api/option-templates/${template.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...template, values: template.values.filter((_, i) => i !== valueIndex) }),
+      }).catch(err => console.error('[OptionsLibrary] API update error:', err));
+    }
+  };
+
+  const handleRemovePreset = (presetId: string) => {
+    setOptions(options.filter(o => o.id !== presetId));
+
+    // Sync to API via DELETE
+    const template = options.find(o => o.id === presetId);
+    if (template) {
+      fetch(`/api/option-templates/${template.id}`, {
+        method: 'DELETE',
+      }).catch(err => console.error('[OptionsLibrary] API delete error:', err));
+    }
   };
 
   return (
@@ -76,7 +136,7 @@ export const OptionsLibraryView: React.FC = () => {
                 {opt.values.map((v, idx) => (
                   <span key={idx} className="group relative text-xs font-semibold bg-[#181B26] text-slate-200 px-2.5 py-1 rounded-lg border border-[#2E3548] flex items-center gap-1.5">
                     {v}
-                    <button 
+                    <button
                       onClick={() => handleRemoveValueFromPreset(opt.id, idx)}
                       className="text-slate-500 hover:text-red-400 cursor-pointer"
                     >
@@ -87,8 +147,8 @@ export const OptionsLibraryView: React.FC = () => {
               </div>
 
               <div className="flex gap-2">
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={newValueMap[opt.id] || ''}
                   onChange={(e) => setNewValueMap({ ...newValueMap, [opt.id]: e.target.value })}
                   onKeyPress={(e) => e.key === 'Enter' && handleAddValueToPreset(opt.id)}
@@ -106,7 +166,7 @@ export const OptionsLibraryView: React.FC = () => {
 
             <div className="pt-2 border-t border-[#2E3548] flex justify-end">
               <button
-                onClick={() => setOptions(options.filter(o => o.id !== opt.id))}
+                onClick={() => handleRemovePreset(opt.id)}
                 className="text-xs text-slate-400 hover:text-red-400 flex items-center gap-1 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -117,7 +177,7 @@ export const OptionsLibraryView: React.FC = () => {
         ))}
       </div>
 
-      <AddOptionTemplateModal 
+      <AddOptionTemplateModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onSave={handleAddTemplate}

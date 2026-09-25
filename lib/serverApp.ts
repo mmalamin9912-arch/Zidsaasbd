@@ -228,6 +228,7 @@ const defaultStorePayload = {
   adminPaymentConfig: null,
   pendingRequests: [],
   allMerchants: [],
+  optionTemplates: [],
 };
 const categoryStore = new Map<string, unknown[]>();
 const merchantStore = new Map<string, Record<string, unknown>>();
@@ -2378,6 +2379,8 @@ async function resolveStoreIdentity(rawRef: string): Promise<StoreIdentity> {
 
 // Products mocked in memory to prevent 404s
 const productStore = new Map<string, any[]>();
+// Option templates mocked in memory to prevent 404s
+const optionTemplateStore = new Map<string, any[]>();
 
 app.get('/api/products-by-slug/:slug', async (req, res) => {
   const slug = (req.params.slug || '').trim().toLowerCase();
@@ -2937,6 +2940,135 @@ app.delete('/api/products', async (req, res) => {
   }
 
   return res.json({ ok: true, deleted_id: prodId });
+});
+
+/* ── Option Templates CRUD ─────────────────────────────────────── */
+
+app.get('/api/option-templates', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeSlug = String(req.query.store_slug || req.query.storeSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
+    const memTemplates = optionTemplateStore.has(storeSlug) ? [...optionTemplateStore.get(storeSlug)] : [];
+    const payload = await readStorePayload();
+    const fileTemplates = Array.isArray(payload.optionTemplates) ? [...payload.optionTemplates] : [];
+    const merged = new Map<string, any>();
+    for (const t of fileTemplates) { if (t && t.id) merged.set(t.id, t); }
+    for (const t of memTemplates) { if (t && t.id) merged.set(t.id, t); }
+    return res.json({ ok: true, templates: Array.from(merged.values()) });
+  } catch (err: any) {
+    console.error('[Server] GET /api/option-templates error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Failed to fetch option templates' });
+  }
+});
+
+app.post('/api/option-templates', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ ok: false, error: 'Option template payload object required' });
+    }
+    const storeSlug = String(body.store_slug || body.storeSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
+    const template = {
+      ...body,
+      id: body.id || `opt-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      store_slug: storeSlug,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const memTemplates = optionTemplateStore.has(storeSlug) ? [...optionTemplateStore.get(storeSlug)] : [];
+    memTemplates.unshift(template);
+    optionTemplateStore.set(storeSlug, memTemplates);
+
+    const payload = await readStorePayload();
+    if (!Array.isArray(payload.optionTemplates)) payload.optionTemplates = [];
+    const idx = payload.optionTemplates.findIndex((t: any) => String(t.id) === String(template.id));
+    if (idx >= 0) { payload.optionTemplates[idx] = template; } else { payload.optionTemplates.unshift(template); }
+    await writeStorePayload(payload);
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      try {
+        await mongoose.connection.db.collection('option_templates').updateOne(
+          { id: template.id },
+          { $set: template },
+          { upsert: true }
+        );
+      } catch (mongoErr) { console.warn('[Server] POST /api/option-templates MongoDB warning:', mongoErr); }
+    }
+
+    return res.status(200).json({ ok: true, template });
+  } catch (err: any) {
+    console.error('[Server] POST /api/option-templates error:', err);
+    return res.status(400).json({ ok: false, error: err?.message || 'Invalid option template request' });
+  }
+});
+
+app.put('/api/option-templates/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const templateId = req.params.id;
+    if (!templateId) return res.status(400).json({ ok: false, error: 'Template id required' });
+    const body = req.body || {};
+    const storeSlug = String(body.store_slug || body.storeSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
+
+    const updateData = { ...body, id: templateId, store_slug: storeSlug, updatedAt: new Date().toISOString() };
+
+    for (const [slug, templates] of optionTemplateStore.entries()) {
+      optionTemplateStore.set(slug, templates.map((t: any) => String(t.id) === String(templateId) ? { ...t, ...updateData } : t));
+    }
+
+    const payload = await readStorePayload();
+    if (Array.isArray(payload.optionTemplates)) {
+      const idx = payload.optionTemplates.findIndex((t: any) => String(t.id) === String(templateId));
+      if (idx >= 0) { payload.optionTemplates[idx] = { ...payload.optionTemplates[idx], ...updateData }; }
+    }
+    await writeStorePayload(payload);
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      try {
+        await mongoose.connection.db.collection('option_templates').updateOne(
+          { id: templateId },
+          { $set: updateData }
+        );
+      } catch (mongoErr) { console.warn('[Server] PUT /api/option-templates MongoDB warning:', mongoErr); }
+    }
+
+    return res.json({ ok: true, template: updateData });
+  } catch (err: any) {
+    console.error('[Server] PUT /api/option-templates/:id error:', err);
+    return res.status(400).json({ ok: false, error: err?.message || 'Failed to update option template' });
+  }
+});
+
+app.delete('/api/option-templates/:id', async (req, res) => {
+  const templateId = req.params.id;
+  if (!templateId) return res.status(400).json({ ok: false, error: 'Template id required' });
+
+  for (const [slug, templates] of optionTemplateStore.entries()) {
+    optionTemplateStore.set(slug, templates.filter((t: any) => String(t.id) !== String(templateId)));
+  }
+
+  const payload = await readStorePayload();
+  if (Array.isArray(payload.optionTemplates)) {
+    payload.optionTemplates = payload.optionTemplates.filter((t: any) => String(t.id) !== String(templateId));
+  }
+  await writeStorePayload(payload);
+
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      try {
+        await mongoose.connection.db.collection('option_templates').deleteOne({ id: templateId });
+      } catch (mongoErr) { console.warn('[Server] DELETE /api/option-templates MongoDB warning:', mongoErr); }
+    }
+  } catch (mongoDelErr) {
+    console.warn('[Server] DELETE /api/option-templates MongoDB delete warning:', mongoDelErr);
+  }
+
+  return res.json({ ok: true, deleted_id: templateId });
 });
 
 app.all('/api/tenant-store', async (req, res) => {
