@@ -320,22 +320,22 @@ async function mirrorMerchantToSupabase(
     Prefer: 'resolution=merge-duplicates',
   };
 
-  try {
-    // Upsert with `on_conflict` so a repeat write updates the existing row
-    // instead of violating a unique constraint on store_slug.
-    const url = `${supabaseUrl}/rest/v1/stores?on_conflict=${encodeURIComponent(matchColumn)}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
-    });
+try {
+     const res = await fetch(
+       `${supabaseUrl}/rest/v1/stores`,
+       {
+         method: 'POST',
+         headers,
+         body: JSON.stringify(payload),
+         signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+       }
+     );
 
-    if (res.ok) return { ok: true };
-    return { ok: false, error: `Supabase stores upsert responded ${res.status}` };
-  } catch (err: any) {
-    return { ok: false, error: err?.message || 'Supabase stores upsert failed' };
-  }
+     if (res.ok) return { ok: true };
+     return { ok: false, error: `Supabase stores upsert responded ${res.status}` };
+   } catch (err: any) {
+     return { ok: false, error: err?.message || 'Supabase stores upsert failed' };
+   }
 }
 
 /**

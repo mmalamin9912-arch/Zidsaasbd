@@ -55,10 +55,8 @@ async function writeSupabaseRow(
   };
 
   try {
-    // on_conflict makes a repeat save UPDATE the row instead of violating the
-    // unique key on the match column (id).
     const res = await fetch(
-      `${supabaseUrl}/rest/v1/${table}?on_conflict=${encodeURIComponent(matchColumn)}`,
+      `${supabaseUrl}/rest/v1/${table}`,
       {
         method: 'POST',
         headers,

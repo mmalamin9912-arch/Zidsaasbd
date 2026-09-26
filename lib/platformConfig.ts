@@ -54,10 +54,8 @@ async function writeSupabaseRow(
   };
 
   try {
-    // on_conflict makes a repeat save UPDATE the existing row instead of
-    // violating the unique key on `config_key`.
     const res = await fetch(
-      `${supabaseUrl}/rest/v1/${table}?on_conflict=${encodeURIComponent(matchColumn)}`,
+      `${supabaseUrl}/rest/v1/${table}`,
       {
         method: 'POST',
         headers,

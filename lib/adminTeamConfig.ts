@@ -59,7 +59,7 @@ async function writeSupabaseRow(
 
   try {
     const res = await fetch(
-      `${supabaseUrl}/rest/v1/${table}?on_conflict=${encodeURIComponent(matchColumn)}`,
+      `${supabaseUrl}/rest/v1/${table}`,
       {
         method: 'POST',
         headers: {

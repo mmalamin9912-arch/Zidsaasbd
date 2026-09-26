@@ -3212,6 +3212,151 @@ app.get('/api/storefront/:slug', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/storefront — accept storefront data submissions (products, categories,
+ * themes, merchant info) from the storefront or merchant dashboard.
+ *
+ * MongoDB is the authoritative write; Supabase mirroring is best-effort and must
+ * never block the primary operation or turn the response into an error.
+ */
+app.post('/api/storefront', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeSlug = typeof req.body?.store_slug === 'string'
+      ? req.body.store_slug.trim().toLowerCase()
+      : typeof req.body?.storeSlug === 'string'
+        ? req.body.storeSlug.trim().toLowerCase()
+        : 'bd';
+
+    const payload = req.body || {};
+    const products = Array.isArray(payload.products) ? payload.products : [];
+    const categories = Array.isArray(payload.categories) ? payload.categories : [];
+    const merchant = payload.merchant || {};
+
+    // 1. MongoDB write (authoritative)
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] POST /api/storefront MongoDB unavailable:', dbErr?.message || dbErr);
+    }
+
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      try {
+        const db = mongoose.connection.db;
+        const now = new Date();
+
+        // Upsert products
+        for (const prod of products) {
+          const prodId = String(prod.id || prod._id || `prod-${Date.now()}`);
+          await db.collection('products').updateOne(
+            { id: prodId },
+            { $set: { ...prod, id: prodId, store_slug: storeSlug, storeSlug, updated_at: now } },
+            { upsert: true }
+          );
+        }
+
+        // Upsert categories
+        for (const cat of categories) {
+          const catId = String(cat.id || `cat-${Date.now()}`);
+          await db.collection('categories').updateOne(
+            { id: catId },
+            { $set: { ...cat, id: catId, store_slug: storeSlug, storeSlug, updated_at: now } },
+            { upsert: true }
+          );
+        }
+
+        // Upsert merchant/store record
+        if (merchant && Object.keys(merchant).length > 0) {
+          const storeId = String(merchant.id || merchant.storeId || storeSlug);
+          await db.collection('stores').updateOne(
+            { id: storeId },
+            { $set: { ...merchant, id: storeId, store_slug: storeSlug, storeSlug, updated_at: now } },
+            { upsert: true }
+          );
+        }
+      } catch (mongoErr: any) {
+        console.warn('[Server] POST /api/storefront MongoDB write warning:', mongoErr?.message || mongoErr);
+      }
+    }
+
+    // 2. Supabase mirroring (best-effort, must not block)
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    if (isConfigured) {
+      try {
+        // Mirror categories
+        if (categories.length > 0) {
+          try {
+            const knownColumns = await fetchTableColumns(supabaseUrl, supabaseKey, 'categories');
+            const records = categories
+              .map((cat: any) =>
+                buildCategoryMirrorPayload(cat, storeSlug, knownColumns)
+              )
+              .filter((r: Record<string, any>) => r && r.id)
+              .map((r: Record<string, any>) => sanitizeImagePayload(r).value as Record<string, any>);
+
+            if (records.length > 0) {
+              await fetch(`${supabaseUrl}/rest/v1/categories`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'apikey': supabaseKey,
+                  'Authorization': `Bearer ${supabaseKey}`,
+                  'Prefer': 'resolution=merge-duplicates',
+                },
+                body: JSON.stringify(records),
+              });
+            }
+          } catch (sbCatErr: any) {
+            console.warn('[Server] POST /api/storefront Supabase categories mirror warning:', sbCatErr?.message || sbCatErr);
+          }
+        }
+
+        // Mirror products
+        if (products.length > 0) {
+          try {
+            const productRecords = products.map((p: any) => ({
+              id: String(p.id || p._id || `prod-${Date.now()}`),
+              name: String(p.name || p.title || 'Product'),
+              title: String(p.name || p.title || 'Product'),
+              price: Number(p.price || p.priceBDT || 0),
+              stock_quantity: Number(p.stock || p.stock_quantity || 0),
+              category: String(p.category || 'General'),
+              image_url: String(p.image || p.imageUrl || p.image_url || ''),
+              store_slug: storeSlug,
+            }));
+
+            await fetch(`${supabaseUrl}/rest/v1/products`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`,
+                'Prefer': 'resolution=merge-duplicates',
+              },
+              body: JSON.stringify(productRecords),
+            });
+          } catch (sbProdErr: any) {
+            console.warn('[Server] POST /api/storefront Supabase products mirror warning:', sbProdErr?.message || sbProdErr);
+          }
+        }
+      } catch (sbErr: any) {
+        console.warn('[Server] POST /api/storefront Supabase mirror warning:', sbErr?.message || sbErr);
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeSlug,
+      products: products.length,
+      categories: categories.length,
+      merchant: !!merchant,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/storefront error:', err);
+    return res.status(200).json({ ok: false, store_slug: 'bd', error: err?.message || String(err) });
+  }
+});
+
 app.get('/api/store', async (req, res) => {
   const payload = await readStorePayload();
   res.json(payload);
@@ -3661,7 +3806,7 @@ app.post('/api/stores/update', async (req, res) => {
         const cleanSbPayload = sbSanitized.value as Record<string, any>;
 
         if (Object.keys(cleanSbPayload).length > 0) {
-          const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?on_conflict=store_slug`, {
+          const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores`, {
             method: 'POST',
             headers: {
               apikey: supabaseKey,
