@@ -87,6 +87,7 @@ import {
   recordCourierDispatch,
 } from './orderStatus.js';
 import { sendRecoveryCoupon, listRecoveryLogs } from './abandonedCarts.js';
+import { buildCategoryMirrorPayload, fetchTableColumns } from './supabaseSchema.js';
 
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
@@ -1982,29 +1983,34 @@ app.all('/api/categories', async (req, res) => {
 
       if (isConfigured && categories.length > 0) {
         try {
-          const records = categories.map((cat: any) => ({
-            id: String(cat.id),
-            store_slug: storeSlug || cat.store_slug || cat.storeSlug || 'bd',
-            title: String(cat.name || cat.title || 'Category'),
-            name: String(cat.name || cat.title || 'Category'),
-            image_url: String(cat.image || cat.coverImage || cat.image_url || ''),
-            image: String(cat.image || cat.coverImage || cat.image_url || ''),
-            category_id: String(cat.id),
-            status: cat.status || 'active',
-            is_published: cat.status !== 'hidden',
-            parent_id: cat.parentId || cat.parent_id || null,
-            slug: cat.slug || '',
-          }));
-          await fetch(`${supabaseUrl}/rest/v1/categories`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
-              'Prefer': 'resolution=merge-duplicates',
-            },
-            body: JSON.stringify(records),
-          }).catch(err => console.warn('Supabase category REST upsert error:', err));
+          const knownColumns = await fetchTableColumns(supabaseUrl, supabaseKey, 'categories');
+          const records = categories
+            .map((cat: any) =>
+              buildCategoryMirrorPayload(cat, storeSlug || cat.store_slug || cat.storeSlug || 'bd', knownColumns)
+            )
+            .filter((r: Record<string, any>) => r && r.id);
+
+          if (records.length === 0) {
+            console.warn('[Server] /api/categories Supabase mirror skipped: no category had a usable id.');
+          } else {
+            const sbRes = await fetch(`${supabaseUrl}/rest/v1/categories`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`,
+                'Prefer': 'resolution=merge-duplicates',
+              },
+              body: JSON.stringify(records),
+            });
+            if (!sbRes.ok) {
+              const text = await sbRes.text().catch(() => '');
+              console.warn(
+                `[Server] /api/categories Supabase REST mirror rejected (${sbRes.status}):`,
+                text.slice(0, 300)
+              );
+            }
+          }
         } catch (sbErr) {
           console.warn('Supabase category REST upsert warning:', sbErr);
         }

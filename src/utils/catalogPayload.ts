@@ -1,3 +1,5 @@
+import { buildCategoryMirrorPayload, fetchTableColumns } from '../../lib/supabaseSchema';
+
 export function toCatalogSlug(value: string, fallback = 'item'): string {
   const slug = (value || '')
     .toLowerCase()
@@ -323,33 +325,53 @@ export async function upsertProductToSupabase(productData: any, storeSlugInput?:
 
 export async function upsertCategoryToSupabase(category: any, storeSlugInput?: string) {
   const slug = String(storeSlugInput || category.storeSlug || category.store_slug || 'bd').toLowerCase().trim();
-  const name = String(category.name || category.title || 'Category').trim();
-  const basePayload = {
-    id: String(category.id),
-    title: name,
-    name,
-    image_url: String(category.image || category.coverImage || category.image_url || ''),
-    image: String(category.image || category.coverImage || category.image_url || ''),
-    category_id: String(category.id),
-    status: category.status || 'active',
-    is_published: category.status !== 'hidden',
-    parent_id: category.parentId || category.parent_id || null,
-    slug: category.slug || '',
-  };
 
   // Only the ACTIVE tenant slug is written. The previous multi-slug fan-out
   // issued one Supabase request per alias per category and amplified a schema
   // rejection into a repeating 400 storm. MongoDB `/api/categories` remains the
   // authoritative write; this is a best-effort mirror for the real store only.
-  const payload = { ...basePayload, store_slug: slug };
 
   try {
-    const { supabase } = await import('../lib/supabase');
-    if (supabase) {
-      const { error } = await supabase
-        .from('categories')
-        .upsert(payload, { onConflict: 'id' });
-      if (error) console.warn('Supabase category mirror skipped:', error.message);
+    const { supabase, supabaseUrl, supabaseAnonKey } = await import('../lib/supabase');
+    if (!supabase) return;
+
+    // Ask the table what columns it REALLY has, so we never send a key that
+    // does not exist. Without this, the stray `category_id` key made PostgREST
+    // reject the whole row with PGRST204 and the mirror silently wrote nothing.
+    let columns: string[] | null = null;
+    if (supabaseUrl && supabaseAnonKey) {
+      try {
+        columns = await fetchTableColumns(supabaseUrl, supabaseAnonKey, 'categories');
+      } catch {
+        columns = null; // fall back to the conservative core payload
+      }
+    }
+
+    const payload = buildCategoryMirrorPayload(category, slug, columns);
+    if (!payload.id) {
+      console.warn('Supabase category mirror skipped: the category has no id to conflict on.');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('categories')
+      .upsert(payload, { onConflict: 'id' });
+
+    if (error) {
+      // If introspection was unavailable and the conservative core still got
+      // rejected, retry with the absolute minimum a categories table needs.
+      if (columns === null && /PGRST204|could not find the/i.test(error.message)) {
+        const minimal = { id: String(category._id ?? category.id ?? ''), name: String(category.name || category.title || 'Category') };
+        if (minimal.id) {
+          const { error: retryErr } = await supabase
+            .from('categories')
+            .upsert(minimal, { onConflict: 'id' });
+          if (!retryErr) return;
+          console.warn('Supabase category mirror skipped (minimal retry failed):', retryErr.message);
+          return;
+        }
+      }
+      console.warn('Supabase category mirror skipped:', error.message);
     }
   } catch (e) {
     console.warn('Supabase category mirror unavailable:', e);
