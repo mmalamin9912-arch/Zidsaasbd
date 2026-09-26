@@ -87,7 +87,7 @@ import {
   recordCourierDispatch,
 } from './orderStatus.js';
 import { sendRecoveryCoupon, listRecoveryLogs } from './abandonedCarts.js';
-import { buildCategoryMirrorPayload, fetchTableColumns } from './supabaseSchema.js';
+import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId } from './supabaseSchema.js';
 import { sanitizeImagePayload, formatBytes } from './imagePayload.js';
 
 
@@ -2011,7 +2011,7 @@ app.all('/api/categories', async (req, res) => {
             .map((cat: any) =>
               buildCategoryMirrorPayload(cat, storeSlug || cat.store_slug || cat.storeSlug || 'bd', knownColumns)
             )
-            .filter((r: Record<string, any>) => r && r.id)
+            .filter((r: Record<string, any>) => r && r.id != null)
             // A category cover uploaded as base64 is the other half of the 400s
             // here: PostgREST rejects the request when the body exceeds its
             // per-request limit, and the failure reads as a schema error. Strip
@@ -2030,8 +2030,11 @@ app.all('/api/categories', async (req, res) => {
                 'Prefer': 'resolution=merge-duplicates',
               },
               body: JSON.stringify(records),
+            }).catch((err) => {
+              console.warn('[Server] /api/categories Supabase fetch error (non-blocking):', err);
+              return null;
             });
-            if (!sbRes.ok) {
+            if (sbRes && !sbRes.ok) {
               const text = await sbRes.text().catch(() => '');
               console.warn(
                 `[Server] /api/categories Supabase REST mirror rejected (${sbRes.status}):`,
@@ -2040,7 +2043,7 @@ app.all('/api/categories', async (req, res) => {
             }
           }
         } catch (sbErr) {
-          console.warn('Supabase category REST upsert warning:', sbErr);
+          console.warn('Supabase category REST upsert warning (non-blocking):', sbErr);
         }
       }
 
@@ -2052,13 +2055,13 @@ app.all('/api/categories', async (req, res) => {
       if (catId) {
         const cats = categoryStore.get(storeSlug) || [];
         const updatedCats = cats
-          .filter((c: any) => String(c.id) !== catId)
+          .filter((c: any) => String(c.id) !== catId && String(c._id) !== catId)
           .map((c: any) => String(c.parentId) === catId || String(c.parent_id) === catId ? { ...c, parentId: null, parent_id: null } : c);
         categoryStore.set(storeSlug, updatedCats);
 
         if (db) {
           try {
-            await db.collection('categories').deleteOne({ id: catId });
+            await db.collection('categories').deleteOne({ $or: [{ id: catId }, { _id: catId }] });
             await db.collection('categories').updateMany(
               { $or: [{ parent_id: catId }, { parentId: catId }] },
               { $set: { parent_id: null, parentId: null } }
@@ -2071,27 +2074,31 @@ app.all('/api/categories', async (req, res) => {
         const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
         if (isConfigured) {
           try {
-            await fetch(`${supabaseUrl}/rest/v1/categories?parent_id=eq.${encodeURIComponent(catId)}`, {
-              method: 'PATCH',
-              headers: {
-                'Content-Type': 'application/json',
-                'apikey': supabaseKey,
-                'Authorization': `Bearer ${supabaseKey}`,
-                'Prefer': 'return=minimal',
-              },
-              body: JSON.stringify({ parent_id: null }),
-            }).catch(() => {});
+            const safeNumericId = toSafeBigIntId(catId);
+            if (safeNumericId !== null) {
+              const idStr = String(safeNumericId);
+              await fetch(`${supabaseUrl}/rest/v1/categories?parent_id=eq.${encodeURIComponent(idStr)}`, {
+                method: 'PATCH',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'apikey': supabaseKey,
+                  'Authorization': `Bearer ${supabaseKey}`,
+                  'Prefer': 'return=minimal',
+                },
+                body: JSON.stringify({ parent_id: null }),
+              }).catch(() => {});
 
-            await fetch(`${supabaseUrl}/rest/v1/categories?id=eq.${encodeURIComponent(catId)}`, {
-              method: 'DELETE',
-              headers: {
-                'apikey': supabaseKey,
-                'Authorization': `Bearer ${supabaseKey}`,
-                'Prefer': 'return=minimal',
-              },
-            }).catch(() => {});
+              await fetch(`${supabaseUrl}/rest/v1/categories?id=eq.${encodeURIComponent(idStr)}`, {
+                method: 'DELETE',
+                headers: {
+                  'apikey': supabaseKey,
+                  'Authorization': `Bearer ${supabaseKey}`,
+                  'Prefer': 'return=minimal',
+                },
+              }).catch(() => {});
+            }
           } catch (e) {
-            console.warn('Server Supabase category delete error:', e);
+            console.warn('Server Supabase category delete error (non-blocking):', e);
           }
         }
         return res.status(200).json({ ok: true, deleted_id: catId });
@@ -2100,17 +2107,25 @@ app.all('/api/categories', async (req, res) => {
     }
 
     if (req.method === 'GET') {
-      let cats = categoryStore.get(storeSlug) || [];
-      if (cats.length === 0 && db) {
+      let cats: any[] = [];
+      if (db) {
         try {
           const query: any = storeSlug ? { $or: [{ store_slug: storeSlug }, { storeSlug: storeSlug }] } : {};
           const mongoCats = await db.collection('categories').find(query).toArray();
           if (Array.isArray(mongoCats) && mongoCats.length > 0) {
-            cats = mongoCats;
+            cats = mongoCats.map((c: any) => ({
+              ...c,
+              id: String(c.id || c._id || `cat-${Date.now()}`),
+              parentId: c.parentId ?? c.parent_id ?? null,
+            }));
+            categoryStore.set(storeSlug, cats);
           }
         } catch (mongoGetErr) {
           console.warn('[Server] /api/categories MongoDB query warning:', mongoGetErr);
         }
+      }
+      if (cats.length === 0) {
+        cats = categoryStore.get(storeSlug) || [];
       }
       return res.status(200).json({ ok: true, store_slug: storeSlug, categories: cats });
     }
@@ -2254,10 +2269,34 @@ app.get('/api/merchants/by-slug', async (req, res) => {
   return res.json({ ok: true, merchant: null });
 });
 
-app.get('/api/categories-by-slug/:slug', (req, res) => {
-  const slug = (req.params.slug || '').trim().toLowerCase();
-  const cats = categoryStore.get(slug) || [];
-  return res.json(cats);
+app.get('/api/categories-by-slug/:slug', async (req, res) => {
+  try {
+    const slug = (req.params.slug || '').trim().toLowerCase();
+    let cats = categoryStore.get(slug) || [];
+    if (cats.length === 0 && mongoose.connection.readyState === 1) {
+      const db = mongoose.connection.db;
+      if (db) {
+        try {
+          const mongoCats = await db.collection('categories').find({
+            $or: [{ store_slug: slug }, { storeSlug: slug }]
+          }).toArray();
+          if (Array.isArray(mongoCats) && mongoCats.length > 0) {
+            cats = mongoCats.map((c: any) => ({
+              ...c,
+              id: String(c.id || c._id || `cat-${Date.now()}`),
+              parentId: c.parentId ?? c.parent_id ?? null,
+            }));
+            categoryStore.set(slug, cats);
+          }
+        } catch (mongoErr) {
+          console.warn('[Server] /api/categories-by-slug MongoDB query warning:', mongoErr);
+        }
+      }
+    }
+    return res.json(cats);
+  } catch {
+    return res.json([]);
+  }
 });
 
 // UUID and store code patterns
@@ -3294,11 +3333,11 @@ app.post('/api/storefront', async (req, res) => {
               .map((cat: any) =>
                 buildCategoryMirrorPayload(cat, storeSlug, knownColumns)
               )
-              .filter((r: Record<string, any>) => r && r.id)
+              .filter((r: Record<string, any>) => r && r.id != null)
               .map((r: Record<string, any>) => sanitizeImagePayload(r).value as Record<string, any>);
 
             if (records.length > 0) {
-              await fetch(`${supabaseUrl}/rest/v1/categories`, {
+              const res = await fetch(`${supabaseUrl}/rest/v1/categories`, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -3307,7 +3346,14 @@ app.post('/api/storefront', async (req, res) => {
                   'Prefer': 'resolution=merge-duplicates',
                 },
                 body: JSON.stringify(records),
+              }).catch((e) => {
+                console.warn('[Server] POST /api/storefront Supabase categories fetch error:', e);
+                return null;
               });
+              if (res && !res.ok) {
+                const text = await res.text().catch(() => '');
+                console.warn('[Server] POST /api/storefront Supabase categories mirror warning:', text.slice(0, 300));
+              }
             }
           } catch (sbCatErr: any) {
             console.warn('[Server] POST /api/storefront Supabase categories mirror warning:', sbCatErr?.message || sbCatErr);

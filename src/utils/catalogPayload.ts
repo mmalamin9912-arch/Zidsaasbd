@@ -1,4 +1,6 @@
-import { buildCategoryMirrorPayload, fetchTableColumns } from '../../lib/supabaseSchema';
+import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId } from '../../lib/supabaseSchema';
+
+export { toSafeBigIntId };
 
 export function toCatalogSlug(value: string, fallback = 'item'): string {
   const slug = (value || '')
@@ -323,57 +325,63 @@ export async function upsertProductToSupabase(productData: any, storeSlugInput?:
   return { ok: !clientError, error: clientError };
 }
 
-export async function upsertCategoryToSupabase(category: any, storeSlugInput?: string) {
-  const slug = String(storeSlugInput || category.storeSlug || category.store_slug || 'bd').toLowerCase().trim();
+export async function upsertCategoryToSupabase(category: any, storeSlugInput?: string): Promise<void> {
+  const slug = String(storeSlugInput || category?.storeSlug || category?.store_slug || 'bd').toLowerCase().trim();
 
-  // Only the ACTIVE tenant slug is written. The previous multi-slug fan-out
-  // issued one Supabase request per alias per category and amplified a schema
-  // rejection into a repeating 400 storm. MongoDB `/api/categories` remains the
-  // authoritative write; this is a best-effort mirror for the real store only.
+  // Only the ACTIVE tenant slug is written. MongoDB `/api/categories` remains the
+  // authoritative write; this is a best-effort mirror that MUST NEVER block or reject.
 
   try {
     const { supabase, supabaseUrl, supabaseAnonKey } = await import('../lib/supabase');
     if (!supabase) return;
 
-    // Ask the table what columns it REALLY has, so we never send a key that
-    // does not exist. Without this, the stray `category_id` key made PostgREST
-    // reject the whole row with PGRST204 and the mirror silently wrote nothing.
+    // Ask the table what columns it REALLY has, so we never send a key that does not exist.
     let columns: string[] | null = null;
     if (supabaseUrl && supabaseAnonKey) {
       try {
         columns = await fetchTableColumns(supabaseUrl, supabaseAnonKey, 'categories');
       } catch {
-        columns = null; // fall back to the conservative core payload
+        columns = null; // fall back to conservative core payload
       }
     }
 
     const payload = buildCategoryMirrorPayload(category, slug, columns);
     if (!payload.id) {
-      console.warn('Supabase category mirror skipped: the category has no id to conflict on.');
+      // Missing or invalid ID — skip Supabase mirror silently
       return;
     }
 
-    const { error } = await supabase
-      .from('categories')
-      .upsert(payload, { onConflict: 'id' });
+    try {
+      const { error } = await supabase
+        .from('categories')
+        .upsert(payload, { onConflict: 'id' });
 
-    if (error) {
-      // If introspection was unavailable and the conservative core still got
-      // rejected, retry with the absolute minimum a categories table needs.
-      if (columns === null && /PGRST204|could not find the/i.test(error.message)) {
-        const minimal = { id: String(category._id ?? category.id ?? ''), name: String(category.name || category.title || 'Category') };
-        if (minimal.id) {
-          const { error: retryErr } = await supabase
-            .from('categories')
-            .upsert(minimal, { onConflict: 'id' });
-          if (!retryErr) return;
-          console.warn('Supabase category mirror skipped (minimal retry failed):', retryErr.message);
-          return;
+      if (error) {
+        // If introspection was unavailable and the conservative core got rejected,
+        // retry with the absolute minimum a categories table needs with safe numeric ID.
+        if (columns === null && /PGRST204|could not find the/i.test(error.message)) {
+          const safeId = toSafeBigIntId(category?._id ?? category?.id);
+          if (safeId !== null) {
+            const minimal = { id: safeId, name: String(category?.name || category?.title || 'Category') };
+            try {
+              const { error: retryErr } = await supabase
+                .from('categories')
+                .upsert(minimal, { onConflict: 'id' });
+              if (!retryErr) return;
+              console.warn('Supabase category mirror skipped (minimal retry failed):', retryErr.message);
+              return;
+            } catch (retryEx) {
+              console.warn('Supabase category minimal retry exception:', retryEx);
+              return;
+            }
+          }
         }
+        console.warn('Supabase category mirror skipped:', error.message);
       }
-      console.warn('Supabase category mirror skipped:', error.message);
+    } catch (upsertErr) {
+      console.warn('Supabase category upsert exception (non-blocking):', upsertErr);
     }
   } catch (e) {
-    console.warn('Supabase category mirror unavailable:', e);
+    console.warn('Supabase category mirror unavailable (non-blocking):', e);
   }
 }

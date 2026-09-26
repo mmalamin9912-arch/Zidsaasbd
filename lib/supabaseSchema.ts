@@ -145,6 +145,86 @@ export function clearColumnCache(): void {
 }
 
 /**
+ * Safely converts an arbitrary ID (MongoDB ObjectId, slug string, or numeric ID)
+ * into a safe, positive integer compatible with PostgreSQL `bigint` columns.
+ *
+ * PostgreSQL error 22P02 ("invalid input syntax for type bigint") occurs when
+ * non-numeric strings such as 24-hex MongoDB ObjectIds ("65e8a...") or string keys
+ * ("cat-home") are passed to `bigint` columns in PostgREST queries (e.g. `categories?on_conflict=id`).
+ */
+export function toSafeBigIntId(rawId: unknown): number | null {
+  if (rawId === null || rawId === undefined || rawId === '') return null;
+
+  if (typeof rawId === 'number') {
+    if (Number.isFinite(rawId) && rawId > 0) return Math.floor(rawId);
+    return null;
+  }
+
+  const str = String(rawId).trim();
+  if (!str) return null;
+
+  // 1. Pure digits string
+  if (/^\d+$/.test(str)) {
+    const num = Number(str);
+    if (num > 0 && Number.isSafeInteger(num)) {
+      return num;
+    }
+    try {
+      const b = BigInt(str);
+      if (b > 0n) {
+        return Number(b % 9007199254740990n) + 1;
+      }
+    } catch {
+      // Fall through to hash
+    }
+  }
+
+  // 2. Prefixed timestamp like "cat-1727378901234"
+  const tsMatch = str.match(/^cat-(\d{9,14})$/i);
+  if (tsMatch) {
+    const num = Number(tsMatch[1]);
+    if (num > 0 && Number.isSafeInteger(num)) {
+      return num;
+    }
+  }
+
+  // 3. MongoDB 24-character hexadecimal ObjectId (e.g. "65e8a002b88df0537d8847aa")
+  // Extract lower 13 hex chars (52 bits), which comfortably fits within JavaScript's 53-bit MAX_SAFE_INTEGER
+  if (/^[0-9a-fA-F]{24}$/.test(str)) {
+    try {
+      const hexSlice = str.slice(-13);
+      const parsed = parseInt(hexSlice, 16);
+      if (parsed > 0 && Number.isSafeInteger(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Fall through to general hash
+    }
+  }
+
+  // 4. Deterministic 64-bit FNV-1a hash algorithm for arbitrary string IDs (e.g. "cat-home", "cat-womens-fashion")
+  // Yields consistent, positive integers in the range [1, 9007199254740990] (safe for Postgres bigint and JS number)
+  try {
+    let hash = 0xcbf29ce484222325n;
+    const prime = 0x100000001b3n;
+    for (let i = 0; i < str.length; i++) {
+      hash ^= BigInt(str.charCodeAt(i));
+      hash = (hash * prime) & 0xffffffffffffffffn;
+    }
+    const positive = hash & 0x7fffffffffffffffn;
+    const safeInt = Number(positive % 9007199254740990n) + 1;
+    return safeInt;
+  } catch {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) + h) + str.charCodeAt(i);
+      h = h & 0x7fffffff;
+    }
+    return (Math.abs(h) % 9007199254740990) + 1;
+  }
+}
+
+/**
  * Build a `categories` row that is guaranteed to match the table's real schema.
  *
  * @param category      the source category object
@@ -158,29 +238,37 @@ export function buildCategoryMirrorPayload(
 ): Record<string, any> {
   const slug = String(storeSlug || 'bd').toLowerCase().trim();
 
+  const rawId = category?._id ?? category?.id ?? '';
+  const safeId = toSafeBigIntId(rawId);
+
+  // An `id` is mandatory: it is the upsert conflict target.
+  // Using toSafeBigIntId guarantees we never pass a non-numeric string (such as
+  // a MongoDB ObjectId or "cat-home") to a PostgreSQL `bigint` column (SQLSTATE 22P02).
+  if (safeId === null) return {};
+
+  const rawParentId = category?.parentId ?? category?.parent_id ?? null;
+  const safeParentId = rawParentId ? toSafeBigIntId(rawParentId) : null;
+
   // The source values, keyed by the column the code WANTS to write.
   const wanted: Record<string, any> = {
-    id: String(category?._id ?? category?.id ?? ''),
+    id: safeId,
     name: String(category?.name || category?.title || 'Category'),
     title: String(category?.name || category?.title || 'Category'),
     image: String(category?.image || category?.coverImage || category?.image_url || ''),
     image_url: String(category?.image || category?.coverImage || category?.image_url || ''),
     status: category?.status || 'active',
     is_published: category?.status !== 'hidden',
-    parent_id: category?.parentId ?? category?.parent_id ?? null,
+    parent_id: safeParentId,
     slug: String(category?.slug || ''),
     store_slug: slug,
     // Legacy aliases: only emitted if the table really has them.
-    category_id: String(category?._id ?? category?.id ?? ''),
+    category_id: safeId,
     category_name: String(category?.name || category?.title || 'Category'),
     cover_image: String(category?.image || category?.coverImage || category?.image_url || ''),
     sort_order: Number.isFinite(Number(category?.sortOrder ?? category?.sort_order))
       ? Number(category?.sortOrder ?? category?.sort_order)
       : 0,
   };
-
-  // An `id` is mandatory: it is the upsert conflict target.
-  if (!wanted.id) return {};
 
   // ── Schema known → emit exactly the columns that exist. ────────────────────
   if (knownColumns) {
@@ -221,6 +309,7 @@ export function buildCategoryMirrorPayload(
 
 export default {
   buildCategoryMirrorPayload,
+  toSafeBigIntId,
   fetchTableColumns,
   probeColumn,
   clearColumnCache,

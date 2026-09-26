@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Product } from '../../types';
 import { readZidStoreData, writeZidStoreData } from '../../lib/storeData';
-import { upsertCategoryToSupabase } from '../../utils/catalogPayload';
+import { upsertCategoryToSupabase, toSafeBigIntId } from '../../utils/catalogPayload';
 import { readAndDownscaleImage } from '../../utils/imageUtils';
 import SafeImage from '../SafeImage';
 import { 
@@ -229,10 +229,16 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
       method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' }, body: JSON.stringify({ categories }),
     }).catch(() => undefined);
 
-    // Upsert each category directly to Supabase table
+    // Upsert each category directly to Supabase table (best-effort background mirror)
     if (Array.isArray(categories)) {
       for (const cat of categories) {
-        void upsertCategoryToSupabase(cat, storeSlug);
+        try {
+          void upsertCategoryToSupabase(cat, storeSlug).catch((err) => {
+            console.warn('Background category Supabase upsert non-blocking warning:', err);
+          });
+        } catch (catSyncErr) {
+          console.warn('Category sync skipped (non-blocking):', catSyncErr);
+        }
       }
     }
   }, [categories]);
@@ -439,13 +445,22 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
     try {
       const { supabase } = await import('../../lib/supabase');
       if (supabase) {
-        await supabase.from('categories').update({ parent_id: null, parentId: null }).eq('parent_id', catId);
-        await supabase.from('categories').delete().eq('id', catId);
-        // MongoDB `/api/categories?id=...` above is authoritative; the Supabase
-        // call is an optional mirror and must never be retried on schema errors.
+        const safeNumericId = toSafeBigIntId(catId);
+        if (safeNumericId !== null) {
+          try {
+            await supabase.from('categories').update({ parent_id: null }).eq('parent_id', safeNumericId);
+          } catch (updateErr) {
+            console.warn('Supabase category parent_id reset skipped (non-blocking):', updateErr);
+          }
+          try {
+            await supabase.from('categories').delete().eq('id', safeNumericId);
+          } catch (delErr) {
+            console.warn('Supabase category direct delete skipped (non-blocking):', delErr);
+          }
+        }
       }
     } catch (sbErr) {
-      console.warn('Supabase category direct delete warning:', sbErr);
+      console.warn('Supabase category direct delete warning (non-blocking):', sbErr);
     }
 
     // Remove category and assign children to null parent in UI state immediately
