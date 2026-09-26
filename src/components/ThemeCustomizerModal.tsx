@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { GalleryImage, MerchantProfile } from '../types';
 import { TenantStorefrontView } from './TenantStorefrontView';
 import { writeZidStoreData } from '../lib/storeData';
+import { readAndDownscaleImage } from '../utils/imageUtils';
 import SafeImage from './SafeImage';
 import { supabase } from '../lib/supabase';
 import {
@@ -278,23 +279,42 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const videoInputRef = useRef<HTMLInputElement>(null);
   const [updatingGalleryIndex, setUpdatingGalleryIndex] = useState<number | null>(null);
 
-  const handleGalleryImageUpload = (e: React.ChangeEvent<HTMLInputElement>, mode: 'add' | 'update', index?: number) => {
+  /**
+   * Read an uploaded image and hand the DOWNSCALED `data:` URL to a setter.
+   *
+   * Every image in this modal (logo, favicon, gallery, section backgrounds) ends
+   * up inside `theme_config`, which is persisted through /api/stores/update. A
+   * raw FileReader result is several MB, which is what produced the 413 there and
+   * the Supabase mirror's 400.
+   */
+  const pickImage = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    apply: (dataUrl: string) => void
+  ) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64String = reader.result as string;
-        if (mode === 'add') {
-          setGalleryImages([...galleryImages, { url: base64String, caption: 'New Image', link: '#' }]);
-        } else if (mode === 'update' && index !== undefined) {
-          const newImages = [...galleryImages];
-          newImages[index].url = base64String;
-          setGalleryImages(newImages);
-        }
-        // Reset input value
-        e.target.value = '';
-      };
-      reader.readAsDataURL(file);
+    e.target.value = '';
+    if (!file) return;
+    const dataUrl = await readAndDownscaleImage(file);
+    if (dataUrl) apply(dataUrl);
+  };
+
+  const handleGalleryImageUpload = async (e: React.ChangeEvent<HTMLInputElement>, mode: 'add' | 'update', index?: number) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+
+    // Downscale before it enters theme_config. Gallery images are persisted via
+    // /api/stores/update, so a full-size upload here was a direct cause of the
+    // 413 on save and of the Supabase mirror's 400.
+    const base64String = await readAndDownscaleImage(file);
+    if (!base64String) return;
+
+    if (mode === 'add') {
+      setGalleryImages([...galleryImages, { url: base64String, caption: 'New Image', link: '#' }]);
+    } else if (mode === 'update' && index !== undefined) {
+      const newImages = [...galleryImages];
+      newImages[index].url = base64String;
+      setGalleryImages(newImages);
     }
   };
 
@@ -1239,18 +1259,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                               type="file"
                               accept="image/*"
                               className="hidden"
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (file) {
-                                  const reader = new FileReader();
-                                  reader.onload = (event) => {
-                                    if (event.target?.result) {
-                                      setDesktopLogoUrl(event.target.result as string);
-                                    }
-                                  };
-                                  reader.readAsDataURL(file);
-                                }
-                              }}
+                              onChange={(e) => pickImage(e, setDesktopLogoUrl)}
                             />
                           </label>
                         </div>
@@ -1288,18 +1297,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                               type="file"
                               accept="image/*"
                               className="hidden"
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (file) {
-                                  const reader = new FileReader();
-                                  reader.onload = (event) => {
-                                    if (event.target?.result) {
-                                      setMobileLogoUrl(event.target.result as string);
-                                    }
-                                  };
-                                  reader.readAsDataURL(file);
-                                }
-                              }}
+                              onChange={(e) => pickImage(e, setMobileLogoUrl)}
                             />
                           </label>
                         </div>
@@ -1676,20 +1674,10 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                       type="file"
                                       accept="image/*"
                                       className="hidden"
-                                      onChange={(e) => {
-                                        const file = e.target.files?.[0];
-                                        if (file) {
-                                          const reader = new FileReader();
-                                          reader.onload = (event) => {
-                                            if (event.target?.result) {
-                                              const newImg = event.target.result as string;
-                                              setSlides(prev => prev.map((item, i) => i === idx ? { ...item, image: newImg } : item));
-                                              if (activeSlideIndex === idx) updateHeroImage(newImg);
-                                            }
-                                          };
-                                          reader.readAsDataURL(file);
-                                        }
-                                      }}
+                                      onChange={(e) => pickImage(e, (newImg) => {
+                                        setSlides(prev => prev.map((item, i) => i === idx ? { ...item, image: newImg } : item));
+                                        if (activeSlideIndex === idx) updateHeroImage(newImg);
+                                      })}
                                     />
                                   </label>
                                 </div>
@@ -2035,18 +2023,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                               type="file"
                               accept="image/*"
                               className="hidden"
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (file) {
-                                  const reader = new FileReader();
-                                  reader.onload = (event) => {
-                                    if (event.target?.result) {
-                                      setCountdownBgImage(event.target.result as string);
-                                    }
-                                  };
-                                  reader.readAsDataURL(file);
-                                }
-                              }}
+                              onChange={(e) => pickImage(e, setCountdownBgImage)}
                             />
                           </label>
                         </div>
@@ -3063,20 +3040,10 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                           type="file"
                                           accept="image/*"
                                           className="hidden"
-                                          onChange={(e) => {
-                                            const file = e.target.files?.[0];
-                                            if (file) {
-                                              const reader = new FileReader();
-                                              reader.onload = (event) => {
-                                                if (event.target?.result) {
-                                                  const newImg = event.target.result as string;
-                                                  setSlides(prev => prev.map((item, i) => i === idx ? { ...item, image: newImg } : item));
-                                                  if (activeSlideIndex === idx) updateHeroImage(newImg);
-                                                }
-                                              };
-                                              reader.readAsDataURL(file);
-                                            }
-                                          }}
+                                          onChange={(e) => pickImage(e, (newImg) => {
+                                            setSlides(prev => prev.map((item, i) => i === idx ? { ...item, image: newImg } : item));
+                                            if (activeSlideIndex === idx) updateHeroImage(newImg);
+                                          })}
                                         />
                                       </label>
                                     </div>
@@ -3212,18 +3179,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 type="file"
                                 accept="image/*"
                                 className="hidden"
-                                onChange={(e) => {
-                                  const file = e.target.files?.[0];
-                                  if (file) {
-                                    const reader = new FileReader();
-                                    reader.onload = (event) => {
-                                      if (event.target?.result) {
-                                        setCategoriesBgImage(event.target.result as string);
-                                      }
-                                    };
-                                    reader.readAsDataURL(file);
-                                  }
-                                }}
+                                onChange={(e) => pickImage(e, setCategoriesBgImage)}
                               />
                             </label>
                           </div>
@@ -3452,18 +3408,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 type="file"
                                 accept="image/*"
                                 className="hidden"
-                                onChange={(e) => {
-                                  const file = e.target.files?.[0];
-                                  if (file) {
-                                    const reader = new FileReader();
-                                    reader.onload = (event) => {
-                                      if (event.target?.result) {
-                                        setCountdownBgImage(event.target.result as string);
-                                      }
-                                    };
-                                    reader.readAsDataURL(file);
-                                  }
-                                }}
+                                onChange={(e) => pickImage(e, setCountdownBgImage)}
                               />
                             </label>
                           </div>
@@ -3770,18 +3715,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 type="file"
                                 accept="image/*"
                                 className="hidden"
-                                onChange={(e) => {
-                                  const file = e.target.files?.[0];
-                                  if (file) {
-                                    const reader = new FileReader();
-                                    reader.onload = (event) => {
-                                      if (event.target?.result) {
-                                        setVideoCoverImage(event.target.result as string);
-                                      }
-                                    };
-                                    reader.readAsDataURL(file);
-                                  }
-                                }}
+                                onChange={(e) => pickImage(e, setVideoCoverImage)}
                               />
                             </label>
                           </div>
@@ -3810,15 +3744,19 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 className="hidden"
                                 onChange={(e) => {
                                   const file = e.target.files?.[0];
-                                  if (file) {
-                                    const reader = new FileReader();
-                                    reader.onload = (event) => {
-                                      if (event.target?.result) {
-                                        setVideoFileUrl(event.target.result as string);
-                                      }
-                                    };
-                                    reader.readAsDataURL(file);
+                                  e.target.value = '';
+                                  if (!file) return;
+                                  // A video is far too large to inline as base64
+                                  // (a 20MB clip is ~27MB encoded, which no
+                                  // document store will accept). Use a blob URL
+                                  // for preview and persist nothing inline.
+                                  if (file.size > 4_000_000) {
+                                    console.warn(
+                                      '[ThemeCustomizer] Video is larger than 4MB and will not be saved inline. ' +
+                                      'Host it and use a URL instead.'
+                                    );
                                   }
+                                  setVideoFileUrl(URL.createObjectURL(file));
                                 }}
                               />
                             </label>

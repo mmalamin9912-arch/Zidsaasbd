@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../types';
 import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug } from '../../utils/catalogPayload';
 import { buildDeliveryFeeFields } from '../../utils/deliveryCharges';
+import { downscaleImage, readAndDownscaleImage } from '../../utils/imageUtils';
 import { readZidStoreData } from '../../lib/storeData';
 import { safeGetItem } from '../../utils/safeStorage';
 import { isProAccessGranted } from '../../lib/subscriptionStatusCache';
@@ -50,68 +51,6 @@ import {
   Truck,
   Loader2
 } from 'lucide-react';
-
-/**
- * Optimise an image for the storefront and return the URL to persist.
- *
- * WHAT IT ACTUALLY DOES
- * ---------------------
- * An uploaded file arrives as a `data:` URL, which can be several megabytes of
- * base64 embedded in every product document and every storefront response. This
- * downsamples it to a storefront-appropriate size and re-encodes it as WebP (with
- * a JPEG fallback), typically cutting the payload by 80-95% while looking
- * identical at display size.
- *
- * Runs entirely in the browser via canvas, so there is no upload round-trip and
- * no server dependency. It NEVER throws: any failure returns the original image,
- * because losing the merchant's photo would be far worse than saving a large one.
- *
- * A remote http(s) URL is returned untouched — those are already hosted.
- */
-async function optimizeImageForStorefront(source: string): Promise<string> {
-  if (!source) return source;
-  // Only local/canvas-encodable images can be re-encoded.
-  if (!/^data:image\//i.test(source) && !/^blob:/i.test(source)) return source;
-  if (typeof document === 'undefined') return source;
-
-  const MAX_EDGE = 1200;
-
-  return new Promise<string>((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const scale = Math.min(1, MAX_EDGE / Math.max(img.width || 1, img.height || 1));
-        const width = Math.max(1, Math.round((img.width || MAX_EDGE) * scale));
-        const height = Math.max(1, Math.round((img.height || MAX_EDGE) * scale));
-
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(source);
-          return;
-        }
-        ctx.drawImage(img, 0, 0, width, height);
-
-        // WebP first (much smaller at the same visual quality); a browser that
-        // cannot encode it falls back to quality-tuned JPEG rather than
-        // returning a PNG that could be LARGER than the original.
-        let encoded = canvas.toDataURL('image/webp', 0.85);
-        if (!encoded.startsWith('data:image/webp')) {
-          encoded = canvas.toDataURL('image/jpeg', 0.85);
-        }
-
-        // Only accept the result if it is genuinely smaller.
-        resolve(encoded && encoded.length < source.length ? encoded : source);
-      } catch {
-        resolve(source);
-      }
-    };
-    img.onerror = () => resolve(source);
-    img.src = source;
-  });
-}
 
 interface SingleProductFormProps {
   initialData?: Product | null;
@@ -447,7 +386,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     setIsEnhancingImage(true);
     try {
       const original = image;
-      const optimized = await optimizeImageForStorefront(original);
+      const optimized = await downscaleImage(original);
 
       if (optimized && optimized !== original) {
         // Keep the ORIGINAL too, so the merchant can revert and so the stored
@@ -770,23 +709,23 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
+    e.target.value = '';
 
     for (let i = 0; i < files.length; i++) {
       const file: File = files[i];
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const result = event.target?.result as string;
-        if (result) {
-          if (!image) {
-            setImage(result);
-          } else {
-            setAdditionalImages((prev) => [...prev, result]);
-          }
+      // Downscale at upload time. Previously the raw FileReader output was
+      // stored, so a phone photo landed in the payload at full size — the
+      // cause of the 413 on save. The Magic Enhance button used to be the only
+      // path that optimized, which is why a plain upload still failed.
+      void readAndDownscaleImage(file).then((result) => {
+        if (!result) return;
+        if (!image) {
+          setImage(result);
+        } else {
+          setAdditionalImages((prev) => [...prev, result]);
         }
-      };
-      reader.readAsDataURL(file);
+      });
     }
-    e.target.value = '';
   };
 
 
@@ -2036,17 +1975,11 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                                           type="file"
                                           accept="image/*"
                                           className="hidden"
-                                          onChange={(e) => {
+                                          onChange={async (e) => {
                                             const file = e.target.files?.[0];
                                             if (file) {
-                                              const reader = new FileReader();
-                                              reader.onload = (event) => {
-                                                const result = event.target?.result as string;
-                                                if (result) {
-                                                  updateVariantImage(v.id, result);
-                                                }
-                                              };
-                                              reader.readAsDataURL(file);
+                                              const result = await readAndDownscaleImage(file);
+                                              if (result) updateVariantImage(v.id, result);
                                             }
                                           }}
                                         />

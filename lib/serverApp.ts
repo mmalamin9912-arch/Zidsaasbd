@@ -88,6 +88,7 @@ import {
 } from './orderStatus.js';
 import { sendRecoveryCoupon, listRecoveryLogs } from './abandonedCarts.js';
 import { buildCategoryMirrorPayload, fetchTableColumns } from './supabaseSchema.js';
+import { sanitizeImagePayload, formatBytes } from './imagePayload.js';
 
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
@@ -214,7 +215,26 @@ process.on('warning', (warning: any) => {
 });
 
 const app = express();
-app.use(express.json());
+
+// ── Request body limits ───────────────────────────────────────────────────────
+//
+// Express defaults `express.json()` to **100kb**. The dashboard legitimately
+// sends far more than that: a merchant uploading a store logo, a category cover
+// or a product photo has it read as a `data:` URL by FileReader and echoed back
+// inside the `/api/stores/update` / `/api/categories` payload. A single 2MB
+// photo is ~2.7MB of base64 — 27× the default limit — so the parser rejected the
+// request with `PayloadTooLargeError` (HTTP 413, "request entity too large")
+// BEFORE any route ran. That is the exact error in the log, and it made store
+// and category saves fail with no way for the merchant to succeed.
+//
+// The limit is raised to accommodate a realistic multi-image payload, and the
+// images themselves are stripped/downscaled before they reach the database (see
+// `sanitizeImagePayload`), because raising the limit alone would just move the
+// failure to Mongo's 16MB document ceiling.
+const JSON_BODY_LIMIT = process.env.API_JSON_BODY_LIMIT || '25mb';
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
+// Some clients post uploads as form data rather than JSON.
+app.use(express.urlencoded({ limit: JSON_BODY_LIMIT, extended: true }));
 
 const STORE_FILE = path.join(process.cwd(), 'local-store.json');
 
@@ -1968,9 +1988,12 @@ app.all('/api/categories', async (req, res) => {
               slug: cat.slug || '',
               updated_at: new Date(),
             };
+            // A base64 cover would push the document toward Mongo's 16MB ceiling
+            // and the Supabase mirror over its request limit. Strip it here too.
+            const safeDoc = sanitizeImagePayload(doc).value as Record<string, any>;
             await db.collection('categories').updateOne(
               { id: catId },
-              { $set: doc, $setOnInsert: { created_at: new Date() } },
+              { $set: safeDoc, $setOnInsert: { created_at: new Date() } },
               { upsert: true }
             );
           }
@@ -1988,7 +2011,12 @@ app.all('/api/categories', async (req, res) => {
             .map((cat: any) =>
               buildCategoryMirrorPayload(cat, storeSlug || cat.store_slug || cat.storeSlug || 'bd', knownColumns)
             )
-            .filter((r: Record<string, any>) => r && r.id);
+            .filter((r: Record<string, any>) => r && r.id)
+            // A category cover uploaded as base64 is the other half of the 400s
+            // here: PostgREST rejects the request when the body exceeds its
+            // per-request limit, and the failure reads as a schema error. Strip
+            // oversized images so the mirror carries only a usable URL.
+            .map((r: Record<string, any>) => sanitizeImagePayload(r).value as Record<string, any>);
 
           if (records.length === 0) {
             console.warn('[Server] /api/categories Supabase mirror skipped: no category had a usable id.');
@@ -3549,6 +3577,23 @@ app.post('/api/stores/update', async (req, res) => {
     const email = String(m.email || '').trim().toLowerCase();
     const storeId = String(m.id || m.storeId || m.store_id || '').trim();
 
+    // Strip oversized inline base64 images BEFORE they reach Mongo or Supabase.
+    //
+    // Raising the Express body limit stops the 413, but the same multi-megabyte
+    // `data:` logo would then be written into the `stores` document and mirrored
+    // to Supabase — where it blows the per-request size limit and comes back as
+    // an opaque 400 that looks like a schema error. Dropping the oversized image
+    // here fixes the real problem rather than deferring it.
+    const imageSanitized = sanitizeImagePayload(m);
+    const cleanMerchant = imageSanitized.value as Record<string, any>;
+    if (imageSanitized.changed) {
+      console.warn(
+        '[Server] /api/stores/update: stripped oversized image field(s):',
+        imageSanitized.strippedFields.join(', '),
+        `(${formatBytes(imageSanitized.before)} -> ${formatBytes(imageSanitized.after)})`
+      );
+    }
+
     // 1. Direct MongoDB update
     await connectToMongoDB();
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
@@ -3564,7 +3609,7 @@ app.post('/api/stores/update', async (req, res) => {
           // update with Mongo error 66, which is what produced the "would modify
           // the immutable field '_id'" warning on every settings save. Strip it
           // (and any operator keys) before building $set.
-          const cleanPatch = sanitizeMongoPatch(m);
+          const cleanPatch = sanitizeMongoPatch(cleanMerchant);
           if (Object.keys(cleanPatch).length === 0) {
             console.warn('[Server] /api/stores/update: nothing to update after sanitizing the patch.');
           } else {
@@ -3603,14 +3648,19 @@ app.post('/api/stores/update', async (req, res) => {
         ];
         const sbPayload: Record<string, any> = {};
         for (const key of allowed) {
-          if (m[key] !== undefined) sbPayload[key] = m[key];
+          if (cleanMerchant[key] !== undefined) sbPayload[key] = cleanMerchant[key];
         }
         // Carry the theme selection under its snake_case column names.
-        if (m.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = m.activeThemeId;
-        if (m.themeConfig && sbPayload.theme_config === undefined) sbPayload.theme_config = m.themeConfig;
+        if (cleanMerchant.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = cleanMerchant.activeThemeId;
+        if (cleanMerchant.themeConfig && sbPayload.theme_config === undefined) sbPayload.theme_config = cleanMerchant.themeConfig;
         if (storeSlug && sbPayload.store_slug === undefined) sbPayload.store_slug = storeSlug;
 
-        if (Object.keys(sbPayload).length > 0) {
+        // A theme_config can itself embed gallery images; strip those too so the
+        // Supabase mirror does not 400 on size.
+        const sbSanitized = sanitizeImagePayload(sbPayload);
+        const cleanSbPayload = sbSanitized.value as Record<string, any>;
+
+        if (Object.keys(cleanSbPayload).length > 0) {
           const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?on_conflict=store_slug`, {
             method: 'POST',
             headers: {
@@ -3619,9 +3669,18 @@ app.post('/api/stores/update', async (req, res) => {
               'Content-Type': 'application/json',
               Prefer: 'resolution=merge-duplicates',
             },
-            body: JSON.stringify(sbPayload),
+            body: JSON.stringify(cleanSbPayload),
           });
-          if (!sbRes.ok) console.warn('[Server] /api/stores/update Supabase mirror warning:', sbRes.status);
+          if (!sbRes.ok) {
+            // Read the body: a bare status code hid the real cause (usually an
+            // unknown column or a size rejection) behind "warning: 400".
+            const detail = await sbRes.text().catch(() => '');
+            console.warn(
+              '[Server] /api/stores/update Supabase mirror warning:',
+              sbRes.status,
+              detail.slice(0, 300)
+            );
+          }
         }
       }
     } catch (sbErr: any) {
@@ -3629,11 +3688,11 @@ app.post('/api/stores/update', async (req, res) => {
     }
 
     if (storeSlug) {
-      merchantStore.set(storeSlug, m);
+      merchantStore.set(storeSlug, cleanMerchant);
     }
     const payload = await readStorePayload();
     if (patch.merchant) {
-      payload.merchant = { ...(payload.merchant || {}), ...patch.merchant };
+      payload.merchant = { ...(payload.merchant || {}), ...cleanMerchant };
     }
     await writeStorePayload(payload);
 
@@ -3650,7 +3709,7 @@ app.post('/api/stores/update', async (req, res) => {
       'payment_config', 'paymentConfig',
     ];
     let onboardingStatus: Record<string, any> | undefined;
-    if (storeSlug && ONBOARDING_RELEVANT_KEYS.some((key) => m[key] !== undefined)) {
+    if (storeSlug && ONBOARDING_RELEVANT_KEYS.some((key) => cleanMerchant[key] !== undefined)) {
       try {
         const status = await checkOnboardingStatus(storeSlug, { persist: true });
         onboardingStatus = {
@@ -3668,6 +3727,11 @@ app.post('/api/stores/update', async (req, res) => {
       ok: true,
       store_slug: storeSlug || payload.merchant?.storeSlug || '',
       ...(onboardingStatus ? { onboarding: onboardingStatus } : {}),
+      // Tell the client when an image had to be dropped, so the UI can warn
+      // instead of the merchant silently losing their logo.
+      ...(imageSanitized.changed
+        ? { warning: imageSanitized.notice, strippedFields: imageSanitized.strippedFields }
+        : {}),
     });
   } catch (err: any) {
     console.error('[Server] POST /api/stores/update error:', err);
@@ -9194,6 +9258,36 @@ app.get('/api/export/download', async (req, res) => {
 // never receives an HTML error page or a hung request.
 app.use((err: any, req: any, res: any, _next: any) => {
   if (res.headersSent) return;
+
+  // A body-parser rejection is a CLIENT problem with a specific cause, not an
+  // opaque 500. Reporting it as 413 + a plain-English message tells the merchant
+  // exactly what to do (upload a smaller image) instead of leaving them with
+  // "request entity too large" in a server log they cannot see.
+  const isTooLarge =
+    err?.type === 'entity.too.large' ||
+    err?.status === 413 ||
+    err?.statusCode === 413;
+
+  if (isTooLarge) {
+    const limitMb = Math.round((Number(err?.limit) || 0) / (1024 * 1024));
+    console.warn(
+      `[Server] Payload too large on ${req.method} ${req.originalUrl || req.url}` +
+        (limitMb ? ` (limit ${limitMb}MB)` : '')
+    );
+    try {
+      return res.status(413).json({
+        ok: false,
+        error:
+          'This request was too large to save. Please upload a smaller image ' +
+          '(under about 2 MB) or reduce the number of images and try again.',
+        code: 'PAYLOAD_TOO_LARGE',
+        limitBytes: Number(err?.limit) || undefined,
+      });
+    } catch {
+      return res.status(413).end();
+    }
+  }
+
   const status = Number(err?.status || err?.statusCode) || 500;
   console.error(`[Server] Unhandled error on ${req.method} ${req.originalUrl || req.url}:`, err?.message || err);
   try {

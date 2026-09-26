@@ -4,6 +4,7 @@ import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
 import LiveThemePreview from './LiveThemePreview';
 import { resolveLayoutForTheme, LAYOUT_LABELS } from '../lib/themeRegistry';
+import { readAndDownscaleImage } from '../utils/imageUtils';
 import { fetchAuditLogs } from '../lib/platformConfigApi';
 import {
   ShieldAlert,
@@ -3246,15 +3247,12 @@ onUpdateMerchant(updatedCurrent);
                           <input
                             type="file"
                             accept="image/*"
-                            onChange={(e) => {
+                            onChange={async (e) => {
                               const file = e.target.files?.[0];
-                              if (file) {
-                                const reader = new FileReader();
-                                reader.onloadend = () => {
-                                  setSettingsForm({...settingsForm, logoUrl: reader.result as string});
-                                };
-                                reader.readAsDataURL(file);
-                              }
+                              e.target.value = '';
+                              if (!file) return;
+                              const dataUrl = await readAndDownscaleImage(file, 512);
+                              if (dataUrl) setSettingsForm({ ...settingsForm, logoUrl: dataUrl });
                             }}
                             className="text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-[#2E3548] file:text-white hover:file:bg-[#3A435E] cursor-pointer"
                           />

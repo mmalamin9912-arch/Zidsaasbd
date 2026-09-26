@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Product } from '../../types';
 import { readZidStoreData, writeZidStoreData } from '../../lib/storeData';
 import { upsertCategoryToSupabase } from '../../utils/catalogPayload';
+import { readAndDownscaleImage } from '../../utils/imageUtils';
 import SafeImage from '../SafeImage';
 import { 
   FolderTree, 
@@ -457,19 +458,18 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
   };
 
   // Image File Upload Handlers
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, target: 'image' | 'cover') => {
+  //
+  // Downscaled at the point of upload: a category cover read straight from the
+  // device was several MB of base64, which is what produced the 413 on
+  // /api/categories and the 400 from the Supabase mirror.
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>, target: 'image' | 'cover') => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const res = evt.target?.result as string;
-      if (res) {
-        if (target === 'image') setFormImage(res);
-        else setFormCoverImage(res);
-      }
-    };
-    reader.readAsDataURL(file);
     e.target.value = '';
+    const res = await readAndDownscaleImage(file);
+    if (!res) return;
+    if (target === 'image') setFormImage(res);
+    else setFormCoverImage(res);
   };
 
   // Auto-generate or Custom Slug

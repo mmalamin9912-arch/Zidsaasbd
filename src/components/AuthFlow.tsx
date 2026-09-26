@@ -40,6 +40,7 @@ import {
 import { safeParseJson } from '../lib/safeFetch';
 import { generateStoreCode, resolveStoreRef, withPermanentStoreId } from '../lib/storeId';
 import { fetchStoreByRef } from '../lib/storeApi';
+import { readAndDownscaleImage } from '../utils/imageUtils';
 
 interface AuthFlowProps {
   onLoginSuccess: (userProfile: MerchantProfile) => void;
@@ -103,21 +104,21 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const [storeLogo, setStoreLogo] = useState('');
   const [phone, setPhone] = useState('');
 
-  const handleLogoFile = (file: File) => {
+  const handleLogoFile = async (file: File) => {
     if (file.size > 2 * 1024 * 1024) {
       setErrorMsg('Logo file size must be less than 2MB.');
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      if (e.target?.result) {
-        setStoreLogo(e.target.result as string);
-      }
-    };
-    reader.onerror = () => {
+    // Downscale before storing: the logo is saved on the store record and
+    // mirrored to Supabase, so a raw 2MB upload is ~2.7MB of base64 in the
+    // /api/stores/update body — over the parser limit and over the Supabase
+    // per-request limit.
+    const dataUrl = await readAndDownscaleImage(file, 512);
+    if (!dataUrl) {
       setErrorMsg('Failed to read the logo file.');
-    };
-    reader.readAsDataURL(file);
+      return;
+    }
+    setStoreLogo(dataUrl);
   };
   const [streetAddress, setStreetAddress] = useState('');
   const [district, setDistrict] = useState('Dhaka');
