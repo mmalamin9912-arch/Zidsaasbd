@@ -3222,16 +3222,19 @@ app.get('/api/storefront/:slug', async (req, res) => {
 app.post('/api/storefront', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const storeSlug = typeof req.body?.store_slug === 'string'
-      ? req.body.store_slug.trim().toLowerCase()
-      : typeof req.body?.storeSlug === 'string'
-        ? req.body.storeSlug.trim().toLowerCase()
-        : 'bd';
+    const storeSlug = typeof req.query?.store_slug === 'string'
+      ? req.query.store_slug.trim().toLowerCase()
+      : typeof req.body?.store_slug === 'string'
+        ? req.body.store_slug.trim().toLowerCase()
+        : typeof req.body?.storeSlug === 'string'
+          ? req.body.storeSlug.trim().toLowerCase()
+          : 'bd';
 
-    const payload = req.body || {};
-    const products = Array.isArray(payload.products) ? payload.products : [];
-    const categories = Array.isArray(payload.categories) ? payload.categories : [];
-    const merchant = payload.merchant || {};
+    const body = req.body || {};
+    const patch = body.patch || body;
+    const products = Array.isArray(patch.products) ? patch.products : Array.isArray(body.products) ? body.products : [];
+    const categories = Array.isArray(patch.categories) ? patch.categories : Array.isArray(body.categories) ? body.categories : [];
+    const merchant = patch.merchant || body.merchant || {};
 
     // 1. MongoDB write (authoritative)
     try {
