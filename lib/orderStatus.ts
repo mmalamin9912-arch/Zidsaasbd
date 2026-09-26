@@ -100,6 +100,91 @@ function normalizeKey(value: string): string {
 }
 
 /**
+ * Every status tab OrdersView renders, in display order.
+ *
+ * This is deliberately a SUPERSET of `ORDER_STATUSES`: the reverse-logistics
+ * tabs ('Processing reverse', 'Partially Reversed', 'Reversed') are real UI
+ * filters but were never canonicalised, so filtering on them through Mongo
+ * needs the tab label itself to be matchable.
+ */
+export const ORDER_STATUS_TABS = [
+  'New',
+  'Preparing',
+  'Ready',
+  'In delivery',
+  'Completed',
+  'Cancelled',
+  'Processing reverse',
+  'Partially Reversed',
+  'Reversed',
+] as const;
+
+/**
+ * Reverse-logistics tab → the canonical statuses it should match.
+ *
+ * A row in any of these states is a reverse in progress from the merchant's
+ * point of view, so each reverse tab matches all of them rather than only its
+ * exact label. Without this, 'Processing reverse' returned an empty list for
+ * every real order.
+ */
+const REVERSE_ALIASES: Record<string, string[]> = {
+  processingreverse: ['Processing reverse', 'Reversing', 'Reverse processing'],
+  partiallyreversed: ['Partially Reversed', 'Partial Reversed', 'Partially reversed'],
+  reversed: ['Reversed', 'Fully Reversed', 'Refund processed'],
+};
+
+/**
+ * All the raw spellings a status may have been PERSISTED under, so a Mongo
+ * `status: { $in: [...] }` filter finds the row regardless of which one was
+ * written.
+ *
+ * Rows written by the storefront, by the dashboard dropdown and by the courier
+ * dispatch route all use different spellings for the same state; matching only
+ * the display label silently returned nothing.
+ */
+export function orderStatusQueryValues(raw: unknown): string[] {
+  const text = String(raw ?? '').trim();
+  if (!text) return [];
+
+  const canonical = canonicalOrderStatus(text) || text;
+  const values = new Set<string>([text, canonical]);
+
+  // Every alias that resolves back to the canonical status.
+  for (const [alias, target] of Object.entries(STATUS_ALIASES)) {
+    if (target === canonical) {
+      values.add(alias);
+      // `outfordelivery` was persisted as 'Out for delivery' too.
+      values.add(alias.replace(/([a-z])([0-9])/g, '$1 $2'));
+    }
+  }
+  // snake_case / kebab-case variants of the canonical label.
+  values.add(canonical.toLowerCase().replace(/[^a-z0-9]+/g, '_'));
+  values.add(canonical.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+  values.add(canonical.toLowerCase());
+
+  // Reverse tabs also match the whole reverse family.
+  const reverseKey = normalizeKey(canonical);
+  for (const aliases of Object.values(REVERSE_ALIASES)) {
+    if (aliases.some((a) => normalizeKey(a) === reverseKey)) {
+      for (const a of aliases) {
+        values.add(a);
+        values.add(a.toLowerCase().replace(/[^a-z0-9]+/g, '_'));
+      }
+    }
+  }
+
+  return Array.from(values).filter(Boolean);
+}
+
+/** Convenience: the full `$in` value list for a status tab, or null for 'All'. */
+export function orderStatusFilter(raw: unknown): string[] | null {
+  const text = String(raw ?? '').trim();
+  if (!text || text.toLowerCase() === 'all') return null;
+  const values = orderStatusQueryValues(text);
+  return values.length ? values : [text];
+}
+
+/**
  * Canonicalise an incoming order status.
  * Returns `null` when the value is empty, so the caller can skip the field
  * instead of writing `undefined` over the stored value.
@@ -329,8 +414,11 @@ export async function recordCourierDispatch(
 export default {
   ORDER_STATUSES,
   PAYMENT_STATUSES,
+  ORDER_STATUS_TABS,
   canonicalOrderStatus,
   canonicalPaymentStatus,
+  orderStatusQueryValues,
+  orderStatusFilter,
   fulfillmentForStatus,
   findOrder,
   updateOrderFields,

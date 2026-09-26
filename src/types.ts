@@ -573,6 +573,12 @@ export interface Order {
   id: string;
   orderNumber: string;
   source?: 'Store' | 'Manual' | 'POS' | 'WhatsApp';
+  /**
+   * Explicit flag set by the "+ Create Order" flow and persisted to Mongo as
+   * `is_manual` / `isManual`. The "Manual orders" tab relies on it; `source`
+   * alone is not enough because older rows only carry the label.
+   */
+  isManual?: boolean;
   customerName: string;
   customerPhone: string;
   customerCity: string;

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, OrderItem } from '../../types';
-import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders } from '../../utils/orderUtils';
+import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canonicalStatusOf, isManualOrder } from '../../utils/orderUtils';
 import SafeImage from '../SafeImage';
 import {
   ShoppingBag,
@@ -116,6 +116,23 @@ const STATUS_TABS: StatusTab[] = [
   'Reversed'
 ];
 
+/** One abandoned checkout awaiting recovery. */
+interface AbandonedCart {
+  id: string;
+  name: string;
+  phone: string;
+  item: string;
+  price: number;
+  leftTime: string;
+  stage: string;
+}
+
+const ABANDONED_CARTS: AbandonedCart[] = [
+  { id: 'AC-991', name: 'Farhana Rahman', phone: '+8801722883344', item: 'Handcrafted Muslin Saree', price: 5650, leftTime: '2 hours ago', stage: 'Left at bKash screen' },
+  { id: 'AC-992', name: 'Tanvir Hossain', phone: '+8801811445566', item: 'Jamdani Silk Panjabi', price: 3200, leftTime: '5 hours ago', stage: 'Left at Address step' },
+  { id: 'AC-993', name: 'Nabila Chowdhury', phone: '+8801900889900', item: 'Handmade Leather Shoes', price: 4120, leftTime: 'Yesterday', stage: 'Left at COD confirmation' },
+];
+
 export const OrdersView: React.FC<OrdersViewProps> = ({
   orders,
   onUpdateOrders,
@@ -211,6 +228,29 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     onUpdateOrders(localOnly.length ? [...localOnly, ...merged] : merged);
   };
 
+  // ── Filter / view state ─────────────────────────────────────────────────────
+  //
+  // Declared ABOVE the polling effects below: the tab-count probe reads
+  // `subMenu` / `statusTab` / `searchQuery`, and a `useEffect` referencing a
+  // `const` declared further down the component body is a temporal-dead-zone
+  // error at runtime, not just a lint warning.
+
+  // Sub-menu state
+  const [subMenu, setSubMenu] = useState<OrderSubMenu>('all');
+
+  // Active Status Tab state
+  const [statusTab, setStatusTab] = useState<StatusTab>('All');
+
+  // Controls state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'amount_high' | 'amount_low'>('newest');
+  const [isFilterModalOpen, setIsFilterModalOpen] = useState(false);
+  const [filterSource, setFilterSource] = useState<string>('All');
+  const [filterPlatform, setFilterPlatform] = useState<string>('All');
+  const [filterPaymentMethod, setFilterPaymentMethod] = useState<string>('All');
+  const [filterPaymentStatus, setFilterPaymentStatus] = useState<string>('All');
+  const [filterCourier, setFilterCourier] = useState<string>('All');
+
   // Live polling effect for orders sync from MongoDB.
   // Uses the flexible GET /api/orders endpoint and sends BOTH merchant_id and
   // store_slug, so an order placed by the storefront (which may only carry the
@@ -222,7 +262,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         const params = new URLSearchParams();
         if (merchantId) params.set('merchant_id', merchantId);
         if (storeSlug) params.set('store_slug', storeSlug);
+        // NOTE: deliberately NOT sending subMenu/statusTab/search here. This
+        // poll owns the authoritative list held in app state; narrowing it to
+        // the active tab would delete the other rows from the list and break
+        // the status counts and every other tab. The tab's own Mongo query runs
+        // in `serverTabCount` below.
         const res = await fetch(`/api/orders${params.toString() ? `?${params.toString()}` : ''}`);
+        if (!res.ok) {
+          console.warn(`Live order fetch returned ${res.status} — keeping the current list.`);
+          return;
+        }
         const data = await res.json();
         // Apply the authoritative server list even when empty, so a deleted or
         // reassigned order does not linger in the dashboard view. Normalize
@@ -239,21 +288,54 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     const timer = setInterval(fetchLiveOrders, 4000);
     return () => clearInterval(timer);
   }, [merchantId, storeSlug]);
-  // Sub-menu state
-  const [subMenu, setSubMenu] = useState<OrderSubMenu>('all');
 
-  // Active Status Tab state
-  const [statusTab, setStatusTab] = useState<StatusTab>('All');
+  /**
+   * Server-side result of the ACTIVE tab's Mongo query.
+   *
+   * The main poll owns the whole list, so this is a separate, narrow query that
+   * proves the tab's own predicate works: it runs the real `isManual` / `status`
+   * / `search` filter against Mongo and reports how many rows the database
+   * believes match. The empty state uses it to tell apart "this tab is genuinely
+   * empty" from "the filter never matched anything", instead of showing a
+   * misleading empty state.
+   */
+  const [serverTabCount, setServerTabCount] = useState<number | null>(null);
+  useEffect(() => {
+    if (!merchantId && !storeSlug) return;
+    if (subMenu === 'abandoned') return;
 
-  // Controls state
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'amount_high' | 'amount_low'>('newest');
-  const [isFilterModalOpen, setIsFilterModalOpen] = useState(false);
-  const [filterSource, setFilterSource] = useState<string>('All');
-  const [filterPlatform, setFilterPlatform] = useState<string>('All');
-  const [filterPaymentMethod, setFilterPaymentMethod] = useState<string>('All');
-  const [filterPaymentStatus, setFilterPaymentStatus] = useState<string>('All');
-  const [filterCourier, setFilterCourier] = useState<string>('All');
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (merchantId) params.set('merchant_id', merchantId);
+        if (storeSlug) params.set('store_slug', storeSlug);
+        if (subMenu === 'manual') params.set('isManual', 'true');
+        if (statusTab !== 'All') params.set('status', statusTab);
+        const q = searchQuery.trim();
+        if (q) params.set('search', q);
+        params.set('limit', '1'); // we only need the count, not the rows
+        const res = await fetch(`/api/orders?${params.toString()}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        // The route returns a plain array; the count header tells us the real
+        // number even when we only asked for the first row.
+        const header = res.headers.get('X-Orders-Count');
+        const count = header !== null ? Number(header) : Array.isArray(data) ? data.length : null;
+        if (count !== null && Number.isFinite(count)) setServerTabCount(count);
+      } catch {
+        // A failed probe must never blank the table — keep the client filter.
+        if (!cancelled) setServerTabCount(null);
+      }
+    };
+
+    const debounce = setTimeout(run, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounce);
+    };
+  }, [merchantId, storeSlug, subMenu, statusTab, searchQuery]);
 
   // Interactions state
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
@@ -516,7 +598,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
     orders.forEach((ord) => {
       counts['All'] += 1;
-      const st = ord.status || (ord.fulfillmentStatus === 'Delivered' ? 'Completed' : 'New');
+      // Use the canonical label so a row stored as 'in_delivery' is counted
+      // under 'In delivery' rather than vanishing from every tab.
+      const st = canonicalStatusOf(ord);
       if (counts[st] !== undefined) {
         counts[st] += 1;
       }
@@ -529,28 +613,34 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const filteredOrders = useMemo(() => {
     return orders.filter((ord) => {
       // 1. Sub-menu filter
-      if (subMenu === 'manual') {
-        const src = ord.source || 'Store';
-        if (src !== 'Manual' && src !== 'POS') return false;
+      //
+      // `isManualOrder` checks the persisted `is_manual` / `isManual` flag AND
+      // the `source` / `platform` / tag labels. The previous check compared
+      // `source` against exactly 'Manual' | 'POS', so an order persisted by
+      // Mongo as `source: 'manual'` (lowercase) matched nothing and the tab
+      // showed an empty state even when manual orders existed.
+      if (subMenu === 'manual' && !isManualOrder(ord)) {
+        return false;
       }
 
-      // 2. Status Tab filter
-      const ordStatus = ord.status || (ord.fulfillmentStatus === 'Delivered' ? 'Completed' : 'New');
-      if (statusTab !== 'All' && ordStatus !== statusTab) {
+      // 2. Status Tab filter — compared through `canonicalStatusOf` so every
+      // alias/snake_case spelling lands on the tab the merchant clicked.
+      if (statusTab !== 'All' && canonicalStatusOf(ord) !== statusTab) {
         return false;
       }
 
       // 3. Search query
       if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchesNumber = ord.orderNumber.toLowerCase().includes(q);
-        const matchesName = ord.customerName.toLowerCase().includes(q);
-        const matchesPhone = ord.customerPhone.includes(q);
-        const matchesAddress = ord.address.toLowerCase().includes(q);
-        const matchesItem = ord.items.some(it => it.productName.toLowerCase().includes(q));
-        const matchesTag = ord.tags?.some(t => t.toLowerCase().includes(q));
+        const q = searchQuery.trim().toLowerCase();
+        const matchesNumber = String(ord.orderNumber || '').toLowerCase().includes(q);
+        const matchesName = String(ord.customerName || '').toLowerCase().includes(q);
+        const matchesPhone = String(ord.customerPhone || '').includes(q);
+        const matchesAddress = String(ord.address || '').toLowerCase().includes(q);
+        const matchesItem = (ord.items || []).some(it => String(it.productName || '').toLowerCase().includes(q));
+        const matchesTag = (ord.tags || []).some(t => String(t).toLowerCase().includes(q));
+        const matchesStatus = canonicalStatusOf(ord).toLowerCase().includes(q);
 
-        if (!matchesNumber && !matchesName && !matchesPhone && !matchesAddress && !matchesItem && !matchesTag) {
+        if (!matchesNumber && !matchesName && !matchesPhone && !matchesAddress && !matchesItem && !matchesTag && !matchesStatus) {
           return false;
         }
       }
@@ -571,6 +661,79 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       return 0;
     });
   }, [orders, subMenu, statusTab, searchQuery, filterSource, filterPlatform, filterPaymentMethod, filterPaymentStatus, filterCourier, sortBy]);
+
+  /**
+   * Send a WhatsApp recovery coupon for one abandoned cart.
+   *
+   * WHY THIS IS A HANDLER NOW
+   * -------------------------
+   * The button was an `<a href="https://wa.me/…RECOVER10">` with a hardcoded
+   * code and no persistence: no coupon row, no message log, and nothing the
+   * merchant could prove. It now POSTs to the recovery route, which mints a
+   * REAL coupon, writes the automated-message log to Mongo (+ Supabase) and
+   * returns a link carrying that real code.
+   *
+   * The WhatsApp window is only opened after the server responds, so the
+   * merchant never sends a code that was never created. Failures are surfaced
+   * rather than swallowed.
+   */
+  const [recoveryState, setRecoveryState] = useState<Record<string, { busy: boolean; message: string; ok: boolean }>>({});
+
+  const handleSendRecoveryCoupon = async (cart: AbandonedCart) => {
+    if (recoveryState[cart.id]?.busy) return;
+    setRecoveryState((prev) => ({ ...prev, [cart.id]: { busy: true, message: 'Creating coupon…', ok: false } }));
+
+    try {
+      const res = await fetch(`/api/abandoned-carts/${encodeURIComponent(cart.id)}/recovery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerName: cart.name,
+          customerPhone: cart.phone,
+          itemName: cart.item,
+          storeName: storeSlug || 'our store',
+          storeSlug,
+          merchantId,
+          discountType: 'percentage',
+          discountValue: 10,
+          validDays: 7,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `The coupon could not be created (HTTP ${res.status}).`);
+      }
+
+      // Open WhatsApp with the REAL persisted code.
+      if (data?.whatsappLink) {
+        window.open(data.whatsappLink, '_blank', 'noopener,noreferrer');
+      }
+
+      setRecoveryState((prev) => ({
+        ...prev,
+        [cart.id]: {
+          busy: false,
+          ok: true,
+          message: data?.coupon?.code
+            ? `Coupon ${data.coupon.code} created${data.persisted ? ' and logged' : ' (log not saved)'}.`
+            : data?.message || 'Recovery coupon created.',
+        },
+      }));
+
+      // Refresh so the tab reflects the 'recovered' state written to Mongo.
+      setTimeout(() => onUpdateOrders([...orders]), 500);
+    } catch (err: any) {
+      setRecoveryState((prev) => ({
+        ...prev,
+        [cart.id]: {
+          busy: false,
+          ok: false,
+          message: err?.message || 'The recovery coupon could not be sent.',
+        },
+      }));
+    }
+  };
 
   // Bulk actions handlers
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -974,18 +1137,46 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     onUpdateOrders(updated);
   };
 
-  const handleCreateManualOrder = (e: React.FormEvent) => {
+  const [isCreatingManualOrder, setIsCreatingManualOrder] = useState(false);
+  const [manualOrderError, setManualOrderError] = useState<string | null>(null);
+
+  /**
+   * Create a manual (dashboard/POS) order.
+   *
+   * WHY THIS IS ASYNC NOW
+   * ---------------------
+   * It used to be a pure `onUpdateOrders([newOrd, ...orders])`. That painted the
+   * row in React state and nothing else: the order was never sent to Mongo, so
+   * the 4-second poll deleted it again and it was gone on reload. It also
+   * carried no `is_manual` flag, so even if it had survived the "Manual orders"
+   * tab could not find it.
+   *
+   * Now it POSTs to /api/orders first (which persists `is_manual: true` and a
+   * manual `source`), paints optimistically so the UI stays instant, and reports
+   * a real failure instead of silently dropping the order.
+   */
+  const handleCreateManualOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCreatingManualOrder) return;
+    setIsCreatingManualOrder(true);
+    setManualOrderError(null);
+
+    const orderNumber = `72200${Math.floor(800 + Math.random() * 199)}`;
     const newOrd: Order = {
       id: `ord-${Date.now()}`,
-      orderNumber: `#72200${Math.floor(800 + Math.random() * 199)}`,
+      orderNumber: `#${orderNumber}`,
       source: 'Manual',
+      // The explicit flag the "Manual orders" tab and the `isManual` Mongo query
+      // both look for. Set here AND on the server record.
+      isManual: true,
       customerName: manualForm.customerName,
       customerPhone: manualForm.customerPhone,
       customerCity: manualForm.customerCity,
       deliveryZone: manualForm.deliveryZone,
       address: manualForm.address,
       platform: 'POS',
+      merchantId,
+      storeSlug,
       totalBDT: manualForm.quantity * manualForm.unitPriceBDT,
       paymentMethod: manualForm.paymentMethod,
       paymentStatus: manualForm.paymentMethod === 'COD' ? 'Unpaid' : 'Paid',
@@ -1007,8 +1198,47 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       ],
     };
 
-    onUpdateOrders([newOrd, ...orders]);
-    setIsManualModalOpen(false);
+    try {
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...newOrd,
+          orderNumber,
+          isManual: true,
+          is_manual: true,
+          source: 'Manual',
+          order_source: 'Manual',
+          // Send every store reference so the record is queryable by whichever
+          // one this dashboard polls with.
+          storeId: merchantId,
+          store_id: merchantId,
+          storeSlug,
+          store_slug: storeSlug,
+          merchantId,
+          merchant_id: merchantId,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || data?.message || `The order could not be saved (HTTP ${res.status}).`);
+      }
+
+      onUpdateOrders([newOrd, ...orders]);
+      setIsManualModalOpen(false);
+      setManualForm({
+        customerName: '', customerPhone: '', customerCity: 'Dhaka',
+        deliveryZone: 'Inside Dhaka', address: '', itemTitle: '',
+        quantity: 1, unitPriceBDT: 0, paymentMethod: 'COD', courierName: 'Steadfast Courier',
+      });
+    } catch (err: any) {
+      // Do NOT paint an order that does not exist in the database — the next
+      // poll would erase it and the merchant would think it saved.
+      setManualOrderError(err?.message || 'The manual order could not be saved.');
+    } finally {
+      setIsCreatingManualOrder(false);
+    }
   };
 
   // Payment & Order Status Options Configuration
@@ -1096,7 +1326,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
   // Inline Order Status Dropdown Helper
   const renderOrderStatusDropdown = (ord: Order) => {
-    const current = ord.status || 'New';
+    // Canonicalised so the badge and the active status tab always agree.
+    const current = canonicalStatusOf(ord) as Order['status'];
     const isOpen = activeMenu?.id === ord.id && activeMenu?.type === 'status';
     const isSaving = savingOrderIds.includes(ord.id);
 
@@ -1230,7 +1461,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           <Building2 className="w-4 h-4" />
           <span>Manual orders</span>
           <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-slate-950/20">
-            {orders.filter(o => o.source === 'Manual' || o.source === 'POS').length}
+            {orders.filter(o => isManualOrder(o)).length}
           </span>
         </button>
 
@@ -1527,6 +1758,24 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         <ShoppingBag className="w-8 h-8 text-slate-600 mx-auto mb-2" />
                         <p className="font-bold text-white text-sm">No orders found matching your active filters.</p>
                         <p className="text-xs text-slate-500 mt-1">Try clearing search keywords or resetting status tab filters.</p>
+                        {/*
+                          `serverTabCount` is the number of rows Mongo itself
+                          reports for this tab's query. When it disagrees with
+                          the client filter, the tab is not genuinely empty — the
+                          two are reading different things, and saying "no
+                          orders" would be wrong.
+                        */}
+                        {serverTabCount !== null && serverTabCount > 0 && (
+                          <p className="text-[11px] text-amber-400 mt-2 font-semibold">
+                            The database reports {serverTabCount} matching order{serverTabCount === 1 ? '' : 's'} for this tab,
+                            but the loaded list shows none. The order list may be out of date — it refreshes every few seconds.
+                          </p>
+                        )}
+                        {subMenu === 'manual' && serverTabCount === 0 && orders.length > 0 && (
+                          <p className="text-[11px] text-slate-500 mt-2">
+                            No manual orders exist yet. Use “+ Create Order” to add one — it is saved with the manual flag.
+                          </p>
+                        )}
                       </td>
                     </tr>
                   ) : (
@@ -1853,11 +2102,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           </div>
 
           <div className="space-y-3">
-            {[
-              { id: 'AC-991', name: 'Farhana Rahman', phone: '+8801722883344', item: 'Handcrafted Muslin Saree', price: 5650, leftTime: '2 hours ago', stage: 'Left at bKash screen' },
-              { id: 'AC-992', name: 'Tanvir Hossain', phone: '+8801811445566', item: 'Jamdani Silk Panjabi', price: 3200, leftTime: '5 hours ago', stage: 'Left at Address step' },
-              { id: 'AC-993', name: 'Nabila Chowdhury', phone: '+8801900889900', item: 'Handmade Leather Shoes', price: 4120, leftTime: 'Yesterday', stage: 'Left at COD confirmation' },
-            ].map(cart => (
+            {ABANDONED_CARTS.map((cart: AbandonedCart) => {
+              const recovery = recoveryState[cart.id];
+              return (
               <div key={cart.id} className="bg-[#181B26] p-4 rounded-xl border border-[#2E3548] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2">
@@ -1867,19 +2114,25 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   </div>
                   <p className="text-xs text-slate-300 mt-1">Item: {cart.item} (৳{safeAmount(cart?.price)} BDT)</p>
                   <p className="text-[11px] text-amber-400 mt-0.5 font-semibold">{cart.stage} • Left {cart.leftTime}</p>
+                  {recovery && !recovery.busy && (
+                    <p className={`text-[11px] mt-1 font-semibold ${recovery.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {recovery.message}
+                    </p>
+                  )}
                 </div>
 
-                <a
-                  href={`https://wa.me/${cart.phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(`Hi ${cart.name}! You left your ${cart.item} in cart at My Store. Use code 'RECOVER10' for 10% OFF!`)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold px-4 py-2 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shrink-0 shadow-md transition"
+                <button
+                  type="button"
+                  onClick={() => handleSendRecoveryCoupon(cart)}
+                  disabled={recovery?.busy}
+                  className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-extrabold px-4 py-2 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shrink-0 shadow-md transition"
                 >
                   <MessageSquare className="w-4 h-4" />
-                  <span>Send WhatsApp Recovery Coupon</span>
-                </a>
+                  <span>{recovery?.busy ? 'Creating coupon…' : 'Send WhatsApp Recovery Coupon'}</span>
+                </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -2916,19 +3169,25 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 </div>
               </div>
 
-              <div className="pt-3 border-t border-[#2E3548] flex justify-end gap-3">
+              <div className="pt-3 border-t border-[#2E3548] flex justify-end gap-3 items-center">
+                {manualOrderError && (
+                  <p className="text-[11px] text-rose-400 font-semibold mr-auto">
+                    {manualOrderError}
+                  </p>
+                )}
                 <button
                   type="button"
-                  onClick={() => setIsManualModalOpen(false)}
+                  onClick={() => { setIsManualModalOpen(false); setManualOrderError(null); }}
                   className="px-4 py-2 bg-[#202533] text-slate-300 rounded-xl font-bold cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 rounded-xl font-extrabold cursor-pointer"
+                  disabled={isCreatingManualOrder}
+                  className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 rounded-xl font-extrabold cursor-pointer"
                 >
-                  Create Order
+                  {isCreatingManualOrder ? 'Saving…' : 'Create Order'}
                 </button>
               </div>
             </form>

@@ -81,10 +81,12 @@ import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
 import {
   canonicalOrderStatus,
   canonicalPaymentStatus,
+  orderStatusFilter,
   fulfillmentForStatus,
   updateOrderFields,
   recordCourierDispatch,
 } from './orderStatus.js';
+import { sendRecoveryCoupon, listRecoveryLogs } from './abandonedCarts.js';
 
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
@@ -7030,7 +7032,7 @@ const saveLoyaltySettings = async (req: any, res: any) => {
     if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
 
     const payload = body.loyaltyConfig || body.loyalty || body;
-    
+
     // Validate required fields
     if (payload.spendPerPointBDT !== undefined && (typeof payload.spendPerPointBDT !== 'number' || payload.spendPerPointBDT <= 0)) {
       return res.status(400).json({ ok: false, error: 'spendPerPointBDT must be a positive number.' });
@@ -7072,7 +7074,7 @@ app.post('/api/store/loyalty-transaction', async (req, res) => {
     if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
 
     const { customerId, delta, reason, action } = body;
-    
+
     // Validate required fields
     if (!customerId || typeof customerId !== 'string') {
       return res.status(400).json({ ok: false, error: 'customerId is required.' });
@@ -7094,7 +7096,7 @@ app.post('/api/store/loyalty-transaction', async (req, res) => {
     }
 
     const db = mongoose.connection.db;
-    
+
     // Find the customer and update their loyalty points
     const customer = await db.collection('customers').findOne({ id: customerId, store_slug: storeRef });
     if (!customer) {
@@ -7107,11 +7109,11 @@ app.post('/api/store/loyalty-transaction', async (req, res) => {
     // Update customer's loyalty points
     const updateResult = await db.collection('customers').updateOne(
       { id: customerId, store_slug: storeRef },
-      { 
-        $set: { 
+      {
+        $set: {
           loyaltyPoints: newPoints,
           updated_at: new Date().toISOString()
-        } 
+        }
       }
     );
 
@@ -7140,7 +7142,7 @@ app.post('/api/store/loyalty-transaction', async (req, res) => {
     try {
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
       const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      
+
       if (supabaseUrl && supabaseKey) {
         const supabaseResponse = await fetch(`${supabaseUrl}/rest/v1/customers?id=eq.${customerId}&store_slug=eq.${storeRef}`, {
           method: 'PATCH',
@@ -7150,12 +7152,12 @@ app.post('/api/store/loyalty-transaction', async (req, res) => {
             'Authorization': `Bearer ${supabaseKey}`,
             'Prefer': 'return=minimal'
           },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             loyalty_points: newPoints,
             updated_at: new Date().toISOString()
           })
         });
-        
+
         if (!supabaseResponse.ok) {
           console.warn('[Server] Supabase sync warning:', await supabaseResponse.text());
         }
@@ -8189,6 +8191,109 @@ async function buildOrderQuery(rawRef: string): Promise<any | null> {
   return { $or: or };
 }
 
+/**
+ * Build the NON-store clauses of the order list filter: `isManual`, `status`
+ * and `search`.
+ *
+ * Previously GET /api/orders accepted only a store reference, so the
+ * "Manual orders" tab and every status tab were filtered client-side against a
+ * list that had already been silently emptied by a bad store match. These
+ * clauses are combined with the store `$or` in one query so the tab filters run
+ * as real MongoDB predicates.
+ *
+ * Returns `null` when nothing was requested (i.e. no restriction at all).
+ */
+function buildOrderFilterClauses(query: {
+  isManual?: unknown;
+  status?: unknown;
+  search?: unknown;
+}): Record<string, any> | null {
+  const clauses: Record<string, any>[] = [];
+
+  // ── isManual ──────────────────────────────────────────────────────────────
+  // A manual order is flagged with `is_manual`/`isManual: true` OR carries a
+  // manual/POS `source`. Both spellings are probed because orders created
+  // before the flag existed only have `source`, and vice-versa.
+  const rawManual = query.isManual;
+  const manualWanted =
+    rawManual === true ||
+    rawManual === 'true' ||
+    rawManual === '1' ||
+    rawManual === 1 ||
+    String(rawManual || '').toLowerCase() === 'manual';
+
+  if (manualWanted) {
+    clauses.push({
+      $or: [
+        { is_manual: true },
+        { isManual: true },
+        { source: { $in: ['manual', 'Manual', 'pos', 'POS', 'whatsapp_manual'] } },
+        { order_source: { $in: ['manual', 'Manual', 'pos', 'POS'] } },
+        { platform: 'POS' },
+        // Legacy rows only carry the tag.
+        { tags: { $in: ['Manual Order', 'Manual', 'POS'] } },
+      ],
+    });
+  } else if (
+    rawManual === false ||
+    rawManual === 'false' ||
+    rawManual === '0' ||
+    rawManual === 0 ||
+    String(rawManual || '').toLowerCase() === 'false'
+  ) {
+    clauses.push({
+      is_manual: { $ne: true },
+      isManual: { $ne: true },
+      source: { $nin: ['manual', 'Manual', 'pos', 'POS'] },
+    });
+  }
+
+  // ── status ────────────────────────────────────────────────────────────────
+  // 'All' (or an empty value) is explicitly NOT a filter. Anything else maps to
+  // every spelling that status may have been persisted under.
+  const statusValues = orderStatusFilter(query.status);
+  if (statusValues) {
+    clauses.push({
+      $or: [
+        { status: { $in: statusValues } },
+        { order_status: { $in: statusValues } },
+        // A row with no status at all is still 'New' as far as the tab is
+        // concerned, otherwise the 'New' tab looks empty on fresh data.
+        ...(statusValues.includes('New') ? [{ status: { $exists: false } }, { status: null }, { status: '' }] : []),
+      ],
+    });
+  }
+
+  // ── search ────────────────────────────────────────────────────────────────
+  const rawSearch = String(query.search ?? '').trim();
+  if (rawSearch) {
+    // Escape the term so a stray `(` or `*` in a customer search cannot throw
+    // the whole query out and return a silent empty list.
+    const rx = new RegExp(rawSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    clauses.push({
+      $or: [
+        { order_number: rx },
+        { orderNumber: rx },
+        { id: rx },
+        { customer_name: rx },
+        { customerName: rx },
+        { customer_phone: rx },
+        { customerPhone: rx },
+        { customer_city: rx },
+        { customerCity: rx },
+        { shipping_address: rx },
+        { address: rx },
+        { tracking_code: rx },
+        { items: rx },
+      ],
+    });
+  }
+
+  if (clauses.length === 0) return null;
+  // Multiple clauses must AND together.
+  return clauses.length === 1 ? clauses[0] : { $and: clauses };
+}
+
 // GET /api/orders — list orders with FLEXIBLE matching. Accepts the store
 // reference from the query string (`store_slug` / `storeSlug` / `store_id` /
 // `merchant_id` / `merchantId` / `storeRef` / `slug`) or the path. When NO
@@ -8207,6 +8312,12 @@ app.get('/api/orders', async (req, res) => {
     }
     if (mongoose.connection.readyState !== 1) return res.status(200).json([]);
 
+    // The handler always answers 200 + a JSON array so the dashboard never
+    // blanks, but a genuine outage used to be indistinguishable from "this
+    // store has no orders". Flag it in a response header so the client can
+    // surface it instead of silently showing an empty state.
+    res.setHeader('X-Orders-Source', 'mongodb');
+
     const storeRef = String(
       (req.query.store_slug as string) ||
       (req.query.storeSlug as string) ||
@@ -8220,7 +8331,26 @@ app.get('/api/orders', async (req, res) => {
     ).trim();
 
     // No filter → return ALL orders for the authenticated merchant.
-    const query = await buildOrderQuery(storeRef);
+    const storeQuery = await buildOrderQuery(storeRef);
+
+    // `isManual` / `status` / `search` run as real Mongo predicates so the
+    // "Manual orders" tab and the status tabs query the database instead of
+    // filtering an already-empty client list.
+    const filterClauses = buildOrderFilterClauses({
+      isManual: req.query.isManual ?? req.query.is_manual ?? req.query.manual,
+      status: req.query.status ?? req.query.order_status,
+      search: req.query.search ?? req.query.q,
+    });
+
+    // Honour `limit` (the tab-count probe asks for 1 row) while never allowing
+    // an unbounded read.
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 500;
+
+    let query: any = storeQuery;
+    if (filterClauses) {
+      query = storeQuery ? { $and: [storeQuery, filterClauses] } : filterClauses;
+    }
 
     let orders: any[] = [];
     try {
@@ -8228,12 +8358,16 @@ app.get('/api/orders', async (req, res) => {
       orders = await (Order as any)
         .find(query || {})
         .sort({ created_at: -1 })
-        .limit(500)
+        .limit(limit)
         .lean();
     } catch (queryErr: any) {
       console.warn('[Server] GET /api/orders query warning:', queryErr?.message || queryErr);
       orders = [];
     }
+    // Report the authoritative number of matches so the client can tell an
+    // empty tab apart from a broken filter without fetching every row.
+    res.setHeader('X-Orders-Count', String(Array.isArray(orders) ? orders.length : 0));
+    res.setHeader('X-Orders-Filtered', filterClauses ? 'true' : 'false');
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
@@ -8258,7 +8392,18 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     }
     const raw = String(req.params.storeRef || '').trim();
     // No reference → return the full merchant list rather than an empty array.
-    const query = await buildOrderQuery(raw);
+    const storeQuery = await buildOrderQuery(raw);
+    const filterClauses = buildOrderFilterClauses({
+      isManual: req.query.isManual ?? req.query.is_manual ?? req.query.manual,
+      status: req.query.status ?? req.query.order_status,
+      search: req.query.search ?? req.query.q,
+    });
+    let query: any = storeQuery;
+    if (filterClauses) {
+      query = storeQuery ? { $and: [storeQuery, filterClauses] } : filterClauses;
+    }
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 500;
 
     let orders: any[] = [];
     try {
@@ -8266,12 +8411,14 @@ app.get('/api/orders/:storeRef', async (req, res) => {
       orders = await (Order as any)
         .find(query || {})
         .sort({ created_at: -1 })
-        .limit(500)
+        .limit(limit)
         .lean();
     } catch (queryErr: any) {
       console.warn('[Server] GET /api/orders/:storeRef query warning:', queryErr?.message || queryErr);
       orders = [];
     }
+    res.setHeader('X-Orders-Count', String(Array.isArray(orders) ? orders.length : 0));
+    res.setHeader('X-Orders-Filtered', filterClauses ? 'true' : 'false');
     return res.status(200).json(Array.isArray(orders) ? orders : []);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
@@ -8362,6 +8509,21 @@ app.post('/api/orders', async (req, res) => {
           slug
       ).trim();
 
+      // A manually created (dashboard / POS) order is flagged explicitly so the
+      // "Manual orders" tab can query it directly instead of inferring intent
+      // from a display label. `source` is persisted in BOTH spellings because
+      // the read path and the client payload use different ones.
+      const rawSource = String(order.source ?? order.orderSource ?? order.order_source ?? '').trim();
+      const isManual = Boolean(
+        order.isManual === true ||
+        order.is_manual === true ||
+        order.isManual === 'true' ||
+        order.is_manual === 'true' ||
+        /^(manual|pos)$/i.test(rawSource) ||
+        order.platform === 'POS'
+      );
+      const source = isManual ? (rawSource || 'Manual') : (rawSource || 'Store');
+
       const record: any = {
         store_id: storeId,
         // Persist BOTH the snake_case (read path) and camelCase (client payload)
@@ -8389,6 +8551,10 @@ app.post('/api/orders', async (req, res) => {
         payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
         transaction_id: order.transactionId || order.transaction_id || null,
         status: order.status || 'New',
+        source,
+        order_source: source,
+        is_manual: isManual,
+        isManual,
         // Explicit, valid creation timestamp for the dashboard's date column.
         created_at: toValidDate(order.createdAt ?? order.created_at ?? order.date),
       };
@@ -8415,6 +8581,90 @@ app.post('/api/orders', async (req, res) => {
     console.error('[Server] POST /api/orders error:', err);
     // Never surface a 5xx — acknowledge with a well-formed JSON envelope.
     return res.status(200).json({ ok: false, success: false, synced: 0, error: err?.message || 'Order sync failed' });
+  }
+});
+
+// ── Abandoned-cart recovery ──────────────────────────────────────────────────
+//
+// The "Send WhatsApp Recovery Coupon" button used to be a bare wa.me link with a
+// hardcoded code, so nothing reached the database. These routes mint a real
+// coupon, log the automated message to Mongo + Supabase, and hand back the
+// click-to-chat link carrying that real code.
+
+app.post('/api/abandoned-carts/:cartId/recovery', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const cartId = String(req.params.cartId || '').trim();
+  if (!cartId) {
+    return res.status(200).json({ ok: false, error: 'A cart id is required.' });
+  }
+
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+
+  try {
+    const result = await sendRecoveryCoupon({
+      cartId,
+      customerName: body.customerName ?? body.customer_name ?? body.name ?? '',
+      customerPhone: body.customerPhone ?? body.customer_phone ?? body.phone ?? '',
+      itemName: body.itemName ?? body.item_name ?? body.productName ?? '',
+      storeName: body.storeName ?? body.store_name,
+      storeSlug: body.storeSlug ?? body.store_slug ?? body.storeRef ?? '',
+      merchantId: body.merchantId ?? body.merchant_id ?? '',
+      discountValue: body.discountValue ?? body.discount_value ?? 10,
+      discountType: body.discountType === 'fixed' ? 'fixed' : 'percentage',
+      minOrderValue: body.minOrderValue ?? body.min_order_value ?? 0,
+      maxDiscount: body.maxDiscount ?? body.max_discount ?? null,
+      validDays: body.validDays ?? body.valid_days ?? 7,
+    });
+
+    // Always 200 with a shaped body — the client still needs the link when the
+    // database write degraded, and must not read this as a 5xx.
+    return res.status(200).json({
+      ok: Boolean(result.ok),
+      success: Boolean(result.ok),
+      cartId,
+      coupon: result.coupon ?? null,
+      code: result.coupon?.code ?? null,
+      whatsappLink: result.whatsappLink ?? null,
+      message: result.message ?? '',
+      error: result.error ?? null,
+      persisted: Boolean(result.persisted),
+      supabaseSynced: Boolean(result.supabaseSynced),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/abandoned-carts/:cartId/recovery error:', err);
+    return res.status(200).json({
+      ok: false,
+      success: false,
+      cartId,
+      error: err?.message || 'The recovery coupon could not be created.',
+    });
+  }
+});
+
+// GET /api/abandoned-carts/logs — the automated-message log for a store.
+app.get('/api/abandoned-carts/logs', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const storeRef = String(
+    (req.query.store_slug as string) ||
+    (req.query.storeSlug as string) ||
+    (req.query.store_id as string) ||
+    (req.query.merchant_id as string) ||
+    (req.query.storeRef as string) ||
+    ''
+  ).trim();
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 100;
+
+  try {
+    const result = await listRecoveryLogs(storeRef, limit);
+    return res.status(200).json({
+      ok: result.ok,
+      logs: result.logs,
+      error: result.error ?? null,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/abandoned-carts/logs error:', err);
+    return res.status(200).json({ ok: false, logs: [], error: err?.message || 'The log could not be read.' });
   }
 });
 
