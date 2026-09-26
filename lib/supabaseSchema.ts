@@ -102,9 +102,14 @@ export async function fetchTableColumns(
 /**
  * Does `column` exist on `table`?
  *
- * `limit=0` is the cheapest possible request: PostgREST validates the column
- * against the schema cache BEFORE it would return any row, so a 2xx with an
- * empty array still proves the column exists.
+ * `limit=1` (NOT `limit=0`) is the cheapest request PostgREST accepts. `limit=0`
+ * is rejected with a 400 Bad Request, so every probe failed and introspection
+ * always reported "no columns" — silently forcing the mirror onto the
+ * conservative fallback payload.
+ *
+ * PostgREST validates the selected column against its schema cache BEFORE it
+ * returns any row, so a 2xx with a zero-or-one-row body still proves the column
+ * exists. `limit=1` keeps that guarantee at the smallest possible cost.
  */
 export async function probeColumn(
   supabaseUrl: string,
@@ -114,7 +119,7 @@ export async function probeColumn(
 ): Promise<boolean> {
   try {
     const res = await fetch(
-      `${supabaseUrl}/rest/v1/${table}?select=${encodeURIComponent(column)}&limit=0`,
+      `${supabaseUrl}/rest/v1/${table}?select=${encodeURIComponent(column)}&limit=1`,
       {
         headers: {
           apikey: supabaseKey,
