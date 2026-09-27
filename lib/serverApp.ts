@@ -7265,6 +7265,112 @@ const saveIntegrationProperties = async (req: any, res: any) => {
 app.post('/api/store/integration-properties', saveIntegrationProperties);
 app.put('/api/store/integration-properties', saveIntegrationProperties);
 
+/* ────────────────────────────
+ * App Market — merchant_integrations persistence
+ * ---------------------------------------------------------------------------
+ * Every App Market card (TikTok, Courier, Bulk SMS, bKash Engine, ...) flips
+ * its status badge to INSTALLED the moment its settings modal is saved. That
+ * state used to live only in localStorage, so a reload or another device lost
+ * it. This collection is the durable record: one doc per {store_slug, app_id}
+ * carrying the connection flag, the saved credential fields and timestamps.
+ */
+const MERCHANT_INTEGRATIONS_COLLECTION = 'merchant_integrations';
+
+const ALLOWED_INTEGRATION_IDS = new Set([
+  'fb-pixel',
+  'tiktok-pixel',
+  'whatsapp-bot',
+  'whatsapp-otp-api',
+  'courier-api',
+  'bulk-sms',
+  'bkash-verifier',
+]);
+
+app.get('/api/store/merchant-integrations', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.storeSlug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(200).json({ ok: true, store_slug: storeRef, integrations: [], persisted: false });
+    }
+
+    const docs = await mongoose.connection.db
+      .collection(MERCHANT_INTEGRATIONS_COLLECTION)
+      .find({ store_slug: storeRef })
+      .toArray();
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      integrations: docs.map((d: any) => ({
+        appId: d.app_id,
+        isConnected: d.is_connected === true,
+        field1Value: d.field1_value || '',
+        field2Value: d.field2_value || '',
+        field3Value: d.field3_value || '',
+        updatedAt: d.updated_at,
+      })),
+      persisted: true,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/merchant-integrations error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load app integrations.' });
+  }
+});
+
+const saveMerchantIntegration = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const appId = String(body.appId || body.app_id || '').trim();
+    if (!ALLOWED_INTEGRATION_IDS.has(appId)) {
+      return res.status(400).json({ ok: false, error: `Unknown integration appId: ${appId || '(missing)'}.` });
+    }
+
+    const isConnected = body.isConnected === undefined ? true : body.isConnected === true || body.isConnected === 'true';
+    const doc = {
+      store_slug: storeRef,
+      app_id: appId,
+      is_connected: isConnected,
+      field1_value: String(body.field1Value ?? body.field1_value ?? '').slice(0, 512),
+      field2_value: String(body.field2Value ?? body.field2_value ?? '').slice(0, 512),
+      field3_value: String(body.field3Value ?? body.field3_value ?? '').slice(0, 512),
+      updated_at: new Date().toISOString(),
+    };
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
+    }
+
+    await mongoose.connection.db.collection(MERCHANT_INTEGRATIONS_COLLECTION).updateOne(
+      { store_slug: storeRef, app_id: appId },
+      { $set: doc },
+      { upsert: true },
+    );
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      appId,
+      isConnected,
+      message: `${appId} saved to merchant_integrations.`,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/merchant-integrations error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save app integration.' });
+  }
+};
+
+app.post('/api/store/merchant-integrations', saveMerchantIntegration);
+app.put('/api/store/merchant-integrations', saveMerchantIntegration);
+
 /**
  * GET /api/store/loyalty-settings — load loyalty configuration including tiers.
  */

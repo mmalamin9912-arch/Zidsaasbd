@@ -225,6 +225,64 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
     setF3Val(app.field3Value || '');
   };
 
+  const merchantStoreRef = merchant?.store_slug || (merchant as any)?.storeSlug || (merchant as any)?.id || 'default-store';
+
+  /**
+   * Persist one app's state to the MongoDB `merchant_integrations` collection
+   * via the backend. Fire-and-forget with a console warning on failure — the
+   * optimistic UI update has already applied by the time this runs.
+   */
+  const persistIntegration = React.useCallback(async (appId: string, isConnected: boolean, f1 = '', f2 = '', f3 = '') => {
+    try {
+      const res = await fetch('/api/store/merchant-integrations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          store_slug: merchantStoreRef,
+          appId,
+          isConnected,
+          field1Value: f1,
+          field2Value: f2,
+          field3Value: f3,
+        }),
+      });
+      const data = await res.json();
+      if (!data.ok) console.warn('merchant-integrations save failed:', data.error);
+      return Boolean(data.ok);
+    } catch (err) {
+      console.warn('merchant-integrations save error:', err);
+      return false;
+    }
+  }, [merchantStoreRef]);
+
+  /** Hydrate connection state + credentials from MongoDB on mount. */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/store/merchant-integrations?store_slug=${encodeURIComponent(merchantStoreRef)}`);
+        const data = await res.json();
+        if (cancelled || !data.ok || !Array.isArray(data.integrations) || data.integrations.length === 0) return;
+        setIntegrations(prev => prev.map(item => {
+          const saved = data.integrations.find((s: any) => s.appId === item.id);
+          if (!saved) return item;
+          return {
+            ...item,
+            isConnected: saved.isConnected,
+            field1Value: saved.field1Value || item.field1Value,
+            field2Value: saved.field2Value || item.field2Value || '',
+            field3Value: saved.field3Value || item.field3Value || '',
+          };
+        }));
+      } catch (err) {
+        console.warn('merchant-integrations hydration skipped:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Run once per store identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [merchantStoreRef]);
+
   const handleToggleConnection = (app: AppIntegrationConfig) => {
     // Check if free merchant is attempting to enable a PRO app
     if (app.tier === 'PRO' && merchantPlan === 'FREE' && !app.isConnected) {
@@ -232,18 +290,22 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
       return;
     }
 
+    const nextConnected = !app.isConnected;
     setIntegrations(prev => prev.map(item => {
       if (item.id === app.id) {
-        return { ...item, isConnected: !item.isConnected };
+        return { ...item, isConnected: nextConnected };
       }
       return item;
     }));
+    void persistIntegration(app.id, nextConnected, app.field1Value, app.field2Value || '', app.field3Value || '');
   };
 
-  const handleSaveIntegration = (e: React.FormEvent) => {
+  const handleSaveIntegration = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedApp) return;
 
+    // Optimistic UI: badge flips to INSTALLED immediately, rolls back if the
+    // server could not persist the record.
     setIntegrations(prev => prev.map(item => {
       if (item.id === selectedApp.id) {
         return {
@@ -256,6 +318,18 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
       }
       return item;
     }));
+
+    const persisted = await persistIntegration(selectedApp.id, true, f1Val, f2Val, f3Val);
+    if (!persisted) {
+      setIntegrations(prev => prev.map(item => {
+        if (item.id === selectedApp.id) {
+          return { ...item, isConnected: selectedApp.isConnected, field1Value: selectedApp.field1Value, field2Value: selectedApp.field2Value || '', field3Value: selectedApp.field3Value || '' };
+        }
+        return item;
+      }));
+      alert('Could not save the integration to the server. Please try again.');
+      return;
+    }
 
     setSelectedApp(null);
     alert(`Successfully connected and saved configuration for ${selectedApp.name}! Settings applied to store.`);
@@ -275,7 +349,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
 
   return (
     <div className="space-y-6">
-      
+
       {/* Top Banner Header */}
       <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-xl">
         <div>
@@ -338,8 +412,8 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
           const isProLocked = app.tier === 'PRO' && merchantPlan === 'FREE';
 
           return (
-            <div 
-              key={app.id} 
+            <div
+              key={app.id}
               className={`bg-[#202533] border rounded-2xl p-6 space-y-5 shadow-xl flex flex-col justify-between transition relative ${
                 isProLocked ? 'border-amber-500/30 bg-gradient-to-b from-[#202533] to-[#1A1E2B]' : 'border-[#2E3548] hover:border-[#3A435E]'
               }`}
@@ -373,11 +447,11 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
                   </div>
 
                   <span className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold uppercase shrink-0 ${
-                    app.isConnected 
-                      ? 'bg-[#00D68F]/20 text-[#00D68F] border border-[#00D68F]/30' 
+                    app.isConnected
+                      ? 'bg-[#00D68F]/20 text-[#00D68F] border border-[#00D68F]/30'
                       : 'bg-slate-800 text-slate-400 border border-slate-700'
                   }`}>
-                    {app.isConnected ? 'Connected' : 'Not Connected'}
+                    {app.isConnected ? 'INSTALLED' : 'NOT INSTALLED'}
                   </span>
                 </div>
 

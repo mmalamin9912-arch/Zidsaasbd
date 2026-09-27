@@ -372,6 +372,26 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       const data = await response.json();
       
       if (data.ok) {
+        // Mirror the connection into the merchant_integrations collection so the
+        // App Market badge survives reloads. Best-effort — the primary config
+        // save already succeeded.
+        try {
+          await fetch('/api/store/merchant-integrations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              store_slug: payload.store_slug,
+              appId: selectedApp.id,
+              isConnected: true,
+              field1Value: f1Val,
+              field2Value: f2Val,
+              field3Value: f3Val,
+            }),
+          });
+        } catch (mirrorErr) {
+          console.warn('merchant_integrations mirror failed:', mirrorErr);
+        }
+
         // Update local state based on the result
         setIntegrations(prev => prev.map(item => {
           if (item.id === selectedApp.id) {
@@ -425,7 +445,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       });
 
       const data = await response.json();
-      
+
       if (!data.ok) {
         // Roll back on failure
         setIntegrations(prev => prev.map(item => {
@@ -435,6 +455,17 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
           return item;
         }));
         alert(`Failed to update connection status: ${data.error || 'Unknown error'}`);
+      } else {
+        // Mirror the toggle into merchant_integrations (best-effort).
+        try {
+          await fetch('/api/store/merchant-integrations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ store_slug: storeSlug, appId: id, isConnected: nextState }),
+          });
+        } catch (mirrorErr) {
+          console.warn('merchant_integrations mirror failed:', mirrorErr);
+        }
       }
     } catch (error) {
       console.error('Error toggling connection:', error);
@@ -660,7 +691,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
 
   const handleUpdateTier = async (id: string, field: 'minSpendBDT' | 'multiplier', value: string) => {
     const numVal = parseFloat(value) || 0;
-    
+
     // Optimistic UI update
     setLoyaltyTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: numVal } : t));
 
@@ -685,7 +716,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       });
 
       const data = await response.json();
-      
+
       if (!data.ok) {
         // Roll back on failure
         setLoyaltyTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: (t as any)[field] } : t));
@@ -715,7 +746,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       });
 
       const data = await response.json();
-      
+
       if (!data.ok) {
         alert(`Failed to save loyalty config: ${data.error || 'Unknown error'}`);
       }
@@ -735,7 +766,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       alert('Please enter a valid points amount.');
       return;
     }
-    
+
     if (!adjReason.trim()) {
       alert('Please provide a reason for the adjustment.');
       return;
@@ -756,7 +787,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       });
 
       const data = await response.json();
-      
+
       if (data.ok) {
         // Update local state with the result from the server
         setCustomersList(prev => prev.map(c => c.id === selectedCustomerId ? { ...c, loyaltyPoints: data.transaction.newBalance } : c));
@@ -788,7 +819,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
 
   return (
     <div className="space-y-6">
-      
+
       {/* Top Header Card */}
       <div className="bg-[#202533] border border-[#2E3548] p-5 sm:p-6 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
         <div>
@@ -919,8 +950,8 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                   )}
                 </div>
                 <p className="text-[11px] text-slate-400 mt-0.5">
-                  {isProMerchant 
-                    ? 'All Pro level apps, TikTok Events API, Bulk SMS, and bKash TrxID verifiers are fully unlocked.' 
+                  {isProMerchant
+                    ? 'All Pro level apps, TikTok Events API, Bulk SMS, and bKash TrxID verifiers are fully unlocked.'
                     : 'Upgrade to Pro Merchant plan to unlock advanced tracking pixels, bulk SMS gateways, and automated payment verifiers.'}
                 </p>
               </div>
@@ -977,11 +1008,11 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                     </div>
 
                     <span className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wide shrink-0 ${
-                      app.isConnected 
-                        ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' 
+                      app.isConnected
+                        ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
                         : 'bg-slate-800/80 text-slate-400 border border-slate-700/60'
                     }`}>
-                      {app.isConnected ? 'Active' : 'Not Installed'}
+                      {app.isConnected ? 'INSTALLED' : 'NOT INSTALLED'}
                     </span>
                   </div>
 
