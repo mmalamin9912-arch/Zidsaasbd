@@ -401,6 +401,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     heroTitle: (typeof merchantThemeConfig.heroTitle === 'string' && merchantThemeConfig.heroTitle) || storefrontMerchant.heroTitle || '',
     heroSubtitle: (typeof merchantThemeConfig.heroSubtitle === 'string' && merchantThemeConfig.heroSubtitle) || storefrontMerchant.heroSubtitle || '',
     heroImage: (typeof merchantThemeConfig.heroImage === 'string' && merchantThemeConfig.heroImage) || storefrontMerchant.heroImage || '',
+    heroImages: Array.isArray(merchantThemeConfig.heroImages) && merchantThemeConfig.heroImages.length > 0
+      ? (merchantThemeConfig.heroImages as string[])
+      : ((typeof merchantThemeConfig.heroImage === 'string' && merchantThemeConfig.heroImage) || storefrontMerchant.heroImage
+          ? [(typeof merchantThemeConfig.heroImage === 'string' && merchantThemeConfig.heroImage) || storefrontMerchant.heroImage || '']
+          : []),
     heroCtaText: (typeof merchantThemeConfig.heroCtaText === 'string' && merchantThemeConfig.heroCtaText) || 'Shop Now',
     slides: Array.isArray(merchantThemeConfig.slides) && merchantThemeConfig.slides.length > 0
       ? (merchantThemeConfig.slides as Array<{ id: string; title: string; subtitle: string; ctaText: string; ctaLink: string; image: string; }>)
@@ -468,6 +473,22 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [supabaseProducts, setSupabaseProducts] = useState<Product[]>([]);
   const [supabaseCategories, setSupabaseCategories] = useState<any[]>([]);
   const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
+  // Hero carousel auto-rotation state (2s interval)
+  const heroImageList: string[] = resolvedTheme.heroImages.length > 0
+    ? resolvedTheme.heroImages
+    : (resolvedTheme.heroImage ? [resolvedTheme.heroImage] : []);
+  const [activeHeroIndex, setActiveHeroIndex] = useState(0);
+  useEffect(() => {
+    if (!resolvedTheme.showHeroBanner || heroImageList.length <= 1) return;
+    const interval = setInterval(() => {
+      setActiveHeroIndex((prev) => (prev + 1) % heroImageList.length);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [resolvedTheme.showHeroBanner, heroImageList.length]);
+  // Reset index when image list changes
+  useEffect(() => {
+    setActiveHeroIndex(0);
+  }, [heroImageList.join(',')]);
 
   // Legal policies (set in Settings → Legal policies). When `showInFooter` is on,
   // links to the policies the merchant filled in are auto-injected into the
@@ -1742,11 +1763,30 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             {/* Hero Banner (Luxury Dark Aesthetic) — themed from Theme Editor settings */}
             {resolvedTheme.showHeroBanner && (
             <div className="w-full h-[220px] relative overflow-hidden bg-slate-950 border-b border-slate-800/80">
-              <SafeImage
-                src={activeHeroSlide?.image || resolvedTheme.heroImage || "https://images.unsplash.com/photo-1445205170230-053b83016050?auto=format&fit=crop&w=800&q=80"}
-                alt="Hero Banner"
-                className="w-full h-full object-cover opacity-50 scale-105 transition-transform duration-700 hover:scale-100"
-              />
+              {heroImageList.length > 1 ? (
+                heroImageList.map((img, idx) => (
+                  <div
+                    key={idx}
+                    className="absolute inset-0 w-full h-full transition-opacity duration-700 ease-in-out"
+                    style={{
+                      opacity: idx === activeHeroIndex ? 1 : 0,
+                      pointerEvents: idx === activeHeroIndex ? 'auto' : 'none',
+                    }}
+                  >
+                    <SafeImage
+                      src={img}
+                      alt={`Hero Banner ${idx + 1}`}
+                      className="w-full h-full object-cover opacity-50 scale-105 transition-transform duration-700"
+                    />
+                  </div>
+                ))
+              ) : (
+                <SafeImage
+                  src={activeHeroSlide?.image || resolvedTheme.heroImage || "https://images.unsplash.com/photo-1445205170230-053b83016050?auto=format&fit=crop&w=800&q=80"}
+                  alt="Hero Banner"
+                  className="w-full h-full object-cover opacity-50 scale-105 transition-transform duration-700 hover:scale-100"
+                />
+              )}
               <div className="absolute inset-0 bg-gradient-to-t from-[#0f172a] via-[#0f172a]/50 to-transparent flex items-end p-5">
                 <div className="space-y-2 max-w-sm">
                   <span className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-400 to-[#00D68F] text-slate-950 text-[10px] font-black uppercase tracking-widest px-3 py-0.5 rounded-full shadow-lg">

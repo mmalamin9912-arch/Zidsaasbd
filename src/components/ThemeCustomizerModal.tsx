@@ -200,6 +200,11 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const [heroSubtitle, setHeroSubtitle] = useState(merchant?.heroSubtitle || (merchant?.themeConfig?.slides?.[0]?.subtitle ?? 'Shop our premium organic food, traditional boutique, and authentic gadgets.'));
   const [heroCtaText, setHeroCtaText] = useState(merchant?.themeConfig?.heroCtaText ?? (merchant?.themeConfig?.slides?.[0]?.ctaText ?? 'Shop Now'));
   const [heroImage, setHeroImage] = useState(merchant?.heroImage || (merchant?.themeConfig?.slides?.[0]?.image ?? 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=1600&q=80'));
+  const [heroImages, setHeroImages] = useState<string[]>(
+    Array.isArray(merchant?.themeConfig?.heroImages) && merchant.themeConfig.heroImages.length > 0
+      ? merchant.themeConfig.heroImages
+      : (merchant?.heroImage ? [merchant.heroImage] : [])
+  );
 
   // 2. Categories
   const [showCategories, setShowCategories] = useState(merchant?.themeConfig?.showCategories ?? true);
@@ -367,9 +372,19 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const updateHideLanguage = (val: boolean) => { setHideLanguage(val); markDirty(); };
   const updateHideCountry = (val: boolean) => { setHideCountry(val); markDirty(); };
 
+  // Sync heroImages from slides: whenever slides change, update heroImages
+  // so the array of image URLs is kept in sync with the slide manager.
+  useEffect(() => {
+    const images = slides
+      .map((s) => s.image)
+      .filter((img) => img && img.trim() !== '');
+    setHeroImages(images.length > 0 ? images : []);
+  }, [slides]);
+
   const updateHeroTitle = (val: string) => { setHeroTitle(val); markDirty(); };
   const updateHeroSubtitle = (val: string) => { setHeroSubtitle(val); markDirty(); };
   const updateHeroImage = (val: string) => { setHeroImage(val); markDirty(); };
+  const updateHeroImages = (imgs: string[]) => { setHeroImages(imgs); markDirty(); };
 
   // ---------------- DRAG AND DROP REORDER STATES & HANDLERS ----------------
   // Top Level Main Sections Order
@@ -575,7 +590,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     headerSticky, headerBgColor, hideLanguage, hideCountry, showSearchBar,
     showAnnouncement, announcementText, announcementBg, announcementLink, isMarquee, marqueeSpeed, announcementItems,
     showHeroBanner, carouselTransition, desktopCarouselHeight, mobileCarouselHeight, activeSlideIndex, slides,
-    heroTitle, heroSubtitle, heroCtaText, heroImage,
+    heroTitle, heroSubtitle, heroCtaText, heroImage, heroImages,
     showCategories, categoriesHeading, categoriesSubtitle, categoriesLayout, categoriesSelection, categoriesItemsPerRow,
     categoriesShowItemCount, categoriesShowMoreButton, categoriesMoreButtonText, categoriesBgImage, categoriesOverlayOpacity, categoriesList,
     showFeaturedGrid, featuredHeading, productColumns, productsLayout, productsSelection, productsShowMoreButton, productsMoreButtonText,
@@ -613,7 +628,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       storeLogoText, logoImageUrl, desktopLogoUrl, mobileLogoUrl, logoHeight,
       headerSticky, headerBgColor, hideLanguage, hideCountry, showSearchBar,
       showAnnouncement, announcementText, announcementBg, announcementLink, isMarquee, marqueeSpeed, announcementItems,
-      showHeroBanner, carouselTransition, desktopCarouselHeight, mobileCarouselHeight, activeSlideIndex, slides, heroTitle, heroSubtitle, heroCtaText, heroImage,
+      showHeroBanner, carouselTransition, desktopCarouselHeight, mobileCarouselHeight, activeSlideIndex, slides, heroTitle, heroSubtitle, heroCtaText, heroImage, heroImages,
       showCategories, categoriesHeading, categoriesSubtitle, categoriesLayout, categoriesSelection, categoriesItemsPerRow, categoriesShowItemCount, categoriesMoreButtonText, categoriesShowMoreButton, categoriesBgImage, categoriesOverlayOpacity, categoriesList,
       showFeaturedGrid, featuredHeading, productColumns, productsLayout, productsSelection, productsShowMoreButton, productsMoreButtonText,
       showCountdown, countdownTitle, countdownEndDate, countdownBgImage, countdownOverlayOpacity, countdownHours, countdownDiscount,
@@ -630,6 +645,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       heroTitle,
       heroSubtitle,
       heroImage,
+      heroImages,
       announcementText,
       themeConfig,
     } : ({} as MerchantProfile);
@@ -691,6 +707,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
             hero_title: heroTitle,
             hero_subtitle: heroSubtitle,
             hero_image: heroImage,
+            hero_images: heroImages,
             announcement_text: announcementText,
             logo_url: logoImageUrl || desktopLogoUrl || mobileLogoUrl || '',
             active_theme_id: updatedMerchant.activeThemeId || null,
@@ -698,38 +715,6 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
           }, { onConflict: 'email' });
         if (themeSaveErr) {
           console.warn('[ThemeCustomizer] Supabase theme save notice:', themeSaveErr.message);
-        }
-
-        // Also persist to the 'stores' table (used for tenant storefront lookups).
-        const storeRow = {
-          email: updatedMerchant.email.trim().toLowerCase(),
-          store_name: updatedMerchant.storeName,
-          store_slug: (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
-            .toLowerCase().replace(/[^a-z0-9]/g, ''),
-          theme_config: themeConfig,
-          hero_title: heroTitle,
-          hero_subtitle: heroSubtitle,
-          hero_image: heroImage,
-          announcement_text: announcementText,
-          logo_url: logoImageUrl || desktopLogoUrl || mobileLogoUrl || '',
-          active_theme_id: updatedMerchant.activeThemeId || null,
-          updated_at: new Date().toISOString()
-        };
-        const { error: storesSaveErr } = await supabase
-          .from('stores')
-          .upsert(storeRow, { onConflict: 'email' });
-        if (storesSaveErr) {
-          console.warn('[ThemeCustomizer] Supabase stores save notice:', storesSaveErr.message);
-          // 'stores' may not exist or may not have an email unique constraint —
-          // retry as an update targeted by slug, then by insert fallback.
-          const { error: updErr } = await supabase
-            .from('stores')
-            .update(storeRow)
-            .eq('store_slug', storeRow.store_slug);
-          if (updErr) {
-            const { error: insErr } = await supabase.from('stores').insert(storeRow);
-            if (insErr) console.warn('[ThemeCustomizer] Supabase stores insert notice:', insErr.message);
-          }
         }
       }
     } catch (e) {
@@ -984,8 +969,9 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       heroTitle,
       heroSubtitle,
       heroCtaText,
-      heroImage,
-      showCategories,
+       heroImage,
+       heroImages,
+       showCategories,
       categoriesHeading,
       categoriesSubtitle,
       categoriesLayout,

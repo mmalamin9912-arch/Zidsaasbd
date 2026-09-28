@@ -213,6 +213,7 @@ export interface MerchantProfile {
   heroTitle?: string;
   heroSubtitle?: string;
   heroImage?: string;
+  heroImages?: string[];
   announcementText?: string;
   shippingConfig?: {
     type: 'flat' | 'free' | 'advance';
