@@ -608,10 +608,30 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     return () => { active = false; };
   }, [effectiveStoreSlug]);
 
-  // Products shown on the storefront come ONLY from the database (via API).
-  // No hardcoded/mock fallback: if nothing was fetched we render an explicit
-  // "No products available" empty state instead of dummy items.
-  const storefrontProducts: Product[] = supabaseProducts;
+  // Products shown on the storefront come from the DATABASE (via API).
+  //
+  // `/api/products` is the primary catalog feed, but `/api/storefront/:slug`
+  // ALSO returns the store's published products from MongoDB. Previously only
+  // `supabaseProducts` was consulted, so whenever that single secondary call
+  // returned empty (slow Mongo handshake, Supabase hiccup) the section rendered
+  // "No products added yet" even though the store had live products. We now
+  // fall back through the other database-backed sources before giving up.
+  const storefrontProducts: Product[] = React.useMemo(() => {
+    if (supabaseProducts.length > 0) return supabaseProducts;
+
+    const fromStorefrontPayload = Array.isArray(liveStoreData.products)
+      ? (liveStoreData.products as any[])
+      : [];
+    if (fromStorefrontPayload.length > 0) {
+      return fromStorefrontPayload.map(mapSupabaseProduct);
+    }
+
+    if (Array.isArray(products) && products.length > 0) {
+      return products.map(mapSupabaseProduct);
+    }
+
+    return [];
+  }, [supabaseProducts, liveStoreData.products, products]);
 
   // Tracks whether catalog loading finished (success or failure). While loading
   // we show a skeleton rather than a premature "no products" message.

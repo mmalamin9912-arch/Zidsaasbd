@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { GalleryImage, MerchantProfile } from '../types';
+import { GalleryImage, MerchantProfile, Product, ThemeConfig } from '../types';
 import { TenantStorefrontView } from './TenantStorefrontView';
-import { writeZidStoreData } from '../lib/storeData';
+import { readZidStoreData, writeZidStoreData } from '../lib/storeData';
 import { readAndDownscaleImage } from '../utils/imageUtils';
 import SafeImage from './SafeImage';
 import { supabase } from '../lib/supabase';
@@ -638,6 +638,31 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       onPublish(updatedMerchant);
     }
 
+    // Persist to the AUTHORITATIVE database store (MongoDB `stores`, mirrored to
+    // Supabase by /api/stores/update). This is a PARTIAL update: the route writes
+    // `themeConfig.<leaf>` via dot-notation, so publishing the Header section can
+    // never delete the Page Content / video / custom-block sections the merchant
+    // configured earlier. Previously publish only touched Supabase + the local
+    // shared store, so a reload on a fresh device (or the real /store/:slug URL)
+    // lost every section — the editor's "sections disappear on save" bug.
+    try {
+      await fetch('/api/stores/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          merchant: {
+            ...updatedMerchant,
+            store_slug: updatedMerchant.storeSlug,
+            activeThemeId: updatedMerchant.activeThemeId,
+            themeConfig,
+          },
+          themeConfig,
+        }),
+      });
+    } catch (e) {
+      console.warn('[ThemeCustomizer] Database theme save failed:', e);
+    }
+
     // Persist the published theme to the slug-scoped shared store so the live
     // storefront (and other tabs) pick it up instantly via storage/CustomEvent.
     try {
@@ -866,6 +891,52 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     setDrillDownSection(id);
   };
 
+  /**
+   * Live-preview catalogue.
+   *
+   * The customizer previously rendered `<TenantStorefrontView products={[]} />`,
+   * so the Featured Products section always showed "No products added yet" in the
+   * preview even when the store had live products — the preview did not match the
+   * real storefront URL. These resolve the merchant's real catalogue (products +
+   * active themes) from the slug-scoped shared store, which TenantStorefrontView
+   * also refreshes from `/api/storefront/:slug` on mount.
+   */
+  const previewSlug = String(merchant?.storeSlug || merchant?.store_slug || 'bd');
+  const [previewProducts, setPreviewProducts] = useState<Product[]>([]);
+  const [previewThemes, setPreviewThemes] = useState<ThemeConfig[]>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    const load = async () => {
+      // 1. Shared store first (instant, no network) so the preview is populated
+      //    on the very first paint.
+      const shared = readZidStoreData(previewSlug);
+      if (active) {
+        if (Array.isArray(shared?.products)) setPreviewProducts(shared.products as Product[]);
+        if (Array.isArray(shared?.themes)) setPreviewThemes(shared.themes as ThemeConfig[]);
+      }
+      // 2. Authoritative database catalogue (MongoDB-backed).
+      try {
+        const res = await fetch(`/api/storefront/${encodeURIComponent(previewSlug)}`);
+        const data = await res.json().catch(() => null);
+        const payload = data?.storefront;
+        if (active && payload) {
+          if (Array.isArray(payload.products) && payload.products.length > 0) {
+            setPreviewProducts(payload.products as Product[]);
+          }
+          if (Array.isArray(payload.themes) && payload.themes.length > 0) {
+            setPreviewThemes(payload.themes as ThemeConfig[]);
+          }
+        }
+      } catch (e) {
+        console.warn('[ThemeCustomizer] preview catalogue load warning:', e);
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [isOpen, previewSlug]);
+
   const liveMerchant: MerchantProfile = {
     ...(merchant || {
       storeName: 'My Store',
@@ -972,9 +1043,8 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       dhakaAddress,
       contactEmail,
       showPaymentBadges,
-      mainSectionsOrder,
-      contentSectionsOrder,
-      footerSectionsOrder,
+      contentSectionsOrder, mainSectionsOrder, headerSectionsOrder, footerSectionsOrder,
+      addedSections,
     }
   };
 
@@ -4128,10 +4198,10 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                 <TenantStorefrontView
                   storeSlug={liveMerchant.storeSlug || 'demo'}
                   merchant={liveMerchant}
-                  products={[]}
+                  products={previewProducts}
                   bankAccounts={[]}
                   mobileBanking={[]}
-                  themes={[]}
+                  themes={previewThemes}
                   isMobile={deviceMode === 'mobile'}
                   onPlaceOrder={(order) => {
                     console.log('Order placed in live customizer preview:', order);

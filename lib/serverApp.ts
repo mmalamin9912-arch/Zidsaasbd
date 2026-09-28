@@ -3311,31 +3311,39 @@ app.all('/api/tenant-store', async (req, res) => {
   return res.json({ ok: true, store_slug: slug, tenant: payload });
 });
 
-app.get('/api/storefront/:slug', async (req, res) => {
+// GET /api/storefront/:slug  AND  GET /api/storefront?store_slug=…
+//
+// Both path forms resolve to the same handler so a client using query params
+// (or a custom store domain) never hits the 404 fallback.
+app.get('/api/storefront/:slug?', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
-    const slug = (req.params.slug || '').trim().toLowerCase();
+    const rawRef = String(
+      req.params?.slug ||
+      req.query?.store_slug ||
+      req.query?.storeSlug ||
+      req.query?.store_domain ||
+      req.query?.custom_domain ||
+      req.query?.domain ||
+      req.query?.store_id ||
+      req.query?.store_code ||
+      'bd'
+    ).trim();
+
+    // Resolve the reference (slug / UUID / store_code / custom domain) to the
+    // canonical slug + identity. MongoDB-first, Supabase fallback is wrapped so
+    // a secondary-query failure can never break the storefront.
+    const refs = await resolveStoreRefs(rawRef);
+    const slug = refs.slug || 'bd';
+
     const payload = await readStorePayload();
 
-    // Filter products by store_slug to only return products belonging to this store
-    const allProducts = Array.isArray(payload.products) ? payload.products : [];
-    const storeProducts = allProducts.filter((p: any) => {
-      const pSlug = (p.storeSlug || p.store_slug || '').toString().trim().toLowerCase();
-      return pSlug === slug || (slug === 'bd' && (!pSlug || pSlug === 'bd'));
-    });
-
-    // Also check store-specific products in payload.stores
-    if (payload.stores && payload.stores[slug] && Array.isArray(payload.stores[slug].products)) {
-      const storeP = payload.stores[slug].products;
-      const existingIds = new Set(storeProducts.map((p: any) => String(p.id)));
-      for (const p of storeP) {
-        if (p && !existingIds.has(String(p.id))) {
-          storeProducts.push(p);
-          existingIds.add(String(p.id));
-        }
-      }
-    }
-
-    // Also query MongoDB for this store's products
+    // ── Products: MongoDB `products` is the AUTHORITATIVE source ─────────
+    // Queried FIRST (and strictly by the resolved store_slug, plus the store's
+    // id/code and the raw reference) so a stale local file mirror can never
+    // mask real, published products — which is what produced the spurious
+    // "No products added yet" empty state on the storefront.
+    let storeProducts: any[] = [];
     try {
       await connectToMongoDB();
     } catch (dbErr: any) {
@@ -3343,26 +3351,64 @@ app.get('/api/storefront/:slug', async (req, res) => {
     }
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       try {
-        // @ts-ignore
-        const mongoSlugQuery: any = {
-          $or: [
-            { store_slug: slug },
-            { storeSlug: slug },
-          ]
-        };
-        const mongoProds = await (mongoose.connection.db.collection('products') as any).find(mongoSlugQuery).toArray();
-        if (Array.isArray(mongoProds) && mongoProds.length > 0) {
-          const existingIds = new Set(storeProducts.map((p: any) => String(p.id)));
-          for (const p of mongoProds) {
-            if (p && !existingIds.has(String(p.id))) {
-              storeProducts.push(p);
-            }
+        const mongoOr: any[] = [
+          { store_slug: slug },
+          { storeSlug: slug },
+        ];
+        if (refs.storeId) mongoOr.push({ store_id: refs.storeId }, { storeId: refs.storeId });
+        if (refs.storeCode) mongoOr.push({ store_code: refs.storeCode }, { storeCode: refs.storeCode });
+        const rawLower = rawRef.toLowerCase();
+        if (rawLower && rawLower !== slug) {
+          mongoOr.push({ store_slug: rawLower }, { storeSlug: rawLower });
+          if (isUuidLike(rawRef)) mongoOr.push({ store_id: rawRef }, { storeId: rawRef });
+          if (STORE_CODE_RE.test(rawRef)) mongoOr.push({ store_code: rawRef }, { storeCode: rawRef });
+          // Custom-domain storefront access.
+          if (rawLower.includes('.')) {
+            mongoOr.push({ store_domain: rawLower }, { domain: rawLower }, { customDomain: rawLower }, { custom_domain: rawLower });
           }
+        }
+        const mongoProds = await (mongoose.connection.db.collection('products') as any)
+          .find({ $or: mongoOr })
+          .toArray();
+        if (Array.isArray(mongoProds) && mongoProds.length > 0) {
+          storeProducts = mongoProds.map(normalizeMongoProduct);
         }
       } catch (mongoErr) {
         console.warn('[Server] GET /api/storefront/:slug MongoDB query warning:', mongoErr);
       }
     }
+
+    // ── Offline fallback: local file / in-memory mirror ──────────────────
+    if (storeProducts.length === 0) {
+      const allProducts = Array.isArray(payload.products) ? payload.products : [];
+      storeProducts = allProducts
+        .filter((p: any) => {
+          const pSlug = (p.storeSlug || p.store_slug || '').toString().trim().toLowerCase();
+          return pSlug === slug || (slug === 'bd' && (!pSlug || pSlug === 'bd'));
+        })
+        .map(normalizeMongoProduct);
+
+      // Also check store-specific products in payload.stores
+      if (payload.stores && payload.stores[slug] && Array.isArray(payload.stores[slug].products)) {
+        const existingIds = new Set(storeProducts.map((p: any) => String(p.id)));
+        for (const p of payload.stores[slug].products) {
+          if (p && !existingIds.has(String(p.id))) {
+            storeProducts.push(normalizeMongoProduct(p));
+            existingIds.add(String(p.id));
+          }
+        }
+      }
+    }
+
+    // De-duplicate by product id so Mongo + mirror never double-list an item.
+    const byId = new Map<string, any>();
+    for (const p of storeProducts) {
+      const key = String(p?.id ?? p?._id ?? '');
+      if (key && !byId.has(key)) byId.set(key, p);
+    }
+
+    // Only active, published products may reach the public storefront.
+    storeProducts = filterActivePublished([...byId.values()]);
 
     // Build storefront with only the data needed by the public customer link.
     //
@@ -3373,9 +3419,9 @@ app.get('/api/storefront/:slug', async (req, res) => {
     // checkout and the delivery zones price themselves (Inside City / Outside
     // City) instead of falling back to "To be confirmed".
     let merchantRecord: any = payload.merchant || null;
-    if (!merchantRecord) {
+    if (!merchantRecord || String(merchantRecord.storeSlug || merchantRecord.store_slug || '').toLowerCase() !== slug) {
       try {
-        merchantRecord = await resolveStoreRecordFlexible(slug);
+        merchantRecord = (await resolveStoreRecordFlexible(slug)) || merchantRecord;
       } catch (resolveErr: any) {
         console.warn('[Server] GET /api/storefront/:slug store resolve warning:', resolveErr?.message || resolveErr);
       }
@@ -3956,24 +4002,51 @@ app.post('/api/stores/update', async (req, res) => {
         if (storeId) filterOr.push({ id: storeId }, { store_id: storeId });
 
         if (filterOr.length > 0) {
-          // The incoming merchant object is one the client previously READ from
-          // the API, so it still carries `_id`. $set-ing `_id` aborts the whole
-          // update with Mongo error 66, which is what produced the "would modify
-          // the immutable field '_id'" warning on every settings save. Strip it
-          // (and any operator keys) before building $set.
+          // PARTIAL UPDATE ($set), never a whole-document replace.
+          //
+          // The client sends back a merchant object it previously READ from the
+          // API, so it still carries `_id` (Mongo error 66 on $set) AND stale /
+          // absent section keys. A plain `$set` of top-level fields is correct:
+          // fields the patch does not mention (e.g. `theme_config.slides`,
+          // `theme_config.addedSections`, video/custom blocks) are left untouched
+          // instead of being wiped.
           const cleanPatch = sanitizeMongoPatch(cleanMerchant);
-          if (Object.keys(cleanPatch).length === 0) {
+          delete cleanPatch._id;
+
+          // `themeConfig` / `theme_config` are nested objects edited section by
+          // section. Write them with DOT-NOTATION per leaf key so saving the
+          // Header section can never delete the Page Content / video / custom
+          // block sections the merchant already configured. Keys explicitly set
+          // to `null` are preserved as explicit clears.
+          const flatTheme: Record<string, any> = {};
+          for (const rawKey of ['themeConfig', 'theme_config'] as const) {
+            const tc = cleanPatch[rawKey];
+            if (!tc || typeof tc !== 'object' || Array.isArray(tc)) continue;
+            for (const [k, v] of Object.entries(tc as Record<string, any>)) {
+              if (k === '_id') continue;
+              flatTheme[`${rawKey}.${k}`] = v;
+            }
+            delete cleanPatch[rawKey];
+          }
+
+          const setDoc: Record<string, any> = {
+            ...cleanPatch,
+            ...flatTheme,
+            store_slug: storeSlug || m.storeSlug,
+            storeSlug: storeSlug || m.storeSlug,
+            updated_at: new Date(),
+          };
+
+          if (Object.keys(setDoc).length <= 3) {
             console.warn('[Server] /api/stores/update: nothing to update after sanitizing the patch.');
           } else {
             await mongoose.connection.db.collection('stores').updateOne(
               { $or: filterOr },
               {
-                $set: {
-                  ...cleanPatch,
-                  store_slug: storeSlug || m.storeSlug,
-                  storeSlug: storeSlug || m.storeSlug,
-                  updated_at: new Date(),
-                }
+                $set: setDoc,
+                // Seed the slug/code on insert only; $setOnInsert never clobbers
+                // an existing document's identity fields.
+                ...(storeSlug ? { $setOnInsert: { store_slug: storeSlug, storeSlug } } : {}),
               },
               { upsert: true }
             );
