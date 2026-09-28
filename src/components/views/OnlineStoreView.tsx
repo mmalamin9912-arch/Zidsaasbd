@@ -72,52 +72,27 @@ export interface ThemeMarketItem {
   category: string;
 }
 
-export const themeCatalog: ThemeMarketItem[] = [
-  {
-    id: 'growth-1',
-    name: 'Growth (Free Standard)',
-    version: '1.0.0',
-    badge: 'Standard Free',
-    isFree: true,
-    updatedAt: 'Updated on August 05, 2026',
-    previewUrl: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=600&q=80',
-    description: 'Standard clean, fully responsive layout engineered for Bangladesh e-commerce with built-in bKash/Nagad badges and express checkout.',
-    category: 'General E-Commerce'
-  },
-  {
-    id: 'modern-gold-luxury',
-    name: 'Modern Gold Luxury',
-    version: '2.5.0',
-    badge: 'Ultra Premium',
-    isFree: false,
-    updatedAt: 'Updated on August 06, 2026',
-    previewUrl: 'https://images.unsplash.com/photo-1512436991641-6745cdb1723f?auto=format&fit=crop&w=600&q=80',
-    description: 'Ultra-premium obsidian black & champagne gold layout with glowing product card hover effects and high-end boutique feel.',
-    category: 'Luxury & Jewelry'
-  },
-  {
-    id: 'supermarket-tech',
-    name: 'Supermarket & Tech Mega-Store',
-    version: '3.1.0',
-    badge: 'Mega-Menu Store',
-    isFree: false,
-    updatedAt: 'Updated on August 07, 2026',
-    previewUrl: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=600&q=80',
-    description: 'Catch/Luzuk style layout with multi-category sidebars, mega-menu header, express delivery badges, flash deal countdowns, and quick-add buttons.',
-    category: 'Supermarket & Tech'
-  },
-  {
-    id: 'elegant-fashion',
-    name: 'Elegant Fashion & Lifestyle',
-    version: '2.2.0',
-    badge: 'Boutique Hot',
-    isFree: false,
-    updatedAt: 'Updated on August 08, 2026',
-    previewUrl: 'https://images.unsplash.com/photo-1523381210434-271e8be1f52b?auto=format&fit=crop&w=600&q=80',
-    description: 'Boutique fashion theme featuring Instagram story-style category circles, floating quick cart drawers, social proof badges, and mobile-optimized checkout.',
-    category: 'Fashion & Apparel'
-  }
-];
+/**
+ * Theme catalogue — 100% dynamic.
+ *
+ * There is NO hardcoded theme array here. Every theme the merchant sees in the
+ * Themes section / Marketplace comes from the Super Admin panel's `themes`
+ * collection (MongoDB `themes`, mirrored to Supabase) via GET /api/admin/themes,
+ * passed down as `platformThemes`. When the prop is empty (e.g. the component
+ * mounts before App finished loading) we fetch the catalogue directly from the
+ * API so the marketplace never falls back to mock data.
+ */
+const mapDbThemeToMarketItem = (raw: Record<string, any>): ThemeMarketItem => ({
+  id: String(raw?.id || raw?.slug || '').trim(),
+  name: String(raw?.name || raw?.title || 'Theme'),
+  version: String(raw?.version || '1.0.0'),
+  badge: raw?.badge ? String(raw.badge) : undefined,
+  isFree: raw?.isFree === true || raw?.is_free === true || Number(raw?.priceBDT ?? raw?.price ?? 0) === 0,
+  updatedAt: String(raw?.updatedAt || raw?.updated_at || 'Published by admin'),
+  previewUrl: String(raw?.previewUrl || raw?.preview_url || raw?.thumbnailUrl || raw?.thumbnail_url || ''),
+  description: String(raw?.description || `Theme: ${raw?.name || raw?.id || ''}`),
+  category: String(raw?.category || 'General'),
+});
 
 export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
   onOpenStorefrontPreview,
@@ -222,33 +197,45 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     alert(`Theme "${theme.name}" is now live on your storefront!`);
   };
 
-  // Effective catalogue = built-in market themes + any ACTIVE themes published
-  // by the Super Admin. Admin themes are appended so a newly-created platform
-  // theme becomes selectable here immediately (ids are de-duplicated).
-  const mergedThemeCatalog: ThemeMarketItem[] = React.useMemo(() => {
-    const byId = new Map<string, ThemeMarketItem>();
-    for (const t of themeCatalog) byId.set(t.id, t);
-    for (const raw of platformThemes || []) {
-      const id = String(raw?.id || raw?.slug || '').trim();
-      if (!id) continue;
-      if (byId.has(id)) continue;
-      byId.set(id, {
-        id,
-        name: String(raw?.name || raw?.title || 'Theme'),
-        version: String(raw?.version || '1.0.0'),
-        badge: raw?.badge ? String(raw.badge) : undefined,
-        isFree: raw?.isFree === true || Number(raw?.priceBDT ?? raw?.price ?? 0) === 0,
-        updatedAt: String(raw?.updatedAt || raw?.updated_at || 'Published by admin'),
-        previewUrl: String(raw?.previewUrl || raw?.preview_url || raw?.thumbnailUrl || raw?.thumbnail_url || ''),
-        description: String(raw?.description || `Theme: ${raw?.name || id}`),
-        category: String(raw?.category || 'General'),
-      });
-    }
-    return [...byId.values()];
+  // Direct DB fallback: fetch the ACTIVE admin themes when the parent has not
+  // handed us a catalogue yet, so the marketplace ONLY ever shows what the
+  // Super Admin configured in the `themes` collection — never mock entries.
+  const [dbThemes, setDbThemes] = useState<Array<Record<string, any>>>([]);
+  useEffect(() => {
+    if ((platformThemes || []).length > 0) return; // prop is the primary source
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/admin/themes', { headers: { Accept: 'application/json' } });
+        const data = await res.json().catch(() => null);
+        const themes = Array.isArray(data?.themes) ? data.themes : [];
+        if (active && themes.length > 0) {
+          setDbThemes(themes.filter((t: any) => String(t?.status || 'Active') !== 'Hidden'));
+        }
+      } catch (err: any) {
+        console.warn('[OnlineStoreView] admin themes fetch notice:', err?.message || err);
+      }
+    })();
+    return () => { active = false; };
   }, [platformThemes]);
 
-  // Current active theme object
-  const currentActiveTheme = mergedThemeCatalog.find(t => t.id === (merchant?.activeThemeId || 'growth-1')) || mergedThemeCatalog[0];
+  // Effective catalogue = ONLY the ACTIVE themes published by the Super Admin
+  // (MongoDB `themes` collection is the single source of truth). Prop themes
+  // win; the direct API fetch is a fallback. Duplicates are de-duplicated by id.
+  const mergedThemeCatalog: ThemeMarketItem[] = React.useMemo(() => {
+    const byId = new Map<string, ThemeMarketItem>();
+    const source = (platformThemes && platformThemes.length > 0) ? platformThemes : dbThemes;
+    for (const raw of source || []) {
+      if (String(raw?.status || 'Active') === 'Hidden') continue;
+      const item = mapDbThemeToMarketItem(raw);
+      if (!item.id || byId.has(item.id)) continue;
+      byId.set(item.id, item);
+    }
+    return [...byId.values()];
+  }, [platformThemes, dbThemes]);
+
+  // Current active theme object (defaults to the first DB theme, not a mock id)
+  const currentActiveTheme = mergedThemeCatalog.find(t => t.id === merchant?.activeThemeId) || mergedThemeCatalog[0];
 
   // Landing Pages Data
   const [landingPages, setLandingPages] = useState<any[]>([]);
@@ -547,7 +534,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 <h2 className="text-base font-bold text-white flex items-center gap-2">
                   <span>Theme Catalog & Marketplace</span>
                   <span className="text-xs bg-[#00D68F]/10 text-[#00D68F] border border-[#00D68F]/30 px-2 py-0.5 rounded-md font-mono font-bold">
-                    1 Free • 4 Premium
+                    {mergedThemeCatalog.filter(t => t.isFree).length} Free • {mergedThemeCatalog.filter(t => !t.isFree).length} Premium
                   </span>
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">Upgrade to a Professional or Enterprise plan to unlock all premium themes instantly.</p>
@@ -577,14 +564,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 <tbody className="divide-y divide-[#2E3548] text-slate-200">
                   {mergedThemeCatalog.map((t) => {
                     const unlocked = isThemeUnlocked(t);
-                    const isActive = (merchant?.activeThemeId || 'growth-1') === t.id;
+                    const isActive = merchant?.activeThemeId === t.id;
 
                     return (
                       <tr key={t.id} className="hover:bg-[#202533]/50 transition">
                         <td className="p-3">
-                          <SafeImage 
-                            src={t.previewUrl} 
-                            alt={t.name} 
+                          <SafeImage
+                            src={t.previewUrl}
+                            alt={t.name}
                             className="w-16 h-10 object-cover rounded-lg border border-[#2E3548]"
                           />
                         </td>
@@ -759,7 +746,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <h1 className="text-xl font-extrabold text-white">Landing Pages Builder</h1>
               <p className="text-xs text-slate-400 mt-0.5">Create custom standalone high-converting campaign landing pages.</p>
             </div>
-            <button 
+            <button
               onClick={() => setShowCreateLPModal(true)}
               className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition cursor-pointer"
             >
@@ -796,7 +783,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   Create high-converting landing pages for your Eid campaigns, Flash sales, or special launches.
                 </p>
               </div>
-              <button 
+              <button
                 onClick={() => setShowCreateLPModal(true)}
                 className="bg-[#282E3F] hover:bg-[#32394E] text-[#00D68F] border border-[#00D68F]/30 font-bold px-5 py-2.5 rounded-xl text-xs flex items-center gap-2 transition cursor-pointer"
               >
@@ -884,15 +871,15 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             <div className="space-y-4 bg-[#181B26] p-4 rounded-xl border border-[#2E3548]">
               <label className="block text-slate-200 font-bold">Primary Brand Accent Color</label>
               <div className="flex items-center gap-3">
-                <input 
-                  type="color" 
-                  value={themePrimaryColor} 
-                  onChange={(e) => setThemePrimaryColor(e.target.value)} 
+                <input
+                  type="color"
+                  value={themePrimaryColor}
+                  onChange={(e) => setThemePrimaryColor(e.target.value)}
                   className="w-10 h-10 rounded-lg cursor-pointer bg-transparent border-0"
                 />
-                <input 
-                  type="text" 
-                  value={themePrimaryColor} 
+                <input
+                  type="text"
+                  value={themePrimaryColor}
                   onChange={(e) => setThemePrimaryColor(e.target.value)}
                   className="bg-[#202533] border border-[#2E3548] text-white px-3 py-2 rounded-xl font-mono text-xs uppercase"
                 />
@@ -901,9 +888,9 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
             <div className="space-y-2 bg-[#181B26] p-4 rounded-xl border border-[#2E3548]">
               <label className="block text-slate-200 font-bold">Store Header Announcement Banner</label>
-              <input 
-                type="text" 
-                value={headerAnnouncement} 
+              <input
+                type="text"
+                value={headerAnnouncement}
                 onChange={(e) => setHeaderAnnouncement(e.target.value)}
                 placeholder="🎉 Free Delivery across Bangladesh on Orders Over ৳2,000!"
                 className="w-full bg-[#202533] border border-[#2E3548] text-white px-3 py-2 rounded-xl text-xs outline-none focus:border-indigo-500 transition"
@@ -913,7 +900,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           </div>
 
           <div className="pt-4 border-t border-[#2E3548] flex justify-end">
-            <button 
+            <button
               onClick={handleSaveBrand}
               className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-6 py-3 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-[#00D68F]/20 transition transform active:scale-95 cursor-pointer"
             >
@@ -932,7 +919,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <h1 className="text-xl font-extrabold text-white">Navigation Menus</h1>
               <p className="text-xs text-slate-400 mt-0.5">Customize main header navigation links and footer menu hierarchy.</p>
             </div>
-            <button 
+            <button
               onClick={() => setShowAddMenuModal(true)}
               className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition cursor-pointer"
             >
@@ -957,7 +944,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           </div>
 
           <div className="pt-4 border-t border-[#2E3548] flex justify-end">
-            <button 
+            <button
               onClick={handleSaveMenu}
               className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-6 py-3 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-[#00D68F]/20 transition transform active:scale-95 cursor-pointer"
             >
@@ -976,7 +963,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <h1 className="text-xl font-extrabold text-white">Store Blog & Content</h1>
               <p className="text-xs text-slate-400 mt-0.5">Publish articles, customer buying guides, and fashion news.</p>
             </div>
-            <button 
+            <button
               onClick={() => handleOpenBlogModal()}
               className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition cursor-pointer"
             >
@@ -1006,27 +993,27 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                       </div>
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center gap-2">
                     <span className="bg-[#00D68F]/10 text-[#00D68F] px-2.5 py-1 rounded-full font-bold text-[10px] mr-4">
                       {post.status}
                     </span>
                     <div className="flex items-center bg-[#202533] rounded-lg border border-[#2E3548] overflow-hidden">
-                      <button 
+                      <button
                         onClick={() => alert(`Viewing published article: ${post.title}`)}
                         className="p-2 hover:bg-[#282E3F] text-slate-400 hover:text-white transition border-r border-[#2E3548]"
                         title="View Article"
                       >
                         <Eye className="w-4 h-4" />
                       </button>
-                      <button 
+                      <button
                         onClick={() => handleOpenBlogModal(post)}
                         className="p-2 hover:bg-[#282E3F] text-slate-400 hover:text-indigo-400 transition border-r border-[#2E3548]"
                         title="Edit Article"
                       >
                         <Edit3 className="w-4 h-4" />
                       </button>
-                      <button 
+                      <button
                         onClick={() => handleDeletePost(post.id)}
                         className="p-2 hover:bg-[#282E3F] text-slate-400 hover:text-red-400 transition"
                         title="Delete Article"
@@ -1049,7 +1036,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   Start writing articles to drive more traffic to your store and improve your SEO on Google.
                 </p>
               </div>
-              <button 
+              <button
                 onClick={() => handleOpenBlogModal()}
                 className="bg-[#282E3F] hover:bg-[#32394E] text-[#00D68F] border border-[#00D68F]/30 font-bold px-5 py-2.5 rounded-xl text-xs flex items-center gap-2 transition cursor-pointer"
               >
@@ -1069,7 +1056,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <h1 className="text-xl font-extrabold text-white">Custom Pages</h1>
               <p className="text-xs text-slate-400 mt-0.5">Manage About Us, Privacy Policy, Terms, and Delivery Policy pages.</p>
             </div>
-            <button 
+            <button
               onClick={() => setShowAddPageModal(true)}
               className="bg-[#00D68F] text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 hover:bg-[#00E699] transition cursor-pointer"
             >
@@ -1090,12 +1077,12 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                     {page.status}
                   </span>
                 </div>
-                
+
                 <div className="flex items-center gap-2 pt-2 border-t border-[#2E3548]">
                   <button className="flex-1 bg-[#282E3F] hover:bg-[#32394E] text-indigo-400 font-bold py-2 rounded-lg transition text-[10px]">
                     Edit Page
                   </button>
-                  <button 
+                  <button
                     onClick={() => {
                       const newStatus = page.status === 'Published' ? 'Draft' : 'Published';
                       setCustomPages(customPages.map(p => p.id === page.id ? { ...p, status: newStatus } : p));
@@ -1104,7 +1091,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   >
                     {page.status === 'Published' ? 'Unpublish' : 'Publish'}
                   </button>
-                  <button 
+                  <button
                     onClick={() => {
                       if (confirm('Delete this custom page?')) {
                         setCustomPages(customPages.filter(p => p.id !== page.id));
@@ -1143,8 +1130,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   <span>Meta Title (Google Search Title)</span>
                   <span className="text-[10px] text-slate-500 font-normal">{metaTitle.length}/70 chars</span>
                 </label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={metaTitle}
                   onChange={(e) => setMetaTitle(e.target.value)}
                   placeholder={`${merchant?.storeName || 'My Store'} - Best Online Shopping in Bangladesh`}
@@ -1158,7 +1145,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   <span>Meta Description</span>
                   <span className="text-[10px] text-slate-500 font-normal">{metaDescription.length}/160 chars</span>
                 </label>
-                <textarea 
+                <textarea
                   rows={4}
                   value={metaDescription}
                   onChange={(e) => setMetaDescription(e.target.value)}
@@ -1172,8 +1159,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             <div className="space-y-4">
               <div className="bg-[#181B26] p-4 rounded-xl border border-[#2E3548] space-y-2">
                 <label className="block text-slate-200 font-bold">Meta Keywords</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={metaKeywords}
                   onChange={(e) => setMetaKeywords(e.target.value)}
                   placeholder="e.g. fashion, sarees, gadgets, dhaka, online shopping"
@@ -1184,7 +1171,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
               <div className="bg-[#181B26] p-4 rounded-xl border border-[#2E3548] space-y-3">
                 <label className="block text-slate-200 font-bold">Social Share Image (OG Image)</label>
-                <div 
+                <div
                   className={`
                     w-full h-32 rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-2 transition cursor-pointer overflow-hidden relative
                     ${ogImage ? 'border-indigo-500/50' : 'border-[#2E3548] hover:border-slate-600'}
@@ -1217,7 +1204,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           </div>
 
           <div className="pt-4 border-t border-[#2E3548] flex justify-end">
-            <button 
+            <button
               onClick={() => {
                 alert('SEO Settings saved successfully! Your store will be re-indexed within 24-48 hours.');
               }}
@@ -1238,7 +1225,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <h1 className="text-xl font-extrabold text-white">Frequently Asked Questions (FAQs)</h1>
               <p className="text-xs text-slate-400 mt-0.5">Manage customer self-service questions on storefront.</p>
             </div>
-            <button 
+            <button
               onClick={() => handleOpenFaqModal()}
               className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 transition cursor-pointer"
             >
@@ -1256,14 +1243,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                     <p className="text-slate-300 leading-relaxed">A: {f.answer}</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button 
+                    <button
                       onClick={() => handleOpenFaqModal(f)}
                       className="p-2 hover:bg-[#282E3F] text-slate-400 hover:text-indigo-400 transition rounded-lg border border-[#2E3548]"
                       title="Edit FAQ"
                     >
                       <Edit3 className="w-3.5 h-3.5" />
                     </button>
-                    <button 
+                    <button
                       onClick={() => handleDeleteFaq(f.id)}
                       className="p-2 hover:bg-[#282E3F] text-slate-400 hover:text-red-400 transition rounded-lg border border-[#2E3548]"
                       title="Delete FAQ"
@@ -1285,7 +1272,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   Create common questions to help your customers find answers quickly and reduce support tickets.
                 </p>
               </div>
-              <button 
+              <button
                 onClick={() => handleOpenFaqModal()}
                 className="bg-[#282E3F] hover:bg-[#32394E] text-[#00D68F] border border-[#00D68F]/30 font-bold px-5 py-2.5 rounded-xl text-xs flex items-center gap-2 transition cursor-pointer"
               >
@@ -1308,7 +1295,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </div>
                 <h3 className="font-bold text-white">Create New Landing Page</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setShowCreateLPModal(false)}
                 className="text-slate-400 hover:text-white p-1 transition"
               >
@@ -1316,7 +1303,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </button>
             </div>
 
-            <form 
+            <form
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!newPageTitle || !newPageSlug) return;
@@ -1337,9 +1324,9 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             >
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-300">Page Title</label>
-                <input 
+                <input
                   autoFocus
-                  type="text" 
+                  type="text"
                   value={newPageTitle}
                   onChange={(e) => {
                     setNewPageTitle(e.target.value);
@@ -1357,8 +1344,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 <label className="text-xs font-bold text-slate-300">URL Slug</label>
                 <div className="flex items-center gap-2 bg-[#181B26] border border-[#2E3548] px-4 py-3 rounded-xl text-sm text-slate-400">
                   <span>store.com.bd/p/</span>
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     value={newPageSlug}
                     onChange={(e) => setNewPageSlug(e.target.value)}
                     className="bg-transparent text-white outline-none flex-1 lowercase"
@@ -1369,14 +1356,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </div>
 
               <div className="pt-2 flex gap-3">
-                <button 
+                <button
                   type="button"
                   onClick={() => setShowCreateLPModal(false)}
                   className="flex-1 bg-[#282E3F] hover:bg-[#32394E] text-white font-bold py-3 rounded-xl text-xs transition"
                 >
                   Cancel
                 </button>
-                <button 
+                <button
                   type="submit"
                   className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20"
                 >
@@ -1400,7 +1387,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </h3>
                 <p className="text-xs text-slate-400">Discover premium high-converting themes engineered for Bangladesh e-commerce.</p>
               </div>
-              <button 
+              <button
                 onClick={() => setShowMarketModal(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-lg"
               >
@@ -1411,7 +1398,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {mergedThemeCatalog.map((item) => {
                 const unlocked = isThemeUnlocked(item);
-                const isActive = (merchant?.activeThemeId || 'growth-1') === item.id;
+                const isActive = merchant?.activeThemeId === item.id;
 
                 return (
                   <div key={item.id} className="bg-[#181B26] border border-[#2E3548] rounded-2xl overflow-hidden space-y-3 p-3 flex flex-col justify-between">
@@ -1528,10 +1515,10 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               <div className="flex justify-between border-b border-[#2E3548] pb-2">
                 <span className="text-slate-400">Current Status:</span>
                 <strong className={isThemeUnlocked(showDetailsModal) ? "text-indigo-400 font-bold" : "text-amber-400 font-bold"}>
-                  {(merchant?.activeThemeId || 'growth-1') === showDetailsModal.id 
-                    ? 'Live & Active' 
-                    : isThemeUnlocked(showDetailsModal) 
-                      ? 'Unlocked' 
+                  {merchant?.activeThemeId === showDetailsModal.id
+                    ? 'Live & Active'
+                    : isThemeUnlocked(showDetailsModal)
+                      ? 'Unlocked'
                       : 'Locked / Premium'}
                 </strong>
               </div>
@@ -1548,7 +1535,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </p>
             </div>
 
-            <button 
+            <button
               onClick={() => setShowDetailsModal(null)}
               className="w-full bg-[#282E3F] text-white font-bold py-2 rounded-xl text-xs cursor-pointer"
             >
@@ -1569,7 +1556,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </div>
                 <h3 className="font-bold text-white">Add Navigation Menu Item</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setShowAddMenuModal(false)}
                 className="text-slate-400 hover:text-white p-1 transition"
               >
@@ -1577,7 +1564,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </button>
             </div>
 
-            <form 
+            <form
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!newMenuTitle || !newMenuUrl) return;
@@ -1595,9 +1582,9 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             >
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-300">Menu Title</label>
-                <input 
+                <input
                   autoFocus
-                  type="text" 
+                  type="text"
                   value={newMenuTitle}
                   onChange={(e) => setNewMenuTitle(e.target.value)}
                   placeholder="e.g. Summer Collection"
@@ -1608,8 +1595,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-300">Link URL / Path</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={newMenuUrl}
                   onChange={(e) => setNewMenuUrl(e.target.value)}
                   placeholder="e.g. /collections/summer or https://..."
@@ -1620,14 +1607,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </div>
 
               <div className="pt-2 flex gap-3">
-                <button 
+                <button
                   type="button"
                   onClick={() => setShowAddMenuModal(false)}
                   className="flex-1 bg-[#282E3F] hover:bg-[#32394E] text-white font-bold py-3 rounded-xl text-xs transition"
                 >
                   Cancel
                 </button>
-                <button 
+                <button
                   type="submit"
                   className="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white font-black py-3 rounded-xl text-xs transition shadow-lg shadow-indigo-500/20"
                 >
@@ -1653,7 +1640,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </div>
                 <h3 className="font-bold text-white">Unlock Premium Themes</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setShowUpgradePrompt(false)}
                 className="text-slate-400 hover:text-white p-1 transition"
               >
@@ -1691,7 +1678,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </div>
 
               <div className="flex flex-col gap-3">
-                <button 
+                <button
                   onClick={() => {
                     setShowUpgradePrompt(false);
                     onOpenSubscriptionModal();
@@ -1701,7 +1688,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   <Rocket className="w-4 h-4" />
                   <span>View Subscription Plans</span>
                 </button>
-                <button 
+                <button
                   onClick={() => setShowUpgradePrompt(false)}
                   className="w-full text-slate-400 hover:text-white text-xs font-bold py-2 transition"
                 >
@@ -1724,7 +1711,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </div>
                 <h3 className="font-bold text-white">{editingPost ? 'Edit Article' : 'Write New Article'}</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setShowBlogModal(false)}
                 className="text-slate-400 hover:text-white p-1 transition"
               >
@@ -1738,9 +1725,9 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 <div className="lg:col-span-2 space-y-4">
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-300">Article Title</label>
-                    <input 
+                    <input
                       autoFocus
-                      type="text" 
+                      type="text"
                       value={blogForm.title}
                       onChange={(e) => setBlogForm({ ...blogForm, title: e.target.value })}
                       placeholder="e.g. The Ultimate Guide to Eid Fashion 2026"
@@ -1759,7 +1746,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                           </button>
                         ))}
                       </div>
-                      <textarea 
+                      <textarea
                         rows={12}
                         value={blogForm.content}
                         onChange={(e) => setBlogForm({ ...blogForm, content: e.target.value })}
@@ -1775,7 +1762,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 <div className="space-y-4">
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-300">Cover Image</label>
-                    <div 
+                    <div
                       className={`
                         w-full h-40 rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-2 transition cursor-pointer overflow-hidden relative
                         ${blogForm.coverImage ? 'border-indigo-500/50' : 'border-[#2E3548] hover:border-slate-600'}
@@ -1807,8 +1794,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-slate-300">Author Name</label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       value={blogForm.author}
                       onChange={(e) => setBlogForm({ ...blogForm, author: e.target.value })}
                       placeholder="e.g. John Doe"
@@ -1834,14 +1821,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </div>
 
               <div className="pt-4 border-t border-[#2E3548] flex gap-3">
-                <button 
+                <button
                   type="button"
                   onClick={() => setShowBlogModal(false)}
                   className="bg-[#282E3F] hover:bg-[#32394E] text-white font-bold px-6 py-3 rounded-xl text-xs transition"
                 >
                   Cancel
                 </button>
-                <button 
+                <button
                   type="submit"
                   className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center justify-center gap-2"
                 >
@@ -1865,7 +1852,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </div>
                 <h3 className="font-bold text-white">Create Custom Page</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setShowAddPageModal(false)}
                 className="text-slate-400 hover:text-white p-1 transition"
               >
@@ -1873,7 +1860,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </button>
             </div>
 
-            <form 
+            <form
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!newPageForm.title) return;
@@ -1886,14 +1873,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 setCustomPages([...customPages, newPage]);
                 setShowAddPageModal(false);
                 setNewPageForm({ title: '', slug: '', content: '' });
-              }} 
+              }}
               className="flex-1 overflow-y-auto p-6 space-y-5"
             >
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-300">Page Title</label>
-                <input 
+                <input
                   autoFocus
-                  type="text" 
+                  type="text"
                   value={newPageForm.title}
                   onChange={(e) => setNewPageForm({ ...newPageForm, title: e.target.value })}
                   placeholder="e.g. Terms of Service"
@@ -1906,8 +1893,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 <label className="text-xs font-bold text-slate-300">URL Slug</label>
                 <div className="flex items-center gap-2">
                   <span className="text-slate-500 text-xs font-mono">/pages/</span>
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     value={newPageForm.slug}
                     onChange={(e) => setNewPageForm({ ...newPageForm, slug: e.target.value.toLowerCase().replace(/ /g, '-') })}
                     placeholder="terms-of-service"
@@ -1919,7 +1906,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-300">Page Content (HTML/Markdown)</label>
-                <textarea 
+                <textarea
                   rows={10}
                   value={newPageForm.content}
                   onChange={(e) => setNewPageForm({ ...newPageForm, content: e.target.value })}
@@ -1929,14 +1916,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </div>
 
               <div className="pt-4 border-t border-[#2E3548] flex gap-3">
-                <button 
+                <button
                   type="button"
                   onClick={() => setShowAddPageModal(false)}
                   className="bg-[#282E3F] hover:bg-[#32394E] text-white font-bold px-6 py-3 rounded-xl text-xs transition"
                 >
                   Cancel
                 </button>
-                <button 
+                <button
                   type="submit"
                   className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center justify-center gap-2"
                 >
@@ -1960,7 +1947,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </div>
                 <h3 className="font-bold text-white">{editingFaq ? 'Edit FAQ' : 'Add New FAQ'}</h3>
               </div>
-              <button 
+              <button
                 onClick={() => setShowFaqModal(false)}
                 className="text-slate-400 hover:text-white p-1 transition"
               >
@@ -1971,9 +1958,9 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             <form onSubmit={handleSaveFaq} className="p-6 space-y-5">
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-300">Question</label>
-                <input 
+                <input
                   autoFocus
-                  type="text" 
+                  type="text"
                   value={faqForm.question}
                   onChange={(e) => setFaqForm({ ...faqForm, question: e.target.value })}
                   placeholder="e.g. Do you offer home delivery?"
@@ -1984,7 +1971,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-300">Answer</label>
-                <textarea 
+                <textarea
                   rows={4}
                   value={faqForm.answer}
                   onChange={(e) => setFaqForm({ ...faqForm, answer: e.target.value })}
@@ -1995,14 +1982,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               </div>
 
               <div className="pt-2 flex gap-3">
-                <button 
+                <button
                   type="button"
                   onClick={() => setShowFaqModal(false)}
                   className="flex-1 bg-[#282E3F] hover:bg-[#32394E] text-white font-bold py-3 rounded-xl text-xs transition"
                 >
                   Cancel
                 </button>
-                <button 
+                <button
                   type="submit"
                   className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center justify-center gap-2"
                 >
@@ -2026,7 +2013,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           mobileBanking={[]}
           previewTheme={demoPreviewTheme}
           isUnlocked={isThemeUnlocked(demoPreviewTheme)}
-          isCurrentActive={(merchant?.activeThemeId || 'growth-1') === demoPreviewTheme.id}
+          isCurrentActive={merchant?.activeThemeId === demoPreviewTheme.id}
           onBuyTheme={(t: any) => {
             setUpgradingForTheme(t);
             setShowUpgradePrompt(true);

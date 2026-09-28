@@ -44,6 +44,8 @@ import {
   listSubscriptionRequests,
   listThemeRequests,
   purgeTestTransactionsAndReload,
+  writeSubscriptionRequest,
+  writeThemeRequest,
 } from './adminRequests.js';
 import { pick, toNumber } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
@@ -1574,6 +1576,85 @@ app.post('/api/admin/requests', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/store/subscription-requests — merchant submits a plan request.
+ *
+ * Records the request as PENDING_APPROVAL and NOTHING ELSE. The active plan and
+ * expiry are deliberately left alone: an unapproved submission must never make
+ * the header badge report a paid plan.
+ *
+ * POST /api/store/theme-requests — merchant requests a premium theme unlock.
+ */
+app.post('/api/store/subscription-requests', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const planId = String(body.planId || body.plan_id || '').trim();
+    if (!planId) return res.status(400).json({ ok: false, error: 'planId is required.' });
+
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    const result = await writeSubscriptionRequest({
+      id: body.id,
+      storeName: body.storeName || body.store_name,
+      storeSlug: storeRef || body.storeSlug,
+      storeId: body.storeId || body.store_id,
+      email: body.email || body.merchant_email,
+      planId,
+      planName: body.planName || body.plan_name,
+      amountBDT: body.amountBDT ?? body.amount_bdt ?? body.amount,
+      paymentMethod: body.paymentMethod || body.payment_method,
+      transactionId: body.transactionId || body.transaction_id,
+      status: 'pending_approval',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      request_id: result.id,
+      subscription_status: 'PENDING_APPROVAL',
+      collections: result.collections,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/subscription-requests error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not submit the subscription request.' });
+  }
+});
+
+app.post('/api/store/theme-requests', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const themeId = String(body.themeId || body.theme_id || '').trim();
+    if (!themeId) return res.status(400).json({ ok: false, error: 'themeId is required.' });
+
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    const result = await writeThemeRequest({
+      id: body.id,
+      storeName: body.storeName || body.store_name,
+      storeSlug: storeRef || body.storeSlug,
+      storeId: body.storeId || body.store_id,
+      email: body.email || body.merchant_email,
+      themeId,
+      themeName: body.themeName || body.theme_name,
+      amountBDT: body.amountBDT ?? body.amount_bdt ?? body.amount,
+      paymentMethod: body.paymentMethod || body.payment_method,
+      transactionId: body.transactionId || body.transaction_id,
+      status: 'pending_approval',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      request_id: result.id,
+      request_status: 'PENDING_APPROVAL',
+      collections: result.collections,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/theme-requests error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not submit the theme request.' });
+  }
+});
+
 // ── Admin merchant management ───────────────
 // GET    /api/admin/merchants            — list stores (query: status, search)
 // POST   /api/admin/merchants            — create a new store
@@ -2517,74 +2598,151 @@ function getMergedProductsForStore(storeSlug: string, merchantId: string, payloa
   });
 }
 
+/**
+ * Resolve ANY store reference to its canonical slug + identity, MongoDB-first.
+ *
+ * Accepts a store_slug, ZID-BD-XXXX store_code, stores.id UUID, or a custom
+ * domain (mystore.com / shop.example.com). MongoDB `stores` is authoritative,
+ * so a store that only exists there resolves correctly even when Supabase is
+ * unreachable. Supabase is a secondary lookup and every failure is swallowed —
+ * it can never fail the caller.
+ */
+async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: string; storeCode?: string }> {
+  const clean = String(ref || '').split(':')[0].trim().toLowerCase();
+  if (!clean) return { slug: 'bd' };
+
+  let slug = clean;
+  let storeId: string | undefined;
+  let storeCode: string | undefined;
+
+  // 1. MongoDB stores collection (authoritative).
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const upper = clean.toUpperCase();
+      const orClauses: any[] = [
+        { store_slug: clean },
+        { storeSlug: clean },
+        { store_code: { $in: [clean, upper] } },
+        { customDomain: clean },
+        { custom_domain: clean },
+        { domain: clean },
+        { 'domainConfig.customDomain': clean },
+      ];
+      if (isUuidLike(clean)) orClauses.push({ id: clean }, { _id: clean }, { store_id: clean });
+      const doc: any = await (mongoose.connection.db.collection('stores') as any).findOne({ $or: orClauses });
+      if (doc) {
+        slug = String(doc.store_slug || doc.storeSlug || clean).toLowerCase();
+        if (isUuidLike(String(doc.id || doc._id || ''))) storeId = String(doc.id || doc._id);
+        if (doc.store_code) storeCode = String(doc.store_code);
+        return { slug, storeId, storeCode };
+      }
+    }
+  } catch (e: any) {
+    console.warn('[Server] resolveStoreRefs mongo warning:', e?.message || e);
+  }
+
+  // 2. Secondary Supabase resolution — best effort, must never fail or hang the request.
+  try {
+    const resolved = await resolveStoreSlugByRef(ref);
+    if (resolved) slug = String(resolved).toLowerCase();
+  } catch (e: any) {
+    console.warn('[Server] resolveStoreRefs supabase warning:', e?.message || e);
+  }
+
+  return { slug, storeId, storeCode };
+}
+
+/** Keep only products a public storefront may show: active and published. */
+function filterActivePublished(prods: any[]): any[] {
+  if (!Array.isArray(prods)) return [];
+  return prods.filter(p => {
+    if (!p) return false;
+    const status = String(p.status || 'active').toLowerCase();
+    const isPublished = p.is_published !== false && p.isPublished !== false;
+    return status !== 'archived' && status !== 'hidden' && status !== 'draft' && isPublished;
+  });
+}
+
+/** Normalise a Mongo product row: _id -> id when missing, camel/snake parity. */
+function normalizeMongoProduct(p: any): any {
+  if (!p || typeof p !== 'object') return p;
+  const id = p.id != null ? String(p.id) : (p._id != null ? String(p._id) : `prod-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  return { ...p, id, product_id: id, productId: id };
+}
+
 app.get('/api/products', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    // Accept store_slug, storeSlug, store_id, or store_code from query
+    // Accept store_slug, storeSlug, store_id, store_code, or store domain
+    // (domain / store_domain / custom_domain query params).
     const rawSlug = (req.query.store_slug as string ||
       req.query.storeSlug as string ||
       req.query.store_id as string ||
+      req.query.storeId as string ||
       req.query.store_code as string ||
+      req.query.storeCode as string ||
+      req.query.store_domain as string ||
+      req.query.custom_domain as string ||
+      req.query.domain as string ||
       '').trim();
-    // Preserve original for UUID/store_code matching (before .toLowerCase())
+    // Preserve original for UUID/store_code/domain matching (before .toLowerCase())
     const rawSlugOriginal = rawSlug.trim();
-    let storeSlug = String(rawSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
-
-    // If the input matches a UUID or ZID-BD-XXXX pattern, try to resolve to store_slug
-    if ((isUuidLike(rawSlugOriginal) || STORE_CODE_RE.test(rawSlugOriginal)) && getServerSupabaseConfig().isConfigured) {
-      try {
-        const resolved = await resolveStoreSlugByRef(rawSlugOriginal);
-        if (resolved) storeSlug = resolved.toLowerCase();
-      } catch (e) {
-        console.warn('[Server] GET /api/products store_slug resolution failed:', e);
-      }
-    }
 
     const merchantId = (req.query.merchant_id as string || req.query.merchantId as string || '').trim();
 
-    const payload = await readStorePayload();
-    let prods = getMergedProductsForStore(storeSlug, merchantId, payload);
+    // Resolve UUID / store_code / custom domain to the canonical slug.
+    // MongoDB-first with a safely wrapped Supabase fallback, so a slow or
+    // misconfigured Supabase can never fail this route.
+    const refs = await resolveStoreRefs(rawSlugOriginal);
+    const storeSlug = refs.slug || 'bd';
 
-    // Also try with the raw reference (UUID/code) if resolved lookup didn't find products
-    if (prods.length === 0 && (isUuidLike(rawSlugOriginal) || STORE_CODE_RE.test(rawSlugOriginal))) {
-      prods = getMergedProductsForStore(rawSlugOriginal, merchantId, payload);
+    // 1. MongoDB `products` collection — the AUTHORITATIVE source. Query it
+    //    first so a stale local-store.json mirror can never mask real products.
+    let prods: any[] = [];
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] GET /api/products MongoDB unavailable, falling back to file/memory store:', dbErr?.message || dbErr);
     }
-
-    if (prods.length === 0) {
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       try {
-        await connectToMongoDB();
-      } catch (dbErr: any) {
-        console.error('[Server] GET /api/products MongoDB unavailable, falling back to file/memory store:', dbErr?.message || dbErr);
-      }
-      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-        try {
-          // Build query: try resolved slug, and original ref (UUID/store_code)
-          const mongoOr: any[] = [
-            { store_slug: storeSlug },
-            { storeSlug: storeSlug },
-          ];
-          // If original was a UUID or store_code, also match by store_id / store_code
-          if (isUuidLike(rawSlugOriginal)) {
-            mongoOr.push({ store_id: rawSlugOriginal });
-          }
-          if (STORE_CODE_RE.test(rawSlugOriginal)) {
-            mongoOr.push({ store_code: rawSlugOriginal });
-          }
-          // Also try by slug if it differs from original
-          if (storeSlug !== rawSlugOriginal.toLowerCase()) {
-            mongoOr.push({ store_id: storeSlug });
-          }
-          // @ts-ignore
-          const mongoOrQuery: any = { $or: mongoOr };
-          const mongoProds = await (mongoose.connection.db.collection('products') as any).find(mongoOrQuery).toArray();
-          if (Array.isArray(mongoProds) && mongoProds.length > 0) {
-            prods = mongoProds;
-          }
-        } catch (mongoErr) {
-          console.warn('[Server] GET /api/products MongoDB query warning:', mongoErr);
+        const mongoOr: any[] = [
+          { store_slug: storeSlug },
+          { storeSlug: storeSlug },
+        ];
+        if (refs.storeId) mongoOr.push({ store_id: refs.storeId }, { storeId: refs.storeId });
+        if (refs.storeCode) mongoOr.push({ store_code: refs.storeCode }, { storeCode: refs.storeCode });
+        // If the original was a UUID or store_code, also match by those keys directly.
+        if (isUuidLike(rawSlugOriginal)) mongoOr.push({ store_id: rawSlugOriginal }, { storeId: rawSlugOriginal });
+        if (STORE_CODE_RE.test(rawSlugOriginal)) mongoOr.push({ store_code: rawSlugOriginal }, { storeCode: rawSlugOriginal });
+        // If the caller passed a custom domain, match domain fields too.
+        const lowerOrig = rawSlugOriginal.toLowerCase();
+        if (lowerOrig.includes('.')) {
+          mongoOr.push({ store_domain: lowerOrig }, { domain: lowerOrig }, { customDomain: lowerOrig }, { custom_domain: lowerOrig });
         }
+        const mongoProds = await (mongoose.connection.db.collection('products') as any)
+          .find({ $or: mongoOr })
+          .toArray();
+        if (Array.isArray(mongoProds) && mongoProds.length > 0) {
+          prods = mongoProds.map(normalizeMongoProduct);
+        }
+      } catch (mongoErr) {
+        console.warn('[Server] GET /api/products MongoDB query warning:', mongoErr);
       }
     }
+
+    // 2. File/memory mirror only when MongoDB had nothing (offline fallback).
+    if (prods.length === 0) {
+      const payload = await readStorePayload();
+      prods = getMergedProductsForStore(storeSlug, merchantId, payload);
+      if (prods.length === 0 && (isUuidLike(rawSlugOriginal) || STORE_CODE_RE.test(rawSlugOriginal))) {
+        prods = getMergedProductsForStore(rawSlugOriginal, merchantId, payload);
+      }
+    }
+
+    // Only public, active, published products may leave the API.
+    prods = filterActivePublished(prods);
 
     return res.status(200).json(Array.isArray(prods) ? prods : []);
   } catch (err: any) {
@@ -4304,6 +4462,74 @@ app.post('/api/subscription/update', async (req, res) => {
     const plan_started_at = req.body?.plan_started_at || computed.plan_started_at;
     const expires_at = req.body?.expires_at || computed.expires_at;
     const expiryDate = req.body?.expiryDate || computed.expiryDate;
+    const transactionId = req.body?.transactionId;
+    const paymentMethod = req.body?.paymentMethod;
+
+    // ── Approval gate ────────────────────────────────────────────────────
+    //
+    // A merchant picking a plan in the Subscription Plans modal is REQUESTING
+    // it, not activating it. This route previously always wrote
+    // `status: 'active'`, so selecting a plan silently granted it and the
+    // Super Admin approvals queue stayed empty (nothing wrote the request).
+    //
+    // Authorization is therefore explicit: only a caller that states the plan
+    // is already approved (the admin approve route passes `status: 'active'`)
+    // may activate. Everything else — i.e. every merchant submission — is
+    // recorded as PENDING_APPROVAL and the store's plan is left untouched.
+    const requestedStatus = String(req.body?.status || '').trim().toLowerCase();
+    const isAdminApproval = req.body?.approved === true || requestedStatus === 'active';
+    const subscriptionStatus = isAdminApproval ? 'active' : 'pending_approval';
+
+    // 1. Always record the request so the admin queue reflects it.
+    const requestWrite = await writeSubscriptionRequest({
+      storeName,
+      storeSlug,
+      storeId: req.body?.storeId || req.body?.store_id,
+      email,
+      planId,
+      planName: req.body?.planName || req.body?.plan_name,
+      amountBDT: req.body?.amountBDT ?? req.body?.amount_bdt ?? req.body?.amount,
+      paymentMethod,
+      transactionId,
+      status: subscriptionStatus,
+    }).catch((err: any) => {
+      console.warn('[Server] subscription request write failed:', err?.message || err);
+      return { ok: false, collections: [], error: err?.message };
+    });
+
+    // 2. A pending request must NOT change the active plan/expiry. Persisting
+    //    the new timestamps here is what made a merely-submitted plan render as
+    //    an active paid plan in the header badge.
+    if (!isAdminApproval) {
+      const subWrite = await writeSubscription({
+        merchant_email: email,
+        store_slug: storeSlug,
+        store_name: storeName,
+        subscription_plan: planId,
+        plan_started_at,
+        expires_at,
+        subscription_expiry: expiryDate,
+        duration_days,
+        transaction_id: transactionId,
+        payment_method: paymentMethod,
+        status: 'pending_approval',
+      }).catch((err: any) => {
+        console.warn('[Server] pending subscription write failed:', err?.message || err);
+        return { sources: [] as string[] };
+      });
+
+      return res.json({
+        status: 'ok',
+        updated: false,
+        subscription_status: 'PENDING_APPROVAL',
+        plan_id: planId,
+        expiry_date: expiryDate,
+        duration_days,
+        request_id: (requestWrite as any)?.id,
+        sources: (subWrite?.sources || []),
+        message: 'Subscription request submitted. Awaiting Super Admin approval.',
+      });
+    }
 
     const payload = await readStorePayload();
     if (payload.merchant) {
@@ -4367,9 +4593,9 @@ app.post('/api/subscription/update', async (req, res) => {
       expires_at,
       subscription_expiry: expiryDate,
       duration_days,
-      transaction_id: req.body?.transactionId,
-      payment_method: req.body?.paymentMethod,
-      status: req.body?.status || 'active',
+      transaction_id: transactionId,
+      payment_method: paymentMethod,
+      status: 'active',
     });
 
     res.json({

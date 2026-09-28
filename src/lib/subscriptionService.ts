@@ -276,6 +276,11 @@ export async function syncMerchantSubscription(
   }
 
   // 2. Sync to Backend Server Endpoint `/api/subscription/update`
+  //
+  // The `status` is forwarded EXPLICITLY. The server treats anything other than
+  // an admin approval as a request: it records PENDING_APPROVAL and leaves the
+  // live plan/expiry untouched. Omitting it would let a merchant submission
+  // activate the plan without approval.
   try {
     await fetch('/api/subscription/update', {
       method: 'POST',
@@ -291,7 +296,8 @@ export async function syncMerchantSubscription(
         duration_days: durationDays,
         selectedPlanDays: durationDays,
         transactionId,
-        paymentMethod
+        paymentMethod,
+        status
       })
     });
   } catch (srvErr) {

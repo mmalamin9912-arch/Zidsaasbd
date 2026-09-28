@@ -349,6 +349,219 @@ export async function listThemeRequests(opts: { status?: string } = {}): Promise
   };
 }
 
+/* ------------------------- request writers ------------------------- */
+
+/** Shape returned by the request writers — never throws. */
+export interface AdminRequestWriteResult {
+  ok: boolean;
+  /** The id of the upserted request document. */
+  id?: string;
+  /** Collections the row was written to (modern name first). */
+  collections: string[];
+  error?: string;
+  dbError?: MongoFailure | null;
+}
+
+export interface SubscriptionRequestInput {
+  id?: string;
+  storeName?: string;
+  storeSlug?: string;
+  storeId?: string;
+  email?: string;
+  planId: string;
+  planName?: string;
+  amountBDT?: number;
+  paymentMethod?: string;
+  transactionId?: string;
+  /** Defaults to `pending_approval` — the merchant's submission is never auto-approved. */
+  status?: string;
+  requestedAt?: string;
+}
+
+export interface ThemeRequestInput {
+  id?: string;
+  storeName?: string;
+  storeSlug?: string;
+  storeId?: string;
+  email?: string;
+  themeId: string;
+  themeName?: string;
+  amountBDT?: number;
+  paymentMethod?: string;
+  transactionId?: string;
+  status?: string;
+  requestedAt?: string;
+}
+
+/**
+ * Upsert a merchant's subscription request into `subscription_requests`.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * `listSubscriptionRequests` was the only entry point for this collection, so
+ * the Super Admin "Approvals & Requests" tab always rendered an empty list: no
+ * code path ever INSERTED a row. A merchant picking a plan called
+ * `/api/subscription/update`, which writes `status: 'active'` straight into
+ * `subscriptions` — silently activating the plan and bypassing approval
+ * entirely.
+ *
+ * This writer is the missing half. It records the request as
+ * `pending_approval` so the admin sees it, and it is idempotent on `id` so a
+ * double-submit updates rather than duplicating.
+ */
+export async function writeSubscriptionRequest(
+  input: SubscriptionRequestInput
+): Promise<AdminRequestWriteResult> {
+  const collections: string[] = [];
+  try {
+    const planId = String(input.planId || "").trim();
+    if (!planId) {
+      return { ok: false, collections, error: "planId is required to record a subscription request." };
+    }
+
+    const { db, failure } = await getDb();
+    if (!db) {
+      return { ok: false, collections, error: failure?.message || "MongoDB is not configured or unavailable.", dbError: failure };
+    }
+
+    const now = new Date();
+    const id = String(input.id || `req-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`);
+
+    // Written in BOTH the modern camelCase shape the admin normaliser prefers
+    // and the snake_case aliases legacy readers look for.
+    const doc: Row = {
+      id,
+      kind: "subscription",
+      storeName: String(input.storeName || "Store"),
+      store_name: String(input.storeName || "Store"),
+      storeSlug: String(input.storeSlug || ""),
+      store_slug: String(input.storeSlug || ""),
+      storeId: String(input.storeId || ""),
+      store_id: String(input.storeId || ""),
+      email: String(input.email || ""),
+      merchant_email: String(input.email || ""),
+      planId,
+      plan_id: planId,
+      planName: String(input.planName || humanizePlanId(planId)),
+      plan_name: String(input.planName || humanizePlanId(planId)),
+      amountBDT: toNumber(input.amountBDT, 0),
+      amount_bdt: toNumber(input.amountBDT, 0),
+      paymentMethod: String(input.paymentMethod || ""),
+      payment_method: String(input.paymentMethod || ""),
+      transactionId: String(input.transactionId || ""),
+      transaction_id: String(input.transactionId || ""),
+      // Default is PENDING — a merchant submission must never self-approve.
+      status: String(input.status || "pending_approval"),
+      requestedAt: toIso(input.requestedAt || now),
+      requested_at: toIso(input.requestedAt || now),
+      created_at: toIso(input.requestedAt || now),
+      createdAt: toIso(input.requestedAt || now),
+      updated_at: toIso(now),
+    };
+
+    for (const collectionName of COLLECTIONS.subscription) {
+      try {
+        await db.collection(collectionName).updateOne(
+          { id },
+          { $set: doc, $setOnInsert: { _inserted_at: now } },
+          { upsert: true }
+        );
+        collections.push(collectionName);
+      } catch (err: any) {
+        if (!isMissingCollection(err)) {
+          console.warn(`[adminRequests] ${collectionName} write warning:`, err?.message || err);
+        }
+      }
+    }
+
+    if (collections.length === 0) {
+      return { ok: false, collections, error: "The subscription request could not be saved." };
+    }
+    return { ok: true, id, collections };
+  } catch (err: any) {
+    console.error("[adminRequests] writeSubscriptionRequest error:", err);
+    return { ok: false, collections, error: err?.message || "The subscription request could not be saved." };
+  }
+}
+
+/**
+ * Upsert a theme purchase request into `theme_purchase_requests`.
+ *
+ * Same missing-writer problem as subscriptions: the "Unlock Premium Theme"
+ * button flipped local state and nothing was recorded for the admin to approve.
+ */
+export async function writeThemeRequest(
+  input: ThemeRequestInput
+): Promise<AdminRequestWriteResult> {
+  const collections: string[] = [];
+  try {
+    const themeId = String(input.themeId || "").trim();
+    if (!themeId) {
+      return { ok: false, collections, error: "themeId is required to record a theme request." };
+    }
+
+    const { db, failure } = await getDb();
+    if (!db) {
+      return { ok: false, collections, error: failure?.message || "MongoDB is not configured or unavailable.", dbError: failure };
+    }
+
+    const now = new Date();
+    const id = String(input.id || `thm-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`);
+
+    const doc: Row = {
+      id,
+      kind: "theme",
+      storeName: String(input.storeName || "Store"),
+      store_name: String(input.storeName || "Store"),
+      storeSlug: String(input.storeSlug || ""),
+      store_slug: String(input.storeSlug || ""),
+      storeId: String(input.storeId || ""),
+      store_id: String(input.storeId || ""),
+      email: String(input.email || ""),
+      merchant_email: String(input.email || ""),
+      themeId,
+      theme_id: themeId,
+      themeName: String(input.themeName || themeId),
+      theme_name: String(input.themeName || themeId),
+      amountBDT: toNumber(input.amountBDT, 0),
+      amount_bdt: toNumber(input.amountBDT, 0),
+      paymentMethod: String(input.paymentMethod || ""),
+      payment_method: String(input.paymentMethod || ""),
+      transactionId: String(input.transactionId || ""),
+      transaction_id: String(input.transactionId || ""),
+      status: String(input.status || "pending_approval"),
+      requestedAt: toIso(input.requestedAt || now),
+      requested_at: toIso(input.requestedAt || now),
+      created_at: toIso(input.requestedAt || now),
+      createdAt: toIso(input.requestedAt || now),
+      updated_at: toIso(now),
+    };
+
+    for (const collectionName of COLLECTIONS.theme) {
+      try {
+        await db.collection(collectionName).updateOne(
+          { id },
+          { $set: doc, $setOnInsert: { _inserted_at: now } },
+          { upsert: true }
+        );
+        collections.push(collectionName);
+      } catch (err: any) {
+        if (!isMissingCollection(err)) {
+          console.warn(`[adminRequests] ${collectionName} write warning:`, err?.message || err);
+        }
+      }
+    }
+
+    if (collections.length === 0) {
+      return { ok: false, collections, error: "The theme request could not be saved." };
+    }
+    return { ok: true, id, collections };
+  } catch (err: any) {
+    console.error("[adminRequests] writeThemeRequest error:", err);
+    return { ok: false, collections, error: err?.message || "The theme request could not be saved." };
+  }
+}
+
 /**
  * Does this document look like seeded mock/demo data rather than a real payment?
  *
