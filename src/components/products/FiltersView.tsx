@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Sliders, Plus, Trash2, Check, Sparkles } from 'lucide-react';
+import { useToast } from '../ToastProvider';
 
 export const FiltersView: React.FC = () => {
+  const toast = useToast();
   const [filters, setFilters] = useState([]);
 
   return (
@@ -18,7 +20,7 @@ export const FiltersView: React.FC = () => {
         </div>
 
         <button
-          onClick={() => alert('New Filter Preset Added')}
+          onClick={() => toast.info('New filter preset added')}
           className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-md"
         >
           <Plus className="w-4 h-4 stroke-[3]" />

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { TrendingUp, Sparkles, Search, MessageSquare, Zap, Globe, Check } from 'lucide-react';
 
 import { MerchantProfile } from '../../types';
+import { useToast } from '../ToastProvider';
 
 interface GrowthViewProps {
   merchant?: MerchantProfile;
@@ -12,6 +13,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
   merchant,
   onSwitchToBilling
 }) => {
+  const toast = useToast();
   const isFreeTier = merchant?.subscriptionPlan === 'free_trial';
 
   const [seoOptimized, setSeoOptimized] = useState(true);
@@ -29,7 +31,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
 
   const handleSaveWhatsApp = () => {
     // Logic to save WhatsApp settings would go here
-    alert('WhatsApp settings saved successfully!');
+    toast.success('WhatsApp settings saved successfully!');
   };
 
   const generateCaption = async () => {
@@ -39,7 +41,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
     }
 
     if (!captionPrompt) {
-      alert('Please enter what you want the post to be about.');
+      toast.warning('Please enter what you want the post to be about.');
       return;
     }
 
@@ -49,8 +51,8 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: `Generate a professional, catchy social media promotional caption and hashtags for an e-commerce store. 
-          The post is about: ${captionPrompt}. 
+          prompt: `Generate a professional, catchy social media promotional caption and hashtags for an e-commerce store.
+          The post is about: ${captionPrompt}.
           Make it engaging and include relevant emojis.`,
           systemInstruction: 'You are an expert social media manager for luxury and modern e-commerce brands.'
         }),
@@ -62,7 +64,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
       }
     } catch (error) {
       console.error('AI Caption Error:', error);
-      alert('Failed to generate AI caption.');
+      toast.error('Failed to generate AI caption.', { description: 'Please try again in a moment.' });
     } finally {
       setIsGeneratingCaption(false);
     }
@@ -107,14 +109,14 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
                 className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none h-20"
               />
             </div>
-            
+
             {generatedCaption && (
               <div className="p-3 bg-[#181B26] border border-[#2E3548] rounded-xl text-xs text-slate-300 relative group">
                 <p className="whitespace-pre-wrap">{generatedCaption}</p>
-                <button 
+                <button
                   onClick={() => {
                     navigator.clipboard.writeText(generatedCaption);
-                    alert('Caption copied to clipboard!');
+                    toast.success('Caption copied to clipboard!');
                   }}
                   className="absolute top-2 right-2 text-[10px] text-[#D4AF37] font-bold opacity-0 group-hover:opacity-100 transition cursor-pointer"
                 >

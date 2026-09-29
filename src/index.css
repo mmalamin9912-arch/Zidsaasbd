@@ -114,6 +114,21 @@
   100% { transform: scale(1.4); opacity: 0; }
 }
 
+/* Toast notifications — enter from the bottom-right, settle into place. */
+@keyframes zid-toast-in {
+  from { opacity: 0; transform: translateY(12px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-toast-in {
+  animation: zid-toast-in .22s cubic-bezier(.16, 1, .3, 1);
+}
+
+/* Respect a visitor's reduced-motion preference: show the toast instantly. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-toast-in { animation: none; }
+}
+
 /* Zid AI Assistant — typing dots animation */
 @keyframes zid-ai-dot-bounce {
   0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }

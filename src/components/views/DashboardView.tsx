@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { ZidAiAssistant } from '../ZidAiAssistant';
+import { useToast } from '../ToastProvider';
 
 interface DashboardViewProps {
   merchant: MerchantProfile;
@@ -49,6 +50,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onNavigateTab,
   onOpenSubscriptionModal,
 }) => {
+  const toast = useToast();
   const totalSalesBDT = orders.reduce((sum, o) => sum + o.totalBDT, 0);
 
   // Dynamic Chart Logic
@@ -58,11 +60,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       const date = new Date();
       date.setDate(date.getDate() - i);
       const dayName = date.toLocaleDateString('en-US', { weekday: 'short' });
-      
+
       const salesForDay = orders
         .filter(o => new Date(o.createdAt).toDateString() === date.toDateString())
         .reduce((sum, o) => sum + o.totalBDT, 0);
-        
+
       data.push({ day: dayName, salesBDT: salesForDay });
     }
     return data;
@@ -177,7 +179,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <div className="space-y-6 select-none bg-[#1C1814] p-4 sm:p-6 rounded-3xl border border-[#3E342B]/40 shadow-inner">
-      
+
       {/* Distinct Merchant Admin vs Customer Storefront Links */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* 1. Merchant Admin Dashboard Link */}
@@ -200,7 +202,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(`${window.location.origin}/dashboard/${merchant?.storeSlug || ''}`);
-                  alert('Merchant Dashboard URL copied to clipboard!');
+                  toast.success('Merchant Dashboard URL copied to clipboard!');
                 }}
                 className="flex-1 px-3 py-2 bg-[#2E241D] hover:bg-[#3D3027] text-blue-300 border border-[#4E3E33] font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5"
               >
@@ -238,7 +240,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(`${window.location.origin}/e/${merchant?.storeSlug || ''}`);
-                  alert('Customer Store URL copied to clipboard!');
+                  toast.success('Customer Store URL copied to clipboard!');
                 }}
                 className="flex-1 px-3 py-2 bg-[#2E241D] hover:bg-[#3D3027] text-[#E6C587] border border-[#4E3E33] font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5"
               >

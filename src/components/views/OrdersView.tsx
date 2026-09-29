@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Order, OrderItem } from '../../types';
 import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canonicalStatusOf, isManualOrder } from '../../utils/orderUtils';
 import SafeImage from '../SafeImage';
+import { useToast } from '../ToastProvider';
 import {
   ShoppingBag,
   Search,
@@ -139,6 +140,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   merchantId,
   storeSlug,
 }) => {
+  const toast = useToast();
   const channelRef = useRef<any>(null);
 
   // ── Optimistic-update bookkeeping ─────────────────────────────────────────
@@ -441,7 +443,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             ? `The courier service could not be reached (HTTP ${res.status}). Please try again in a moment.`
             : `Booking failed (HTTP ${res.status}). Please try again.`);
         console.warn(`Courier booking failed [${courierName}]:`, data.code || res.status, reason);
-        alert(`Booking failed: ${reason}`);
+        toast.error('Booking failed', { description: reason });
         return;
       }
 
@@ -467,9 +469,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
 
       if (data.warning) {
-        alert(`Booked via ${courierName} (Tracking ID: ${trackingCode}).\n\nNote: ${data.warning}`);
+        toast.success(`Booked via ${courierName}`, { description: `Tracking ID: ${trackingCode}. ${data.warning}` });
       } else {
-        alert(`Booked Successfully via ${courierName}! Tracking ID: ${trackingCode}`);
+        toast.success(`Booked successfully via ${courierName}!`, { description: `Tracking ID: ${trackingCode}` });
       }
     } catch (error: any) {
       // Reached only when the request never completed (offline, DNS, CORS).
@@ -480,7 +482,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         ? `Could not reach the server to book this order with ${dispatchCourier}. Please retry.`
         : error?.message || 'Network error';
       console.warn('Courier booking request error:', error);
-      alert(`Booking failed: ${reason}`);
+      toast.error('Booking failed', { description: reason });
     } finally {
       setIsBookingCourier(prev => ({ ...prev, [ord.id]: false }));
     }
@@ -863,10 +865,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       failed.forEach(id => {
         failedWritesRef.current[id] = true;
       });
-      alert(
+      toast.error(
         failed.length === ids.length
-          ? `Could not update the status of ${failed.length} order(s). Please try again.`
-          : `Updated ${ids.length - failed.length} of ${ids.length} orders. ${failed.length} could not be saved and have been reverted.`
+          ? `Could not update the status of ${failed.length} order(s).`
+          : `Updated ${ids.length - failed.length} of ${ids.length} orders.`,
+        {
+          description: failed.length === ids.length
+            ? 'Please try again.'
+            : `${failed.length} could not be saved and have been reverted.`,
+        }
       );
     }
   };
@@ -897,10 +904,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       failed.forEach(id => {
         failedWritesRef.current[id] = true;
       });
-      alert(
+      toast.error(
         failed.length === ids.length
-          ? `Could not update the payment status of ${failed.length} order(s). Please try again.`
-          : `Updated ${ids.length - failed.length} of ${ids.length} orders. ${failed.length} could not be saved and have been reverted.`
+          ? `Could not update the payment status of ${failed.length} order(s).`
+          : `Updated ${ids.length - failed.length} of ${ids.length} orders.`,
+        {
+          description: failed.length === ids.length
+            ? 'Please try again.'
+            : `${failed.length} could not be saved and have been reverted.`,
+        }
       );
     }
   };
@@ -926,11 +938,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     endWrite(orderId, !ok);
 
     if (!ok) {
-      alert(
-        `Could not save the payment status for this order. It has been reverted to "${
-          previous?.paymentStatus || 'Unpaid'
-        }". Please try again.`
-      );
+      toast.error('Could not save the payment status for this order.', {
+        description: `It has been reverted to "${previous?.paymentStatus || 'Unpaid'}". Please try again.`,
+      });
     }
   };
 
@@ -961,9 +971,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     endWrite(orderId, !ok);
 
     if (!ok) {
-      alert(
-        `Could not save the new order status. It has been reverted to "${beforeStatus || 'New'}". Please try again.`
-      );
+      toast.error('Could not save the new order status.', {
+        description: `It has been reverted to "${beforeStatus || 'New'}". Please try again.`,
+      });
     }
   };
 
@@ -1102,10 +1112,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       failed.forEach(id => {
         failedWritesRef.current[id] = true;
       });
-      alert(
+      toast.error(
         failed.length === ids.length
-          ? `Could not schedule pickup for ${failed.length} order(s). Please try again.`
-          : `Scheduled pickup for ${ids.length - failed.length} of ${ids.length} orders. ${failed.length} could not be saved and have been reverted.`
+          ? `Could not schedule pickup for ${failed.length} order(s).`
+          : `Scheduled pickup for ${ids.length - failed.length} of ${ids.length} orders.`,
+        {
+          description: failed.length === ids.length
+            ? 'Please try again.'
+            : `${failed.length} could not be saved and have been reverted.`,
+        }
       );
     }
   };
@@ -2247,7 +2262,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   onClick={() => {
                     const printWindow = window.open('', '_blank');
                     if (!printWindow) {
-                      alert('Please allow popups for this website to print invoices.');
+                      toast.warning('Please allow popups for this website to print invoices.');
                       return;
                     }
 
@@ -2647,7 +2662,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   onClick={() => {
                     const printWindow = window.open('', '_blank');
                     if (!printWindow) {
-                      alert('Please allow popups for this website to print shipping labels.');
+                      toast.warning('Please allow popups for this website to print shipping labels.');
                       return;
                     }
 

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { MerchantProfile } from '../../types';
 import { safeSetItem } from '../../utils/safeStorage';
-import { 
+import {  useToast } from '../ToastProvider';
+import {
   Grid, 
   Smartphone, 
   Check, 
@@ -54,6 +55,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
   platformSettings,
   onOpenSubscriptionModal
 }) => {
+  const toast = useToast();
   // Merchant Plan State (Standard Free vs Pro Plan)
   const [merchantPlan, setMerchantPlan] = useState<'FREE' | 'PRO'>(() => {
     const savedPlan = localStorage.getItem('zid_merchant_plan');
@@ -327,12 +329,12 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
         }
         return item;
       }));
-      alert('Could not save the integration to the server. Please try again.');
+      toast.error('Could not save the integration to the server.', { description: 'Please try again.' });
       return;
     }
 
     setSelectedApp(null);
-    alert(`Successfully connected and saved configuration for ${selectedApp.name}! Settings applied to store.`);
+    toast.success(`Successfully connected and saved configuration for ${selectedApp.name}!`);
   };
 
   const handleUpgradeAccount = () => {

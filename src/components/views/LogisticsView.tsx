@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { CourierService, MerchantProfile, CodConfig } from '../../types';
 import SafeImage from '../SafeImage';
-import { 
+import {  useToast } from '../ToastProvider';
+import {
   Truck, 
   Key, 
   CheckCircle2, 
@@ -37,6 +38,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
   onUpdateCouriers,
   onUpdateCodConfig,
 }) => {
+  const toast = useToast();
   const [courierList, setCourierList] = useState<CourierService[]>(couriers);
   const [selectedCourierId, setSelectedCourierId] = useState<string>('steadfast');
   const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
@@ -77,7 +79,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
   const handleSaveShippingSettings = (e: React.FormEvent) => {
     e.preventDefault();
     onUpdateCodConfig(shippingForm);
-    alert('Shipping settings saved successfully!');
+    toast.success('Shipping settings saved successfully!');
   };
 
   const handleSaveApiKeys = (e: React.FormEvent) => {
@@ -97,7 +99,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     });
     setCourierList(updated);
     onUpdateCouriers(updated);
-    alert(`Successfully connected & saved credentials for ${currentCourier?.name || 'the courier'}!`);
+    toast.success('Successfully connected & saved credentials', { description: `${currentCourier?.name || 'The courier'} is now linked to your store.` });
   };
 
   const handleRunCalculator = (e: React.FormEvent) => {

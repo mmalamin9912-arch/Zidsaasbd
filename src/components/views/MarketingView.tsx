@@ -4,37 +4,38 @@ import { initialCoupons, initialCustomers } from '../../data/initialData';
 import { ProFeaturePaymentModal } from '../marketing/ProFeaturePaymentModal';
 import { safeSetItem } from '../../utils/safeStorage';
 import SafeImage from '../SafeImage';
-import { 
-  Megaphone, 
-  Plus, 
-  Tag, 
-  PhoneCall, 
-  Sparkles, 
-  Send, 
-  Calendar, 
-  Users, 
-  Award, 
-  Gift, 
-  FileText, 
-  Check, 
-  X, 
-  Clock, 
-  Edit3, 
-  Trash2, 
-  Copy, 
-  ShieldCheck, 
-  Sliders, 
-  Percent, 
-  Truck, 
-  Zap, 
-  Layers, 
-  MessageSquare, 
-  Mail, 
-  Filter, 
-  CheckCircle2, 
-  RefreshCw, 
-  Search, 
-  UserCheck, 
+import {  useToast } from '../ToastProvider';
+import {
+  Megaphone,
+  Plus,
+  Tag,
+  PhoneCall,
+  Sparkles,
+  Send,
+  Calendar,
+  Users,
+  Award,
+  Gift,
+  FileText,
+  Check,
+  X,
+  Clock,
+  Edit3,
+  Trash2,
+  Copy,
+  ShieldCheck,
+  Sliders,
+  Percent,
+  Truck,
+  Zap,
+  Layers,
+  MessageSquare,
+  Mail,
+  Filter,
+  CheckCircle2,
+  RefreshCw,
+  Search,
+  UserCheck,
   ChevronRight,
   TrendingUp,
   SlidersHorizontal,
@@ -131,12 +132,13 @@ interface MarketingViewProps {
   onOpenSubscriptionModal?: () => void;
 }
 
-export const MarketingView: React.FC<MarketingViewProps> = ({ 
-  merchant, 
-  platformSettings, 
+export const MarketingView: React.FC<MarketingViewProps> = ({
+  merchant,
+  platformSettings,
   adminPaymentConfig,
-  onOpenSubscriptionModal 
+  onOpenSubscriptionModal
 }) => {
+  const toast = useToast();
   // Main Sub-Tab State
   const [activeTab, setActiveTab] = useState<'app_market' | 'campaigns' | 'whatsapp_templates' | 'coupons' | 'loyalty'>('app_market');
 
@@ -406,13 +408,13 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
           return item;
         }));
         setSelectedApp(null);
-        alert(`Successfully connected and saved configuration for ${selectedApp.name}! Settings applied to store header/footer.`);
+        toast.success(`Successfully connected and saved configuration for ${selectedApp.name}!`, { description: 'Settings applied to the store header/footer.' });
       } else {
-        alert(`Error saving configuration: ${data.error || 'Unknown error'}`);
+        toast.error('Error saving configuration', { description: data.error || 'Unknown error' });
       }
     } catch (error) {
       console.error('Error saving integration:', error);
-      alert('Failed to save configuration. Please try again.');
+      toast.error('Failed to save configuration.', { description: 'Please try again.' });
     }
   };
 
@@ -454,7 +456,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
           }
           return item;
         }));
-        alert(`Failed to update connection status: ${data.error || 'Unknown error'}`);
+        toast.error('Failed to update connection status', { description: data.error || 'Unknown error' });
       } else {
         // Mirror the toggle into merchant_integrations (best-effort).
         try {
@@ -476,7 +478,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
         }
         return item;
       }));
-      alert('Failed to update connection status. Please try again.');
+      toast.error('Failed to update connection status.', { description: 'Please try again.' });
     }
   };
 
@@ -575,7 +577,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
     setTplName('');
     setTplBodyText('');
     setTplFooterText('');
-    alert(`WhatsApp Template "${newTpl.name}" submitted for Meta approval!`);
+    toast.success(`WhatsApp template "${newTpl.name}" submitted for Meta approval!`);
   };
 
   // -------------------------------------------------------------
@@ -627,7 +629,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
     setAdvancedCoupons([added, ...advancedCoupons]);
     setShowCouponModal(false);
     setCCode('');
-    alert(`Advanced Coupon "${added.code}" created with zero restrictions!`);
+    toast.success(`Advanced coupon "${added.code}" created with zero restrictions!`);
   };
 
   const handleToggleCouponStatus = (id: string) => {
@@ -720,12 +722,12 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       if (!data.ok) {
         // Roll back on failure
         setLoyaltyTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: (t as any)[field] } : t));
-        alert(`Failed to save tier rules: ${data.error || 'Unknown error'}`);
+        toast.error('Failed to save tier rules', { description: data.error || 'Unknown error' });
       }
     } catch (error) {
       console.error('Error saving tier rules:', error);
       setLoyaltyTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: (t as any)[field] } : t));
-      alert('Failed to save tier rules. Please try again.');
+      toast.error('Failed to save tier rules.', { description: 'Please try again.' });
     }
   };
 
@@ -748,11 +750,11 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
       const data = await response.json();
 
       if (!data.ok) {
-        alert(`Failed to save loyalty config: ${data.error || 'Unknown error'}`);
+        toast.error('Failed to save loyalty config', { description: data.error || 'Unknown error' });
       }
     } catch (error) {
       console.error('Error saving loyalty config:', error);
-      alert('Failed to save loyalty config. Please try again.');
+      toast.error('Failed to save loyalty config.', { description: 'Please try again.' });
     }
   };
 
@@ -763,12 +765,12 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
 
     const delta = (adjAction === 'add' ? 1 : -1) * (parseInt(adjPoints) || 0);
     if (delta === 0) {
-      alert('Please enter a valid points amount.');
+      toast.warning('Please enter a valid points amount.');
       return;
     }
 
     if (!adjReason.trim()) {
-      alert('Please provide a reason for the adjustment.');
+      toast.warning('Please provide a reason for the adjustment.');
       return;
     }
 
@@ -807,13 +809,13 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
         setAdjPoints('');
         setAdjReason('');
 
-        alert(`Successfully ${adjAction === 'add' ? 'awarded' : 'deducted'} ${Math.abs(delta)} points for ${cust.name}! New Balance: ${data.transaction.newBalance} Points.`);
+        toast.success(`Successfully ${adjAction === 'add' ? 'awarded' : 'deducted'} ${Math.abs(delta)} points for ${cust.name}!`, { description: `New balance: ${data.transaction.newBalance} points.` });
       } else {
-        alert(`Error processing point adjustment: ${data.error || 'Unknown error'}`);
+        toast.error('Error processing point adjustment', { description: data.error || 'Unknown error' });
       }
     } catch (error) {
       console.error('Error adjusting points:', error);
-      alert('Failed to process point adjustment. Please try again.');
+      toast.error('Failed to process point adjustment.', { description: 'Please try again.' });
     }
   };
 
@@ -1118,7 +1120,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => alert(`Broadcasting campaign update for ${c.title}`)}
+                    onClick={() => toast.info(`Broadcasting campaign update for ${c.title}`)}
                     className="w-full py-2 bg-[#282E3F] hover:bg-[#32394E] text-slate-200 font-bold text-xs rounded-xl transition cursor-pointer border border-[#3A435E] flex items-center justify-center gap-1.5"
                   >
                     <RefreshCw className="w-3.5 h-3.5 text-[#00D68F]" />
@@ -1199,7 +1201,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                   <span>Created: {t.createdAt}</span>
                   <button
                     type="button"
-                    onClick={() => alert(`WhatsApp template "${t.name}" copied to campaign draft.`)}
+                    onClick={() => toast.success(`WhatsApp template "${t.name}" copied to campaign draft.`)}
                     className="text-[#00D68F] font-bold hover:underline flex items-center gap-1 cursor-pointer"
                   >
                     <Copy className="w-3.5 h-3.5" />

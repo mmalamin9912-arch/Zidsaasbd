@@ -79,6 +79,7 @@ import { OrdersView } from './components/views/OrdersView';
 import { ProductsView } from './components/views/ProductsView';
 import { CustomersView } from './components/views/CustomersView';
 import { supabase } from './lib/supabase';
+import { useToast } from './components/ToastProvider';
 import { MarketingView } from './components/views/MarketingView';
 import { AppsWhatsAppView } from './components/views/AppsWhatsAppView';
 import { OnlineStoreView } from './components/views/OnlineStoreView';
@@ -131,6 +132,7 @@ function isBareStorePath(path: string): boolean {
 }
 
 export default function App() {
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
   const [productSubTab, setProductSubTab] = useState<ProductSubTab>('all_products');
   const [customerSubTab, setCustomerSubTab] = useState<CustomerSubTab>('all_customers');
@@ -1568,7 +1570,7 @@ export default function App() {
       console.error('Failed to update subscription in DB', e);
     }
 
-    alert(`Subscription request submitted successfully! Your Transaction ID (${txId}) is pending Super Admin verification.`);
+    toast.success(`Subscription request submitted successfully!`, { description: `Your Transaction ID (${txId}) is pending Super Admin verification.` });
   };
 
   const handleUpdateCustomers = async (updatedCustomers: Customer[]) => {

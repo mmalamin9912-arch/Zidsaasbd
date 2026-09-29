@@ -311,7 +311,6 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         type: 'error',
         message: `Error saving product: ${e?.message || 'Unknown error'}`
       });
-      alert(`Error saving product: ${e?.message || 'Unknown network error'}`);
     }
   };
 

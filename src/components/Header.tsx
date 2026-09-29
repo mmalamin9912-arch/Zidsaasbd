@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase';
 import { subscribeToSubscriptionStatus } from '../lib/subscriptionStatusCache';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
+import { useToast } from './ToastProvider';
 import {
   Sparkles,
   ExternalLink,
@@ -67,6 +68,7 @@ export const Header: React.FC<HeaderProps> = ({
   onQuickAddProduct,
   onToggleSidebarMobile,
 }) => {
+  const toast = useToast();
   const [searchQuery, setSearchQuery] = useState('');
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -532,7 +534,7 @@ export const Header: React.FC<HeaderProps> = ({
 
             <div className="flex items-center gap-3">
               <button
-                onClick={() => alert(`Pending Subscription Request:\n• Plan: ${pendingRequest.planName}\n• Amount: ৳${pendingRequest.amountBDT?.toLocaleString()} BDT\n• Payment: ${pendingRequest.paymentMethod}\n• TrxID: ${pendingRequest.transactionId}\n• Status: Pending Super Admin Approval\n\nOur administration team is verifying your bKash payment.`)}
+                onClick={() => toast.info('Pending Subscription Request', { description: `Plan: ${pendingRequest.planName} • Amount: ৳${pendingRequest.amountBDT?.toLocaleString()} BDT • Payment: ${pendingRequest.paymentMethod} • TrxID: ${pendingRequest.transactionId}`, duration: 8000 })}
                 className="p-2 text-slate-300 hover:text-amber-300 bg-[#282117] hover:bg-[#342C1E] rounded-xl border border-amber-500/30 transition cursor-pointer text-xs flex items-center gap-1.5 px-3 py-1.5"
                 title="View Verification Status"
               >
@@ -583,7 +585,7 @@ export const Header: React.FC<HeaderProps> = ({
 
             <div className="flex items-center gap-3">
               <button
-                onClick={() => alert('Support Center: Opening Zid Merchant Help Desk...')}
+                onClick={() => toast.info('Support Center: Opening Zid Merchant Help Desk...')}
                 className="p-2 text-slate-300 hover:text-[#00D68F] bg-[#202E34] hover:bg-[#283C44] rounded-xl border border-[#00D68F]/20 transition cursor-pointer"
                 title="Help & Support"
               >
@@ -644,7 +646,7 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
 
               <button
-                onClick={() => alert('Support Center: Opening Zid Merchant Help Desk...')}
+                onClick={() => toast.info('Support Center: Opening Zid Merchant Help Desk...')}
                 className="p-2 text-slate-300 hover:text-[#E6C587] bg-[#252B3B] hover:bg-[#2E3548] rounded-xl border border-[#3A435E] transition cursor-pointer"
                 title="Help & Support"
               >
@@ -977,7 +979,7 @@ export const Header: React.FC<HeaderProps> = ({
                   onClick={(e) => {
                     e.preventDefault();
                     navigator.clipboard.writeText(`https://zidbdsaas2026.vercel.app/e/${merchant?.storeSlug || ''}`);
-                    alert('Store link copied to clipboard!');
+                    toast.success('Store link copied to clipboard!');
                   }}
                   className="p-0.5 text-slate-500 hover:text-white transition-colors"
                   title="Copy Store Link"

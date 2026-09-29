@@ -4,27 +4,28 @@ import { readZidStoreData, writeZidStoreData } from '../../lib/storeData';
 import { upsertCategoryToSupabase, toSafeBigIntId } from '../../utils/catalogPayload';
 import { readAndDownscaleImage } from '../../utils/imageUtils';
 import SafeImage from '../SafeImage';
-import { 
-  FolderTree, 
-  Plus, 
-  Search, 
-  ChevronRight, 
-  ChevronDown, 
-  MoreVertical, 
+import {  useToast } from '../ToastProvider';
+import {
+  FolderTree,
+  Plus,
+  Search,
+  ChevronRight,
+  ChevronDown,
+  MoreVertical,
   GripVertical,
-  Edit2, 
-  Trash2, 
-  Eye, 
-  FolderPlus, 
-  ArrowLeft, 
-  Upload, 
-  Sparkles, 
-  Check, 
-  X, 
-  ExternalLink, 
-  Copy, 
-  Info, 
-  Package, 
+  Edit2,
+  Trash2,
+  Eye,
+  FolderPlus,
+  ArrowLeft,
+  Upload,
+  Sparkles,
+  Check,
+  X,
+  ExternalLink,
+  Copy,
+  Info,
+  Package,
   ImageIcon,
   Lock,
   Layers,
@@ -54,11 +55,12 @@ interface CategoriesViewProps {
   onOpenSubscriptionModal?: () => void;
 }
 
-export const CategoriesView: React.FC<CategoriesViewProps> = ({ 
+export const CategoriesView: React.FC<CategoriesViewProps> = ({
   products,
   storeSlug,
-  onOpenSubscriptionModal 
+  onOpenSubscriptionModal
 }) => {
+  const toast = useToast();
   // Master Category List with Multi-Level Hierarchy & LocalStorage persistence
   const [categories, setCategories] = useState<CategoryNode[]>(() => {
     const saved = localStorage.getItem(`zid_store_categories_v2:${storeSlug}`);
@@ -762,7 +764,7 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
                     type="button"
                     onClick={() => {
                       setActiveMenuId(null);
-                      alert(`Managing products under category "${cat.name}"`);
+                      toast.info(`Managing products under category "${cat.name}"`);
                     }}
                     className="w-full px-3.5 py-2 hover:bg-[#282E3F] flex items-center gap-2 text-left cursor-pointer transition"
                   >

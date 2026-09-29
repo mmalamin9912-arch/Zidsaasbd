@@ -4,6 +4,7 @@ import { ThemeCustomizerModal } from '../ThemeCustomizerModal';
 import { StorefrontPreviewModal } from '../StorefrontPreviewModal';
 import SafeImage from '../SafeImage';
 import { readAndDownscaleImage } from '../../utils/imageUtils';
+import { useToast } from '../ToastProvider';
 import {  readZidStoreData, writeZidStoreData } from '../../lib/storeData';
 import {
   loadStorefrontModules,
@@ -118,6 +119,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
   onOpenSubscriptionModal,
   platformThemes = [],
 }) => {
+  const toast = useToast();
   // Theme Manager States
   const [selectedThemeAction, setSelectedThemeAction] = useState<string | null>(null);
   const [showMarketModal, setShowMarketModal] = useState(false);
@@ -150,8 +152,6 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
   const [showHeroBanner, setShowHeroBanner] = useState(true);
   /** True while the Online Store modules are being read from the database. */
   const [modulesLoading, setModulesLoading] = useState(false);
-  /** Set when the last module save failed, so the UI can say so honestly. */
-  const [moduleSaveError, setModuleSaveError] = useState<string | null>(null);
 
   // The store this dashboard is editing — every module write is scoped to it.
   const moduleStoreRef = merchant?.storeSlug || (merchant as any)?.store_slug || '';
@@ -212,7 +212,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
       console.warn('[OnlineStoreView] theme publish broadcast notice:', err);
     }
 
-    alert(`Theme "${theme.name}" is now live on your storefront!`);
+    toast.success(`Theme "${theme.name}" is now live on your storefront!`);
   };
 
   // Direct DB fallback: fetch the ACTIVE admin themes when the parent has not
@@ -319,7 +319,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
     const saved = await saveStoreModule<BlogPost[]>('blog', moduleStoreRef, next);
     if (saved) setBlogPosts(saved);
-    else setModuleSaveError('The article could not be saved to the database. Please try again.');
+    else toast.error('The article could not be saved to the database.', { description: 'Please try again.' });
   };
 
   const handleDeletePost = async (id: string) => {
@@ -328,7 +328,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     setBlogPosts(next);
     const saved = await saveStoreModule<BlogPost[]>('blog', moduleStoreRef, next);
     if (saved) setBlogPosts(saved);
-    else setModuleSaveError('The article could not be deleted from the database.');
+    else toast.error('The article could not be deleted from the database.');
   };
 
   // FAQ Manager States — hydrated from the database below.
@@ -361,7 +361,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
     const saved = await saveStoreModule<FaqItem[]>('faqs', moduleStoreRef, next);
     if (saved) setFaqs(saved);
-    else setModuleSaveError('The FAQ could not be saved to the database. Please try again.');
+    else toast.error('The FAQ could not be saved to the database.', { description: 'Please try again.' });
   };
 
   const handleDeleteFaq = async (id: string) => {
@@ -370,7 +370,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     setFaqs(next);
     const saved = await saveStoreModule<FaqItem[]>('faqs', moduleStoreRef, next);
     if (saved) setFaqs(saved);
-    else setModuleSaveError('The FAQ could not be deleted from the database.');
+    else toast.error('The FAQ could not be deleted from the database.');
   };
 
   // Menu Manager States — hydrated from the database below. Empty by default:
@@ -467,9 +467,14 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
       if (saved.faviconUrl) setStoreFavicon(saved.faviconUrl);
       if (saved.brandColor) setThemePrimaryColor(saved.brandColor);
       setHeaderAnnouncement(saved.announcementText ?? headerAnnouncement);
-      alert('Brand identity saved to your storefront.');
+      // Non-blocking confirmation: the Mongo write already completed, so the
+      // merchant can keep editing while this fades out on its own.
+      toast.success('Brand identity saved to your storefront.');
     } else {
-      setModuleSaveError('Brand identity could not be saved to the database. Please try again.');
+      toast.error(
+        'Brand identity could not be saved to the database.',
+        { description: 'Your changes are still on screen — please retry.' }
+      );
     }
   };
 
@@ -495,9 +500,12 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     if (saved) {
       setMenuItems(saved.header || []);
       setFooterMenuItems(saved.footer || []);
-      alert('Navigation menus saved to your storefront.');
+      toast.success('Navigation menus saved to your storefront.');
     } else {
-      setModuleSaveError('Navigation menus could not be saved to the database. Please try again.');
+      toast.error(
+        'Navigation menus could not be saved to the database.',
+        { description: 'Your changes are still on screen — please retry.' }
+      );
     }
   };
 
@@ -521,9 +529,12 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
       setMetaDescription(saved.metaDescription || '');
       setMetaKeywords(saved.metaKeywords || '');
       setOgImage(saved.ogImage || null);
-      alert('SEO settings saved to your storefront.');
+      toast.success('SEO settings saved to your storefront.');
     } else {
-      setModuleSaveError('SEO settings could not be saved to the database. Please try again.');
+      toast.error(
+        'SEO settings could not be saved to the database.',
+        { description: 'Your changes are still on screen — please retry.' }
+      );
     }
   };
 
@@ -550,7 +561,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
     const saved = await saveStoreModule<CustomPage[]>('pages', moduleStoreRef, next);
     if (saved) setCustomPages(saved);
-    else setModuleSaveError('The page could not be saved to the database. Please try again.');
+    else toast.error('The page could not be saved to the database.', { description: 'Please try again.' });
   };
 
   return (
@@ -1165,7 +1176,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                     </span>
                     <div className="flex items-center bg-[#202533] rounded-lg border border-[#2E3548] overflow-hidden">
                       <button
-                        onClick={() => alert(`Viewing published article: ${post.title}`)}
+                        onClick={() => toast.info(`Viewing published article: ${post.title}`)}
                         className="p-2 hover:bg-[#282E3F] text-slate-400 hover:text-white transition border-r border-[#2E3548]"
                         title="View Article"
                       >
@@ -1371,7 +1382,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           <div className="pt-4 border-t border-[#2E3548] flex justify-end">
             <button
               onClick={() => {
-                alert('SEO Settings saved successfully! Your store will be re-indexed within 24-48 hours.');
+                toast.info('SEO settings saved. Your store will be re-indexed within 24-48 hours.');
               }}
               className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-8 py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center gap-2 cursor-pointer"
             >
@@ -1487,9 +1498,9 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 // Persist alongside the custom pages so the page survives a
                 // reload and is reachable at /pages/<slug>.
                 void saveStoreModule('pages', moduleStoreRef, next).then((saved) => {
-                  if (!saved) setModuleSaveError('The landing page could not be saved to the database.');
+                  if (!saved) toast.error('The landing page could not be saved to the database.');
                 });
-                alert(`Redirecting to Drag-and-Drop Landing Page Editor for "${newPageTitle}"...`);
+                toast.success(`Opening the Drag-and-Drop editor for "${newPageTitle}"...`);
               }}
               className="p-6 space-y-4"
             >

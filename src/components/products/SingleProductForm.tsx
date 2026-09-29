@@ -7,6 +7,7 @@ import { readZidStoreData } from '../../lib/storeData';
 import { safeGetItem } from '../../utils/safeStorage';
 import { isProAccessGranted } from '../../lib/subscriptionStatusCache';
 import SafeImage from '../SafeImage';
+import { useToast } from '../ToastProvider';
 import { generateAiText, aiErrorMessage } from '../../lib/aiService';
 import {
   ArrowLeft,
@@ -153,6 +154,10 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   onOpenSubscriptionModal,
   onToast,
 }) => {
+  // Shared toast channel. `onToast` (a positional-signature callback from the
+  // parent) is still honoured for its existing AI-error calls below.
+  const toast = useToast();
+
   // 1. Basic Info State - English & Bengali Names
   const [title, setTitle] = useState(initialData?.title || '');
   const [titleBn, setTitleBn] = useState(initialData?.titleBn || '');
@@ -328,7 +333,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     }
 
     if (!title && !titleBn) {
-      alert('Please enter a product title first.');
+      toast.warning('Please enter a product title first.');
       return;
     }
 
@@ -379,7 +384,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     }
 
     if (!image) {
-      alert('Please upload an image first.');
+      toast.warning('Please upload an image first.');
       return;
     }
 
@@ -395,10 +400,13 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
         if (!aiEnhancedFrom) setAiEnhancedFrom(original);
       }
 
-      alert(
+      toast.success(
         optimized
-          ? 'Magic Enhance: your photo has been optimized for the storefront. The optimized image will be saved with this product.'
-          : 'Magic Enhance could not optimize this image. The original will be saved.'
+          ? 'Magic Enhance: your photo has been optimized for the storefront.'
+          : 'Magic Enhance could not optimize this image.',
+        optimized
+          ? { description: 'The optimized image will be saved with this product.' }
+          : { description: 'The original will be saved.' }
       );
     } finally {
       setIsEnhancingImage(false);
@@ -412,7 +420,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     }
 
     if (!title || !priceBDT) {
-      alert('Please enter title and price first.');
+      toast.warning('Please enter title and price first.');
       return;
     }
 
@@ -612,7 +620,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
 
     setVariants(newVars);
     setHasVariants(true);
-    alert(`Successfully generated ${newVars.length} variants for option "${optName}".`);
+    toast.success(`Successfully generated ${newVars.length} variants for option "${optName}".`);
   };
 
   const updateVariantPrice = (id: string, value: string) => {
@@ -767,21 +775,21 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     const cleanTitleBn = titleBn.trim();
     if (!cleanTitle && !cleanTitleBn) {
       setFormError('A product title is required.');
-      alert('Error: A product title is required.');
+      toast.error('A product title is required.');
       return;
     }
 
     const cleanCategory = category.trim();
     if (!cleanCategory) {
       setFormError('Please choose or type a category before saving.');
-      alert('Error: A category is required.');
+      toast.error('A category is required.');
       return;
     }
 
     const priceValue = Number(numSellingPrice);
     if (!Number.isFinite(priceValue) || priceValue <= 0) {
       setFormError('Selling price must be a number greater than 0.');
-      alert('Error: Selling price must be greater than 0 (৳).');
+      toast.error('Selling price must be greater than 0 (৳).');
       return;
     }
 
@@ -791,7 +799,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       const compareValue = Number(numComparePrice);
       if (!Number.isFinite(compareValue) || compareValue <= priceValue) {
         setFormError('Compare-at price must be higher than the selling price.');
-        alert('Error: The compare-at (original) price must be higher than the selling price.');
+        toast.error('The compare-at (original) price must be higher than the selling price.');
         return;
       }
     }
@@ -800,7 +808,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     const validRates = deliveryRates.filter(r => r.zoneName.trim() !== '' && r.fee !== '' && !isNaN(Number(r.fee)));
     if (validRates.length === 0) {
       setDeliveryValidationError('At least one delivery zone and delivery fee amount (৳) are required.');
-      alert('Error: At least one delivery zone and delivery fee amount (৳) are required.');
+      toast.error('At least one delivery zone and delivery fee amount (৳) are required.');
       return;
     }
     setDeliveryValidationError('');
@@ -918,7 +926,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const handleAiAction = (featureKey: 'aiContent' | 'aiWhatsApp' | 'aiBgRemover', action: () => void) => {
     if (isFeatureLocked(featureKey)) {
       if (onOpenSubscriptionModal) onOpenSubscriptionModal();
-      else alert('Please upgrade your plan to unlock this Pro feature.');
+      else toast.warning('Please upgrade your plan to unlock this Pro feature.');
       return;
     }
     action();
@@ -1301,7 +1309,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => alert('Opening Inventory Addresses Management Settings')}
+                onClick={() => toast.info('Opening Inventory Addresses Management Settings')}
                 className="text-purple-300 font-bold underline hover:text-purple-100 transition cursor-pointer flex items-center gap-1 shrink-0"
               >
                 <span>Inventory addresses</span>
@@ -1490,7 +1498,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                     </div>
                     <button
                       type="button"
-                      onClick={() => alert('Opening Tax Settings')}
+                      onClick={() => toast.info('Opening Tax Settings')}
                       className="text-purple-300 hover:text-purple-100 font-bold underline transition cursor-pointer flex items-center gap-1 shrink-0"
                     >
                       <span>tax settings</span>
@@ -1860,7 +1868,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                                   onClick={() => {
                                     const availableImages = [image, ...additionalImages].filter(Boolean);
                                     if (availableImages.length === 0) {
-                                      alert('Please upload/add product images first in the Media section.');
+                                      toast.warning('Please upload/add product images first in the Media section.');
                                       return;
                                     }
                                     const nextIdx = (availableImages.indexOf(currentUrl) + 1) % availableImages.length;
@@ -1882,7 +1890,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                   <div className="flex items-center justify-between pt-2">
                     <button
                       type="button"
-                      onClick={() => alert('Add additional option layer')}
+                      onClick={() => toast.info('Add additional option layer')}
                       className="px-3.5 py-2 bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold rounded-xl border border-[#2E3548] text-xs transition cursor-pointer flex items-center gap-1.5"
                     >
                       <Plus className="w-3.5 h-3.5 text-[#00D68F]" />
@@ -1957,7 +1965,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                                         onClick={() => {
                                           const availableImages = [image, ...additionalImages].filter(Boolean);
                                           if (availableImages.length === 0) {
-                                            alert('Please upload/add product images first in the Media section.');
+                                            toast.warning('Please upload/add product images first in the Media section.');
                                             return;
                                           }
                                           const currentUrl = v.image || '';
@@ -2269,7 +2277,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                     </p>
                     <button
                       type="button"
-                      onClick={() => alert('Opening Custom Fields Settings Page')}
+                      onClick={() => toast.info('Opening Custom Fields Settings Page')}
                       className="text-purple-300 hover:text-purple-100 font-bold underline transition cursor-pointer inline-flex items-center gap-1"
                     >
                       <span>Custom fields settings</span>

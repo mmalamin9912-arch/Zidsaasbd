@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig } from '../../types';
-import { 
+import {  useToast } from '../ToastProvider';
+import {
   CreditCard, 
   Building2, 
   Smartphone, 
@@ -42,6 +43,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   onUpdateCodConfig,
   onUpdateGatewayConfig,
 }) => {
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'banks' | 'mobile' | 'cod' | 'links' | 'gateways' | 'simulator'>('mobile');
 
   // Bank Form Modal State
@@ -157,7 +159,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   const handleSaveCod = (e: React.FormEvent) => {
     e.preventDefault();
     onUpdateCodConfig(codForm);
-    alert('Cash on Delivery (COD) settings saved successfully!');
+    toast.success('Cash on Delivery (COD) settings saved successfully!');
   };
 
   const handleGenerateLink = (e: React.FormEvent) => {
@@ -1270,7 +1272,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 )}
 
                 <button
-                  onClick={() => alert(`Simulated Order Submitted via ${simSelectedMethod.toUpperCase()}!`)}
+                  onClick={() => toast.success(`Simulated order submitted via ${simSelectedMethod.toUpperCase()}!`)}
                   className="w-full py-3 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-lg"
                 >
                   Place Test Order (৳{

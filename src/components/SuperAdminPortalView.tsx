@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
+import { useToast } from './ToastProvider';
 import LiveThemePreview from './LiveThemePreview';
 import { resolveLayoutForTheme, LAYOUT_LABELS } from '../lib/themeRegistry';
 import { readAndDownscaleImage } from '../utils/imageUtils';
@@ -297,6 +298,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   rolePermissions,
   onUpdateRolePermissions
 }) => {
+  const toast = useToast();
   const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team'>('analytics');
   const [openCategory, setOpenCategory] = useState<string | null>(null);
 
@@ -1344,14 +1346,14 @@ if (m.storeSlug) {
       });
     }
 
-    alert(`Theme purchase request approved! Theme "${req.themeName}" is now unlocked for merchant "${req?.storeName || 'Store'}".`);
+    toast.success(`Theme purchase request approved!`, { description: `Theme "${req.themeName}" is now unlocked for merchant "${req?.storeName || 'Store'}".` });
   };
 
   const handleRejectThemePurchase = (reqId: string) => {
     if (onUpdateThemePurchaseRequests) {
       onUpdateThemePurchaseRequests(prev => prev.map(r => r.id === reqId ? { ...r, status: 'rejected' } : r));
     }
-    alert('Theme purchase request rejected.');
+    toast.warning('Theme purchase request rejected.');
   };
 
   const handleExtendTrial = (storeName: string, days: number) => {
@@ -1411,7 +1413,7 @@ onUpdateMerchant(updatedCurrent);
         }
       } catch (e) {}
     }
-    alert(`Successfully extended trial for "${storeName}" by ${days} days.`);
+    toast.success(`Successfully extended trial for "${storeName}" by ${days} days.`);
   };
 
   const handleToggleLockMerchant = (storeName: string) => {
@@ -1645,7 +1647,7 @@ onUpdateMerchant(updatedCurrent);
         }
       } catch (e) {}
     }
-    alert(`Changed plan for "${storeName}" to ${getPlanDisplayName(nextPlan)}`);
+    toast.success(`Changed plan for "${storeName}" to ${getPlanDisplayName(nextPlan)}`);
   };
 
   // Rows shown in the table. Prefer the API-backed list; if the API returned
@@ -4483,7 +4485,7 @@ onUpdateMerchant(updatedCurrent);
                                  setReplyMessage(data.draftReply || '');
                                  setSelectedTicketId(ticket.id);
                                } catch (e) {
-                                 alert('Failed to generate draft.');
+                                 toast.error('Failed to generate draft.');
                                } finally {
                                  setIsGeneratingReply(false);
                                }
