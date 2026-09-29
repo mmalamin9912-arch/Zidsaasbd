@@ -3,30 +3,41 @@ import { StoreSubTab, MerchantProfile, AdminPaymentGatewayConfig, ThemePurchaseR
 import { ThemeCustomizerModal } from '../ThemeCustomizerModal';
 import { StorefrontPreviewModal } from '../StorefrontPreviewModal';
 import SafeImage from '../SafeImage';
+import { readAndDownscaleImage } from '../../utils/imageUtils';
 import {  readZidStoreData, writeZidStoreData } from '../../lib/storeData';
 import {
-  Palette, 
-  Globe, 
-  ExternalLink, 
-  Check, 
-  Eye, 
-  MoreVertical, 
-  Sparkles, 
-  Rocket, 
-  Search, 
-  Plus, 
-  ChevronLeft, 
-  ChevronRight, 
-  Compass, 
-  Menu as MenuIcon, 
-  Newspaper, 
-  FileText, 
-  HelpCircle, 
-  Sliders, 
-  Download, 
-  Copy, 
-  Edit3, 
-  Code, 
+  loadStorefrontModules,
+  saveStoreModule,
+  EMPTY_MODULES,
+  type NavLink,
+  type BrandConfig,
+  type CustomPage,
+  type BlogPost,
+  type FaqItem,
+} from '../../lib/storeModulesApi';
+import {
+  Palette,
+  Globe,
+  ExternalLink,
+  Check,
+  Eye,
+  MoreVertical,
+  Sparkles,
+  Rocket,
+  Search,
+  Plus,
+  ChevronLeft,
+  ChevronRight,
+  Compass,
+  Menu as MenuIcon,
+  Newspaper,
+  FileText,
+  HelpCircle,
+  Sliders,
+  Download,
+  Copy,
+  Edit3,
+  Code,
   X,
   Layout,
   Layers,
@@ -137,6 +148,13 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
   const [storeLogo, setStoreLogo] = useState<string | null>(null);
   const [storeFavicon, setStoreFavicon] = useState<string | null>(null);
   const [showHeroBanner, setShowHeroBanner] = useState(true);
+  /** True while the Online Store modules are being read from the database. */
+  const [modulesLoading, setModulesLoading] = useState(false);
+  /** Set when the last module save failed, so the UI can say so honestly. */
+  const [moduleSaveError, setModuleSaveError] = useState<string | null>(null);
+
+  // The store this dashboard is editing — every module write is scoped to it.
+  const moduleStoreRef = merchant?.storeSlug || (merchant as any)?.store_slug || '';
 
   // Theme Unlock Check Helpers
   const isThemeUnlocked = (theme: ThemeMarketItem) => {
@@ -237,11 +255,11 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
   // Current active theme object (defaults to the first DB theme, not a mock id)
   const currentActiveTheme = mergedThemeCatalog.find(t => t.id === merchant?.activeThemeId) || mergedThemeCatalog[0];
 
-  // Landing Pages Data
+  // Landing Pages Data — hydrated from the database below.
   const [landingPages, setLandingPages] = useState<any[]>([]);
 
-  // Blog Posts Data
-  const [blogPosts, setBlogPosts] = useState<any[]>([]);
+  // Blog Posts Data — hydrated from the database below.
+  const [blogPosts, setBlogPosts] = useState<BlogPost[]>([]);
   const [showBlogModal, setShowBlogModal] = useState(false);
   const [editingPost, setEditingPost] = useState<any | null>(null);
   const [blogForm, setBlogForm] = useState({
@@ -272,37 +290,49 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     setShowBlogModal(true);
   };
 
-  const handleSaveBlogPost = (e: React.FormEvent) => {
+  const handleSaveBlogPost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!blogForm.title || !blogForm.author) return;
 
+    // Build the next list, then persist the WHOLE list — the server stores the
+    // module as one document, so a partial update would drop sibling posts.
+    let next: BlogPost[];
     if (editingPost) {
-      setBlogPosts(prev => prev.map(p => p.id === editingPost.id ? {
+      next = blogPosts.map(p => p.id === editingPost.id ? {
         ...p,
         ...blogForm,
         date: new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })
-      } : p));
+      } : p);
     } else {
-      const newPost = {
-        id: Date.now(),
+      next = [{
+        id: `post-${Date.now()}`,
         ...blogForm,
+        slug: (blogForm.title || '').toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-'),
         date: new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }),
         status: 'Published',
         views: 0
-      };
-      setBlogPosts([newPost, ...blogPosts]);
+      } as BlogPost, ...blogPosts];
     }
+
+    setBlogPosts(next);
     setShowBlogModal(false);
+
+    const saved = await saveStoreModule<BlogPost[]>('blog', moduleStoreRef, next);
+    if (saved) setBlogPosts(saved);
+    else setModuleSaveError('The article could not be saved to the database. Please try again.');
   };
 
-  const handleDeletePost = (id: number) => {
-    if (confirm('Are you sure you want to delete this article?')) {
-      setBlogPosts(prev => prev.filter(p => p.id !== id));
-    }
+  const handleDeletePost = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this article?')) return;
+    const next = blogPosts.filter(p => p.id !== id);
+    setBlogPosts(next);
+    const saved = await saveStoreModule<BlogPost[]>('blog', moduleStoreRef, next);
+    if (saved) setBlogPosts(saved);
+    else setModuleSaveError('The article could not be deleted from the database.');
   };
 
-  // FAQ Manager States
-  const [faqs, setFaqs] = useState<any[]>([]);
+  // FAQ Manager States — hydrated from the database below.
+  const [faqs, setFaqs] = useState<FaqItem[]>([]);
   const [showFaqModal, setShowFaqModal] = useState(false);
   const [editingFaq, setEditingFaq] = useState<any | null>(null);
   const [faqForm, setFaqForm] = useState({ question: '', answer: '' });
@@ -318,80 +348,210 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     setShowFaqModal(true);
   };
 
-  const handleSaveFaq = (e: React.FormEvent) => {
+  const handleSaveFaq = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!faqForm.question || !faqForm.answer) return;
 
-    if (editingFaq) {
-      setFaqs(faqs.map(f => f.id === editingFaq.id ? { ...f, ...faqForm } : f));
-    } else {
-      setFaqs([...faqs, { id: Date.now(), ...faqForm }]);
-    }
+    const next: FaqItem[] = editingFaq
+      ? faqs.map(f => f.id === editingFaq.id ? { ...f, ...faqForm } : f)
+      : [...faqs, { id: `faq-${Date.now()}`, ...faqForm }];
+
+    setFaqs(next);
     setShowFaqModal(false);
+
+    const saved = await saveStoreModule<FaqItem[]>('faqs', moduleStoreRef, next);
+    if (saved) setFaqs(saved);
+    else setModuleSaveError('The FAQ could not be saved to the database. Please try again.');
   };
 
-  const handleDeleteFaq = (id: number) => {
-    if (confirm('Delete this FAQ item?')) {
-      setFaqs(faqs.filter(f => f.id !== id));
-    }
+  const handleDeleteFaq = async (id: string) => {
+    if (!confirm('Delete this FAQ item?')) return;
+    const next = faqs.filter(f => f.id !== id);
+    setFaqs(next);
+    const saved = await saveStoreModule<FaqItem[]>('faqs', moduleStoreRef, next);
+    if (saved) setFaqs(saved);
+    else setModuleSaveError('The FAQ could not be deleted from the database.');
   };
 
-  // Menu Manager States
-  const [menuItems, setMenuItems] = useState([
-    { id: 'm1', title: 'Home', url: '/' },
-    { id: 'm2', title: 'New Arrivals', url: '/collections/new' },
-    { id: 'm3', title: 'Sarees & Panjabi', url: '/collections/ethnic' },
-    { id: 'm4', title: 'Flash Sale', url: '/sale' },
-    { id: 'm5', title: 'Track Order', url: '/track' },
-    { id: 'm6', title: 'Contact Us', url: '/contact' },
-  ]);
+  // Menu Manager States — hydrated from the database below. Empty by default:
+  // inventing demo links here is what made the storefront header show menu
+  // entries the merchant never configured.
+  const [menuItems, setMenuItems] = useState<NavLink[]>([]);
+  const [footerMenuItems, setFooterMenuItems] = useState<NavLink[]>([]);
   const [showAddMenuModal, setShowAddMenuModal] = useState(false);
   const [newMenuTitle, setNewMenuTitle] = useState('');
   const [newMenuUrl, setNewMenuUrl] = useState('');
 
-  // Custom Pages State
-  const [customPages, setCustomPages] = useState([
-    { id: 1, title: `About ${merchant?.storeName || 'My Store'}`, slug: 'about-us', status: 'Published' },
-    { id: 2, title: 'Return & Refund Policy', slug: 'return-policy', status: 'Published' },
-    { id: 3, title: 'Shipping & Delivery Policy', slug: 'shipping-policy', status: 'Published' },
-    { id: 4, title: 'Privacy Policy', slug: 'privacy-policy', status: 'Published' },
-  ]);
+  // Custom Pages State — hydrated from the database below.
+  const [customPages, setCustomPages] = useState<CustomPage[]>([]);
   const [showAddPageModal, setShowAddPageModal] = useState(false);
   const [newPageForm, setNewPageForm] = useState({ title: '', slug: '', content: '' });
 
-  const handleSaveBrand = () => {
+  /**
+   * Hydrate every Online Store module from the database.
+   *
+   * Keyed on the store reference so switching stores (or the merchant record
+   * arriving late) re-reads rather than leaving another store's content on
+   * screen. Values are only overwritten when the server actually returned a
+   * module, so a transient read failure cannot blank what is already shown.
+   */
+  useEffect(() => {
+    if (!moduleStoreRef) return;
+    let active = true;
+    setModulesLoading(true);
+    (async () => {
+      const modules = await loadStorefrontModules(moduleStoreRef);
+      if (!active) return;
+
+      if (modules.brandConfig) {
+        const b = modules.brandConfig;
+        if (b.logoUrl) setStoreLogo(b.logoUrl);
+        if (b.faviconUrl) setStoreFavicon(b.faviconUrl);
+        if (b.brandColor) setThemePrimaryColor(b.brandColor);
+        if (b.announcementText) setHeaderAnnouncement(b.announcementText);
+      }
+      setMenuItems(modules.navigationMenus.header || []);
+      setFooterMenuItems(modules.navigationMenus.footer || []);
+      setCustomPages(modules.customPages || []);
+      setBlogPosts(modules.blogPosts || []);
+      setFaqs(modules.faqs || []);
+      if (modules.seoConfig) {
+        setMetaTitle(modules.seoConfig.metaTitle || '');
+        setMetaDescription(modules.seoConfig.metaDescription || '');
+        setMetaKeywords(modules.seoConfig.metaKeywords || '');
+        setOgImage(modules.seoConfig.ogImage || null);
+      }
+      setModulesLoading(false);
+    })();
+    return () => { active = false; };
+  }, [moduleStoreRef]);
+
+  /**
+   * Persist the brand identity module.
+   *
+   * Writes to MongoDB via /api/store/brand AND mirrors the fields onto the
+   * merchant profile (announcementText / logoUrl / themeConfig colours) because
+   * the storefront header reads both. `setMerchant` alone was the bug: it only
+   * updated in-memory React state, so a reload lost the logo and announcement.
+   */
+  const handleSaveBrand = async () => {
+    const brand: BrandConfig = {
+      logoUrl: storeLogo || merchant?.logoUrl || '',
+      faviconUrl: storeFavicon || '',
+      brandColor: themePrimaryColor,
+      announcementText: headerAnnouncement,
+      announcementBg: merchant?.themeConfig?.announcementBg || '#D4AF37',
+      showAnnouncement: true,
+      storeName: merchant?.storeName || '',
+    };
+
     setMerchant(prev => ({
       ...prev,
       announcementText: headerAnnouncement,
-      logoUrl: storeLogo || prev.logoUrl,
+      logoUrl: brand.logoUrl || prev.logoUrl,
       themeConfig: {
         ...(prev.themeConfig || {}),
         announcementText: headerAnnouncement,
         announcementItems: headerAnnouncement ? [headerAnnouncement] : [],
-        logoImageUrl: storeLogo || prev.themeConfig?.logoImageUrl,
+        logoImageUrl: brand.logoUrl || prev.themeConfig?.logoImageUrl,
+        faviconUrl: brand.faviconUrl || prev.themeConfig?.faviconUrl,
         primaryColor: themePrimaryColor,
         themePrimaryColor,
       }
     }));
-    alert('Brand identity and styling changes saved successfully!');
+
+    const saved = await saveStoreModule<BrandConfig>('brand', moduleStoreRef, brand);
+    if (saved) {
+      // Adopt the server's normalised copy so the dashboard matches the DB.
+      if (saved.logoUrl) setStoreLogo(saved.logoUrl);
+      if (saved.faviconUrl) setStoreFavicon(saved.faviconUrl);
+      if (saved.brandColor) setThemePrimaryColor(saved.brandColor);
+      setHeaderAnnouncement(saved.announcementText ?? headerAnnouncement);
+      alert('Brand identity saved to your storefront.');
+    } else {
+      setModuleSaveError('Brand identity could not be saved to the database. Please try again.');
+    }
   };
 
-  const handleSaveMenu = () => {
+  /**
+   * Persist the header + footer navigation menus to MongoDB.
+   *
+   * Also mirrors `menuItems` into themeConfig for backwards compatibility with
+   * storefront builds that read the menu from there.
+   */
+  const handleSaveMenu = async () => {
+    const navigation = { header: menuItems, footer: footerMenuItems };
+
     setMerchant(prev => ({
       ...prev,
       themeConfig: {
         ...(prev.themeConfig || {}),
-        menuItems: menuItems
+        menuItems,
+        footerMenuItems,
       }
     }));
-    alert('Navigation menu updated successfully!');
+
+    const saved = await saveStoreModule<{ header: NavLink[]; footer: NavLink[] }>('navigation', moduleStoreRef, navigation);
+    if (saved) {
+      setMenuItems(saved.header || []);
+      setFooterMenuItems(saved.footer || []);
+      alert('Navigation menus saved to your storefront.');
+    } else {
+      setModuleSaveError('Navigation menus could not be saved to the database. Please try again.');
+    }
   };
 
-  // SEO States
+  // SEO States — hydrated from the database below.
   const [metaTitle, setMetaTitle] = useState('');
   const [metaDescription, setMetaDescription] = useState('');
   const [metaKeywords, setMetaKeywords] = useState('');
   const [ogImage, setOgImage] = useState<string | null>(null);
+
+  /** Persist the SEO module so the storefront head is populated from MongoDB. */
+  const handleSaveSeo = async () => {
+    const seo = {
+      metaTitle,
+      metaDescription,
+      metaKeywords,
+      ogImage: ogImage || '',
+    };
+    const saved = await saveStoreModule<typeof seo>('seo', moduleStoreRef, seo);
+    if (saved) {
+      setMetaTitle(saved.metaTitle || '');
+      setMetaDescription(saved.metaDescription || '');
+      setMetaKeywords(saved.metaKeywords || '');
+      setOgImage(saved.ogImage || null);
+      alert('SEO settings saved to your storefront.');
+    } else {
+      setModuleSaveError('SEO settings could not be saved to the database. Please try again.');
+    }
+  };
+
+  /** Persist a new custom page and make it reachable at /pages/<slug>. */
+  const handleSaveCustomPage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const title = newPageForm.title.trim();
+    if (!title) return;
+    const slug = (newPageForm.slug || title)
+      .toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-');
+    const next: CustomPage[] = [
+      ...customPages,
+      {
+        id: `page-${Date.now()}`,
+        title,
+        slug,
+        content: newPageForm.content || '',
+        status: 'Published',
+      },
+    ];
+    setCustomPages(next);
+    setNewPageForm({ title: '', slug: '', content: '' });
+    setShowAddPageModal(false);
+
+    const saved = await saveStoreModule<CustomPage[]>('pages', moduleStoreRef, next);
+    if (saved) setCustomPages(saved);
+    else setModuleSaveError('The page could not be saved to the database. Please try again.');
+  };
 
   return (
     <div className="space-y-6">
@@ -824,7 +984,11 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                       <span>Upload Logo</span>
                       <input type="file" className="hidden" accept="image/*" onChange={(e) => {
                         const file = e.target.files?.[0];
-                        if (file) setStoreLogo(URL.createObjectURL(file));
+                        e.target.value = '';
+                        // Inline the image instead of a blob: URL — an object
+                        // URL is document-scoped, so the logo previewed fine and
+                        // then vanished after the save + reload.
+                        if (file) void readAndDownscaleImage(file).then((dataUrl) => { if (dataUrl) setStoreLogo(dataUrl); });
                       }} />
                     </label>
                     {storeLogo && (
@@ -856,7 +1020,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                       <span>Upload Favicon</span>
                       <input type="file" className="hidden" accept="image/*" onChange={(e) => {
                         const file = e.target.files?.[0];
-                        if (file) setStoreFavicon(URL.createObjectURL(file));
+                        e.target.value = '';
+                        if (file) void readAndDownscaleImage(file).then((dataUrl) => { if (dataUrl) setStoreFavicon(dataUrl); });
                       }} />
                     </label>
                     {storeFavicon && (
@@ -1308,16 +1473,22 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 e.preventDefault();
                 if (!newPageTitle || !newPageSlug) return;
                 const newPage = {
-                  id: Date.now(),
+                  id: `page-${Date.now()}`,
                   title: newPageTitle,
                   slug: newPageSlug.toLowerCase().replace(/\s+/g, '-'),
                   views: 0,
                   status: 'Draft'
                 };
-                setLandingPages([newPage, ...landingPages]);
+                const next = [newPage, ...landingPages];
+                setLandingPages(next);
                 setShowCreateLPModal(false);
                 setNewPageTitle('');
                 setNewPageSlug('');
+                // Persist alongside the custom pages so the page survives a
+                // reload and is reachable at /pages/<slug>.
+                void saveStoreModule('pages', moduleStoreRef, next).then((saved) => {
+                  if (!saved) setModuleSaveError('The landing page could not be saved to the database.');
+                });
                 alert(`Redirecting to Drag-and-Drop Landing Page Editor for "${newPageTitle}"...`);
               }}
               className="p-6 space-y-4"

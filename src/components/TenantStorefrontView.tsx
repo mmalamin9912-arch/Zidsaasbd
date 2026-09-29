@@ -12,6 +12,12 @@ import { fetchStoreByRef, storeIdFromRecord } from '../lib/storeApi';
 import { LanguageToggle } from './LanguageToggle';
 import SafeImage from './SafeImage';
 import { useStorefrontTracking } from '../hooks/useStorefrontTracking';
+import {
+  EMPTY_MODULES,
+  applyStoreSeo,
+  applyStoreFavicon,
+  type StorefrontModules,
+} from '../lib/storeModulesApi';
 
 function mapSupabaseProduct(p: any): Product {
   const title = p.title || p.name || 'Untitled Product';
@@ -177,6 +183,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     [storeSlug, (merchant as any)?.storeSlug]
   );
   const [liveStoreData, setLiveStoreData] = useState<ZidStoreData>(() => readZidStoreData(storeSlug));
+  // Online Store modules (brand / navigation / pages / blog / FAQ / SEO) served
+  // from MongoDB by /api/storefront/:slug. These drive the storefront header
+  // navigation, the FAQ section and the document head.
+  const [storeModules, setStoreModules] = useState<StorefrontModules>(EMPTY_MODULES);
   // Real store UUID resolved from the 'stores' table — used for orders.store_id
   const [resolvedStoreId, setResolvedStoreId] = useState<string>('');
   useEffect(() => subscribeToZidStoreData(setLiveStoreData, storeSlug), [storeSlug]);
@@ -208,6 +218,22 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           apiStoreRecord = payload.merchant || null;
           apiBankAccounts = Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [];
           apiMobileBanking = Array.isArray(payload.mobileBanking) ? payload.mobileBanking : [];
+
+          // Online Store modules travel in the same payload, so the storefront
+          // needs no second round-trip to render the menus, FAQs and SEO tags.
+          if (active) {
+            setStoreModules({
+              brandConfig: { ...EMPTY_MODULES.brandConfig, ...(payload.brandConfig || {}) },
+              navigationMenus: {
+                header: Array.isArray(payload.navigationMenus?.header) ? payload.navigationMenus.header : [],
+                footer: Array.isArray(payload.navigationMenus?.footer) ? payload.navigationMenus.footer : [],
+              },
+              customPages: Array.isArray(payload.customPages) ? payload.customPages : [],
+              blogPosts: Array.isArray(payload.blogPosts) ? payload.blogPosts : [],
+              faqs: Array.isArray(payload.faqs) ? payload.faqs : [],
+              seoConfig: { ...EMPTY_MODULES.seoConfig, ...(payload.seoConfig || {}) },
+            });
+          }
         }
 
         // Load the merchant's saved themeConfig from the store payload
@@ -519,6 +545,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   useEffect(() => {
     setActiveHeroIndex(0);
   }, [heroImageList.join(',')]);
+
+  // Apply the merchant's SEO metadata + favicon to the document head.
+  // The storefront is a client-rendered SPA, so this is what fills the <title>,
+  // description, keywords and Open Graph tags that crawlers and link previews
+  // read. Re-applied whenever the store's SEO config loads or changes.
+  useEffect(() => {
+    applyStoreSeo(storeModules.seoConfig, storeDisplayName);
+  }, [storeModules.seoConfig, storeDisplayName]);
+
+  useEffect(() => {
+    applyStoreFavicon(storeModules.brandConfig?.faviconUrl);
+  }, [storeModules.brandConfig?.faviconUrl]);
 
   // Legal policies (set in Settings → Legal policies). When `showInFooter` is on,
   // links to the policies the merchant filled in are auto-injected into the
@@ -1731,6 +1769,36 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             </div>
           </div>
 
+          {/* Dynamic Header Navigation — merchant-defined links from MongoDB
+              (navigation_menus / navigationMenus). Hidden when the merchant has
+              not configured any, so the header is never padded with invented
+              links. Horizontally scrollable on narrow screens. */}
+          {storeModules.navigationMenus.header.length > 0 && (
+            <nav className="px-3.5 pb-2 -mt-1 overflow-x-auto no-scrollbar">
+              <ul className="flex items-center gap-1.5 min-w-max">
+                {storeModules.navigationMenus.header.map((link) => (
+                  <li key={link.id}>
+                    <a
+                      href={link.url}
+                      onClick={(e) => {
+                        // In-app links must not trigger a full page reload; only
+                        // external URLs are left to the browser.
+                        if (!/^https?:\/\//i.test(link.url)) {
+                          e.preventDefault();
+                          setCheckoutStep('catalog');
+                          setMobileTab('home');
+                        }
+                      }}
+                      className="inline-block px-3 py-1.5 rounded-lg text-[11px] font-bold text-slate-300 hover:text-amber-400 hover:bg-slate-800/80 border border-transparent hover:border-slate-700/60 transition whitespace-nowrap"
+                    >
+                      {link.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          )}
+
           {/* Search Input Popup */}
           {isSearchOpen && (
             <div className="p-3 bg-slate-900 border-t border-slate-800/80 shadow-xl animate-fade-in-up">
@@ -2209,6 +2277,33 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       allowFullScreen
                     />
                   )}
+                </div>
+              </section>
+              )}
+
+              {/* FAQ Section — merchant-authored Q&A from MongoDB (`faqs`).
+                  Rendered only when the merchant actually saved entries. */}
+              {storeModules.faqs.length > 0 && (
+              <section className="space-y-3">
+                <h2 className="text-sm font-black text-slate-100 tracking-tight uppercase flex items-center gap-2">
+                  <MessageCircle className="w-4 h-4 text-amber-400" />
+                  {t('sf_faq_heading')}
+                </h2>
+                <div className="space-y-2">
+                  {storeModules.faqs.map((faq, i) => (
+                    <details
+                      key={faq.id || `faq-${i}`}
+                      className="group rounded-2xl bg-slate-900/60 backdrop-blur-md border border-slate-800/80 px-4 py-3 open:border-amber-400/50 transition"
+                    >
+                      <summary className="flex items-center justify-between gap-3 cursor-pointer list-none text-xs font-bold text-slate-100">
+                        <span>{faq.question}</span>
+                        <ChevronRight className="w-4 h-4 text-amber-400 shrink-0 transition-transform group-open:rotate-90" />
+                      </summary>
+                      <p className="mt-2 text-[11px] leading-relaxed text-slate-400 whitespace-pre-line">
+                        {faq.answer}
+                      </p>
+                    </details>
+                  ))}
                 </div>
               </section>
               )}
@@ -3846,6 +3941,24 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-300"><MapPin className="w-3 h-3 text-[#00D68F]" /> {resolvedTheme.dhakaAddress}</div>
               )}
             </div>
+          )}
+          {/* Dynamic Footer Navigation — merchant-defined links from MongoDB
+              (`navigation_menus.footer`), rendered as real anchors. */}
+          {storeModules.navigationMenus.footer.length > 0 && (
+            <nav className="pt-2" data-testid="storefront-footer-menu">
+              <ul className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
+                {storeModules.navigationMenus.footer.map((link) => (
+                  <li key={link.id}>
+                    <a
+                      href={link.url}
+                      className="text-[11px] text-slate-400 hover:text-amber-400 transition"
+                    >
+                      {link.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
           )}
           <div className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-slate-300 pt-1">
             <ShieldCheck className="w-4 h-4 text-[#00D68F]" />

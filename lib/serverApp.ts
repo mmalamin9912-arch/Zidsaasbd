@@ -3434,6 +3434,28 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       || payload.codConfig
       || null;
 
+    // ── Online Store modules (brand / navigation / pages / blog / FAQ / SEO) ──
+    // Read through the same normalisers the dashboard writes with, so the
+    // customer storefront renders exactly what the merchant configured and a
+    // missing module degrades to an empty list instead of breaking the page.
+    const readModuleSafe = async (name: StoreModuleName) => {
+      try {
+        return await readStoreModule(name, slug);
+      } catch (moduleErr: any) {
+        console.warn(`[Server] storefront ${name} module warning:`, moduleErr?.message || moduleErr);
+        return null;
+      }
+    };
+
+    const [brandConfig, navigationMenus, customPages, blogPosts, faqs, seoConfig] = await Promise.all([
+      readModuleSafe('brand'),
+      readModuleSafe('navigation'),
+      readModuleSafe('pages'),
+      readModuleSafe('blog'),
+      readModuleSafe('faqs'),
+      readModuleSafe('seo'),
+    ]);
+
     const storefront = {
       merchant: merchantRecord,
       products: storeProducts,
@@ -3446,6 +3468,17 @@ app.get('/api/storefront/:slug?', async (req, res) => {
         ? merchantRecord.mobileBanking
         : (Array.isArray(payload.mobileBanking) ? payload.mobileBanking : []),
       codConfig,
+      // Public storefront modules. Only published pages/posts are exposed.
+      brandConfig,
+      navigationMenus,
+      customPages: Array.isArray(customPages)
+        ? customPages.filter((p: any) => String(p?.status || '').toLowerCase() !== 'draft')
+        : [],
+      blogPosts: Array.isArray(blogPosts)
+        ? blogPosts.filter((p: any) => String(p?.status || '').toLowerCase() !== 'draft')
+        : [],
+      faqs: Array.isArray(faqs) ? faqs : [],
+      seoConfig,
     };
 
     return res.json({ ok: true, store_slug: slug, storefront });
@@ -7389,6 +7422,348 @@ for (const route of CONFIG_ROUTES) {
   app.post(`/api/store/${path}`, saveConfigHandler);
   app.put(`/api/store/${path}`, saveConfigHandler);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Online Store dashboard modules → MongoDB
+//
+// The Brand / Menu / Blog / Pages / SEO / FAQ panels in the merchant dashboard
+// were pure component state: every edit was lost on reload and nothing ever
+// reached the customer storefront. Each module is now persisted onto the store
+// record (mirrored into the local payload file) and exposed publicly through
+// GET /api/storefront/:slug so the storefront renders from the database.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Drop `undefined` so a JSON round-trip never resurrects it as a null field. */
+function pruneUndefined<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(pruneUndefined) as unknown as T;
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value as Record<string, any>)) {
+      if (v === undefined) continue;
+      out[k] = pruneUndefined(v);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
+/** A trimmed string, or `fallback` when the value is not usable text. */
+function moduleStr(v: any, fallback = ''): string {
+  return typeof v === 'string' ? v.trim() : (typeof v === 'number' ? String(v) : fallback);
+}
+
+/** First value that is a non-empty string. */
+function firstStr(...values: any[]): string {
+  for (const v of values) {
+    const s = moduleStr(v);
+    if (s) return s;
+  }
+  return '';
+}
+
+/** Slugify a page/menu title for use in a URL. */
+function toModuleSlug(raw: any): string {
+  return moduleStr(raw)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-');
+}
+
+/** Normalise a list of nav links: `{ id, title, url }`. */
+function normalizeNavLinks(input: any): Array<{ id: string; title: string; url: string }> {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((item: any, i: number) => ({
+      id: moduleStr(item?.id, `nav-${i + 1}`) || `nav-${i + 1}`,
+      title: firstStr(item?.title, item?.label, item?.name),
+      url: firstStr(item?.url, item?.href, item?.link) || '/',
+    }))
+    .filter((item) => item.title !== '');
+}
+
+/** Normalise the brand identity block. */
+function normalizeBrandConfig(src: any, fallback: any = {}) {
+  const s = src && typeof src === 'object' ? src : {};
+  const fb = fallback && typeof fallback === 'object' ? fallback : {};
+  return {
+    logoUrl: firstStr(s.logoUrl, s.logoImageUrl, s.logo, fb.logoUrl),
+    faviconUrl: firstStr(s.faviconUrl, s.favicon, fb.faviconUrl),
+    brandColor: firstStr(s.brandColor, s.primaryColor, s.themePrimaryColor, fb.brandColor) || '#00D68F',
+    announcementText: firstStr(s.announcementText, fb.announcementText),
+    announcementBg: firstStr(s.announcementBg, fb.announcementBg) || '#D4AF37',
+    showAnnouncement: typeof s.showAnnouncement === 'boolean'
+      ? s.showAnnouncement
+      : (typeof fb.showAnnouncement === 'boolean' ? fb.showAnnouncement : true),
+    storeName: firstStr(s.storeName, fb.storeName),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** Normalise the header + footer navigation menus. */
+function normalizeNavigationMenus(src: any, fallback: any = {}) {
+  const s = src && typeof src === 'object' ? src : {};
+  const fb = fallback && typeof fallback === 'object' ? fallback : {};
+  const header = s.header !== undefined ? s.header : (s.menuItems !== undefined ? s.menuItems : fb.header);
+  const footer = s.footer !== undefined ? s.footer : fb.footer;
+  return {
+    header: normalizeNavLinks(header !== undefined ? header : []),
+    footer: normalizeNavLinks(footer !== undefined ? footer : []),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** Normalise the custom-pages list (About, Return policy, /pages/* …). */
+function normalizeCustomPages(src: any, fallback: any = {}) {
+  const list = Array.isArray(src) ? src : (Array.isArray(fallback) ? fallback : []);
+  return list
+    .map((page: any, i: number) => {
+      const title = firstStr(page?.title, page?.name);
+      return {
+        id: moduleStr(page?.id, `page-${i + 1}`) || `page-${i + 1}`,
+        title,
+        slug: toModuleSlug(firstStr(page?.slug, title)),
+        content: typeof page?.content === 'string' ? page.content : '',
+        status: firstStr(page?.status) || 'Published',
+        seoTitle: firstStr(page?.seoTitle, page?.metaTitle),
+        seoDescription: firstStr(page?.seoDescription, page?.metaDescription),
+        updatedAt: new Date().toISOString(),
+      };
+    })
+    .filter((page) => page.title !== '' && page.slug !== '');
+}
+
+/** Normalise the blog / landing-page article list. */
+function normalizeBlogPosts(src: any, fallback: any = {}) {
+  const list = Array.isArray(src) ? src : (Array.isArray(fallback) ? fallback : []);
+  return list
+    .map((post: any, i: number) => {
+      const title = firstStr(post?.title, post?.name);
+      return {
+        id: moduleStr(post?.id, `post-${i + 1}`) || `post-${i + 1}`,
+        title,
+        slug: toModuleSlug(firstStr(post?.slug, title)),
+        author: firstStr(post?.author),
+        content: typeof post?.content === 'string' ? post.content : '',
+        excerpt: firstStr(post?.excerpt, post?.summary),
+        coverImage: firstStr(post?.coverImage, post?.image, post?.imageUrl),
+        date: firstStr(post?.date) || new Date().toISOString().slice(0, 10),
+        status: firstStr(post?.status) || 'Published',
+        views: Number.isFinite(Number(post?.views)) ? Number(post.views) : 0,
+        updatedAt: new Date().toISOString(),
+      };
+    })
+    .filter((post) => post.title !== '' && post.slug !== '');
+}
+
+/** Normalise the FAQ list rendered on the storefront. */
+function normalizeFaqs(src: any, fallback: any = {}) {
+  const list = Array.isArray(src) ? src : (Array.isArray(fallback) ? fallback : []);
+  return list
+    .map((faq: any, i: number) => ({
+      id: moduleStr(faq?.id, `faq-${i + 1}`) || `faq-${i + 1}`,
+      question: firstStr(faq?.question, faq?.q),
+      answer: firstStr(faq?.answer, faq?.a),
+    }))
+    .filter((faq) => faq.question !== '' && faq.answer !== '');
+}
+
+/** Normalise the SEO block injected into the storefront <head>. */
+function normalizeSeoConfig(src: any, fallback: any = {}) {
+  const s = src && typeof src === 'object' ? src : {};
+  const fb = fallback && typeof fallback === 'object' ? fallback : {};
+  return {
+    metaTitle: firstStr(s.metaTitle, s.title, fb.metaTitle),
+    metaDescription: firstStr(s.metaDescription, s.description, fb.metaDescription),
+    metaKeywords: firstStr(s.metaKeywords, s.keywords, fb.metaKeywords),
+    ogImage: firstStr(s.ogImage, s.ogImageUrl, fb.ogImage),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * The Online Store module registry.
+ *
+ * `key` is the field written onto the store record; `path` is the REST segment
+ * under /api/store/. All four share one read/write code path so the Mongo
+ * round-trip is implemented (and tested) exactly once.
+ */
+const STORE_MODULES = {
+  brand: { key: 'brandConfig', path: 'brand', label: 'Brand identity', normalize: normalizeBrandConfig },
+  navigation: { key: 'navigationMenus', path: 'navigation', label: 'Navigation menus', normalize: normalizeNavigationMenus },
+  pages: { key: 'customPages', path: 'pages', label: 'Custom pages', normalize: normalizeCustomPages },
+  blog: { key: 'blogPosts', path: 'blog', label: 'Blog posts', normalize: normalizeBlogPosts },
+  faqs: { key: 'faqs', path: 'faqs', label: 'FAQs', normalize: normalizeFaqs },
+  seo: { key: 'seoConfig', path: 'seo', label: 'SEO settings', normalize: normalizeSeoConfig },
+} as const;
+
+type StoreModuleName = keyof typeof STORE_MODULES;
+
+/** In-memory fallback so the modules still read back when Mongo is unset. */
+const storeModuleCache = new Map<string, Record<string, any>>();
+
+/** Pull the module payload out of a request body, tolerating flat payloads. */
+function extractModulePayload(name: StoreModuleName, body: any) {
+  const field = STORE_MODULES[name].key;
+  if (!body || typeof body !== 'object') return {};
+  if (body[field] !== undefined) return body[field];
+  // Accept a sibling alias (e.g. `menuItems` for navigation).
+  if (name === 'navigation' && body.menuItems !== undefined) return body.menuItems;
+  if (name === 'pages' && body.pages !== undefined) return body.pages;
+  if (name === 'blog' && body.posts !== undefined) return body.posts;
+  // Flat body: treat everything except routing fields as the payload.
+  const { store_slug, storeSlug, storeId, ...rest } = body;
+  return rest;
+}
+
+async function readStoreModule(name: StoreModuleName, storeRef: string) {
+  const { key, normalize } = STORE_MODULES[name];
+  const slug = cleanStoreRef(storeRef);
+  const cached = storeModuleCache.get(`${name}:${slug}`) || {};
+
+  let stored: any = undefined;
+  try {
+    const record: any = slug ? await resolveStoreRecordFlexible(slug) : null;
+    stored = record?.[key];
+    // Legacy: menus used to live at theme_config.menuItems.
+    if (stored === undefined && name === 'navigation') {
+      const themeCfg = record?.theme_config || record?.themeConfig;
+      if (Array.isArray(themeCfg?.menuItems)) stored = { header: themeCfg.menuItems };
+    }
+  } catch (err: any) {
+    console.warn(`[Server] read ${key} lookup warning:`, err?.message || err);
+  }
+
+  return normalize(stored, cached);
+}
+
+async function writeStoreModule(name: StoreModuleName, storeRef: string, patch: any) {
+  const { key, normalize } = STORE_MODULES[name];
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readStoreModule(name, slug);
+  const next = pruneUndefined(normalize(patch, current));
+  storeModuleCache.set(`${name}:${slug}`, next);
+
+  // 1. Durable copy on the store record (MongoDB is the source of truth).
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: slug },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+      const update = { $set: { [key]: next, updated_at: new Date().toISOString() } };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Server] ${key} mongo persist warning:`, err?.message || err);
+  }
+
+  // 2. Best-effort local mirror for offline/dev parity.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      (payload.merchant as any)[key] = next;
+      await writeStorePayload(payload);
+    }
+  } catch { /* read-only FS on serverless — Mongo remains authoritative */ }
+
+  return next;
+}
+
+for (const [name, module] of Object.entries(STORE_MODULES) as Array<[StoreModuleName, typeof STORE_MODULES[StoreModuleName]]>) {
+  const { path, key, label } = module;
+
+  /** GET /api/store/<module>?store_slug=… */
+  app.get(`/api/store/${path}`, async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+      if (!storeRef) {
+        return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+      }
+      const value = await readStoreModule(name, storeRef);
+      return res.status(200).json({ ok: true, store_slug: storeRef, [key]: value });
+    } catch (err: any) {
+      console.error(`[Server] GET /api/store/${path} error:`, err);
+      return res.status(200).json({ ok: false, error: err?.message || `Could not load ${label.toLowerCase()}.` });
+    }
+  });
+
+  /** POST / PUT /api/store/<module> — persist the module. */
+  const saveModuleHandler = async (req: any, res: any) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const body = req.body || {};
+      const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+      if (!storeRef) {
+        return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+      }
+      const value = await writeStoreModule(name, storeRef, extractModulePayload(name, body));
+      return res.status(200).json({
+        ok: true,
+        store_slug: storeRef,
+        [key]: value,
+        message: `${label} saved.`,
+      });
+    } catch (err: any) {
+      console.error(`[Server] POST /api/store/${path} error:`, err);
+      return res.status(500).json({ ok: false, error: err?.message || `Could not save ${label.toLowerCase()}.` });
+    }
+  };
+
+  app.post(`/api/store/${path}`, saveModuleHandler);
+  app.put(`/api/store/${path}`, saveModuleHandler);
+}
+
+/**
+ * GET /api/store/content/:slug?type=page|post&handle=<page-slug>
+ *
+ * Public read for a single merchant-authored page or blog post, so the
+ * storefront can resolve /pages/<handle> and /blog/<handle> without downloading
+ * the whole module. Only Published entries are ever returned.
+ */
+app.get('/api/store/content/:slug', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.params?.slug || req.query.store_slug || req.query.storeSlug);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const type = String(req.query.type || 'page').toLowerCase() === 'post' ? 'post' : 'page';
+    const handle = toModuleSlug(req.query.handle || req.query.slug || '');
+
+    const list: any[] = type === 'post'
+      ? await readStoreModule('blog', storeRef) as any
+      : await readStoreModule('pages', storeRef) as any;
+
+    const published = (Array.isArray(list) ? list : [])
+      .filter((item) => String(item?.status || '').toLowerCase() !== 'draft');
+
+    // No handle: return the index so /blog can list every article.
+    if (!handle) {
+      return res.status(200).json({ ok: true, store_slug: storeRef, type, items: published });
+    }
+
+    const match = published.find((item) => toModuleSlug(item?.slug) === handle) || null;
+    if (!match) {
+      return res.status(404).json({ ok: false, error: `${type === 'post' ? 'Article' : 'Page'} not found.` });
+    }
+    return res.status(200).json({ ok: true, store_slug: storeRef, type, item: match });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/content/:slug error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not load content.' });
+  }
+});
 
 // Friendly REST alias for the gift options tab: /api/store/gift-options
 app.get('/api/store/gift-options', async (req, res) => {
