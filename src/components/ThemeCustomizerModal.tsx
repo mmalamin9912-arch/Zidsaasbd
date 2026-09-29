@@ -200,26 +200,18 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const [heroSubtitle, setHeroSubtitle] = useState(merchant?.heroSubtitle || (merchant?.themeConfig?.slides?.[0]?.subtitle ?? 'Shop our premium organic food, traditional boutique, and authentic gadgets.'));
   const [heroCtaText, setHeroCtaText] = useState(merchant?.themeConfig?.heroCtaText ?? (merchant?.themeConfig?.slides?.[0]?.ctaText ?? 'Shop Now'));
   const [heroImage, setHeroImage] = useState(merchant?.heroImage || (merchant?.themeConfig?.slides?.[0]?.image ?? 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=1600&q=80'));
-  const [heroImages, setHeroImages] = useState<string[]>(
-    Array.isArray(merchant?.themeConfig?.heroImages) && merchant.themeConfig.heroImages.length > 0
-      ? merchant.themeConfig.heroImages
-      : (merchant?.heroImage ? [merchant.heroImage] : [])
-  );
-  // Merchant-managed list of hero BACKGROUND photos. This is the canonical array
-  // the storefront rotates through every 1000ms. It is seeded from heroImages /
-  // heroImage and is independently addable / replaceable / removable from the
+  // Merchant-managed list of hero BACKGROUND photos — the canonical array the
+  // storefront rotates through every 1000ms. Add / replace / remove from the
   // Image Carousel panel below. Only non-empty URLs are ever persisted.
-  const [heroBackgrounds, setHeroBackgrounds] = useState<string[]>(
-    (() => {
-      const cfg = merchant?.themeConfig as any;
-      const source = Array.isArray(cfg?.heroBackgrounds) && cfg.heroBackgrounds.length > 0
-        ? cfg.heroBackgrounds
-        : (Array.isArray(cfg?.heroImages) && cfg.heroImages.length > 0
-            ? cfg.heroImages
-            : (merchant?.heroImage ? [merchant.heroImage] : []));
-      return (source as string[]).filter((img) => typeof img === 'string' && img.trim() !== '');
-    })()
-  );
+  //
+  // Seeded empty here and hydrated from the merchant record in the mount effect
+  // below. A useMemo initialiser would be a trap: the modal stays mounted across
+  // open/close, so it would capture the FIRST merchant value and every later
+  // upload would be silently reverted on the next open.
+  const [heroBackgrounds, setHeroBackgrounds] = useState<string[]>([]);
+  // Legacy alias kept so `heroImages` — the key the task and older payloads
+  // use — is always written alongside `heroBackgrounds`.
+  const [heroImages, setHeroImages] = useState<string[]>([]);
 
   // 2. Categories
   const [showCategories, setShowCategories] = useState(merchant?.themeConfig?.showCategories ?? true);
@@ -259,8 +251,8 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const [showGallery, setShowGallery] = useState(merchant?.themeConfig?.showGallery ?? true);
   const [galleryHeading, setGalleryHeading] = useState(merchant?.themeConfig?.galleryHeading ?? 'Gallery');
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>(
-    merchant?.themeConfig?.galleryImages && merchant?.themeConfig?.galleryImages?.length > 0
-      ? merchant?.themeConfig?.galleryImages
+    Array.isArray(merchant?.themeConfig?.galleryImages) && merchant?.themeConfig?.galleryImages?.length > 0
+      ? merchant.themeConfig.galleryImages
       : [
           { url: 'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?auto=format&fit=crop&w=300&q=80', caption: 'Artisan Craftsmanship 1', link: '#' },
           { url: 'https://images.unsplash.com/photo-1612196808214-b8e1d6145a8c?auto=format&fit=crop&w=300&q=80', caption: 'Artisan Craftsmanship 2', link: '#' },
@@ -340,12 +332,42 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
 
   const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const vUrl = URL.createObjectURL(file);
-      setVideoFileUrl(vUrl);
-      // Reset input value
-      e.target.value = '';
+    e.target.value = '';
+    if (!file) return;
+    applyVideoFile(file);
+  };
+
+  /**
+   * Persist a merchant-uploaded video into `theme_config.videoFileUrl`.
+   *
+   * A `blob:` object URL was used before, which only lives for the lifetime of
+   * the current document — it survived the live preview and then died, so the
+   * Video section had "disappeared" after a save + reload. Inlining a modest
+   * clip as a `data:` URL makes it durable across the Mongo round-trip; an
+   * oversized one is refused up front with a clear message rather than being
+   * silently truncated by the server-side payload sanitiser.
+   */
+  const MAX_INLINE_VIDEO_BYTES = 1_500_000; // matches MAX_INLINE_IMAGE_BYTES
+  const applyVideoFile = (file: File) => {
+    if (file.size > MAX_INLINE_VIDEO_BYTES) {
+      window.alert(
+        `This video is ${(file.size / 1_000_000).toFixed(1)}MB. Videos above ` +
+        `${(MAX_INLINE_VIDEO_BYTES / 1_000_000).toFixed(1)}MB cannot be stored inline and would be lost on save.\n\n` +
+        'Please host it (YouTube, Vimeo, or your own CDN) and paste the URL in the field instead.'
+      );
+      return;
     }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!dataUrl) return;
+      setVideoFileUrl(dataUrl);
+      markDirty();
+    };
+    reader.onerror = () => {
+      console.warn('[ThemeCustomizer] Could not read the selected video file.');
+    };
+    reader.readAsDataURL(file);
   };
 
   // Dynamic added sections
@@ -387,18 +409,50 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const updateHideLanguage = (val: boolean) => { setHideLanguage(val); markDirty(); };
   const updateHideCountry = (val: boolean) => { setHideCountry(val); markDirty(); };
 
-  // Sync heroImages from slides: whenever slides change, update heroImages
-  // so the array of image URLs is kept in sync with the slide manager.
-  // Guarded de-dupe: only non-empty URLs, and the state is left untouched when
-  // the derived list is identical — otherwise this effect would clobber the
-  // merchant's edits in the separate "Hero Background Photos" manager below.
+  /** Ordered, de-duplicated, blank-free view of every hero background photo. */
+  const mergeHeroBackgrounds = (...lists: Array<string[] | undefined>): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue;
+      for (const raw of list) {
+        const url = typeof raw === 'string' ? raw.trim() : '';
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        out.push(url);
+      }
+    }
+    return out;
+  };
+
+  // Hydrate the hero background list from the merchant record. Keyed on the
+  // merchant so a store switch (or a late-arriving record) re-seeds the editor
+  // instead of leaving a stale or empty list on screen.
+  const heroSeedSignature = JSON.stringify([
+    (merchant as any)?.storeSlug || '',
+    (merchant?.themeConfig as any)?.heroBackgrounds || [],
+    (merchant?.themeConfig as any)?.heroImages || [],
+    merchant?.heroImage || '',
+  ]);
   useEffect(() => {
-    const images = slides
-      .map((s) => s.image)
-      .filter((img) => img && img.trim() !== '');
+    if (!merchant) return;
+    const cfg = merchant.themeConfig as any;
+    const seeded = mergeHeroBackgrounds(cfg?.heroBackgrounds, cfg?.heroImages, merchant.heroImage ? [merchant.heroImage] : []);
+    setHeroBackgrounds(seeded);
+    setHeroImages(seeded);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heroSeedSignature]);
+
+  // Sync the legacy `heroImages` key from slides, but ONLY when the merchant has
+  // not curated an explicit background list. Otherwise a single slide edit would
+  // overwrite the heavily-tuned hero rotation with the slide images — which is
+  // exactly how the hero background photos used to vanish on save.
+  useEffect(() => {
+    if (heroBackgrounds.length > 0) return;
+    const images = mergeHeroBackgrounds(slides.map((s) => s.image));
     if (images.length === 0) return;
     setHeroImages((prev) => (prev.length === images.length && prev.every((v, i) => v === images[i]) ? prev : images));
-  }, [slides]);
+  }, [slides, heroBackgrounds.length]);
 
   const updateHeroTitle = (val: string) => { setHeroTitle(val); markDirty(); };
   const updateHeroSubtitle = (val: string) => { setHeroSubtitle(val); markDirty(); };
@@ -406,25 +460,23 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const updateHeroImages = (imgs: string[]) => { setHeroImages(imgs); markDirty(); };
 
   // ---- Hero Background Photos manager ----
-  // Merged, de-duplicated view of the merchant's background photo list. The
-  // storefront reads the same merged array, so what the merchant edits here is
-  // exactly what rotates on the live store.
-  const heroBackgroundList: string[] = (() => {
-    const merged = [...heroBackgrounds, ...heroImages];
-    const seen = new Set<string>();
-    return merged.filter((img) => {
-      const url = (img || '').trim();
-      if (!url || seen.has(url)) return false;
-      seen.add(url);
-      return true;
-    });
-  })();
+  // The single source of truth the storefront also reads, so what the merchant
+  // edits here is exactly what rotates on the live store.
+  const heroBackgroundList: string[] = mergeHeroBackgrounds(heroBackgrounds, heroImages);
 
-  /** Replace the entire background photo list (add / replace / remove). */
+  /**
+   * Replace the entire background photo list (add / replace / remove).
+   *
+   * Writes `heroBackgrounds` AND `heroImages` from the same array, plus the
+   * matching `heroImage`, so both key names carry identical data. Previously
+   * `heroImages` was derived from `slides`, so the customizer persisted one list
+   * while the storefront rendered another — the hero images "disappeared".
+   */
   const setHeroBackgroundList = (list: string[]) => {
-    const cleaned = list.map((s) => (s || '').trim()).filter((s) => s !== '');
+    const cleaned = mergeHeroBackgrounds(list);
     setHeroBackgrounds(cleaned);
     setHeroImages(cleaned);
+    setHeroImage(cleaned[0] || '');
     markDirty();
   };
 
@@ -729,8 +781,15 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
             ...updatedMerchant,
             store_slug: updatedMerchant.storeSlug,
             activeThemeId: updatedMerchant.activeThemeId,
+            // The `stores` collection declares this field as `theme_config`,
+            // while the client has always sent `themeConfig`. Sending BOTH keeps
+            // the dot-notation writes (`theme_config.galleryImages`, …) landing
+            // under the key the store record actually uses, so Gallery/Video
+            // sections survive a save + reload on the public storefront.
+            theme_config: themeConfig,
             themeConfig,
           },
+          theme_config: themeConfig,
           themeConfig,
         }),
       });
@@ -3931,23 +3990,18 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                   const file = e.target.files?.[0];
                                   e.target.value = '';
                                   if (!file) return;
-                                  // A video is far too large to inline as base64
-                                  // (a 20MB clip is ~27MB encoded, which no
-                                  // document store will accept). Use a blob URL
-                                  // for preview and persist nothing inline.
-                                  if (file.size > 4_000_000) {
-                                    console.warn(
-                                      '[ThemeCustomizer] Video is larger than 4MB and will not be saved inline. ' +
-                                      'Host it and use a URL instead.'
-                                    );
-                                  }
-                                  setVideoFileUrl(URL.createObjectURL(file));
+                                  // Blob URLs are document-scoped and die on
+                                  // reload, which is why the Video section used
+                                  // to vanish after saving. Persist inline when
+                                  // the clip is small enough, otherwise tell the
+                                  // merchant to host it and use a URL.
+                                  applyVideoFile(file);
                                 }}
                               />
                             </label>
                           </div>
                           {videoFileUrl && videoFileUrl.startsWith('data:video') && (
-                            <span className="text-[10px] text-[#D4AF37] font-mono block">✓ Custom video file uploaded</span>
+                            <span className="text-[10px] text-[#D4AF37] font-mono block">✓ Custom video file uploaded &amp; saved</span>
                           )}
                         </div>
 

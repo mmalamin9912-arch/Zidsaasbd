@@ -465,6 +465,28 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const activeHeroSlide = resolvedTheme.slides.length > 0
     ? resolvedTheme.slides[Math.min(resolvedTheme.activeSlideIndex, resolvedTheme.slides.length - 1)]
     : null;
+  // Gallery rows that actually carry an image. The customizer persists whatever
+  // is in its list — including a freshly-added, still-empty row — so filtering
+  // here keeps the storefront from rendering blank tiles or dropping the whole
+  // section because `length > 0` was satisfied by an empty entry.
+  const galleryImageList = (resolvedTheme.galleryImages || []).filter(
+    (img) => img && typeof img.url === 'string' && img.url.trim() !== ''
+  );
+  // Resolve the merchant's video source to an embeddable URL once, so the render
+  // below never has to guess. A bare YouTube/Vimeo link is normalised; anything
+  // else is passed through as a direct media URL.
+  const videoEmbedUrl = (() => {
+    const raw = (resolvedTheme.videoUrl || '').trim();
+    if (!raw) return '';
+    // An explicit <iframe> embed URL is already usable as-is.
+    if (/\/embed\//.test(raw)) return raw;
+    const yt = raw.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|live\/|v\/)|youtu\.be\/)([\w-]{11})/i);
+    if (yt) return `https://www.youtube.com/embed/${yt[1]}`;
+    const vm = raw.match(/vimeo\.com\/(?:video\/)?(\d+)/i);
+    if (vm) return `https://player.vimeo.com/video/${vm[1]}`;
+    return raw;
+  })();
+  const hasVideoSource = Boolean(resolvedTheme.videoFileUrl || videoEmbedUrl);
   const primaryColor = (
     (typeof merchantThemeConfig.primaryColor === 'string' && merchantThemeConfig.primaryColor) ||
     (typeof merchantThemeConfig.themePrimaryColor === 'string' && merchantThemeConfig.themePrimaryColor) ||
@@ -2114,17 +2136,29 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               </section>
               )}
 
-              {/* Gallery Section — themed from Theme Editor */}
-              {resolvedTheme.showGallery && resolvedTheme.galleryImages.length > 0 && (
+              {/* Gallery Section — themed from Theme Editor.
+                  Reads `themeConfig.galleryImages`, which the customizer writes
+                  through /api/stores/update. Blank rows (an "+ Add Image" entry
+                  the merchant has not filled in yet) are dropped here rather
+                  than rendered as empty tiles, and a whole section with no
+                  usable image is skipped entirely instead of leaving a gap. */}
+              {resolvedTheme.showGallery && galleryImageList.length > 0 && (
               <section className="space-y-3">
                 <h2 className="text-sm font-black text-slate-100 tracking-tight uppercase flex items-center gap-2">
                   <Star className="w-4 h-4 text-amber-400" />
                   {resolvedTheme.galleryHeading}
                 </h2>
                 <div className="grid grid-cols-2 gap-3">
-                  {resolvedTheme.galleryImages.map((img, i) => {
+                  {galleryImageList.map((img, i) => {
                     const galleryImg = (
-                      <SafeImage src={img.url} alt={img.caption || `Gallery ${i + 1}`} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                      <>
+                        <SafeImage src={img.url} alt={img.caption || `Gallery ${i + 1}`} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                        {img.caption && (
+                          <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/90 to-transparent px-2.5 py-2 text-[10px] font-bold text-slate-100 truncate">
+                            {img.caption}
+                          </span>
+                        )}
+                      </>
                     );
                     return img.link && img.link !== '#' ? (
                       <a key={`gal-${i}`} href={img.link} target="_blank" rel="noreferrer" className="group relative rounded-2xl overflow-hidden border border-slate-800/80 aspect-square bg-slate-900">
@@ -2140,8 +2174,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               </section>
               )}
 
-              {/* Video Section — themed from Theme Editor */}
-              {resolvedTheme.showVideo && (resolvedTheme.videoFileUrl || resolvedTheme.videoUrl) && (
+              {/* Video Section — themed from Theme Editor.
+                  Uses the pre-resolved `videoEmbedUrl`, so a bare YouTube watch
+                  link, a youtu.be short, a /shorts/ or /embed/ URL and a Vimeo
+                  link all resolve correctly. Previously a link that matched
+                  none of the regexes silently fell back to a placeholder clip,
+                  and a merchant-uploaded file (a blob: URL) was not durable —
+                  the section then vanished on the public storefront. */}
+              {resolvedTheme.showVideo && hasVideoSource && (
               <section className="space-y-3">
                 {resolvedTheme.videoTitle && (
                   <h2 className="text-sm font-black text-slate-100 tracking-tight uppercase flex items-center gap-2">
@@ -2162,7 +2202,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     />
                   ) : (
                     <iframe
-                      src={`https://www.youtube.com/embed/${(resolvedTheme.videoUrl.match(/(?:v=|youtu\.be\/|embed\/)([\w-]{11})/) || [])[1] || 'dQw4w9WgXcQ'}?autoplay=${resolvedTheme.videoAutoplay ? 1 : 0}&mute=${(resolvedTheme.videoAutoplay || resolvedTheme.videoMuted) ? 1 : 0}`}
+                      src={`${videoEmbedUrl}${videoEmbedUrl.includes('?') ? '&' : '?'}autoplay=${resolvedTheme.videoAutoplay ? 1 : 0}&mute=${(resolvedTheme.videoAutoplay || resolvedTheme.videoMuted) ? 1 : 0}`}
                       className="w-full h-full"
                       title={resolvedTheme.videoTitle || 'Store Video'}
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
