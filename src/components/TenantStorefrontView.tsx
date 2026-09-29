@@ -406,6 +406,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       : ((typeof merchantThemeConfig.heroImage === 'string' && merchantThemeConfig.heroImage) || storefrontMerchant.heroImage
           ? [(typeof merchantThemeConfig.heroImage === 'string' && merchantThemeConfig.heroImage) || storefrontMerchant.heroImage || '']
           : []),
+    // Alias for `heroImages`, honouring the editor's `heroBackgrounds` key name.
+    // Merchants/older payloads may write either key; both resolve to one list.
+    heroBackgrounds: Array.isArray(merchantThemeConfig.heroBackgrounds) && merchantThemeConfig.heroBackgrounds.length > 0
+      ? (merchantThemeConfig.heroBackgrounds as string[])
+      : [],
     heroCtaText: (typeof merchantThemeConfig.heroCtaText === 'string' && merchantThemeConfig.heroCtaText) || 'Shop Now',
     slides: Array.isArray(merchantThemeConfig.slides) && merchantThemeConfig.slides.length > 0
       ? (merchantThemeConfig.slides as Array<{ id: string; title: string; subtitle: string; ctaText: string; ctaLink: string; image: string; }>)
@@ -473,16 +478,19 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [supabaseProducts, setSupabaseProducts] = useState<Product[]>([]);
   const [supabaseCategories, setSupabaseCategories] = useState<any[]>([]);
   const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
-  // Hero carousel auto-rotation state (2s interval)
+  // Hero carousel auto-rotation state (1s interval — fades through the
+  // merchant's configured hero background photos in order).
   const heroImageList: string[] = resolvedTheme.heroImages.length > 0
     ? resolvedTheme.heroImages
-    : (resolvedTheme.heroImage ? [resolvedTheme.heroImage] : []);
+    : (resolvedTheme.heroBackgrounds.length > 0
+        ? resolvedTheme.heroBackgrounds
+        : (resolvedTheme.heroImage ? [resolvedTheme.heroImage] : []));
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
   useEffect(() => {
     if (!resolvedTheme.showHeroBanner || heroImageList.length <= 1) return;
     const interval = setInterval(() => {
       setActiveHeroIndex((prev) => (prev + 1) % heroImageList.length);
-    }, 2000);
+    }, 1000);
     return () => clearInterval(interval);
   }, [resolvedTheme.showHeroBanner, heroImageList.length]);
   // Reset index when image list changes
@@ -1565,10 +1573,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   return (
     <div
-      className="min-h-screen font-sans bg-[#0f172a] flex justify-center items-start text-slate-100 selection:text-slate-950 selection:bg-amber-400"
+      className="min-h-screen w-full font-sans bg-[#0f172a] text-slate-100 selection:text-slate-950 selection:bg-amber-400 overflow-x-hidden"
       style={{ ['--theme-primary' as string]: primaryColor } as React.CSSProperties}
     >
-      <div className="w-full max-w-[520px] min-h-screen bg-[#0f172a] text-slate-100 shadow-[0_0_50px_rgba(0,0,0,0.8)] relative flex flex-col border-x border-slate-800/80 overflow-x-hidden pb-24">
+      <div className="w-full min-h-screen bg-[#0f172a] text-slate-100 relative flex flex-col overflow-x-hidden pb-24">
         {isSplashVisible && (
           <div className="fixed inset-0 z-[80] bg-slate-950/95 backdrop-blur-sm flex items-center justify-center">
             <div className="flex flex-col items-center gap-4 text-center animate-pulse">

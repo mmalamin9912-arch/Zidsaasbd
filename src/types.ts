@@ -214,6 +214,8 @@ export interface MerchantProfile {
   heroSubtitle?: string;
   heroImage?: string;
   heroImages?: string[];
+  /** Merchant-managed hero background photos, auto-rotated by the storefront. */
+  heroBackgrounds?: string[];
   announcementText?: string;
   shippingConfig?: {
     type: 'flat' | 'free' | 'advance';

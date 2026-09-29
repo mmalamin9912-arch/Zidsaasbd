@@ -4,7 +4,7 @@ import SafeImage from './SafeImage';
 
 export const SupermarketTechMockup: React.FC = () => {
   return (
-    <div className="min-h-full bg-[#F2F4F8] font-sans text-slate-900 flex flex-col">
+    <div className="min-h-screen w-full bg-[#F2F4F8] font-sans text-slate-900 flex flex-col overflow-x-hidden">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
         <div className="bg-[#00D68F] text-slate-950 py-2 px-4 text-center text-xs font-extrabold tracking-wide">
@@ -36,7 +36,7 @@ export const SupermarketTechMockup: React.FC = () => {
         </div>
       </header>
 
-      <div className="flex-1 max-w-[1400px] mx-auto w-full flex flex-col lg:flex-row gap-6 p-4 md:p-6">
+      <div className="flex-1 max-w-[1400px] mx-auto w-full flex flex-col lg:flex-row gap-4 sm:gap-6 p-0 sm:p-4 md:p-6">
         {/* Sidebar Categories */}
         <aside className="hidden lg:block w-72 shrink-0 bg-white rounded-3xl border border-slate-200/60 p-6 h-fit shadow-sm">
           <h3 className="font-extrabold text-slate-900 mb-4 flex items-center gap-2">
@@ -110,7 +110,7 @@ export const SupermarketTechMockup: React.FC = () => {
 
 export const ElegantFashionMockup: React.FC = () => {
   return (
-    <div className="min-h-full bg-slate-50 font-sans text-slate-900 flex flex-col">
+    <div className="min-h-screen w-full bg-slate-50 font-sans text-slate-900 flex flex-col overflow-x-hidden">
       {/* Header */}
       <header className="bg-white border-b border-slate-100 sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
@@ -162,7 +162,7 @@ export const ElegantFashionMockup: React.FC = () => {
         </div>
       </div>
 
-      <main className="flex-1 max-w-7xl mx-auto w-full p-4 sm:p-6 lg:p-8 space-y-12">
+      <main className="flex-1 max-w-7xl mx-auto w-full p-0 sm:p-4 md:p-6 lg:p-8 space-y-8 sm:space-y-12">
         {/* Minimal Hero */}
         <section className="relative h-[60vh] sm:h-[70vh] rounded-[2rem] overflow-hidden bg-slate-900 flex items-center justify-center text-center">
           <SafeImage src="https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&w=1600&q=80" alt="Fashion Hero" className="absolute inset-0 w-full h-full object-cover opacity-60 mix-blend-overlay" />

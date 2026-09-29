@@ -205,6 +205,21 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       ? merchant.themeConfig.heroImages
       : (merchant?.heroImage ? [merchant.heroImage] : [])
   );
+  // Merchant-managed list of hero BACKGROUND photos. This is the canonical array
+  // the storefront rotates through every 1000ms. It is seeded from heroImages /
+  // heroImage and is independently addable / replaceable / removable from the
+  // Image Carousel panel below. Only non-empty URLs are ever persisted.
+  const [heroBackgrounds, setHeroBackgrounds] = useState<string[]>(
+    (() => {
+      const cfg = merchant?.themeConfig as any;
+      const source = Array.isArray(cfg?.heroBackgrounds) && cfg.heroBackgrounds.length > 0
+        ? cfg.heroBackgrounds
+        : (Array.isArray(cfg?.heroImages) && cfg.heroImages.length > 0
+            ? cfg.heroImages
+            : (merchant?.heroImage ? [merchant.heroImage] : []));
+      return (source as string[]).filter((img) => typeof img === 'string' && img.trim() !== '');
+    })()
+  );
 
   // 2. Categories
   const [showCategories, setShowCategories] = useState(merchant?.themeConfig?.showCategories ?? true);
@@ -374,17 +389,61 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
 
   // Sync heroImages from slides: whenever slides change, update heroImages
   // so the array of image URLs is kept in sync with the slide manager.
+  // Guarded de-dupe: only non-empty URLs, and the state is left untouched when
+  // the derived list is identical — otherwise this effect would clobber the
+  // merchant's edits in the separate "Hero Background Photos" manager below.
   useEffect(() => {
     const images = slides
       .map((s) => s.image)
       .filter((img) => img && img.trim() !== '');
-    setHeroImages(images.length > 0 ? images : []);
+    if (images.length === 0) return;
+    setHeroImages((prev) => (prev.length === images.length && prev.every((v, i) => v === images[i]) ? prev : images));
   }, [slides]);
 
   const updateHeroTitle = (val: string) => { setHeroTitle(val); markDirty(); };
   const updateHeroSubtitle = (val: string) => { setHeroSubtitle(val); markDirty(); };
   const updateHeroImage = (val: string) => { setHeroImage(val); markDirty(); };
   const updateHeroImages = (imgs: string[]) => { setHeroImages(imgs); markDirty(); };
+
+  // ---- Hero Background Photos manager ----
+  // Merged, de-duplicated view of the merchant's background photo list. The
+  // storefront reads the same merged array, so what the merchant edits here is
+  // exactly what rotates on the live store.
+  const heroBackgroundList: string[] = (() => {
+    const merged = [...heroBackgrounds, ...heroImages];
+    const seen = new Set<string>();
+    return merged.filter((img) => {
+      const url = (img || '').trim();
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    });
+  })();
+
+  /** Replace the entire background photo list (add / replace / remove). */
+  const setHeroBackgroundList = (list: string[]) => {
+    const cleaned = list.map((s) => (s || '').trim()).filter((s) => s !== '');
+    setHeroBackgrounds(cleaned);
+    setHeroImages(cleaned);
+    markDirty();
+  };
+
+  /** Append another photo to the rotation. */
+  const addHeroBackground = (url?: string) => {
+    const value = (url || '').trim();
+    if (!value) return;
+    setHeroBackgroundList([...heroBackgroundList, value]);
+  };
+
+  /** Swap the photo at `index`. */
+  const updateHeroBackgroundAt = (index: number, url: string) => {
+    setHeroBackgroundList(heroBackgroundList.map((img, i) => (i === index ? url : img)));
+  };
+
+  /** Remove the photo at `index`. */
+  const removeHeroBackgroundAt = (index: number) => {
+    setHeroBackgroundList(heroBackgroundList.filter((_, i) => i !== index));
+  };
 
   // ---------------- DRAG AND DROP REORDER STATES & HANDLERS ----------------
   // Top Level Main Sections Order
@@ -589,8 +648,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     storeLogoText, logoImageUrl, desktopLogoUrl, mobileLogoUrl, logoHeight,
     headerSticky, headerBgColor, hideLanguage, hideCountry, showSearchBar,
     showAnnouncement, announcementText, announcementBg, announcementLink, isMarquee, marqueeSpeed, announcementItems,
-    showHeroBanner, carouselTransition, desktopCarouselHeight, mobileCarouselHeight, activeSlideIndex, slides,
-    heroTitle, heroSubtitle, heroCtaText, heroImage, heroImages,
+    showHeroBanner, carouselTransition, desktopCarouselHeight, mobileCarouselHeight, activeSlideIndex, slides, heroTitle, heroSubtitle, heroCtaText, heroImage, heroImages, heroBackgrounds,
     showCategories, categoriesHeading, categoriesSubtitle, categoriesLayout, categoriesSelection, categoriesItemsPerRow,
     categoriesShowItemCount, categoriesShowMoreButton, categoriesMoreButtonText, categoriesBgImage, categoriesOverlayOpacity, categoriesList,
     showFeaturedGrid, featuredHeading, productColumns, productsLayout, productsSelection, productsShowMoreButton, productsMoreButtonText,
@@ -628,7 +686,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       storeLogoText, logoImageUrl, desktopLogoUrl, mobileLogoUrl, logoHeight,
       headerSticky, headerBgColor, hideLanguage, hideCountry, showSearchBar,
       showAnnouncement, announcementText, announcementBg, announcementLink, isMarquee, marqueeSpeed, announcementItems,
-      showHeroBanner, carouselTransition, desktopCarouselHeight, mobileCarouselHeight, activeSlideIndex, slides, heroTitle, heroSubtitle, heroCtaText, heroImage, heroImages,
+      showHeroBanner, carouselTransition, desktopCarouselHeight, mobileCarouselHeight, activeSlideIndex, slides, heroTitle, heroSubtitle, heroCtaText, heroImage, heroImages, heroBackgrounds: heroBackgroundList,
       showCategories, categoriesHeading, categoriesSubtitle, categoriesLayout, categoriesSelection, categoriesItemsPerRow, categoriesShowItemCount, categoriesMoreButtonText, categoriesShowMoreButton, categoriesBgImage, categoriesOverlayOpacity, categoriesList,
       showFeaturedGrid, featuredHeading, productColumns, productsLayout, productsSelection, productsShowMoreButton, productsMoreButtonText,
       showCountdown, countdownTitle, countdownEndDate, countdownBgImage, countdownOverlayOpacity, countdownHours, countdownDiscount,
@@ -646,6 +704,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       heroSubtitle,
       heroImage,
       heroImages,
+      heroBackgrounds: heroBackgroundList,
       announcementText,
       themeConfig,
     } : ({} as MerchantProfile);
@@ -968,9 +1027,10 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       slides,
       heroTitle,
       heroSubtitle,
-      heroCtaText,
+       heroCtaText,
        heroImage,
        heroImages,
+       heroBackgrounds: heroBackgroundList,
        showCategories,
       categoriesHeading,
       categoriesSubtitle,
@@ -1766,6 +1826,75 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                           <Plus className="w-3.5 h-3.5 text-[#D4AF37]" />
                           <span>+ Add Slide</span>
                         </button>
+                      </div>
+
+                      {/* Hero Background Photos — the merchant-managed list the
+                          storefront auto-rotates through every 1000ms. Add,
+                          replace (URL or upload) and remove here. */}
+                      <div className="space-y-2 pt-2 border-t border-[#2E3548]">
+                        <div className="flex justify-between items-center">
+                          <label className="text-slate-300 font-semibold block">Hero Background Photos ({heroBackgroundList.length})</label>
+                          <span className="text-[10px] text-[#D4AF37] font-mono">Auto 1s</span>
+                        </div>
+                        <p className="text-[10px] text-slate-500 leading-relaxed">
+                          These background images fade automatically every 1 second on the storefront.
+                        </p>
+
+                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                          {heroBackgroundList.map((bgUrl, idx) => (
+                            <div key={`${idx}-${bgUrl.slice(0, 24)}`} className="flex items-center gap-1.5">
+                              <div className="w-10 h-10 rounded-lg overflow-hidden border border-[#2E3548] bg-[#131620] shrink-0">
+                                <SafeImage src={bgUrl} alt={`Hero background ${idx + 1}`} className="w-full h-full object-cover" />
+                              </div>
+                              <input
+                                type="text"
+                                placeholder="Hero background image URL..."
+                                value={bgUrl}
+                                onChange={(e) => updateHeroBackgroundAt(idx, e.target.value)}
+                                className="flex-1 bg-[#131620] border border-[#2E3548] text-white p-1.5 rounded text-xs"
+                              />
+                              <label className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 text-[10px] font-bold px-2 py-1.5 rounded cursor-pointer shrink-0 flex items-center gap-1 border border-[#3A435E]" title="Replace image">
+                                <Upload className="w-3 h-3 text-[#D4AF37]" />
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  onChange={(e) => pickImage(e, (newImg) => updateHeroBackgroundAt(idx, newImg))}
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => removeHeroBackgroundAt(idx)}
+                                className="text-red-400 hover:text-red-300 p-1 cursor-pointer shrink-0"
+                                title="Remove background image"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                          {heroBackgroundList.length === 0 && (
+                            <p className="text-[10px] text-slate-500 italic py-1">No hero background photos yet — add one below.</p>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => addHeroBackground('')}
+                          className="w-full bg-[#202533] hover:bg-[#282E3F] border border-dashed border-[#3A435E] hover:border-[#D4AF37] text-slate-200 text-xs font-bold p-2.5 rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5 text-[#D4AF37]" />
+                          <span>+ Add Hero Background</span>
+                        </button>
+                        <label className="w-full bg-[#202533] hover:bg-[#282E3F] border border-[#3A435E] hover:border-[#D4AF37] text-slate-200 text-xs font-bold p-2.5 rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer">
+                          <Upload className="w-3 h-3 text-[#D4AF37]" />
+                          <span>Upload Hero Background</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => pickImage(e, (newImg) => addHeroBackground(newImg))}
+                          />
+                        </label>
                       </div>
                     </div>
                   </div>
