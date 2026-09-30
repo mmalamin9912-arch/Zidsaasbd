@@ -31,6 +31,7 @@
  */
 
 import express from 'express';
+import { adminMerchantSlugRouter } from './adminMerchantSlugRoute.js';
 import path from 'path';
 import fs from 'fs/promises';
 import dns from 'node:dns/promises';
@@ -1654,6 +1655,8 @@ app.post('/api/store/theme-requests', async (req, res) => {
     return res.status(200).json({ ok: false, error: err?.message || 'Could not submit the theme request.' });
   }
 });
+
+app.use(adminMerchantSlugRouter);
 
 // ── Admin merchant management ───────────────
 // GET    /api/admin/merchants            — list stores (query: status, search)

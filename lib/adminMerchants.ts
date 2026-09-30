@@ -16,6 +16,8 @@
  */
 
 import { connectToDatabase, getMongoUri, describeMongoError, DB_NAME } from './db.js';
+import { ObjectId } from 'mongodb';
+import { validateMerchantSlug } from './merchantSlug.js';
 import type { MongoFailure } from './db.js';
 import { getSupabaseServerConfig } from './hybridDb.js';
 
@@ -715,6 +717,95 @@ async function findMerchantRecord(db: any, ref: string): Promise<Record<string, 
     } catch { /* try next collection */ }
   }
   return null;
+}
+
+/** Rename atomically; transaction failures leave the original store intact. */
+export async function updateAdminMerchantSlug(id: string, value: unknown, expectedSlug: unknown) {
+  const validated = validateMerchantSlug(value);
+  if (validated.error) return { ok: false, status: 400, error: validated.error };
+  if (!id || typeof expectedSlug !== 'string') {
+    return { ok: false, status: 400, error: 'Merchant ID and current store slug are required.' };
+  }
+  const slug = validated.slug!;
+  const { db } = await getDb();
+  if (!db) return { ok: false, status: 503, error: 'Merchant database is unavailable.' };
+  const connection = await connectToDatabase();
+  const session = await connection.startSession();
+  let updated: Record<string, any> | undefined;
+  let oldSlug = '';
+  try {
+    // Do not ignore index failures: uniqueness must be enforced by MongoDB,
+    // including competing registrations outside this endpoint.
+    for (const name of ['stores', 'merchants']) {
+      await db.collection(name).createIndex({ store_slug: 1 }, {
+        unique: true, name: 'unique_admin_slug_ci',
+        collation: { locale: 'en', strength: 2 },
+        partialFilterExpression: { store_slug: { $type: 'string' } },
+      });
+    }
+    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+    // All rename transactions write the same document, serializing checks
+    // across the two legacy merchant collections and serverless instances.
+    await db.collection('admin_slug_locks').updateOne(
+      { _id: 'rename' }, { $setOnInsert: { revision: 0 } }, { upsert: true },
+    );
+    await session.withTransaction(async () => {
+      await db.collection('admin_slug_locks').updateOne(
+        { _id: 'rename' }, { $inc: { revision: 1 } }, { session },
+      );
+      const identity = { $or: [
+        { id }, { _id: id }, ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : []),
+      ] };
+      let current: Record<string, any> | null = null;
+      for (const name of ['stores', 'merchants']) {
+        current = await db.collection(name).findOne(identity, { session });
+        if (current) break;
+      }
+      if (!current) throw Object.assign(new Error('Merchant not found.'), { status: 404 });
+      oldSlug = normalizeMerchant(current).storeSlug;
+      if (oldSlug !== expectedSlug) {
+        throw Object.assign(new Error('The store slug changed. Refresh merchants and try again.'), { status: 409 });
+      }
+      if (!oldSlug) throw Object.assign(new Error('This merchant has no current slug to rename.'), { status: 409 });
+      const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const oldMatch = new RegExp(`^${escaped(oldSlug)}$`, 'i');
+      const newMatch = new RegExp(`^${slug}$`, 'i');
+      const aliases = (match: RegExp) => ({ $or: ['store_slug', 'storeSlug', 'slug'].map(key => ({ [key]: match })) });
+      for (const name of ['stores', 'merchants']) {
+        const collision = await db.collection(name).findOne({
+          $and: [aliases(newMatch), { $nor: [aliases(oldMatch)] }],
+        }, { session });
+        if (collision) throw Object.assign(new Error('This store slug is already in use.'), { status: 409 });
+      }
+      const patch = { store_slug: slug, storeSlug: slug, updated_at: new Date().toISOString() };
+      for (const name of ['stores', 'merchants']) {
+        await db.collection(name).updateMany(aliases(oldMatch), { $set: patch }, { session });
+        await db.collection(name).updateMany({ slug: oldMatch }, { $set: { slug } }, { session });
+      }
+      // Preserve slug-addressed catalog, orders, settings, and historical records.
+      // Permanent IDs/codes and product/page slugs are never rewritten.
+      for (const { name } of collections) {
+        if (['stores', 'merchants', 'admin_slug_locks'].includes(name) || name.startsWith('system.')) continue;
+        for (const field of ['store_slug', 'storeSlug']) {
+          await db.collection(name).updateMany({ [field]: oldMatch }, { $set: { [field]: slug } }, { session });
+        }
+      }
+      updated = { ...current, ...patch };
+    });
+  } catch (err: any) {
+    if (err?.code === 11000) return { ok: false, status: 409, error: 'The slug conflicts with existing merchant data.' };
+    if (err?.status) return { ok: false, status: err.status, error: err.message };
+    console.warn('[adminMerchants] slug rename failed:', err?.code || 'database error');
+    return { ok: false, status: 503, error: 'Could not safely rename the store. MongoDB must support transactions and unique slug indexes.' };
+  } finally {
+    await session.endSession();
+  }
+  const mirror = await patchMerchantInSupabase(oldSlug, { store_slug: slug });
+  return {
+    ok: true, status: 200, merchant: normalizeMerchant(updated!),
+    warning: getSupabaseServerConfig().isConfigured && !mirror.ok
+      ? 'MongoDB was updated, but the Supabase mirror could not be updated.' : undefined,
+  };
 }
 
 export interface CreateMerchantInput {

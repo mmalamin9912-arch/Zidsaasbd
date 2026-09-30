@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { validateMerchantSlug } from '../../lib/merchantSlug';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
 import { useToast } from './ToastProvider';
@@ -1063,6 +1064,45 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const [merchantCounts, setMerchantCounts] = useState<{ all: number; active: number; trial: number; suspended: number }>({ all: 0, active: 0, trial: 0, suspended: 0 });
   const [isLoadingMerchants, setIsLoadingMerchants] = useState(false);
   const [merchantsError, setMerchantsError] = useState<string | null>(null);
+
+  const [slugMerchant, setSlugMerchant] = useState<AdminMerchantRow | null>(null);
+  const [slugInput, setSlugInput] = useState('');
+  const [slugPassword, setSlugPassword] = useState('');
+  const [slugError, setSlugError] = useState('');
+  const [slugSaving, setSlugSaving] = useState(false);
+  const [slugNotice, setSlugNotice] = useState('');
+
+  const saveMerchantSlug = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!slugMerchant || slugSaving) return;
+    const { slug, error } = validateMerchantSlug(slugInput);
+    if (error) { setSlugError(error); return; }
+    setSlugSaving(true);
+    setSlugError('');
+    try {
+      const response = await fetch(`/api/admin/merchants/${encodeURIComponent(slugMerchant.id)}/slug`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Password': slugPassword },
+        body: JSON.stringify({ store_slug: slug, expected_store_slug: slugMerchant.storeSlug }),
+      });
+      const data = await safeJson<{ ok: boolean; merchant?: AdminMerchantRow; error?: string; warning?: string }>(response);
+      if (!response.ok || !data?.ok || !data.merchant) {
+        setSlugError(data?.error || 'Could not update the store slug. Please try again.');
+        return;
+      }
+      const updated = data.merchant;
+      setServerMerchants(prev => prev.map(m => m.id === slugMerchant.id ? updated : m));
+      onUpdateAllMerchants(prev => prev.map(m => m.id === slugMerchant.id || m.storeSlug === slugMerchant.storeSlug
+        ? { ...m, storeSlug: updated.storeSlug, store_slug: updated.storeSlug } : m));
+      setSlugNotice(data.warning || `Store slug updated to /${updated.storeSlug}.`);
+      setSlugMerchant(null);
+      setSlugPassword('');
+    } catch {
+      setSlugError('Could not reach the server. Please try again.');
+    } finally {
+      setSlugSaving(false);
+    }
+  };
 
   const fetchMerchants = useCallback(async () => {
     setIsLoadingMerchants(true);
@@ -2704,6 +2744,7 @@ onUpdateMerchant(updatedCurrent);
               ))}
             </div>
 
+            {slugNotice && <p role="status" className="text-sm text-amber-300">{slugNotice}</p>}
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#202533] text-slate-400 uppercase font-semibold border-b border-[#2E3548]">
@@ -2780,6 +2821,19 @@ onUpdateMerchant(updatedCurrent);
                         )}
                       </td>
                       <td className="p-3.5 text-right space-x-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSlugMerchant(m);
+                            setSlugInput(m.storeSlug);
+                            setSlugPassword('');
+                            setSlugError('');
+                            setSlugNotice('');
+                          }}
+                          className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold border border-[#3A435E]"
+                        >
+                          Edit slug
+                        </button>
                         <button
                           onClick={() => onLoginAsMerchant(m)}
                           className="bg-indigo-500/10 hover:bg-indigo-500 text-indigo-400 hover:text-white p-2 rounded-lg transition-all border border-indigo-500/20 cursor-pointer inline-flex items-center justify-center"
@@ -4963,6 +5017,39 @@ onUpdateMerchant(updatedCurrent);
       )}
 
       {/* CREATE MERCHANT MODAL */}
+      {slugMerchant && createPortal(
+        <div className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4">
+          <form onSubmit={saveMerchantSlug} role="dialog" aria-modal="true" aria-labelledby="slug-editor-title"
+            className="w-full max-w-md bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-4">
+            <h2 id="slug-editor-title" className="text-lg font-bold text-white">Edit store slug</h2>
+            <p className="text-sm text-slate-300">{slugMerchant.storeName} — current slug: /{slugMerchant.storeSlug}</p>
+            <p className="text-xs text-amber-300">Changing the slug changes the store URL. Existing links using the old slug will stop working.</p>
+            <label className="block text-sm text-slate-200">
+              Store slug
+              <input autoFocus required maxLength={63} value={slugInput} disabled={slugSaving}
+                onChange={event => setSlugInput(event.target.value)} autoCapitalize="none" spellCheck={false}
+                className="mt-1 w-full bg-[#202533] border border-[#3A435E] rounded-lg p-3 text-white" />
+            </label>
+            <p className="text-xs text-slate-400">Use letters, numbers, and single hyphens between words.</p>
+            <label className="block text-sm text-slate-200">
+              Admin password
+              <input type="password" required autoComplete="current-password" value={slugPassword} disabled={slugSaving}
+                onChange={event => setSlugPassword(event.target.value)}
+                className="mt-1 w-full bg-[#202533] border border-[#3A435E] rounded-lg p-3 text-white" />
+            </label>
+            {slugError && <p role="alert" className="text-sm text-red-400">{slugError}</p>}
+            <div className="flex justify-end gap-3">
+              <button type="button" disabled={slugSaving} className="text-slate-300 disabled:opacity-50"
+                onClick={() => { setSlugMerchant(null); setSlugPassword(''); }}>Cancel</button>
+              <button type="submit" disabled={slugSaving || slugInput.trim().toLowerCase() === slugMerchant.storeSlug}
+                className="bg-amber-500 text-black font-bold rounded-lg px-4 py-2 disabled:opacity-50">
+                {slugSaving ? 'Saving…' : 'Save slug'}
+              </button>
+            </div>
+          </form>
+        </div>, document.body
+      )}
+
       {isCreateMerchantModalOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-[#181B26] border border-[#2E3548] rounded-3xl w-full max-w-md shadow-2xl overflow-hidden scale-in-center">
