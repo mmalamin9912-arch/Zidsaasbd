@@ -345,7 +345,8 @@ try {
  */
 async function patchMerchantInSupabase(
   ref: string,
-  patch: Record<string, any>
+  patch: Record<string, any>,
+  identity?: { id?: string; storeCode?: string }
 ): Promise<{ ok: boolean; error?: string }> {
   const { supabaseUrl, supabaseKey, isConfigured } = getSupabaseServerConfig();
   if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
@@ -364,10 +365,15 @@ async function patchMerchantInSupabase(
     Prefer: 'return=minimal',
   };
 
-  const attempts: Array<{ column: string; value: string }> = [
-    { column: 'store_slug', value: slug || cleaned },
-    { column: 'id', value: cleaned },
-  ];
+  const attempts: Array<{ column: string; value: string }> = identity
+    ? [
+        ...(identity.id && isUuid(identity.id) ? [{ column: 'id', value: identity.id }] : []),
+        ...(identity.storeCode ? [{ column: 'store_code', value: identity.storeCode }] : []),
+      ]
+    : [
+        { column: 'store_slug', value: slug || cleaned },
+        { column: 'id', value: cleaned },
+      ];
 
   let lastError: string | undefined;
   for (const attempt of attempts) {
@@ -571,6 +577,8 @@ export interface MerchantActionResult {
   /** true when an existing store was updated rather than a new one inserted. */
   updated?: boolean;
   error?: string;
+  code?: string;
+  warning?: string;
   /** Structured DB diagnosis (code + actionable message) when the write failed. */
   dbError?: MongoFailure | null;
 }
@@ -715,6 +723,134 @@ async function findMerchantRecord(db: any, ref: string): Promise<Record<string, 
     } catch { /* try next collection */ }
   }
   return null;
+}
+
+const RESERVED_MERCHANT_SLUGS = new Set([
+  // Keep synchronized with RESERVED_ROOT_SEGMENTS in src/App.tsx and the app's routing.
+  'admin', 'super-admin', 'admin-login', 'super-admin-gateway',
+  'dashboard', 'store', 'e', 'pricing', 'landing', 'login', 'signin',
+  'register', 'signup', 'checkout', 'api', 'assets', 'static',
+  'www', 'zid', 'zid-bd', 'app', 'portal', 'support', 'help', 'docs', 'status', 'auth',
+]);
+
+/** Normalize a requested merchant slug to the format used by storefront routes. */
+export function normalizeMerchantSlug(requestedSlug: unknown): string {
+  return String(requestedSlug ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/** Authoritative server validation for normalized merchant slugs. */
+export function validateMerchantSlug(slug: string): { ok: boolean; code?: string; error?: string } {
+  if (slug.length < 3 || slug.length > 63 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+    return { ok: false, code: 'invalid_slug', error: 'Use 3-63 lowercase letters or numbers separated by single hyphens.' };
+  }
+  if (RESERVED_MERCHANT_SLUGS.has(slug) || /^zid-bd-\d+$/i.test(slug)) {
+    return { ok: false, code: 'reserved_slug', error: 'This slug is reserved by the platform or storefront routes.' };
+  }
+  return { ok: true };
+}
+
+function merchantRecordIdentityFilter(record: Record<string, any>): Record<string, any> {
+  const fields = ['_id', 'id', 'store_id', 'storeId', 'store_code', 'storeCode'];
+  const clauses = fields.flatMap((field) => {
+    const value = record[field];
+    return value === undefined || value === null || value === '' ? [] : [{ [field]: value }];
+  });
+  return { $or: clauses };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Update a merchant slug without using the mutable slug as its identity. */
+export async function updateMerchantSlug(ref: string, requestedSlug: unknown): Promise<MerchantActionResult> {
+  const { db, failure } = await getDb();
+  if (!db) return { ok: false, error: failure?.message || 'MongoDB is not configured or unavailable.', dbError: failure };
+
+  const normalizedSlug = normalizeMerchantSlug(requestedSlug);
+  const validation = validateMerchantSlug(normalizedSlug);
+  if (!validation.ok) return { ok: false, error: validation.error, code: validation.code };
+
+  const current = await findMerchantRecord(db, ref);
+  if (!current) return { ok: false, error: 'Merchant not found.', code: 'not_found' };
+
+  const currentSlug = String(pick(current, ['store_slug', 'storeSlug', 'slug']) || '');
+  if (normalizedSlug === currentSlug.trim().toLowerCase()) {
+    return { ok: true, merchant: normalizeMerchant(current) };
+  }
+
+  const identityFilter = merchantRecordIdentityFilter(current);
+  const slugPattern = new RegExp(`^${escapeRegExp(normalizedSlug)}$`, 'i');
+  const slugCollisionFilter = {
+    $and: [
+      { $or: [{ store_slug: slugPattern }, { storeSlug: slugPattern }, { slug: slugPattern }] },
+      { $nor: [identityFilter] },
+    ],
+  };
+
+  for (const collectionName of ['stores', 'merchants']) {
+    try {
+      const conflict = await db.collection(collectionName).findOne(slugCollisionFilter);
+      if (conflict) return { ok: false, error: 'That store slug is already in use.', code: 'slug_taken' };
+    } catch (err: any) {
+      const dbError = describeMongoError(err);
+      return { ok: false, error: dbError.message, dbError };
+    }
+  }
+
+  const now = new Date().toISOString();
+  const set = { store_slug: normalizedSlug, storeSlug: normalizedSlug, updated_at: now };
+  let matched = 0;
+  let writeError: any = null;
+  for (const collectionName of ['stores', 'merchants']) {
+    try {
+      const collection = db.collection(collectionName);
+      const result = await collection.updateMany(identityFilter, { $set: set });
+      matched += result?.matchedCount || 0;
+      await collection.updateMany(
+        { $and: [identityFilter, { slug: { $exists: true } }] },
+        { $set: { slug: normalizedSlug } }
+      );
+    } catch (err: any) {
+      if (err?.code === 11000 || err?.codeName === 'DuplicateKey') {
+        return { ok: false, error: 'That store slug is already in use.', code: 'slug_taken' };
+      }
+      writeError = writeError || err;
+      console.warn(`[adminMerchants] slug update ${collectionName} warning:`, err?.message || err);
+    }
+  }
+
+  if (matched === 0) return { ok: false, error: 'Merchant not found.', code: 'not_found' };
+  if (writeError) {
+    const dbError = describeMongoError(writeError);
+    return { ok: false, error: dbError.message, dbError };
+  }
+
+  const supabaseId = String(current.id || '');
+  const storeCode = String(current.store_code || current.storeCode || '');
+  const sbPatch = await patchMerchantInSupabase(ref, set, {
+    id: isUuid(supabaseId) ? supabaseId : undefined,
+    storeCode: storeCode || undefined,
+  });
+  if (!sbPatch.ok) console.warn('[adminMerchants] Supabase slug mirror warning:', sbPatch.error);
+
+  let updatedRecord: Record<string, any> | null = null;
+  for (const collectionName of ['stores', 'merchants']) {
+    try {
+      updatedRecord = await db.collection(collectionName).findOne(identityFilter);
+      if (updatedRecord) break;
+    } catch { /* try next collection */ }
+  }
+
+  return {
+    ok: true,
+    merchant: normalizeMerchant(updatedRecord || { ...current, ...set, ...(current.slug !== undefined ? { slug: normalizedSlug } : {}) }),
+    ...(!sbPatch.ok ? { warning: sbPatch.error || 'Supabase slug mirror failed.' } : {}),
+  };
 }
 
 export interface CreateMerchantInput {

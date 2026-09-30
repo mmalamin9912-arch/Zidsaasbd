@@ -74,6 +74,7 @@ import { supabase } from '../lib/supabase';
 import { savePlan } from '../lib/plansApi';
 import { safeJson } from '../lib/storeApi';
 import { safeSetItem, safeGetItem } from '../utils/safeStorage';
+import { normalizeMerchantSlug, validateMerchantSlug, updateMerchantSlug } from '../lib/adminMerchantsApi';
 
 interface SuperAdminPortalViewProps {
   currentMerchant: MerchantProfile;
@@ -166,6 +167,7 @@ interface PlatformAnalyticsPayload {
 interface AdminMerchantRow {
   id: string;
   storeCode: string;
+  storeId?: string;
   storeName: string;
   storeSlug: string;
   ownerName: string;
@@ -304,6 +306,11 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
   // New modal state for creating merchant
   const [isCreateMerchantModalOpen, setIsCreateMerchantModalOpen] = useState(false);
+  const [merchantSlugEditTarget, setMerchantSlugEditTarget] = useState<AdminMerchantRow | null>(null);
+  const [merchantSlugEditFallback, setMerchantSlugEditFallback] = useState(false);
+  const [merchantSlugInput, setMerchantSlugInput] = useState('');
+  const [isSavingMerchantSlug, setIsSavingMerchantSlug] = useState(false);
+  const [merchantSlugError, setMerchantSlugError] = useState<string | null>(null);
   const [newMerchantForm, setNewMerchantForm] = useState({
     storeName: '',
     email: '',
@@ -1060,6 +1067,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   // `serverMerchants` holds the API result; when the API is unavailable we fall
   // back to the in-memory `allMerchants` prop so the table is never empty.
   const [serverMerchants, setServerMerchants] = useState<AdminMerchantRow[]>([]);
+  const [merchantRefreshTrigger, setMerchantRefreshTrigger] = useState(0);
   const [merchantCounts, setMerchantCounts] = useState<{ all: number; active: number; trial: number; suspended: number }>({ all: 0, active: 0, trial: 0, suspended: 0 });
   const [isLoadingMerchants, setIsLoadingMerchants] = useState(false);
   const [merchantsError, setMerchantsError] = useState<string | null>(null);
@@ -1094,13 +1102,79 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     } finally {
       setIsLoadingMerchants(false);
     }
-  }, [merchantStatusFilter, merchantSearchQuery]);
+  }, [merchantStatusFilter, merchantSearchQuery, merchantRefreshTrigger]);
 
   // Reload whenever the tab or search changes (debounced for typing).
   useEffect(() => {
     const handle = setTimeout(() => { fetchMerchants(); }, merchantSearchQuery ? 300 : 0);
     return () => clearTimeout(handle);
   }, [fetchMerchants, merchantSearchQuery]);
+
+  const openMerchantSlugEditor = (merchant: AdminMerchantRow) => {
+    setMerchantSlugEditTarget(merchant);
+    setMerchantSlugEditFallback(serverMerchants.length === 0);
+    setMerchantSlugInput(merchant.storeSlug || '');
+    setMerchantSlugError(null);
+  };
+
+  const handleSaveMerchantSlug = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const target = merchantSlugEditTarget;
+    if (!target) return;
+
+    const normalizedSlug = normalizeMerchantSlug(merchantSlugInput);
+    const ref = target.storeCode || target.storeId || target.id || target.storeSlug;
+    if (!ref) {
+      setMerchantSlugError('This merchant has no usable reference for a slug update.');
+      return;
+    }
+
+    setIsSavingMerchantSlug(true);
+    setMerchantSlugError(null);
+    const result = await updateMerchantSlug(ref, normalizedSlug);
+    if (!result.ok) {
+      const messages: Record<string, string> = {
+        slug_taken: 'That slug is already in use. Choose another.',
+        reserved_slug: 'That slug is reserved by the platform or a storefront route.',
+        invalid_slug: 'Enter a valid slug using 3-63 letters or numbers separated by hyphens.',
+        not_found: 'The merchant could not be found. Refresh the list and try again.',
+      };
+      setMerchantSlugError(messages[result.code || ''] || result.error || 'Could not update the store slug.');
+      setIsSavingMerchantSlug(false);
+      return;
+    }
+
+    const savedSlug = typeof result.merchant?.storeSlug === 'string'
+      ? result.merchant.storeSlug
+      : normalizedSlug;
+    setServerMerchants((previous) => previous.map((merchant) => {
+      const matches = (target.storeCode && merchant.storeCode === target.storeCode)
+        || (target.storeId && merchant.storeId === target.storeId)
+        || (target.id && merchant.id === target.id)
+        || merchant.storeSlug === target.storeSlug;
+      return matches ? { ...merchant, storeSlug: savedSlug } : merchant;
+    }));
+
+    if (merchantSlugEditFallback) {
+      onUpdateAllMerchants((previous) => previous.map((merchant) => {
+        const matches = target.storeCode
+          ? merchant.storeCode === target.storeCode || merchant.store_code === target.storeCode
+          : target.storeId
+            ? merchant.storeId === target.storeId
+            : target.id
+              ? merchant.id === target.id
+              : merchant.storeSlug === target.storeSlug;
+        return matches ? { ...merchant, storeSlug: savedSlug } : merchant;
+      }));
+    }
+
+    if (result.warning) console.warn('[SuperAdminPortalView] Merchant slug mirror warning:', result.warning);
+    setMerchantSlugEditTarget(null);
+    setMerchantSlugInput('');
+    setMerchantRefreshTrigger((previous) => previous + 1);
+    setIsSavingMerchantSlug(false);
+    toast.success(`Store slug updated to "${savedSlug}".`);
+  };
 
   const handleSaveGateways = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1658,6 +1732,7 @@ onUpdateMerchant(updatedCurrent);
     : allMerchants.map((m) => ({
         id: m.id || m.storeSlug || '',
         storeCode: m.storeCode || m.store_code || '',
+        storeId: m.storeId || '',
         storeName: m.storeName || 'Store',
         storeSlug: m.storeSlug || '',
         ownerName: m.ownerName || '',
@@ -1675,6 +1750,11 @@ onUpdateMerchant(updatedCurrent);
         onboardingProgress: Number(m.onboardingProgress || 0),
         createdAt: null,
       }));
+
+  const merchantSlugPreview = normalizeMerchantSlug(merchantSlugInput);
+  const merchantSlugValidation = validateMerchantSlug(merchantSlugPreview);
+  const merchantSlugUnchanged = Boolean(merchantSlugEditTarget)
+    && merchantSlugPreview === merchantSlugEditTarget?.storeSlug.trim().toLowerCase();
 
   // Client-side filtering still applies as a safety net (the server already
   // filtered, but this keeps the in-memory fallback consistent with the tabs).
@@ -2780,6 +2860,14 @@ onUpdateMerchant(updatedCurrent);
                         )}
                       </td>
                       <td className="p-3.5 text-right space-x-2">
+                        <button
+                          onClick={() => openMerchantSlugEditor(m)}
+                          className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold transition border border-[#3A435E] cursor-pointer text-[10px] inline-flex items-center gap-1"
+                          title="Edit Store Slug"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          Edit Slug
+                        </button>
                         <button
                           onClick={() => onLoginAsMerchant(m)}
                           className="bg-indigo-500/10 hover:bg-indigo-500 text-indigo-400 hover:text-white p-2 rounded-lg transition-all border border-indigo-500/20 cursor-pointer inline-flex items-center justify-center"
@@ -4955,6 +5043,94 @@ onUpdateMerchant(updatedCurrent);
                   className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-xl text-sm transition shadow-lg shadow-indigo-600/20 cursor-pointer"
                 >
                   {editingThemeId ? 'Save Changes' : 'Publish Theme'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MERCHANT SLUG EDIT MODAL */}
+      {merchantSlugEditTarget && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#181B26] border border-[#2E3548] rounded-3xl w-full max-w-md shadow-2xl overflow-hidden scale-in-center">
+            <div className="bg-[#202533] p-6 border-b border-[#2E3548] flex justify-between items-center">
+              <div>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Pencil className="w-5 h-5 text-indigo-400" />
+                  Edit Store Slug
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">{merchantSlugEditTarget.storeName}</p>
+              </div>
+              <button
+                type="button"
+                disabled={isSavingMerchantSlug}
+                onClick={() => setMerchantSlugEditTarget(null)}
+                className="text-slate-400 hover:text-white transition cursor-pointer disabled:opacity-50"
+                aria-label="Close slug editor"
+              >
+                <XCircle className="w-6 h-6" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveMerchantSlug} className="p-6 space-y-5">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Current Slug</label>
+                  <div className="bg-[#202533] border border-[#2E3548] rounded-xl px-4 py-3 text-sm text-slate-300 font-mono">
+                    /{merchantSlugEditTarget.storeSlug}
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="merchant-store-slug" className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">New Store Slug</label>
+                  <input
+                    id="merchant-store-slug"
+                    type="text"
+                    autoFocus
+                    value={merchantSlugInput}
+                    onChange={(event) => {
+                      setMerchantSlugInput(event.target.value);
+                      setMerchantSlugError(null);
+                    }}
+                    placeholder="e.g. north-star-shop"
+                    className="w-full bg-[#202533] border border-[#3A435E] rounded-xl px-4 py-3 text-sm text-white font-mono focus:ring-2 focus:ring-indigo-500/50 outline-none"
+                  />
+                  {!merchantSlugValidation.valid ? (
+                    <p className="text-xs text-amber-400 mt-2">{merchantSlugValidation.message}</p>
+                  ) : merchantSlugUnchanged ? (
+                    <p className="text-xs text-slate-500 mt-2">This is already the current slug.</p>
+                  ) : null}
+                </div>
+                <div className="bg-[#202533] border border-[#2E3548] rounded-xl p-3 space-y-1.5">
+                  <p className="text-[10px] uppercase font-black text-slate-500">Normalized slug preview</p>
+                  <p className="text-sm text-[#D4AF37] font-mono">/{merchantSlugPreview || '...'}</p>
+                  <p className="text-xs text-slate-400">Storefront: <span className="font-mono text-slate-200">/e/{merchantSlugPreview || '...'}</span></p>
+                </div>
+                <p className="text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl p-3">
+                  Old slug links stop working after this change.
+                </p>
+                {merchantSlugError && (
+                  <p role="alert" className="text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl p-3">
+                    {merchantSlugError}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isSavingMerchantSlug}
+                  onClick={() => setMerchantSlugEditTarget(null)}
+                  className="flex-1 bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold py-3 rounded-xl text-sm transition border border-[#3A435E] cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!merchantSlugValidation.valid || merchantSlugUnchanged || isSavingMerchantSlug}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl text-sm transition shadow-lg shadow-indigo-600/30 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isSavingMerchantSlug ? 'Saving...' : 'Save Slug'}
                 </button>
               </div>
             </form>

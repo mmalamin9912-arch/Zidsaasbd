@@ -39,7 +39,7 @@ import mongoose from 'mongoose';
 // bundled by Vercel alongside this file (same pattern as lib/faqGenerator).
 // The explicit '.js' extension is required under "type": "module".
 import { getPlatformAnalytics, buildAnalyticsSummaryPrompt, buildFallbackSummary, getGeminiApiKey } from './adminAnalytics.js';
-import { listAdminMerchants, applyMerchantAction, createAdminMerchant, cleanupDuplicateMerchants } from './adminMerchants.js';
+import { listAdminMerchants, applyMerchantAction, createAdminMerchant, cleanupDuplicateMerchants, updateMerchantSlug } from './adminMerchants.js';
 import {
   listSubscriptionRequests,
   listThemeRequests,
@@ -1725,6 +1725,23 @@ app.delete('/api/admin/merchants/:ref', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] DELETE /api/admin/merchants/:ref error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Merchant action failed.' });
+  }
+});
+
+app.patch('/api/admin/merchants/:ref/slug', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const ref = String(req.params.ref || '').trim();
+    const body = req.body || {};
+    const requestedSlug = body.store_slug ?? body.storeSlug;
+    if (requestedSlug === undefined || requestedSlug === null) {
+      return res.status(200).json({ ok: false, error: 'A store slug is required.', code: 'invalid_slug' });
+    }
+    const result = await updateMerchantSlug(ref, requestedSlug);
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] PATCH /api/admin/merchants/:ref/slug error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not update the store slug.' });
   }
 });
 
