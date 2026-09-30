@@ -513,11 +513,24 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     return raw;
   })();
   const hasVideoSource = Boolean(resolvedTheme.videoFileUrl || videoEmbedUrl);
+  // Resolution order: the merchant's Brand Identity colour wins last-resort
+  // only when neither theme source set one — see the ordering note below.
+  // `brandConfig.brandColor` is the value saved by OnlineStoreView's Brand
+  // Identity panel (persisted to stores.brandConfig). It is inserted ahead of
+  // the built-in theme defaults so a saved colour is never shadowed by a
+  // registry/theme fallback, but *after* the live theme customiser so an
+  // unsaved in-progress edit still previews correctly.
+  const brandAccent = (
+    typeof storeModules.brandConfig?.brandColor === 'string' && storeModules.brandConfig.brandColor.trim()
+      ? storeModules.brandConfig.brandColor.trim()
+      : ''
+  );
   const primaryColor = (
     (typeof merchantThemeConfig.primaryColor === 'string' && merchantThemeConfig.primaryColor) ||
     (typeof merchantThemeConfig.themePrimaryColor === 'string' && merchantThemeConfig.themePrimaryColor) ||
     (typeof themeCustomization.primaryColor === 'string' && themeCustomization.primaryColor) ||
     (typeof themeCustomization.themePrimaryColor === 'string' && themeCustomization.themePrimaryColor) ||
+    brandAccent ||
     activeTheme?.primaryColor ||
     registryTheme?.primaryColor ||
     '#00D68F'
@@ -526,7 +539,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [supabaseProducts, setSupabaseProducts] = useState<Product[]>([]);
   const [supabaseCategories, setSupabaseCategories] = useState<any[]>([]);
   const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
-  // Hero carousel auto-rotation state (1s interval — fades through the
+  // Hero carousel auto-rotation state (2s interval — fades through the
   // merchant's configured hero background photos in order).
   const heroImageList: string[] = resolvedTheme.heroImages.length > 0
     ? resolvedTheme.heroImages
@@ -538,7 +551,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     if (!resolvedTheme.showHeroBanner || heroImageList.length <= 1) return;
     const interval = setInterval(() => {
       setActiveHeroIndex((prev) => (prev + 1) % heroImageList.length);
-    }, 1000);
+    }, 2000);
     return () => clearInterval(interval);
   }, [resolvedTheme.showHeroBanner, heroImageList.length]);
   // Reset index when image list changes
@@ -1634,18 +1647,23 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   return (
     <div
       className="min-h-screen w-full font-sans bg-[#0f172a] text-slate-100 selection:text-slate-950 selection:bg-amber-400 overflow-x-hidden"
-      style={{ ['--theme-primary' as string]: primaryColor } as React.CSSProperties}
+      style={{
+        // `--primary-accent` is the canonical token; `--theme-primary` remains
+        // as an alias so any existing consumer keeps working unchanged.
+        ['--primary-accent' as string]: primaryColor,
+        ['--theme-primary' as string]: primaryColor,
+      } as React.CSSProperties}
     >
       <div className="w-full min-h-screen bg-[#0f172a] text-slate-100 relative flex flex-col overflow-x-hidden pb-24">
         {isSplashVisible && (
           <div className="fixed inset-0 z-[80] bg-slate-950/95 backdrop-blur-sm flex items-center justify-center">
             <div className="flex flex-col items-center gap-4 text-center animate-pulse">
-              <div className="relative flex items-center justify-center w-20 h-20 rounded-[24px] bg-[#00D68F] shadow-[0_0_40px_rgba(0,214,143,0.45)]">
+                <div className="relative flex items-center justify-center w-20 h-20 rounded-[24px] bg-[var(--primary-accent)] shadow-[0_0_40px_rgba(0,214,143,0.45)]">
                 <span className="text-2xl font-black text-slate-950">Z</span>
-                <div className="absolute -inset-2 rounded-[28px] border border-[#00D68F]/70 animate-ping" />
+                <div className="absolute -inset-2 rounded-[28px] border-2 border-[var(--primary-accent)]/70 animate-ping" />
               </div>
               <div>
-                <div className="text-[10px] font-black uppercase tracking-[0.35em] text-[#00D68F]">ZID SAAS BD</div>
+                <div className="text-[10px] font-black uppercase tracking-[0.35em] text-[var(--primary-accent)]">ZID SAAS BD</div>
                 <div className="mt-2 text-xl font-black text-white">{t('sf_loading_storefront')}</div>
               </div>
             </div>
@@ -1761,7 +1779,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               >
                 <ShoppingBag className="w-5 h-5" />
                 {cart.length > 0 && (
-                  <span className="absolute -top-1 -right-1 text-slate-950 text-[10px] font-black min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center bg-gradient-to-r from-amber-400 to-[#00D68F] shadow-[0_0_10px_rgba(212,175,55,0.4)]">
+                  <span className="absolute -top-1 -right-1 text-slate-950 text-[10px] font-black min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center bg-gradient-to-r from-amber-400 to-[var(--primary-accent)] shadow-[0_0_10px_rgba(212,175,55,0.4)]">
                     {cart.reduce((s, i) => s + i.quantity, 0)}
                   </span>
                 )}
@@ -1887,7 +1905,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               )}
               <div className="absolute inset-0 bg-gradient-to-t from-[#0f172a] via-[#0f172a]/50 to-transparent flex items-end p-5">
                 <div className="space-y-2 max-w-sm">
-                  <span className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-400 to-[#00D68F] text-slate-950 text-[10px] font-black uppercase tracking-widest px-3 py-0.5 rounded-full shadow-lg">
+                  <span className="inline-flex items-center gap-1.5 bg-gradient-to-r from-amber-400 to-[var(--primary-accent)] text-slate-950 text-[10px] font-black uppercase tracking-widest px-3 py-0.5 rounded-full shadow-lg">
                     <Sparkles className="w-3 h-3 fill-slate-950" />
                     {t('sf_new_arrivals')}
                   </span>
@@ -1898,7 +1916,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     {activeHeroSlide?.subtitle || resolvedTheme.heroSubtitle || t('sf_hero_fallback_subtitle')}
                   </p>
                   {activeHeroSlide?.ctaText && (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-black text-[#00D68F]">
+                    <span className="inline-flex items-center gap-1 text-[11px] font-black text-[var(--primary-accent)]">
                       {activeHeroSlide.ctaText} <ArrowRight className="w-3 h-3" />
                     </span>
                   )}
@@ -2017,7 +2035,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 <div className="flex justify-between items-center border-b border-slate-800/80 pb-2.5">
                   <div>
                     <h2 className="text-base font-black text-slate-100 uppercase tracking-tight flex items-center gap-2">
-                      <ShoppingBag className="w-4 h-4 text-[#00D68F]" />
+                      <ShoppingBag className="w-4 h-4 text-[var(--primary-accent)]" />
                       {resolvedTheme.featuredHeading || t('sf_products')}
                     </h2>
                     <p className="text-[11px] text-slate-400">
@@ -2074,7 +2092,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                             <Flame className="w-2.5 h-2.5 fill-slate-950" /> Sale
                           </span>
                         ) : (
-                          <span className="bg-[#00D68F] text-slate-950 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full shadow-md">
+                          <span className="bg-[var(--primary-accent)] text-slate-950 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full shadow-md">
                             Hot
                           </span>
                         )}
@@ -2159,7 +2177,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
                           <button
                             onClick={(e) => { e.stopPropagation(); handleAddToCart(p); }}
-                            className="bg-gradient-to-r from-amber-400 via-[#00D68F] to-emerald-400 text-slate-950 font-black text-xs px-3 py-2 rounded-xl flex items-center gap-1.5 shadow-md hover:shadow-amber-400/20 hover:scale-105 active:scale-95 transition cursor-pointer"
+                            className="bg-gradient-to-r from-amber-400 via-[var(--primary-accent)] to-emerald-400 text-slate-950 font-black text-xs px-3 py-2 rounded-xl flex items-center gap-1.5 shadow-md hover:shadow-amber-400/20 hover:scale-105 active:scale-95 transition cursor-pointer"
                           >
                             <ShoppingBag className="w-3.5 h-3.5" />
                             <span>Add</span>
@@ -2317,7 +2335,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 )}
                 <div className="pt-1">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Store Balance</p>
-                  <p className="text-lg font-black text-[#00D68F] font-mono">৳{storeBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-lg font-black text-[var(--primary-accent)] font-mono">৳{storeBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                 </div>
                 <div className="flex items-center justify-center gap-3 pt-1">
                   {resolvedTheme.showFacebook && resolvedTheme.facebookHandle && (
@@ -2384,7 +2402,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     <p className="text-sm text-slate-500 mt-2 mb-6">{t('sf_sign_in_to_view_orders')}</p>
                     <button
                       onClick={() => { setIsAuthOpen(true); setAuthMode('signin'); }}
-                      className="inline-flex items-center gap-2 rounded-xl bg-[#00D68F] px-6 py-3 text-sm font-black text-slate-950 hover:bg-[#00E699] transition cursor-pointer"
+                      className="inline-flex items-center gap-2 rounded-xl bg-[var(--primary-accent)] px-6 py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
                     >
                       <User className="w-4 h-4" /> {t('sf_customer_sign_in')}
                     </button>
@@ -2393,7 +2411,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   <>
                     {/* Automatic Delivered banner */}
                     {customerOrders.some((o) => o.fulfillmentStatus === 'Delivered') && (
-                      <div className="rounded-3xl border border-emerald-300/70 bg-gradient-to-r from-emerald-50 to-[#00D68F]/10 p-5 shadow-sm flex items-start gap-3">
+                      <div className="rounded-3xl border border-emerald-300/70           bg-gradient-to-r from-emerald-50 to-[var(--primary-accent)]/10 p-5 shadow-sm flex items-start gap-3">
                         <Sparkles className="w-6 h-6 text-emerald-500 shrink-0 mt-0.5" />
                         <div>
                           <h4 className="font-black text-emerald-800 text-sm">{t('sf_delivered_banner_title')}</h4>
@@ -2405,7 +2423,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     {/* Order List */}
                     <section className="space-y-3">
                       <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
-                        <PackageCheck className="w-5 h-5 text-[#00D68F]" />
+                        <PackageCheck className="w-5 h-5 text-[var(--primary-accent)]" />
                         {t('sf_my_orders')}
                       </h2>
                       {customerOrders.length === 0 ? (
@@ -2421,7 +2439,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                                 <div className="mt-1 text-base font-black text-slate-900">{order.paymentMethod}</div>
                               </div>
                               <div className="text-right">
-                                <div className="text-base font-black text-[#00D68F]">৳{order.totalBDT.toLocaleString()}</div>
+                                <div className="text-base font-black text-[var(--primary-accent)]">৳{order.totalBDT.toLocaleString()}</div>
                                 <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-black ${order.fulfillmentStatus === 'Delivered' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                                   {order.fulfillmentStatus}
                                 </span>
@@ -2464,7 +2482,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         <select
                           value={returnOrderId}
                           onChange={(e) => setReturnOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F] cursor-pointer"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
                         >
                           <option value="">{t('sf_select_order')}</option>
                           {customerOrders.map((o) => (
@@ -2476,7 +2494,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                           onChange={(e) => setReturnReason(e.target.value)}
                           placeholder={t('sf_return_reason_placeholder')}
                           rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F]"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
                         />
                         <button
                           type="submit"
@@ -2506,7 +2524,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     {/* Product Reviews */}
                     <section className="rounded-3xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm space-y-5">
                       <div className="flex items-center gap-2">
-                        <MessageSquare className="w-5 h-5 text-[#00D68F]" />
+                        <MessageSquare className="w-5 h-5 text-[var(--primary-accent)]" />
                         <h2 className="text-lg font-black text-slate-900">{t('sf_reviews')}</h2>
                       </div>
 
@@ -2545,7 +2563,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         <select
                           value={reviewOrderId}
                           onChange={(e) => setReviewOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F] cursor-pointer"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
                         >
                           <option value="">{t('sf_select_order')}</option>
                           {customerOrders.filter((o) => !customerReviews.some((r) => r.orderId === o.id)).map((o) => (
@@ -2571,11 +2589,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                           onChange={(e) => setReviewComment(e.target.value)}
                           placeholder={t('sf_review_placeholder')}
                           rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F]"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
                         />
                         <button
                           type="submit"
-                          className="w-full rounded-xl bg-[#00D68F] py-3 text-sm font-black text-slate-950 hover:bg-[#00E699] transition cursor-pointer"
+                          className="w-full rounded-xl bg-[var(--primary-accent)] py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
                         >
                           {t('sf_submit_review')}
                         </button>
@@ -2598,7 +2616,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     <p className="text-sm text-slate-500 mt-2 mb-6">{t('sf_sign_in_to_profile')}</p>
                     <button
                       onClick={() => { setIsAuthOpen(true); setAuthMode('signin'); }}
-                      className="inline-flex items-center gap-2 rounded-xl bg-[#00D68F] px-6 py-3 text-sm font-black text-slate-950 hover:bg-[#00E699] transition cursor-pointer"
+                      className="inline-flex items-center gap-2 rounded-xl bg-[var(--primary-accent)] px-6 py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
                     >
                       <User className="w-4 h-4" /> {t('sf_customer_sign_in')}
                     </button>
@@ -2606,7 +2624,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 ) : (
                   <>
                     <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex items-center gap-4">
-                      <div className="w-16 h-16 rounded-2xl bg-[#00D68F] text-slate-950 font-black text-2xl flex items-center justify-center">
+                      <div className="w-16 h-16 rounded-2xl bg-[var(--primary-accent)] text-slate-950 font-black text-2xl flex items-center justify-center">
                         {customerSession.name.charAt(0).toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
@@ -2617,7 +2635,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
                     {/* Automatic Delivered banner */ }
                     {customerOrders.some((o) => o.fulfillmentStatus === 'Delivered') && (
-                      <div className="rounded-3xl border border-emerald-300/70 bg-gradient-to-r from-emerald-50 to-[#00D68F]/10 p-5 shadow-sm flex items-start gap-3">
+                      <div className="rounded-3xl border border-emerald-300/70           bg-gradient-to-r from-emerald-50 to-[var(--primary-accent)]/10 p-5 shadow-sm flex items-start gap-3">
                         <Sparkles className="w-6 h-6 text-emerald-500 shrink-0 mt-0.5" />
                         <div>
                           <h4 className="font-black text-emerald-800 text-sm">{t('sf_delivered_banner_title')}</h4>
@@ -2629,7 +2647,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     {/* Order List */ }
                     <section className="space-y-3">
                       <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
-                        <PackageCheck className="w-5 h-5 text-[#00D68F]" />
+                        <PackageCheck className="w-5 h-5 text-[var(--primary-accent)]" />
                         {t('sf_my_orders')}
                       </h2>
                       {customerOrders.length === 0 ? (
@@ -2645,7 +2663,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                                 <div className="mt-1 text-base font-black text-slate-900">{order.paymentMethod}</div>
                               </div>
                               <div className="text-right">
-                                <div className="text-base font-black text-[#00D68F]">৳{order.totalBDT.toLocaleString()}</div>
+                                <div className="text-base font-black text-[var(--primary-accent)]">৳{order.totalBDT.toLocaleString()}</div>
                                 <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-black ${order.fulfillmentStatus === 'Delivered' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                                   {order.fulfillmentStatus}
                                 </span>
@@ -2687,7 +2705,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         <select
                           value={returnOrderId}
                           onChange={(e) => setReturnOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F] cursor-pointer"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
                         >
                           <option value="">{t('sf_select_order')}</option>
                           {customerOrders.map((o) => (
@@ -2699,7 +2717,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                           onChange={(e) => setReturnReason(e.target.value)}
                           placeholder={t('sf_return_reason_placeholder')}
                           rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F]"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
                         />
                         <button
                           type="submit"
@@ -2730,7 +2748,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     {/* Product Reviews */ }
                     <section className="rounded-3xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm space-y-5">
                       <div className="flex items-center gap-2">
-                        <MessageSquare className="w-5 h-5 text-[#00D68F]" />
+                        <MessageSquare className="w-5 h-5 text-[var(--primary-accent)]" />
                         <h2 className="text-lg font-black text-slate-900">{t('sf_reviews')}</h2>
                       </div>
 
@@ -2769,7 +2787,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         <select
                           value={reviewOrderId}
                           onChange={(e) => setReviewOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F] cursor-pointer"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
                         >
                           <option value="">{t('sf_select_order')}</option>
                           {customerOrders.filter((o) => !customerReviews.some((r) => r.orderId === o.id)).map((o) => (
@@ -2795,11 +2813,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                           onChange={(e) => setReviewComment(e.target.value)}
                           placeholder={t('sf_review_placeholder')}
                           rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[#00D68F]"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
                         />
                         <button
                           type="submit"
-                          className="w-full rounded-xl bg-[#00D68F] py-3 text-sm font-black text-slate-950 hover:bg-[#00E699] transition cursor-pointer"
+                          className="w-full rounded-xl bg-[var(--primary-accent)] py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
                         >
                           {t('sf_submit_review')}
                         </button>
@@ -3109,11 +3127,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         type="button"
                         onClick={() => setPayMethod('cod')}
                         className={`p-3 rounded-xl border text-xs font-bold transition flex items-center justify-between cursor-pointer ${
-                          payMethod === 'cod' ? 'border-[#00D68F] bg-emerald-50 text-[#00A16B]' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                          payMethod === 'cod' ? 'border-[var(--primary-accent)] bg-emerald-50 text-[#00A16B]' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
                         }`}
                       >
                         <div className="flex items-center gap-2.5">
-                          <Building2 className={`w-4 h-4 shrink-0 ${payMethod === 'cod' ? 'text-[#00D68F]' : 'text-slate-400'}`} />
+                          <Building2 className={`w-4 h-4 shrink-0 ${payMethod === 'cod' ? 'text-[var(--primary-accent)]' : 'text-slate-400'}`} />
                           <span>Cash on Delivery (COD)</span>
                         </div>
                         {requiresAdvanceFee && (
@@ -3305,7 +3323,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                             <span>Total Upfront Payable:</span>
                             <span className="text-amber-800 font-mono">৳{totalAdvancePayable} BDT</span>
                           </div>
-                          <div className="flex justify-between text-[#00D68F] font-bold text-[11px] pt-1 border-t border-slate-200">
+                          <div className="flex justify-between text-[var(--primary-accent)] font-bold text-[11px] pt-1 border-t border-slate-200">
                             <span>Remaining COD Balance Due on Delivery:</span>
                             <span>৳{remainingCodBalance.toLocaleString()} BDT</span>
                           </div>
@@ -3341,7 +3359,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     type="submit"
                     data-testid="checkout-submit"
                     disabled={minOrderShortfall > 0 || qtyLimitBreached}
-                    className="w-full py-3.5 bg-[#00D68F] text-slate-950 font-black rounded-xl text-sm hover:bg-[#00E699] disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer shadow-lg"
+                    className="w-full py-3.5 bg-[var(--primary-accent)] text-slate-950 font-black rounded-xl text-sm hover:bg-[var(--primary-accent)]/90 disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer shadow-lg"
                   >
                     {/* Every branch recomputes when the delivery zone changes:
                           • mobile  → the goods + the SELECTED zone's fee + VAT +
@@ -3370,7 +3388,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         {checkoutStep === 'success' && (
           <div className="w-full px-4 py-16 text-center">
             <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-4 border border-emerald-100">
-              <Check className="w-8 h-8 text-[#00D68F]" />
+              <Check className="w-8 h-8 text-[var(--primary-accent)]" />
             </div>
 
             <h3 className="text-2xl font-black text-slate-900 tracking-tight mb-2">Order Placed Successfully!</h3>
@@ -3390,7 +3408,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               </p>
               <div className="flex justify-center items-center gap-1.5 text-xs font-mono">
                 <span className="text-slate-500">ORDER:</span>
-                <span className="bg-[#00D68F] text-white px-2 py-0.5 rounded font-bold">{
+                <span className="bg-[var(--primary-accent)] text-white px-2 py-0.5 rounded font-bold">{
                   storefrontMerchant.invoiceConfig?.prefix
                     ? `${storefrontMerchant.invoiceConfig.prefix}${confirmedOrderNum.replace('#', '')}`
                     : confirmedOrderNum
@@ -3450,7 +3468,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 setSelectedProduct(null);
                 setMobileTab('home');
               }}
-              className="px-6 py-3 bg-[#00D68F] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-md hover:bg-[#00E699]"
+              className="px-6 py-3 bg-[var(--primary-accent)] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-md hover:bg-[var(--primary-accent)]/90"
             >
               Continue Shopping
             </button>
@@ -3473,7 +3491,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
               <button
                 onClick={() => setCheckoutStep('checkout')}
-                className="shrink-0 bg-gradient-to-r from-amber-400 via-[#00D68F] to-emerald-400 text-slate-950 font-black text-xs px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 shadow-[0_0_15px_rgba(212,175,55,0.3)] hover:scale-105 active:scale-95 transition cursor-pointer"
+                className="shrink-0 bg-gradient-to-r from-amber-400 via-[var(--primary-accent)] to-emerald-400 text-slate-950 font-black text-xs px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 shadow-[0_0_15px_rgba(212,175,55,0.3)] hover:scale-105 active:scale-95 transition cursor-pointer"
               >
                 <span>Checkout ৳{cartTotal.toLocaleString()}</span>
                 <ArrowRight className="w-3.5 h-3.5" />
@@ -3500,7 +3518,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   <span className="relative">
                     <TabIcon className={`w-4 h-4 ${active ? 'text-amber-400' : 'text-slate-400'}`} />
                     {count > 0 && (
-                      <span className="absolute -top-1.5 -right-2 bg-gradient-to-r from-amber-400 to-[#00D68F] text-slate-950 text-[9px] font-black min-w-[14px] h-3.5 px-1 rounded-full flex items-center justify-center">
+                      <span className="absolute -top-1.5 -right-2 bg-gradient-to-r from-amber-400 to-[var(--primary-accent)] text-slate-950 text-[9px] font-black min-w-[14px] h-3.5 px-1 rounded-full flex items-center justify-center">
                         {count}
                       </span>
                     )}
@@ -3533,13 +3551,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             <div className="mt-5 grid grid-cols-2 gap-2 rounded-2xl bg-slate-950 p-1">
               <button
                 onClick={() => setAuthMode('signin')}
-                className={`rounded-xl px-3 py-2 text-xs font-bold transition ${authMode === 'signin' ? 'bg-gradient-to-r from-amber-400 to-[#00D68F] text-slate-950 font-black' : 'text-slate-400'}`}
+                className={`rounded-xl px-3 py-2 text-xs font-bold transition ${authMode === 'signin' ? 'bg-gradient-to-r from-amber-400 to-[var(--primary-accent)] text-slate-950 font-black' : 'text-slate-400'}`}
               >
                 {t('sign_in')}
               </button>
               <button
                 onClick={() => setAuthMode('signup')}
-                className={`rounded-xl px-3 py-2 text-xs font-bold transition ${authMode === 'signup' ? 'bg-gradient-to-r from-amber-400 to-[#00D68F] text-slate-950 font-black' : 'text-slate-400'}`}
+                className={`rounded-xl px-3 py-2 text-xs font-bold transition ${authMode === 'signup' ? 'bg-gradient-to-r from-amber-400 to-[var(--primary-accent)] text-slate-950 font-black' : 'text-slate-400'}`}
               >
                 {t('sf_auth_create_account')}
               </button>
@@ -3618,7 +3636,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
               <button
                 type="submit"
-                className="w-full rounded-xl bg-gradient-to-r from-amber-400 via-[#00D68F] to-emerald-400 py-3 text-sm font-black text-slate-950 hover:shadow-lg transition cursor-pointer"
+                className="w-full rounded-xl bg-gradient-to-r from-amber-400 via-[var(--primary-accent)] to-emerald-400 py-3 text-sm font-black text-slate-950 hover:shadow-lg transition cursor-pointer"
               >
                 {authMode === 'signin' ? 'Continue to Order Dashboard' : 'Create Customer Account'}
               </button>
@@ -3732,7 +3750,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     setQuickViewProduct(null);
                     setCheckoutStep('checkout');
                   }}
-                  className="w-full py-3 bg-gradient-to-r from-amber-400 via-[#00D68F] to-emerald-400 text-slate-950 font-black rounded-xl text-xs transition cursor-pointer shadow-lg flex items-center justify-center gap-1.5 hover:scale-[1.02]"
+                  className="w-full py-3 bg-gradient-to-r from-amber-400 via-[var(--primary-accent)] to-emerald-400 text-slate-950 font-black rounded-xl text-xs transition cursor-pointer shadow-lg flex items-center justify-center gap-1.5 hover:scale-[1.02]"
                 >
                   <Zap className="w-4 h-4 fill-slate-950" />
                   <span>Buy Now</span>
@@ -3886,7 +3904,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                     setIsCartOpen(false);
                     setCheckoutStep('checkout');
                   }}
-                  className="w-full py-4 bg-gradient-to-r from-amber-400 via-[#00D68F] to-emerald-400 text-slate-950 font-black rounded-xl text-sm hover:scale-[1.01] transition cursor-pointer shadow-lg flex items-center justify-center gap-2"
+                  className="w-full py-4 bg-gradient-to-r from-amber-400 via-[var(--primary-accent)] to-emerald-400 text-slate-950 font-black rounded-xl text-sm hover:scale-[1.01] transition cursor-pointer shadow-lg flex items-center justify-center gap-2"
                 >
                   <span>Proceed to Checkout</span>
                   <ArrowRight className="w-4 h-4" />
@@ -3932,13 +3950,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           {(resolvedTheme.contactPhone || resolvedTheme.contactEmail || resolvedTheme.dhakaAddress) && (
             <div className="pt-2 space-y-1">
               {resolvedTheme.contactPhone && (
-                <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-300"><Phone className="w-3 h-3 text-[#00D68F]" /> {resolvedTheme.contactPhone}</div>
+                <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-300"><Phone className="w-3 h-3 text-[var(--primary-accent)]" /> {resolvedTheme.contactPhone}</div>
               )}
               {resolvedTheme.contactEmail && (
-                <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-300"><Globe className="w-3 h-3 text-[#00D68F]" /> {resolvedTheme.contactEmail}</div>
+                <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-300"><Globe className="w-3 h-3 text-[var(--primary-accent)]" /> {resolvedTheme.contactEmail}</div>
               )}
               {resolvedTheme.dhakaAddress && (
-                <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-300"><MapPin className="w-3 h-3 text-[#00D68F]" /> {resolvedTheme.dhakaAddress}</div>
+                <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-300"><MapPin className="w-3 h-3 text-[var(--primary-accent)]" /> {resolvedTheme.dhakaAddress}</div>
               )}
             </div>
           )}
@@ -3961,7 +3979,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             </nav>
           )}
           <div className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-slate-300 pt-1">
-            <ShieldCheck className="w-4 h-4 text-[#00D68F]" />
+            <ShieldCheck className="w-4 h-4 text-[var(--primary-accent)]" />
             <span>Secure 256-bit SSL Checkout</span>
           </div>
         </div>
