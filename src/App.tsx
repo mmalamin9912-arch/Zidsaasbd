@@ -722,6 +722,11 @@ export default function App() {
         bankAccounts,
         mobileBanking,
         codConfig,
+        // Courier credentials belong in the cache too — they used to be dropped
+        // here AND left out of this effect's dependencies, so a key saved in
+        // Logistics vanished on the next reload. The durable copy lives in
+        // MongoDB via /api/store/courier-integrations.
+        couriers,
         gatewayConfig
       };
       safeSetItem('ZID_MERCHANT_STORE_DATA', storeData);
@@ -767,7 +772,7 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
-  }, [merchant, products, themes, bankAccounts, mobileBanking, codConfig, orders, customers]);
+  }, [merchant, products, themes, bankAccounts, mobileBanking, codConfig, couriers, orders, customers]);
 
   // Super Admin States
   const [adminPaymentConfig, setAdminPaymentConfig] = useState<AdminPaymentGatewayConfig>(() => {
@@ -1495,6 +1500,8 @@ export default function App() {
         if (parsed.bankAccounts) setBankAccounts(parsed.bankAccounts);
         if (parsed.mobileBanking) setMobileBanking(parsed.mobileBanking);
         if (parsed.codConfig) setCodConfig(parsed.codConfig);
+        // Courier connection state + credentials (secrets re-hydrate from Mongo).
+        if (Array.isArray(parsed.couriers) && parsed.couriers.length > 0) setCouriers(parsed.couriers);
         if (parsed.orders) setOrders(normalizeOrders(parsed.orders));
         if (parsed.themes) setThemes(parsed.themes);
       } else {
@@ -1503,6 +1510,7 @@ export default function App() {
         setBankAccounts([]);
         setMobileBanking(initialMobileBanking);
         setCodConfig(initialCodConfig);
+        setCouriers(initialCouriers);
         setOrders([]);
         setThemes([]);
       }

@@ -3451,6 +3451,15 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       || payload.codConfig
       || null;
 
+    // Delivery-fee rules, read independently of `codConfig` so a store that
+    // configured shipping but never enabled COD still prices its checkout.
+    // `codConfig` remains for backwards compatibility; the checkout prefers
+    // whichever of the two actually carries a value.
+    const shippingConfig = await readStoreConfig('shipping', slug).catch((shippingErr: any) => {
+      console.warn('[Server] storefront shippingConfig warning:', shippingErr?.message || shippingErr);
+      return null;
+    });
+
     // ── Online Store modules (brand / navigation / pages / blog / FAQ / SEO) ──
     // Read through the same normalisers the dashboard writes with, so the
     // customer storefront renders exactly what the merchant configured and a
@@ -3485,6 +3494,7 @@ app.get('/api/storefront/:slug?', async (req, res) => {
         ? merchantRecord.mobileBanking
         : (Array.isArray(payload.mobileBanking) ? payload.mobileBanking : []),
       codConfig,
+      shippingConfig,
       // Public storefront modules. Only published pages/posts are exposed.
       brandConfig,
       navigationMenus,
@@ -7221,6 +7231,92 @@ function normalizeLoyaltySettings(raw: any, fallback: Record<string, any> = {}) 
 }
 
 /**
+ * Sanitise the delivery-fee rules edited in Logistics → Shipping settings.
+ *
+ * These fees used to live only on `codConfig`, which the merchant dashboard
+ * saved to localStorage — the checkout ran in a different tab/session and read
+ * a stale copy, so a fee change did not reach the customer. Persisting them on
+ * the store record makes MongoDB the source of truth the storefront reads.
+ *
+ * A blank string means "not priced for this zone" and is stored as null, which
+ * the storefront renders as "To be confirmed" rather than a phantom ৳0.
+ */
+function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    isEnabled: cfgBool(src.isEnabled, fallback.isEnabled !== false),
+    insideDhakaFee: cfgNumOrNull(
+      src.insideDhakaFee ?? src.insideCityFee,
+      fallback.insideDhakaFee ?? fallback.insideCityFee,
+      { min: 0 },
+    ),
+    outsideDhakaFee: cfgNumOrNull(
+      src.outsideDhakaFee ?? src.outsideCityFee,
+      fallback.outsideDhakaFee ?? fallback.outsideCityFee,
+      { min: 0 },
+    ),
+    subDhakaFee: cfgNumOrNull(src.subDhakaFee, fallback.subDhakaFee, { min: 0 }),
+    // 0 / blank disables the offer, so it is normalised to null (= "not offered")
+    // rather than a threshold of zero, which would make every order free.
+    freeShippingThreshold: (() => {
+      const n = cfgNumOrNull(src.freeShippingThreshold, fallback.freeShippingThreshold, { min: 1 });
+      return n === 0 ? null : n;
+    })(),
+    maxOrderLimit: cfgNumOrNull(src.maxOrderLimit, fallback.maxOrderLimit, { min: 0 }),
+    requestAdvanceDeliveryCharge: cfgBool(
+      src.requestAdvanceDeliveryCharge,
+      fallback.requestAdvanceDeliveryCharge,
+    ),
+    advanceDeliveryChargeAmount: cfgNumOrNull(
+      src.advanceDeliveryChargeAmount,
+      fallback.advanceDeliveryChargeAmount,
+      { min: 0 },
+    ),
+    notes: cfgStr(src.notes, fallback.notes),
+  };
+}
+
+/**
+ * Sanitise the courier integration block edited in Logistics → Courier API.
+ *
+ * `perCourier` holds the credentials entered in the "Setup" modal, keyed by
+ * courier id (`steadfast` | `pathao` | `redx` | …). Secrets are stored but never
+ * echoed back to the browser — the route layer redacts them (see
+ * `redactCourierSecrets`) and treats an omitted secret as "keep the existing".
+ */
+function normalizeCourierConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const perCourierSrc = src.perCourier && typeof src.perCourier === 'object' ? src.perCourier : {};
+  const perCourierFallback =
+    fallback.perCourier && typeof fallback.perCourier === 'object' ? fallback.perCourier : {};
+
+  const perCourier: Record<string, any> = {};
+  for (const id of Object.keys({ ...perCourierFallback, ...perCourierSrc })) {
+    const entry = perCourierSrc[id] && typeof perCourierSrc[id] === 'object' ? perCourierSrc[id] : {};
+    const prev = perCourierFallback[id] && typeof perCourierFallback[id] === 'object' ? perCourierFallback[id] : {};
+    // An empty secret means "unchanged", so a redacted value round-tripped
+    // through the browser cannot wipe the stored credential.
+    const keep = (v: any, fb: any) => (typeof v === 'string' && v !== '' && v !== '••' ? v : cfgStr(fb, ''));
+    perCourier[id] = {
+      isConnected: cfgBool(entry.isConnected, prev.isConnected),
+      apiKey: keep(entry.apiKey, prev.apiKey),
+      secretKey: keep(entry.secretKey, prev.secretKey),
+      clientId: keep(entry.clientId, prev.clientId),
+      clientSecret: keep(entry.clientSecret, prev.clientSecret),
+      storeId: keep(entry.storeId, prev.storeId),
+      pickupAddress: cfgStr(entry.pickupAddress, prev.pickupAddress),
+      autoSyncOrders: cfgBool(entry.autoSyncOrders, prev.autoSyncOrders),
+    };
+  }
+
+  return {
+    selectedCourierId: cfgStr(src.selectedCourierId, fallback.selectedCourierId || 'steadfast'),
+    perCourier,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
  * Generic per-store config store. Each entry declares how to read/write one key
  * on the store record, so gift/invoice/NBR share the same tested code path as
  * the checkout settings instead of duplicating the Mongo dance three times.
@@ -7238,6 +7334,16 @@ const storeConfigs = {
   tax: { key: 'taxConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeTaxConfig },
   integrations: { key: 'integrationsConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeIntegrationsConfig },
   loyalty: { key: 'loyaltyConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeLoyaltySettings },
+  // Delivery fees (Inside/Outside Dhaka, free-shipping threshold). Also mirrored
+  // onto `codConfig` so existing checkout readers keep working unchanged.
+  shipping: {
+    key: 'shippingConfig',
+    legacyKeys: ['shippingRules', 'deliveryConfig'],
+    cache: new Map<string, Record<string, any>>(),
+    normalize: normalizeShippingConfig,
+  },
+  // Courier API credentials (Steadfast, Pathao, RedX, …) entered in the Setup modal.
+  courier: { key: 'courierConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeCourierConfig },
 } as const;
 
 type StoreConfigName = keyof typeof storeConfigs;
@@ -7360,6 +7466,83 @@ function cfgNum(val: any, fallback: number = 0): number {
   return isFinite(n) ? n : fallback;
 }
 
+/**
+ * Redact every courier credential before the config leaves the server.
+ *
+ * The browser needs to know a key is *set* (so the Setup modal can show it as
+ * saved) but must never receive the value — so each secret becomes '••'.
+ * `normalizeCourierConfig` treats '••' as "keep the stored value", so a redacted
+ * config round-tripped back through a save cannot erase the credential.
+ */
+function redactCourierSecrets(config: Record<string, any>) {
+  if (!config) return config;
+  const marker = (v: any) => (v ? '••' : '');
+  const perCourier: Record<string, any> = {};
+  for (const [id, entry] of Object.entries(config.perCourier || {})) {
+    const e = (entry || {}) as Record<string, any>;
+    perCourier[id] = {
+      ...e,
+      apiKey: marker(e.apiKey),
+      secretKey: marker(e.secretKey),
+      clientId: marker(e.clientId),
+      clientSecret: marker(e.clientSecret),
+    };
+  }
+  return { ...config, perCourier };
+}
+
+/**
+ * Copy the saved delivery fees onto the store's `codConfig`.
+ *
+ * `codConfig` is the shape `/api/storefront/:slug` already hands the checkout
+ * (`insideDhakaFee`, `outsideDhakaFee`, `freeShippingThreshold`), so mirroring
+ * here means the merchant's Logistics settings reach the customer without
+ * touching every existing reader. Existing codConfig keys the shipping panel
+ * does not own (advance-charge flags, notes) are preserved.
+ */
+async function mirrorShippingToCodConfig(storeRef: string, shipping: Record<string, any>) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug || !shipping) return;
+
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return;
+
+    const orClauses: any[] = [
+      { store_slug: slug },
+      { storeSlug: slug },
+      { store_code: slug },
+    ];
+    if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+    const collections = ['stores', 'merchants'] as const;
+    for (const collectionName of collections) {
+      const collection = mongoose.connection.db.collection(collectionName) as any;
+      const current = await collection.findOne({ $or: orClauses });
+      if (!current) continue;
+
+      const codConfig = {
+        ...(current.codConfig && typeof current.codConfig === 'object' ? current.codConfig : {}),
+        insideDhakaFee: shipping.insideDhakaFee ?? '',
+        outsideDhakaFee: shipping.outsideDhakaFee ?? '',
+        subDhakaFee: shipping.subDhakaFee ?? '',
+        freeShippingThreshold: shipping.freeShippingThreshold ?? '',
+        maxOrderLimit: shipping.maxOrderLimit ?? '',
+        isEnabled: shipping.isEnabled !== false,
+        requestAdvanceDeliveryCharge: shipping.requestAdvanceDeliveryCharge === true,
+        advanceDeliveryChargeAmount: shipping.advanceDeliveryChargeAmount ?? '',
+      };
+
+      await collection.updateOne({ $or: orClauses }, {
+        $set: { codConfig, updated_at: new Date().toISOString() },
+      });
+      break;
+    }
+  } catch (err: any) {
+    console.warn('[Server] shipping → codConfig mirror warning:', err?.message || err);
+  }
+}
+
 const CONFIG_ROUTES: Array<{ name: StoreConfigName; path: string; label: string }> = [
   { name: 'gift', path: 'gift-settings', label: 'Gift options' },
   { name: 'invoice', path: 'invoice-settings', label: 'Invoice settings' },
@@ -7367,6 +7550,8 @@ const CONFIG_ROUTES: Array<{ name: StoreConfigName; path: string; label: string 
   { name: 'inventory', path: 'inventory-settings', label: 'Inventory & order properties' },
   { name: 'tax', path: 'tax-settings', label: 'Tax settings' },
   { name: 'integrations', path: 'integration-settings', label: 'API integrations' },
+  { name: 'shipping', path: 'shipping-config', label: 'Delivery fees' },
+  { name: 'courier', path: 'courier-integrations', label: 'Courier API credentials' },
 ];
 
 for (const route of CONFIG_ROUTES) {
@@ -7388,6 +7573,7 @@ for (const route of CONFIG_ROUTES) {
   const serialize = (config: any) => {
     if (name === 'nbr') return redactSecrets(config);
     if (name === 'integrations') return redactIntegrationSecrets(config);
+    if (name === 'courier') return redactCourierSecrets(config);
     return config;
   };
 
@@ -7424,6 +7610,19 @@ for (const route of CONFIG_ROUTES) {
       }
 
       const config = await writeStoreConfig(name, storeRef, extractConfig(body));
+
+      // Mirror the delivery fees onto `codConfig`, which is the shape the
+      // storefront checkout already reads. Without this the merchant's fee
+      // change would persist but the customer would still be quoted the old one.
+      if (name === 'shipping') {
+        try {
+          const existing = await readStoreConfig('shipping', storeRef);
+          await mirrorShippingToCodConfig(storeRef, existing);
+        } catch (mirrorErr: any) {
+          console.warn('[Server] codConfig shipping mirror warning:', mirrorErr?.message || mirrorErr);
+        }
+      }
+
       return res.status(200).json({
         ok: true,
         store_slug: storeRef,

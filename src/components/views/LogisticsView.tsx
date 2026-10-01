@@ -1,17 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { CourierService, MerchantProfile, CodConfig } from '../../types';
 import SafeImage from '../SafeImage';
 import {  useToast } from '../ToastProvider';
 import {
-  Truck, 
-  Key, 
-  CheckCircle2, 
-  Calculator, 
-  MapPin, 
-  Settings, 
-  Building2, 
-  ShieldCheck, 
-  ArrowRight, 
+  loadShippingConfig,
+  saveShippingConfig,
+  loadCourierConfig,
+  saveCourierConfig,
+  type CourierConfig,
+} from '../../lib/logisticsApi';
+import {
+  Truck,
+  Key,
+  CheckCircle2,
+  Calculator,
+  MapPin,
+  Settings,
+  Building2,
+  ShieldCheck,
+  ArrowRight,
   RefreshCw,
   Search,
   Check,
@@ -61,7 +68,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
 
   const handleSelectCourier = (id: string) => {
     const isAutomated = ['steadfast', 'pathao', 'redx'].includes(id);
-    
+
     if (isAutomated && !isPro) {
       setIsUpgradeModalOpen(true);
       return;
@@ -76,15 +83,75 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     }
   };
 
-  const handleSaveShippingSettings = (e: React.FormEvent) => {
+  // Hydrate the delivery fees from MongoDB on mount. The store record is the
+  // source of truth — a value saved in another tab/device must win over the
+  // local `codConfig` copy, or the merchant edits one number and sees another.
+  const [isSavingShipping, setIsSavingShipping] = useState(false);
+  const [isSavingCourier, setIsSavingCourier] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const stored = await loadShippingConfig(merchant?.storeSlug);
+      if (!active || !stored) return;
+      setShippingForm((prev) => ({
+        ...prev,
+        isEnabled: stored.isEnabled,
+        insideDhakaFee: stored.insideDhakaFee ?? '',
+        outsideDhakaFee: stored.outsideDhakaFee ?? '',
+        subDhakaFee: stored.subDhakaFee ?? '',
+        freeShippingThreshold: stored.freeShippingThreshold ?? '',
+        maxOrderLimit: stored.maxOrderLimit ?? '',
+        requestAdvanceDeliveryCharge: stored.requestAdvanceDeliveryCharge,
+        advanceDeliveryChargeAmount: stored.advanceDeliveryChargeAmount ?? '',
+      }));
+    })();
+
+    (async () => {
+      // Reflect the persisted connection state on the courier cards so a key
+      // saved in a previous session still reads as "connected".
+      const stored = await loadCourierConfig(merchant?.storeSlug);
+      if (!active || !stored?.perCourier) return;
+      setCourierList((prev) =>
+        prev.map((c) => {
+          const entry = stored.perCourier[c.id];
+          if (!entry) return c;
+          return {
+            ...c,
+            isConnected: entry.isConnected,
+            pickupAddress: entry.pickupAddress || c.pickupAddress,
+            autoSyncOrders: entry.autoSyncOrders,
+          };
+        }),
+      );
+    })();
+
+    return () => { active = false; };
+  }, [merchant?.storeSlug]);
+
+  const handleSaveShippingSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsSavingShipping(true);
+    // Update local state first so the UI feels instant, then persist to Mongo.
     onUpdateCodConfig(shippingForm);
-    toast.success('Shipping settings saved successfully!');
+    const saved = await saveShippingConfig(merchant?.storeSlug, shippingForm);
+    setIsSavingShipping(false);
+
+    if (!saved) {
+      toast.error('Shipping settings could not be saved to the database.', {
+        description: 'Your changes are kept locally. Please check the connection and try again.',
+      });
+      return;
+    }
+    toast.success('Shipping settings saved successfully!', {
+      description: 'Delivery fees are now live on your storefront checkout.',
+    });
   };
 
-  const handleSaveApiKeys = (e: React.FormEvent) => {
+  const handleSaveApiKeys = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentCourier) return;
+
     const updated = courierList.map((c) => {
       if (c.id === selectedCourierId) {
         return {
@@ -97,9 +164,43 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
       }
       return c;
     });
+
     setCourierList(updated);
     onUpdateCouriers(updated);
-    toast.success('Successfully connected & saved credentials', { description: `${currentCourier?.name || 'The courier'} is now linked to your store.` });
+    setIsSavingCourier(true);
+
+    // Persist to MongoDB. Previously these credentials lived only in React
+    // state, so they were lost on reload and the server had nothing to book with.
+    const perCourier: CourierConfig['perCourier'] = {};
+    for (const c of updated) {
+      perCourier[c.id] = {
+        isConnected: c.isConnected === true,
+        apiKey: c.apiCredentials?.apiKey || '',
+        secretKey: c.apiCredentials?.secretKey || '',
+        clientId: c.apiCredentials?.clientId || '',
+        clientSecret: c.apiCredentials?.clientSecret || '',
+        storeId: c.apiCredentials?.storeId || '',
+        pickupAddress: c.pickupAddress || '',
+        autoSyncOrders: c.autoSyncOrders === true,
+      };
+    }
+
+    const saved = await saveCourierConfig(merchant?.storeSlug, {
+      selectedCourierId,
+      perCourier,
+    });
+    setIsSavingCourier(false);
+
+    if (!saved) {
+      toast.error('Courier credentials could not be saved to the database.', {
+        description: 'Nothing was stored. Please check the connection and try again.',
+      });
+      return;
+    }
+
+    toast.success('Successfully connected & saved credentials', {
+      description: `${currentCourier?.name || 'The courier'} is now linked to your store.`,
+    });
   };
 
   const handleRunCalculator = (e: React.FormEvent) => {
@@ -318,9 +419,11 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
           <div className="flex justify-end pt-2">
             <button 
               type="submit"
-              className="bg-[#282E3F] hover:bg-[#32394E] text-[#00D68F] font-bold px-6 py-2.5 rounded-xl text-xs border border-[#00D68F]/30 transition shadow-lg"
+              disabled={isSavingShipping}
+              className="bg-[#282E3F] hover:bg-[#32394E] text-[#00D68F] font-bold px-6 py-2.5 rounded-xl text-xs border border-[#00D68F]/30 transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              Save Shipping Settings
+              {isSavingShipping && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+              <span>{isSavingShipping ? 'Saving…' : 'Save Shipping Settings'}</span>
             </button>
           </div>
         </form>
@@ -496,10 +599,15 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
             <div className="pt-4 border-t border-[#2E3548] flex justify-end">
               <button
                 type="submit"
-                className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-6 py-2.5 rounded-xl text-xs flex items-center gap-2 cursor-pointer shadow-md"
+                disabled={isSavingCourier}
+                className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-6 py-2.5 rounded-xl text-xs flex items-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Check className="w-4 h-4 stroke-[3]" />
-                <span>Save Credentials & Verify API</span>
+                {isSavingCourier ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Check className="w-4 h-4 stroke-[3]" />
+                )}
+                <span>{isSavingCourier ? 'Saving…' : 'Save Credentials & Verify API'}</span>
               </button>
             </div>
           </form>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig, CodConfig, Order, OrderItem, ThemeConfig } from '../types';
 import { buildCategoryDbPayload, buildProductDbPayload, maxCatalogId, packCatalogItem, toCatalogSlug, ensureCategory, mapApiProduct, mapApiCategory } from '../utils/catalogPayload';
-import { resolveDeliveryCharge, resolveProductDeliveryRates } from '../utils/deliveryCharges';
+import { resolveDeliveryCharge, resolveProductDeliveryRates, toFee } from '../utils/deliveryCharges';
 import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play } from 'lucide-react';
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
@@ -198,6 +198,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       try {
         let apiProducts: any[] = [];
         let apiCodConfig: any = null;
+        let apiShippingConfig: any = null;
         let apiStoreRecord: any = null;
         let apiBankAccounts: any[] = [];
         let apiMobileBanking: any[] = [];
@@ -215,6 +216,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           // checkout's delivery zones were priced from whatever stale copy sat
           // in localStorage — or, on a fresh device, from nothing at all.
           apiCodConfig = payload.codConfig || null;
+          // Delivery-fee rules (Inside/Outside Dhaka + free-shipping threshold).
+          // Persisted to MongoDB from Logistics → Shipping settings; the store
+          // record is authoritative over any stale localStorage copy.
+          apiShippingConfig = payload.shippingConfig || null;
           apiStoreRecord = payload.merchant || null;
           apiBankAccounts = Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [];
           apiMobileBanking = Array.isArray(payload.mobileBanking) ? payload.mobileBanking : [];
@@ -261,6 +266,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               // Carry the delivery/COD + payment config through the same merge so
               // the checkout's zone prices are always the merchant's live values.
               ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
+              ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
               ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
               ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
             };
@@ -280,6 +286,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             // `codConfig` drives the delivery-zone prices at checkout, so the
             // server's value must win over a stale localStorage copy.
             ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
+            ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
             ...(apiStoreRecord ? { merchant: { ...(existing?.merchant || {}), ...apiStoreRecord } } : {}),
             ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
             ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
@@ -1030,6 +1037,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   const storefrontCodConfig = (liveStoreData.codConfig as CodConfig) || undefined;
 
+  // Delivery-fee rules persisted to MongoDB (Logistics → Shipping settings).
+  // These win over `codConfig` where both set a value, because the Logistics
+  // panel is the surface the merchant actually edits today.
+  const storefrontShippingConfig = (liveStoreData as any).shippingConfig as
+    | {
+        insideDhakaFee?: number | string | null;
+        outsideDhakaFee?: number | string | null;
+        freeShippingThreshold?: number | string | null;
+        isEnabled?: boolean;
+      }
+    | undefined;
+
   // ── Delivery charge ───────────────────────────────────────────────────────
   //
   // Resolved from the SELECTED PRODUCT first, falling back to the store's COD
@@ -1052,8 +1071,23 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // Passed RAW (not `Number(...)`) into resolveDeliveryCharge. `Number('')` is
   // `0`, which is exactly how an empty COD field used to surface as a phantom
   // "৳0" delivery charge; the resolver's `toFee` rejects ''/NaN as "not set".
-  const storeInsideFee = storefrontCodConfig?.insideDhakaFee;
-  const storeOutsideFee = storefrontCodConfig?.outsideDhakaFee;
+  const storeInsideFee = storefrontShippingConfig?.insideDhakaFee ?? storefrontCodConfig?.insideDhakaFee;
+  const storeOutsideFee = storefrontShippingConfig?.outsideDhakaFee ?? storefrontCodConfig?.outsideDhakaFee;
+
+  // Free-shipping offer: when the cart total reaches the merchant's threshold
+  // the delivery charge is waived. This threshold was previously saved by three
+  // different settings screens and read by none of them — a merchant set it and
+  // the checkout silently ignored it.
+  //
+  // A threshold of 0 is treated as "not offered", NOT as "everything is free".
+  // The settings inputs coerce a cleared field to the number 0, so a merchant
+  // emptying the box would otherwise give away free delivery on every order —
+  // the opposite of what they intended.
+  const freeShippingThresholdRaw = toFee(storefrontShippingConfig?.freeShippingThreshold);
+  const freeShippingThreshold =
+    freeShippingThresholdRaw !== null && freeShippingThresholdRaw > 0
+      ? freeShippingThresholdRaw
+      : null;
 
   // Every product in the cart is charged, so a mixed cart uses the SUM of each
   // product's own fee — the honest reading of "this product costs ৳60 to deliver".
@@ -1083,10 +1117,26 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     return { fee, source };
   })();
 
-  const shippingFee = deliveryCharge.fee;
+  const deliveryFeeBeforeThreshold = deliveryCharge.fee;
+
+  const cartTotal = (cart || []).reduce((sum, item) => sum + ((item.product?.priceBDT ?? 0) * item.quantity), 0);
+  const itemsSubtotal = (cart || []).length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0);
+
+  // The goods subtotal is what the threshold is measured against — before VAT,
+  // gift wrap or delivery, matching how the offer is advertised to customers.
+  const qualifiesForFreeShipping =
+    freeShippingThreshold !== null && itemsSubtotal >= freeShippingThreshold;
+
+  const shippingFee = qualifiesForFreeShipping ? 0 : deliveryFeeBeforeThreshold;
+
+  // How much more the customer must spend to unlock free delivery (0 once met).
+  const freeShippingShortfall =
+    freeShippingThreshold !== null && !qualifiesForFreeShipping
+      ? Math.max(0, freeShippingThreshold - itemsSubtotal)
+      : 0;
 
   // True when at least one product carries its own charge, so the UI can say so.
-  const usesProductDeliveryFee = deliveryCharge.source === 'product';
+  const usesProductDeliveryFee = deliveryCharge.source === 'product' && !qualifiesForFreeShipping;
 
   // Labels + fees for the two shipping areas, used by the city dropdown and the
   // product page so the customer sees the real number before reaching checkout.
@@ -1127,9 +1177,6 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const outsideAreaFee = outsideArea.fee;
   const insideConfigured = insideArea.configured;
   const outsideConfigured = outsideArea.configured;
-
-  const cartTotal = (cart || []).reduce((sum, item) => sum + ((item.product?.priceBDT ?? 0) * item.quantity), 0);
-  const itemsSubtotal = (cart || []).length > 0 ? cartTotal : (selectedProduct?.priceBDT || 0);
 
   // ── VAT (Settings -> Tax) ──────────────────────────────
   //
@@ -3022,7 +3069,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                                   omitted entirely when nothing was saved, so an
                                   unconfigured zone never reads "৳0". */}
                               {zone.value === 'inside' ? 'Inside City' : 'Outside City'}
-                              {zone.configured ? ` (৳${zone.fee.toLocaleString()})` : ''}
+                              {qualifiesForFreeShipping ? (
+                                <span className="text-emerald-400 font-black"> (FREE)</span>
+                              ) : zone.configured ? (
+                                ` (৳${zone.fee.toLocaleString()})`
+                              ) : (
+                                ''
+                              )}
                             </span>
                           </label>
                         );
@@ -3855,9 +3908,33 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   <div className="flex justify-between text-slate-400">
                     <span>Delivery Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'})</span>
                     <span className="text-emerald-400 font-bold">
-                      {zoneConfigured ? `৳${zoneFee.toLocaleString()}` : 'To be confirmed'}
+                      {qualifiesForFreeShipping ? (
+                        <>
+                          <span className="line-through text-slate-500 mr-1.5">
+                            ৳{zoneFee.toLocaleString()}
+                          </span>
+                          FREE
+                        </>
+                      ) : zoneConfigured ? (
+                        `৳${zoneFee.toLocaleString()}`
+                      ) : (
+                        'To be confirmed'
+                      )}
                     </span>
                   </div>
+                  {freeShippingThreshold !== null && (
+                    <div
+                      className={`rounded-xl px-3 py-2 text-[11px] font-semibold border ${
+                        qualifiesForFreeShipping
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                          : 'bg-amber-400/10 border-amber-400/30 text-amber-300'
+                      }`}
+                    >
+                      {qualifiesForFreeShipping
+                        ? `\uD83C\uDF89 You've unlocked FREE delivery on this order!`
+                        : `Add \u09F3${freeShippingShortfall.toLocaleString()} more to get FREE delivery (over \u09F3${freeShippingThreshold.toLocaleString()}).`}
+                    </div>
+                  )}
                   {giftWrapFee > 0 && (
                     <div className="flex justify-between text-slate-400">
                       <span>Gift Wrapping</span>
