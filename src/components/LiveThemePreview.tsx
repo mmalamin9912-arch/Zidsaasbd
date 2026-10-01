@@ -54,12 +54,20 @@ export const LiveThemePreview: React.FC<LiveThemePreviewProps> = ({
     ? products
     : SAMPLE_PRODUCTS) as unknown as Product[];
 
+  // The mockup layouts need the merchant's accent explicitly — they do not read
+  // the store modules themselves. Prefer the live theme customiser, then the
+  // stored brand colour, then the theme's registry default.
+  const previewAccent =
+    (previewMerchant as any)?.themeConfig?.primaryColor ||
+    (previewMerchant as any)?.brandConfig?.brandColor ||
+    undefined;
+
   if (resolvedLayout === 'supermarket') {
-    return <SupermarketTechMockup />;
+    return <SupermarketTechMockup accentColor={previewAccent} />;
   }
 
   if (resolvedLayout === 'fashion') {
-    return <ElegantFashionMockup />;
+    return <ElegantFashionMockup accentColor={previewAccent} />;
   }
 
   return (

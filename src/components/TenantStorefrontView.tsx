@@ -1638,10 +1638,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // what shoppers see on /store/:slug.
   const resolvedLayout = layout || resolveLayoutForTheme({ id: effectiveThemeId });
   if (resolvedLayout === 'supermarket') {
-    return <SupermarketTechMockup />;
+    return <SupermarketTechMockup accentColor={primaryColor} />;
   }
   if (resolvedLayout === 'fashion') {
-    return <ElegantFashionMockup />;
+    return <ElegantFashionMockup accentColor={primaryColor} />;
   }
 
   return (

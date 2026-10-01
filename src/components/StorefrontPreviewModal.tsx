@@ -41,6 +41,13 @@ export const StorefrontPreviewModal: React.FC<StorefrontPreviewModalProps> = ({
   const themeVersion = previewTheme?.version || '1.0.0';
   const themeId = previewTheme?.id || merchant?.activeThemeId || 'growth-1';
 
+  // Accent passed to the mockup layouts, which cannot read the store modules.
+  // Mirrors TenantStorefrontView's resolution order (customiser → brand → theme).
+  const previewAccent =
+    (merchant as any)?.themeConfig?.primaryColor ||
+    (previewTheme as any)?.primaryColor ||
+    undefined;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-950/90 backdrop-blur-md overflow-hidden">
       <div className="relative w-full max-w-[1440px] h-[95vh] bg-slate-900 rounded-3xl shadow-2xl border border-slate-800 overflow-hidden flex flex-col">
@@ -179,9 +186,9 @@ export const StorefrontPreviewModal: React.FC<StorefrontPreviewModalProps> = ({
 
             <div className="flex-1 overflow-y-auto no-scrollbar relative w-full h-full">
               {resolveLayoutForTheme({ id: themeId, category: previewTheme?.category, name: previewTheme?.name }) === 'supermarket' ? (
-                <SupermarketTechMockup />
+                <SupermarketTechMockup accentColor={previewAccent} />
               ) : resolveLayoutForTheme({ id: themeId, category: previewTheme?.category, name: previewTheme?.name }) === 'fashion' ? (
-                <ElegantFashionMockup />
+                <ElegantFashionMockup accentColor={previewAccent} />
               ) : (
                 <TenantStorefrontView
                   storeSlug={merchant?.storeSlug || ''}
