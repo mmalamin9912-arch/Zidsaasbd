@@ -52,6 +52,87 @@ export const LAYOUT_LABELS: Record<ThemeLayoutKey, string> = {
 };
 
 /**
+ * Local, always-available fallback used whenever a theme has no thumbnail or
+ * its remote thumbnail fails to load. The asset ships with the app, so this
+ * never leaves a broken-image box behind.
+ */
+export const THEME_THUMBNAIL_PLACEHOLDER = '/theme-placeholder.svg';
+
+/**
+ * Canonical preview thumbnails for the platform themes.
+ *
+ * The Super Admin catalogue stores only cosmetic metadata and frequently ships
+ * an EMPTY `thumbnail_url` / `preview_url` (see the `themes` seed), which is why
+ * the merchant-facing Themes view used to show broken thumbnails. This map is
+ * the single source of truth that back-fills a real image for every built-in /
+ * well-known theme, keyed by BOTH the theme id (lower-cased) and the theme name
+ * (lower-cased, trimmed) so renamed/legacy rows still resolve.
+ */
+const THEME_THUMBNAILS: Record<string, string> = {
+  // Canonical built-in ids
+  'growth-1':
+    'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&q=80&w=800',
+  'modern-gold-luxury':
+    'https://images.unsplash.com/photo-1441984904996-e0b6ba687e04?auto=format&fit=crop&q=80&w=800',
+  'supermarket-tech':
+    'https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&q=80&w=800',
+  'elegant-fashion':
+    'https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&q=80&w=800',
+
+  // Seed / legacy ids used by the Super Admin theme manager
+  'theme-1':
+    'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&q=80&w=800',
+  'theme-2':
+    'https://images.unsplash.com/photo-1441984904996-e0b6ba687e04?auto=format&fit=crop&q=80&w=800',
+  'theme-3':
+    'https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&q=80&w=800',
+
+  // Well-known theme names (matched case-insensitively)
+  'default modern':
+    'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&q=80&w=800',
+  'luxury boutique':
+    'https://images.unsplash.com/photo-1441984904996-e0b6ba687e04?auto=format&fit=crop&q=80&w=800',
+  'tech store pro':
+    'https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&q=80&w=800',
+  'growth (free standard)':
+    'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&q=80&w=800',
+  'modern gold luxury':
+    'https://images.unsplash.com/photo-1441984904996-e0b6ba687e04?auto=format&fit=crop&q=80&w=800',
+  'supermarket & tech mega-store':
+    'https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&q=80&w=800',
+  'elegant fashion & lifestyle':
+    'https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&q=80&w=800',
+};
+
+/** True when a string is a usable remote image URL (not empty / `'#'`). */
+function isUsableThumbnail(value?: string | null): value is string {
+  return typeof value === 'string' && value.trim() !== '' && value.trim() !== '#';
+}
+
+/**
+ * Resolve the best available preview thumbnail for a theme.
+ *
+ * Priority:
+ *   1. An explicitly supplied thumbnail/preview URL from the source row.
+ *   2. The canonical registry thumbnail (by id, then by name).
+ *   3. The bundled local placeholder — so the UI NEVER renders a broken image.
+ */
+export function resolveThemeThumbnail(theme?: Partial<ThemeRegistryEntry> | null): string {
+  if (!theme) return THEME_THUMBNAIL_PLACEHOLDER;
+
+  if (isUsableThumbnail(theme.thumbnailUrl)) return theme.thumbnailUrl.trim();
+  if (isUsableThumbnail(theme.previewUrl)) return theme.previewUrl.trim();
+
+  const id = String(theme.id || '').trim().toLowerCase();
+  if (id && THEME_THUMBNAILS[id]) return THEME_THUMBNAILS[id];
+
+  const name = String(theme.name || '').trim().toLowerCase();
+  if (name && THEME_THUMBNAILS[name]) return THEME_THUMBNAILS[name];
+
+  return THEME_THUMBNAIL_PLACEHOLDER;
+}
+
+/**
  * Canonical, built-in themes. These IDs match `themeCatalog` in OnlineStoreView
  * and the mockups in ThemeMockups.tsx, so a merchant picking any of them sees an
  * actual, distinct layout on the live storefront.
@@ -65,6 +146,7 @@ export const BUILTIN_THEMES: ThemeRegistryEntry[] = [
     primaryColor: '#00D68F',
     isFree: true,
     price: 0,
+    thumbnailUrl: THEME_THUMBNAILS['growth-1'],
   },
   {
     id: 'modern-gold-luxury',
@@ -74,6 +156,7 @@ export const BUILTIN_THEMES: ThemeRegistryEntry[] = [
     primaryColor: '#D4AF37',
     isFree: false,
     price: 1999,
+    thumbnailUrl: THEME_THUMBNAILS['modern-gold-luxury'],
   },
   {
     id: 'supermarket-tech',
@@ -83,6 +166,7 @@ export const BUILTIN_THEMES: ThemeRegistryEntry[] = [
     primaryColor: '#00D68F',
     isFree: false,
     price: 2499,
+    thumbnailUrl: THEME_THUMBNAILS['supermarket-tech'],
   },
   {
     id: 'elegant-fashion',
@@ -92,6 +176,7 @@ export const BUILTIN_THEMES: ThemeRegistryEntry[] = [
     primaryColor: '#111827',
     isFree: false,
     price: 1999,
+    thumbnailUrl: THEME_THUMBNAILS['elegant-fashion'],
   },
 ];
 
@@ -143,6 +228,10 @@ export function toRegistryEntry(theme: Record<string, any>): ThemeRegistryEntry 
     previewUrl: theme.previewUrl || theme.preview_url || '',
     status: theme.status ? String(theme.status) : undefined,
   };
+  // Back-fill a real preview image so the catalogue never ships a broken
+  // thumbnail just because the DB row stored an empty URL.
+  entry.thumbnailUrl = resolveThemeThumbnail({ ...entry, id, name });
+
   // Ensure a deterministic layout even when the source omitted one.
   entry.layout = resolveLayoutForTheme(entry);
   return entry;
@@ -289,7 +378,9 @@ export const SAMPLE_CATEGORIES = [
 export default {
   BUILTIN_THEMES,
   LAYOUT_LABELS,
+  THEME_THUMBNAIL_PLACEHOLDER,
   resolveLayoutForTheme,
+  resolveThemeThumbnail,
   toRegistryEntry,
   mergeThemeCatalog,
   findThemeById,

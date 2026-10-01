@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400" viewBox="0 0 640 400" role="img" aria-label="Theme preview unavailable">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#202533" />
+      <stop offset="55%" stop-color="#181B26" />
+      <stop offset="100%" stop-color="#12151E" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00D68F" />
+      <stop offset="100%" stop-color="#00B37A" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#00D68F" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#00D68F" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <rect width="640" height="400" fill="url(#bg)" />
+  <rect width="640" height="400" fill="url(#glow)" />
+
+  <!-- Subtle grid texture -->
+  <g stroke="#2E3548" stroke-opacity="0.55" stroke-width="1">
+    <path d="M0 100h640M0 200h640M0 300h640" />
+    <path d="M160 0v400M320 0v400M480 0v400" />
+  </g>
+
+  <!-- Mock storefront frame -->
+  <rect x="196" y="104" width="248" height="192" rx="16" fill="#141821" stroke="#2E3548" stroke-width="2" />
+
+  <!-- Browser chrome -->
+  <rect x="196" y="104" width="248" height="30" rx="16" fill="#1D2230" />
+  <rect x="196" y="122" width="248" height="12" fill="#1D2230" />
+  <circle cx="216" cy="119" r="4" fill="#FF5F57" />
+  <circle cx="232" cy="119" r="4" fill="#FEBC2E" />
+  <circle cx="248" cy="119" r="4" fill="#28C840" />
+
+  <!-- Hero block -->
+  <rect x="214" y="152" width="130" height="14" rx="7" fill="#3A435E" />
+  <rect x="214" y="176" width="90" height="9" rx="4.5" fill="#2E3548" />
+  <rect x="214" y="196" width="58" height="16" rx="8" fill="url(#accent)" />
+
+  <!-- Product tiles -->
+  <rect x="214" y="230" width="64" height="48" rx="8" fill="#202533" stroke="#2E3548" stroke-width="1.5" />
+  <rect x="288" y="230" width="64" height="48" rx="8" fill="#202533" stroke="#2E3548" stroke-width="1.5" />
+  <rect x="362" y="230" width="64" height="48" rx="8" fill="#202533" stroke="#2E3548" stroke-width="1.5" />
+
+  <!-- Image glyph badge -->
+  <g transform="translate(392 150)" fill="none" stroke="#00D68F" stroke-opacity="0.85" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="0" y="0" width="46" height="38" rx="8" />
+    <circle cx="14" cy="13" r="4.5" />
+    <path d="M4 33l14-13 10 9 8-7 6 6" />
+  </g>
+
+  <text x="320" y="356" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="17" font-weight="600" fill="#8A93A8" letter-spacing="0.4">Theme preview unavailable</text>
+</svg>

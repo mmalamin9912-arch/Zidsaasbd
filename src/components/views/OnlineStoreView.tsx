@@ -5,6 +5,7 @@ import { StorefrontPreviewModal } from '../StorefrontPreviewModal';
 import SafeImage from '../SafeImage';
 import { readAndDownscaleImage } from '../../utils/imageUtils';
 import { useToast } from '../ToastProvider';
+import { resolveThemeThumbnail, THEME_THUMBNAIL_PLACEHOLDER } from '../../lib/themeRegistry';
 import {  readZidStoreData, writeZidStoreData } from '../../lib/storeData';
 import {
   loadStorefrontModules,
@@ -80,6 +81,8 @@ export interface ThemeMarketItem {
   isFree: boolean;
   updatedAt: string;
   previewUrl: string;
+  /** Resolved preview image (never empty — falls back to a bundled placeholder). */
+  thumbnailUrl: string;
   description: string;
   category: string;
 }
@@ -94,17 +97,35 @@ export interface ThemeMarketItem {
  * mounts before App finished loading) we fetch the catalogue directly from the
  * API so the marketplace never falls back to mock data.
  */
-const mapDbThemeToMarketItem = (raw: Record<string, any>): ThemeMarketItem => ({
-  id: String(raw?.id || raw?.slug || '').trim(),
-  name: String(raw?.name || raw?.title || 'Theme'),
-  version: String(raw?.version || '1.0.0'),
-  badge: raw?.badge ? String(raw.badge) : undefined,
-  isFree: raw?.isFree === true || raw?.is_free === true || Number(raw?.priceBDT ?? raw?.price ?? 0) === 0,
-  updatedAt: String(raw?.updatedAt || raw?.updated_at || 'Published by admin'),
-  previewUrl: String(raw?.previewUrl || raw?.preview_url || raw?.thumbnailUrl || raw?.thumbnail_url || ''),
-  description: String(raw?.description || `Theme: ${raw?.name || raw?.id || ''}`),
-  category: String(raw?.category || 'General'),
-});
+const mapDbThemeToMarketItem = (raw: Record<string, any>): ThemeMarketItem => {
+  const id = String(raw?.id || raw?.slug || '').trim();
+  const name = String(raw?.name || raw?.title || 'Theme');
+  // The admin catalogue frequently stores an EMPTY (or legacy '#') thumbnail.
+  // Resolve a real image from the registry, and fall back to the bundled
+  // placeholder so a theme row can never render a broken-image icon.
+  const thumbnailUrl = resolveThemeThumbnail({
+    id,
+    name,
+    category: raw?.category ? String(raw.category) : undefined,
+    thumbnailUrl: raw?.thumbnailUrl || raw?.thumbnail_url || '',
+    previewUrl: raw?.previewUrl || raw?.preview_url || '',
+  });
+  return {
+    id,
+    name,
+    version: String(raw?.version || '1.0.0'),
+    badge: raw?.badge ? String(raw.badge) : undefined,
+    isFree:
+      raw?.isFree === true ||
+      raw?.is_free === true ||
+      Number(raw?.priceBDT ?? raw?.price ?? 0) === 0,
+    updatedAt: String(raw?.updatedAt || raw?.updated_at || 'Published by admin'),
+    previewUrl: thumbnailUrl,
+    thumbnailUrl,
+    description: String(raw?.description || `Theme: ${name}`),
+    category: String(raw?.category || 'General'),
+  };
+};
 
 export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
   onOpenStorefrontPreview,
@@ -637,7 +658,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
               {/* Theme Preview Image Thumbnail */}
               <div className="relative w-full md:w-64 h-40 rounded-xl overflow-hidden border border-[#2E3548] shrink-0 group">
                 <SafeImage
-                  src={currentActiveTheme.previewUrl}
+                  src={currentActiveTheme.thumbnailUrl}
+                  fallbackSrc={THEME_THUMBNAIL_PLACEHOLDER}
                   alt={currentActiveTheme.name}
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                 />
@@ -741,9 +763,10 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                       <tr key={t.id} className="hover:bg-[#202533]/50 transition">
                         <td className="p-3">
                           <SafeImage
-                            src={t.previewUrl}
+                            src={t.thumbnailUrl}
+                            fallbackSrc={THEME_THUMBNAIL_PLACEHOLDER}
                             alt={t.name}
-                            className="w-16 h-10 object-cover rounded-lg border border-[#2E3548]"
+                            className="w-16 h-10 object-cover rounded-lg border border-[#2E3548] bg-[#202533]"
                           />
                         </td>
                         <td className="p-3">
@@ -1586,7 +1609,12 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                   <div key={item.id} className="bg-[#181B26] border border-[#2E3548] rounded-2xl overflow-hidden space-y-3 p-3 flex flex-col justify-between">
                     <div className="space-y-2">
                       <div className="relative h-36 rounded-xl overflow-hidden border border-[#2E3548]">
-                        <SafeImage src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
+                        <SafeImage
+                          src={item.thumbnailUrl || item.previewUrl}
+                          fallbackSrc={THEME_THUMBNAIL_PLACEHOLDER}
+                          alt={item.name}
+                          className="w-full h-full object-cover"
+                        />
                         <div className="absolute top-2 left-2 bg-black/80 text-indigo-300 font-bold text-[10px] px-2 py-0.5 rounded border border-indigo-500/30">
                           {item.isFree ? 'FREE' : 'PREMIUM'}
                         </div>
