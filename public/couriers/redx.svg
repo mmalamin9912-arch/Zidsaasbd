@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="RedX Logistics">
+  <defs>
+    <linearGradient id="rx" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#E4002B" />
+      <stop offset="100%" stop-color="#A80020" />
+    </linearGradient>
+  </defs>
+  <rect width="96" height="96" rx="22" fill="url(#rx)" />
+  <path d="M22 28h22a13 13 0 0 1 3 25.6L60 70H48l-9-15h-6v15H22zm11 10v8h10a4 4 0 0 0 0-8z" fill="#FFFFFF" />
+  <path d="M64 30l12 12-12 12z" fill="#FFFFFF" fill-opacity="0.9" />
+</svg>

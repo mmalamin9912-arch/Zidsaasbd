@@ -3,6 +3,7 @@ import { Order, OrderItem } from '../../types';
 import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canonicalStatusOf, isManualOrder } from '../../utils/orderUtils';
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
+import { loadCourierConfig } from '../../lib/logisticsApi';
 import {
   ShoppingBag,
   Search,
@@ -360,6 +361,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [newTagInput, setNewTagInput] = useState<{ [orderId: string]: string }>({});
   const [isBookingCourier, setIsBookingCourier] = useState<{ [orderId: string]: boolean }>({});
 
+  /** Monotonic counter behind sandbox test tracking IDs (1001, 1002, …). */
+  const sandboxSequenceRef = React.useRef(1);
+
   /**
    * Send one order to the courier and apply the result.
    *
@@ -395,6 +399,42 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       };
       const courierEndpoint = courierMap[dispatchCourier] || '/api/courier/steadfast';
       const courierName = dispatchCourier || 'Steadfast Courier';
+
+      // ── Sandbox / Test mode ────────────────────────────────────────────
+      // When the merchant enabled Sandbox mode for this courier in Logistics →
+      // Setup, no live API is called: a deterministic test tracking ID is issued
+      // and the order is marked dispatched locally, so the whole fulfilment flow
+      // can be exercised without real credentials.
+      const courierKey = Object.entries(courierMap).find(([, ep]) => ep === courierEndpoint)?.[0];
+      const sandboxCourierId =
+        (courierKey || 'steadfast').split(' ')[0].toLowerCase();
+      let sandboxActive = false;
+      try {
+        const cfg = await loadCourierConfig(storeSlug);
+        const entry = cfg?.perCourier?.[sandboxCourierId];
+        sandboxActive = entry?.sandboxMode === true;
+      } catch (sandboxErr: any) {
+        console.warn('Sandbox config lookup failed:', sandboxErr?.message || sandboxErr);
+      }
+
+      if (sandboxActive) {
+        const testTrackingId = `TEST-${sandboxCourierId.replace(/[^a-z0-9]/gi, '').toUpperCase()}-${
+          1000 + (sandboxSequenceRef.current++)
+        }`;
+        onUpdateOrders(orders.map(o => (o.id === ord.id
+          ? {
+              ...o,
+              status: 'In delivery' as const,
+              fulfillmentStatus: 'In Transit' as const,
+              courierName: courierName,
+              trackingCode: testTrackingId,
+            }
+          : o)));
+        toast.success(`Sandbox booking created via ${courierName}`, {
+          description: `Test tracking ID: ${testTrackingId} — no real parcel was dispatched.`,
+        });
+        return;
+      }
 
       const res = await fetch(courierEndpoint, {
         method: 'POST',

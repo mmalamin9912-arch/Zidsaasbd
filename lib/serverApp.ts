@@ -7299,6 +7299,8 @@ function normalizeCourierConfig(raw: any, fallback: Record<string, any> = {}) {
     const keep = (v: any, fb: any) => (typeof v === 'string' && v !== '' && v !== '••' ? v : cfgStr(fb, ''));
     perCourier[id] = {
       isConnected: cfgBool(entry.isConnected, prev.isConnected),
+      // Sandbox/Test mode: book parcels against a local mock (no live API call).
+      sandboxMode: cfgBool(entry.sandboxMode, prev.sandboxMode),
       apiKey: keep(entry.apiKey, prev.apiKey),
       secretKey: keep(entry.secretKey, prev.secretKey),
       clientId: keep(entry.clientId, prev.clientId),
@@ -7342,8 +7344,16 @@ const storeConfigs = {
     cache: new Map<string, Record<string, any>>(),
     normalize: normalizeShippingConfig,
   },
-  // Courier API credentials (Steadfast, Pathao, RedX, …) entered in the Setup modal.
-  courier: { key: 'courierConfig', cache: new Map<string, Record<string, any>>(), normalize: normalizeCourierConfig },
+  // Courier API credentials (Steadfast, Pathao, RedX, …) entered in the Setup
+  // modal. Stored on the store record; also mirrored into the `store_settings`
+  // collection as `courier_config` so an external integrator can read the
+  // connection state without knowing the store schema.
+  courier: {
+    key: 'courierConfig',
+    legacyKeys: ['courier_config'],
+    cache: new Map<string, Record<string, any>>(),
+    normalize: normalizeCourierConfig,
+  },
 } as const;
 
 type StoreConfigName = keyof typeof storeConfigs;
@@ -7419,6 +7429,32 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
     }
   } catch (err: any) {
     console.warn(`[Server] ${key} mongo persist warning:`, err?.message || err);
+  }
+
+  // 1b. Courier credentials are additionally mirrored into the `store_settings`
+  //     collection as `courier_config`, so an external integrator (or the
+  //     dispatch worker) can read the connection state and sandbox flag without
+  //     having to know the store document's schema.
+  if (name === 'courier') {
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        await (mongoose.connection.db.collection('store_settings') as any).updateOne(
+          { store_slug: slug, key: 'courier_config' },
+          {
+            $set: {
+              store_slug: slug,
+              key: 'courier_config',
+              value: next,
+              updated_at: new Date().toISOString(),
+            },
+          },
+          { upsert: true },
+        );
+      }
+    } catch (settingsErr: any) {
+      console.warn('[Server] store_settings.courier_config mirror warning:', settingsErr?.message || settingsErr);
+    }
   }
 
   // 2. Best-effort mirror into the local payload file, keeping the legacy key

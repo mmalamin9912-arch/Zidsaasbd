@@ -222,7 +222,10 @@ export const initialCouriers: CourierService[] = [
   {
     id: 'steadfast',
     name: 'Steadfast Courier',
-    logo: 'https://steadfast.com.bd/assets/img/logo.png',
+    // Self-hosted brand icon. Every courier previously pointed at a remote CDN
+    // URL that now 404s (or times out), which is why all five logos rendered
+    // broken. Local assets cannot rot.
+    logo: '/couriers/steadfast.svg',
     description: 'Fastest 24-hour home delivery service in Dhaka and 64 districts coverage.',
     isConnected: false,
     coverage: '64 Districts',
@@ -238,7 +241,7 @@ export const initialCouriers: CourierService[] = [
   {
     id: 'pathao',
     name: 'Pathao Courier',
-    logo: 'https://pathao.com/wp-content/uploads/2018/12/Pathao-Logo.png',
+    logo: '/couriers/pathao.svg',
     description: 'Relentless moving with largest delivery fleet in Bangladesh.',
     isConnected: false,
     coverage: 'Nationwide',
@@ -255,7 +258,7 @@ export const initialCouriers: CourierService[] = [
   {
     id: 'redx',
     name: 'RedX Logistics',
-    logo: 'https://redx.com.bd/static/redx-logo-red.svg',
+    logo: '/couriers/redx.svg',
     description: 'End-to-end logistics solutions for e-commerce businesses.',
     isConnected: false,
     coverage: 'Nationwide',
@@ -270,7 +273,7 @@ export const initialCouriers: CourierService[] = [
   {
     id: 'ecourier',
     name: 'eCourier',
-    logo: 'https://ecourier.com.bd/wp-content/uploads/2018/11/ecourier-logo.png',
+    logo: '/couriers/ecourier.svg',
     description: 'Traditional & specialized logistics service provider.',
     isConnected: false,
     coverage: '64 Districts',
@@ -286,7 +289,7 @@ export const initialCouriers: CourierService[] = [
   {
     id: 'paperfly',
     name: 'Paperfly',
-    logo: 'https://www.paperfly.com.bd/img/paperfly_logo.png',
+    logo: '/couriers/paperfly.svg',
     description: 'Smart logistics for e-commerce with nationwide doorstep delivery.',
     isConnected: false,
     coverage: '4400+ Unions',

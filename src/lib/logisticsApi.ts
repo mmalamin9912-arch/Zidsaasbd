@@ -40,6 +40,8 @@ export interface ShippingConfig {
 /** One courier's stored credentials/state. Secrets arrive redacted ('••'). */
 export interface CourierCredentialEntry {
   isConnected: boolean;
+  /** Simulate parcel booking locally instead of calling the live courier API. */
+  sandboxMode?: boolean;
   apiKey: string;
   secretKey: string;
   clientId: string;

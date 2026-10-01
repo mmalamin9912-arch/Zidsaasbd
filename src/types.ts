@@ -549,6 +549,11 @@ export interface CourierService {
   logo: string;
   description: string;
   isConnected: boolean;
+  /**
+   * When true, parcel booking is simulated locally (test tracking IDs, no real
+   * courier API call) so a merchant can try dispatch without live credentials.
+   */
+  sandboxMode?: boolean;
   coverage: string;
   avgDeliveryDays: string;
   apiCredentials: {
