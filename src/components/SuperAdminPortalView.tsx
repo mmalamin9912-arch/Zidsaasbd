@@ -437,7 +437,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     audience: 'All Merchants',
     subject: '',
     type: 'Both',
-    body: ''
+    body: '',
+    actionUrl: ''
   });
 
   const handleSendBroadcast = (e: React.FormEvent) => {
@@ -451,6 +452,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       subject: broadcastForm.subject,
       type: broadcastForm.type as any,
       body: broadcastForm.body,
+      actionUrl: broadcastForm.actionUrl || undefined,
       status: 'Delivered'
     };
 
@@ -459,7 +461,8 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       audience: 'All Merchants',
       subject: '',
       type: 'Both',
-      body: ''
+      body: '',
+      actionUrl: ''
     });
     setSaveSuccess('Broadcast sent successfully to ' + newBroadcast.audience);
     setTimeout(() => setSaveSuccess(null), 3000);
@@ -4117,8 +4120,12 @@ onUpdateMerchant(updatedCurrent);
                             body: JSON.stringify({ topic, targetAudience: broadcastForm.audience })
                           });
                           const data = await response.json();
-                          setBroadcastDraft(data.emailContent);
-                          setBroadcastForm({...broadcastForm, message: data.emailContent});
+                          if (data?.subject && data?.body) {
+                            setBroadcastForm(prev => ({ ...prev, subject: data.subject, body: data.body }));
+                            setBroadcastDraft(data.body);
+                          } else {
+                            setBroadcastDraft('Failed to generate.');
+                          }
                         } catch (e) {
                           setBroadcastDraft('Failed to generate.');
                         } finally {
@@ -4178,6 +4185,18 @@ onUpdateMerchant(updatedCurrent);
                         placeholder="e.g. Important Platform Update"
                         className="w-full bg-[#202533] border border-[#3A435E] rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none transition-all placeholder:text-slate-600"
                       />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Action Link / Target URL (Optional)</label>
+                      <input
+                        type="url"
+                        value={broadcastForm.actionUrl || ''}
+                        onChange={(e) => setBroadcastForm({...broadcastForm, actionUrl: e.target.value})}
+                        placeholder="e.g. https://zidbdsaas.vercel.app/dashboard/plans"
+                        className="w-full bg-[#202533] border border-[#3A435E] rounded-xl px-4 py-3 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none transition-all placeholder:text-slate-600"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">Merchants can click this link from the notification bell.</p>
                     </div>
 
                     <div className="flex-1">

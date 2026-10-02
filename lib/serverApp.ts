@@ -1501,6 +1501,9 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
         type: 'broadcast',
         targetAudience: 'all',
         audienceFilter,
+        // Carry the admin's Action Link / Target URL onto the notification so a
+        // merchant can open it straight from the bell.
+        actionUrl: broadcast.actionUrl || broadcast.action_url || broadcast.actionLink,
         meta: { broadcastId: broadcast.id, broadcastType: broadcast.type, audience },
       });
       notificationDelivered = fanout.ok;
@@ -2267,7 +2270,139 @@ app.post('/api/ai/generate-text', async (req, res) => {
     return res.status(200).json({ text: 'AI content generation is temporarily unavailable. You can continue editing and saving the product.', fallback: true, error: 'server_error' });
   }
 });
-
+ 
+// POST /api/ai/broadcast-email — generates subject + body for a mass broadcast
+// from a brief topic. Returns { subject, body } so the admin form can be
+// populated automatically. Falls back to a clean template when the AI key is
+// missing or the provider fails.
+app.post('/api/ai/broadcast-email', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { topic, targetAudience } = (req.body || {}) as {
+      topic?: string;
+      targetAudience?: string;
+    };
+ 
+    if (!topic || typeof topic !== 'string' || !topic.trim()) {
+      return res.status(400).json({ ok: false, error: 'bad_request', message: 'A non-empty "topic" is required.' });
+    }
+ 
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      return res.status(200).json({
+        ok: true,
+        fallback: true,
+        subject: `Important Update: ${topic}`,
+        body: `Dear Merchant,\n\n${topic}.\n\nThis message was sent to ${targetAudience || 'All Merchants'}.\n\nBest regards,\nThe Zid Team`,
+      });
+    }
+ 
+    const prompt = [
+      'You are Zid AI, the built-in assistant of the Zid SaaS e-commerce platform for Bangladeshi merchants.',
+      'Write a professional broadcast email for platform admins to send to merchants.',
+      `Topic: "${topic}"`,
+      `Target audience: ${targetAudience || 'All Merchants'}`,
+      'Return ONLY JSON in exactly this shape, no prose and no markdown fence:',
+      '{"subject": string, "body": string}',
+      'Rules:',
+      '- Subject: concise, under 80 characters, clear and actionable.',
+      '- Body: professional tone, 2-3 short paragraphs, include a greeting and sign-off.',
+      '- Match the language of the topic (Bengali/Banglish/English).',
+      '- Do NOT include placeholders like [Merchant Name]; use "Dear Merchant".',
+    ].join('\n');
+ 
+    const candidates = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+ 
+    for (const model of candidates) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20000);
+ 
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const providerRes = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.7, maxOutputTokens: 800 },
+          }),
+          signal: controller.signal,
+        });
+ 
+        clearTimeout(timeoutId);
+ 
+        if (providerRes.status === 400 || providerRes.status === 403) {
+          const detail = await providerRes.json().catch(() => ({}));
+          console.warn('[Server] broadcast-email AI provider key error:', detail?.error?.message);
+          return res.status(200).json({
+            ok: true,
+            fallback: true,
+            subject: `Important Update: ${topic}`,
+            body: `Dear Merchant,\n\n${topic}.\n\nThis message was sent to ${targetAudience || 'All Merchants'}.\n\nBest regards,\nThe Zid Team`,
+          });
+        }
+        if (providerRes.status === 429) {
+          return res.status(200).json({
+            ok: true,
+            fallback: true,
+            subject: `Important Update: ${topic}`,
+            body: `Dear Merchant,\n\n${topic}.\n\nThis message was sent to ${targetAudience || 'All Merchants'}.\n\nBest regards,\nThe Zid Team`,
+          });
+        }
+        if (providerRes.status === 404) {
+          console.warn(`[Server] broadcast-email AI model "${model}" unavailable (404); trying next.`);
+          continue;
+        }
+        if (!providerRes.ok) {
+          console.warn(`[Server] broadcast-email AI model "${model}" failed (${providerRes.status}); trying next.`);
+          continue;
+        }
+ 
+        const data = await providerRes.json().catch(() => null);
+        const text: string =
+          data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
+ 
+        if (!text) continue;
+ 
+        // Extract first balanced JSON object
+        const match = text.match(/\{[\s\S]*\}/);
+        if (match) {
+          try {
+            const parsed = JSON.parse(match[0]);
+            if (parsed.subject && parsed.body) {
+              return res.status(200).json({ ok: true, fallback: false, subject: parsed.subject, body: parsed.body, model });
+            }
+          } catch {
+            // not valid JSON, continue to fallback
+          }
+        }
+      } catch (providerErr: any) {
+        if (providerErr?.name === 'AbortError') {
+          console.warn(`[Server] broadcast-email AI model "${model}" timeout`);
+        } else {
+          console.warn(`[Server] broadcast-email AI model "${model}" error:`, providerErr?.message);
+        }
+      }
+    }
+ 
+    // All models failed — use clean template fallback
+    return res.status(200).json({
+      ok: true,
+      fallback: true,
+      subject: `Important Update: ${topic}`,
+      body: `Dear Merchant,\n\n${topic}.\n\nThis message was sent to ${targetAudience || 'All Merchants'}.\n\nBest regards,\nThe Zid Team`,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/ai/broadcast-email error:', err?.message || err);
+    return res.status(200).json({
+      ok: true,
+      fallback: true,
+      subject: 'Important Update',
+      body: 'Dear Merchant,\n\nAn important platform update was sent.\n\nBest regards,\nThe Zid Team',
+    });
+  }
+});
+ 
 // POST /api/ai/suggest-pricing — never turn a provider failure into a 404/500
 // response. The product save flow must be usable even when AI is unavailable.
 app.post('/api/ai/suggest-pricing', async (req, res) => {

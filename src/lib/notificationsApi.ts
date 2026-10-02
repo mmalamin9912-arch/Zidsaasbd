@@ -30,6 +30,8 @@ export interface MerchantNotification {
   /** Always resolved FOR THE CALLING MERCHANT by the server. */
   isRead: boolean;
   audienceFilter: 'all' | 'free_trial' | 'paid';
+  /** Optional target URL carried over from the broadcast that created this notification. */
+  actionUrl?: string;
 }
 
 export interface NotificationFeed {

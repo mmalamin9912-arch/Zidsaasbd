@@ -1078,6 +1078,19 @@ export const Header: React.FC<HeaderProps> = ({
                           {n.message && (
                             <p className="text-[11px] text-slate-400 mt-0.5 whitespace-pre-line">{n.message}</p>
                           )}
+                          {n.actionUrl && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.open(n.actionUrl, '_blank', 'noopener,noreferrer');
+                              }}
+                              className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
+                              title="Open link"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>View Details / Open Link</span>
+                            </button>
+                          )}
                         </button>
                       );
                     })}

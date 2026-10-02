@@ -142,6 +142,9 @@ export function normalizeTicket(row: Record<string, any>): Record<string, any> {
 /** Normalise a stored broadcast row. */
 export function normalizeBroadcast(row: Record<string, any>): Record<string, any> {
   const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {};
+  const actionUrl = String(
+    row?.actionUrl || row?.action_url || row?.actionLink || payload?.actionUrl || ''
+  ).trim();
   return {
     id: String(row?.id || payload?.id || safeId(undefined, 'bc')),
     timestamp: String(row?.timestamp || row?.created_at || row?.createdAt || payload?.timestamp || new Date().toISOString()),
@@ -151,6 +154,7 @@ export function normalizeBroadcast(row: Record<string, any>): Record<string, any
     body: String(row?.body || payload?.body || ''),
     message: row?.message || payload?.message,
     status: (row?.status || payload?.status || 'Delivered'),
+    actionUrl: actionUrl || undefined,
   };
 }
 
@@ -277,6 +281,7 @@ export async function writeBroadcast(raw: Record<string, any>): Promise<CommsRes
     type: bc.type,
     body: bc.body,
     status: bc.status,
+    action_url: bc.actionUrl,
     payload: bc,
     updated_at: now,
   }, 'id');

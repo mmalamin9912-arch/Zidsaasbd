@@ -436,6 +436,8 @@ export interface BroadcastMessage {
   type: 'In-App Announcement' | 'Email Alert' | 'Both';
   body: string;
   message?: string;
+  /** Optional target URL a merchant can open from the notification bell. */
+  actionUrl?: string;
   status: 'Delivered' | 'Pending' | 'Failed';
 }
 

@@ -75,6 +75,8 @@ export interface MerchantNotification {
   audienceFilter: NotificationAudienceFilter;
   /** Free-form provenance, e.g. the originating broadcast id. */
   meta: Record<string, any>;
+  /** Optional target URL carried over from the broadcast that created this notification. */
+  actionUrl?: string;
 }
 
 export interface NotificationResult<T = any> {
@@ -230,6 +232,10 @@ export function normalizeNotification(
       ? (rawType as NotificationKind)
       : 'info';
 
+  const actionUrl = String(
+    row?.actionUrl || row?.action_url || row?.actionLink || ''
+  ).trim();
+
   return {
     id: String(row?.id || safeId(undefined, 'ntf')),
     targetAudience,
@@ -243,6 +249,7 @@ export function normalizeNotification(
     readBy,
     audienceFilter,
     meta: row?.meta && typeof row.meta === 'object' ? row.meta : {},
+    actionUrl: actionUrl || undefined,
   };
 }
 
@@ -372,6 +379,7 @@ export async function createNotification(
         readBy: raw?.readBy,
         audienceFilter: raw?.audienceFilter || raw?.audience_filter,
         meta: raw?.meta,
+        actionUrl: raw?.actionUrl || raw?.action_url || raw?.actionLink,
       },
       undefined
     ),
@@ -403,6 +411,7 @@ export async function createNotification(
     read_by: notification.readBy,
     audience_filter: notification.audienceFilter,
     meta: notification.meta,
+    action_url: notification.actionUrl,
   });
   if (sb.ok) sources.push('supabase');
   else console.warn('[notificationStore] notifications Supabase write warning:', sb.error);
