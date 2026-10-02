@@ -30,16 +30,41 @@ export const CYCLE_DURATION_DAYS: Record<BillingCycle, number> = {
 /** Headline annual discount used when a plan sets no explicit yearly price. */
 export const DEFAULT_ANNUAL_DISCOUNT_PERCENT = 20;
 
-/** Flags applied to a plan row that carries no feature flags of its own. */
+/**
+ * Flags applied to a plan row that carries no feature flags of its own.
+ *
+ * Every key defaults to `false`, so a plan with no stored flags grants nothing.
+ * That is deliberate: defaulting the paid capabilities to `true` would hand a
+ * merchant access the admin never approved.
+ */
 export const NO_FEATURE_FLAGS: PlanFeatureFlags = {
-  premiumThemes: false,
+  freeSubdomain: false,
   customDomain: false,
-  aiTools: false,
-  metaPixels: false,
-  whatsappRecovery: false,
+  premiumThemes: false,
+  cssCustomizer: false,
   courierApi: false,
+  courierAutoSync: false,
+  metaPixels: false,
+  googleAnalytics: false,
+  aiCaption: false,
+  aiContent: false,
   removeBg: false,
+  aiCopilot: false,
+  whatsappRecovery: false,
+  emailSupport: false,
+  phoneSupport: false,
   prioritySupport: false,
+};
+
+/**
+ * LEGACY flag names, kept only to migrate rows written before the ladder was
+ * split into fine-grained capabilities. `aiTools` used to mean "AI unlocked",
+ * which is the broadest reading, so it maps onto the full content suite —
+ * a merchant who already paid for it keeps working access.
+ */
+export const LEGACY_FEATURE_FLAG_ALIASES: Record<string, keyof PlanFeatureFlags> = {
+  aiTools: 'aiContent',
+  customDomain: 'customDomain',
 };
 
 const toNumber = (value: unknown, fallback = 0): number => {
@@ -180,31 +205,54 @@ export const productLimitLabel = (plan: SubscriptionPlan): string => {
 
 /** The plan's capability flags, with every missing key defaulted to `false`. */
 export function featureFlagsOf(plan: SubscriptionPlan): PlanFeatureFlags {
-  return { ...NO_FEATURE_FLAGS, ...(plan.featureFlags || {}) };
+  const stored = (plan.featureFlags || {}) as Record<string, unknown>;
+  const merged: Record<string, unknown> = { ...NO_FEATURE_FLAGS };
+  for (const key of Object.keys(NO_FEATURE_FLAGS)) merged[key] = stored[key];
+  // Migrate legacy spellings without letting them override a current key.
+  for (const [legacy, current] of Object.entries(LEGACY_FEATURE_FLAG_ALIASES)) {
+    if (legacy !== current && stored[legacy] === true) merged[current] = true;
+  }
+  return merged as unknown as PlanFeatureFlags;
 }
 
 /**
- * The human-readable bullet list a plan card renders.
+ * The bullet list a plan card renders.
  *
- * Derived from the STRUCTURED flags, not from the admin's `features` prose, so
- * what the card claims is exactly what the flag says. The admin's own text is
- * still appended afterwards — it is the part they actually wrote, and it may
- * mention things the flag set does not model.
+ * The admin's OWN `features` array wins. This function used to synthesise
+ * bullets from the flags and discard that array entirely, which is why every
+ * card claimed a "themes" line and a "support" line regardless of tier and the
+ * published ladder looked duplicated. Deriving is now only the FALLBACK for a
+ * plan whose admin left the list blank, so the card is never empty.
  */
 export function derivePlanFeatures(plan: SubscriptionPlan): string[] {
+  const authored = (plan.features || []).map((f) => String(f).trim()).filter(Boolean);
+  if (authored.length > 0) return authored;
+
   const flags = featureFlagsOf(plan);
   const derived = [productLimitLabel(plan)];
 
-  if (flags.premiumThemes) derived.push('Premium themes');
-  else derived.push('Standard themes');
+  if (flags.premiumThemes) derived.push(flags.cssCustomizer ? 'All themes & CSS color customizer' : 'Premium theme library');
+  else derived.push('Standard themes only');
 
-  if (flags.customDomain) derived.push('Custom domain');
-  if (flags.aiTools) derived.push('AI tools unlocked');
-  if (flags.metaPixels) derived.push('Meta & TikTok pixels');
-  if (flags.whatsappRecovery) derived.push('WhatsApp cart recovery');
-  if (flags.courierApi) derived.push('Courier API integrations');
+  if (flags.customDomain) derived.push('Custom domain integration (.com)');
+  else if (flags.freeSubdomain) derived.push('Free subdomain (.zidbd.com)');
+
+  if (flags.metaPixels && flags.googleAnalytics) derived.push('Meta Pixel & Google Analytics tracking');
+  else if (flags.metaPixels) derived.push('Meta Pixel & TikTok tracking');
+  else if (flags.googleAnalytics) derived.push('Google Analytics 4');
+
+  if (flags.aiContent) derived.push('Full AI suite (content, image cleanup, copilot)');
+  else if (flags.aiCaption) derived.push('AI social caption writer');
   if (flags.removeBg) derived.push('AI background remover');
-  derived.push(flags.prioritySupport ? 'Priority support' : 'Standard support');
+
+  if (flags.courierAutoSync) derived.push('Live courier API auto-sync');
+  else if (flags.courierApi) derived.push('Basic courier integration');
+
+  if (flags.whatsappRecovery) derived.push('WhatsApp abandoned-cart auto-recovery');
+
+  if (flags.prioritySupport) derived.push('Priority 24/7 VIP phone & WhatsApp support');
+  else if (flags.phoneSupport) derived.push('Standard phone support');
+  else if (flags.emailSupport) derived.push('Email support');
 
   return derived;
 }
@@ -215,14 +263,22 @@ export function derivePlanFeatures(plan: SubscriptionPlan): string[] {
  * set — a flag shown in the editor can never be missing from the card text.
  */
 export const FEATURE_FLAG_LABELS: Array<{ key: keyof PlanFeatureFlags; label: string }> = [
-  { key: 'premiumThemes', label: 'Premium themes' },
-  { key: 'customDomain', label: 'Custom domain' },
-  { key: 'aiTools', label: 'AI tools' },
-  { key: 'metaPixels', label: 'Meta & TikTok pixels' },
-  { key: 'whatsappRecovery', label: 'WhatsApp recovery' },
-  { key: 'courierApi', label: 'Courier API' },
-  { key: 'removeBg', label: 'Background remover' },
-  { key: 'prioritySupport', label: 'Priority support' },
+  { key: 'freeSubdomain', label: 'Free .zidbd.com subdomain' },
+  { key: 'customDomain', label: 'Custom .com domain' },
+  { key: 'premiumThemes', label: 'Premium theme library' },
+  { key: 'cssCustomizer', label: 'CSS / color customizer' },
+  { key: 'courierApi', label: 'Basic courier integration' },
+  { key: 'courierAutoSync', label: 'Courier API auto-sync' },
+  { key: 'metaPixels', label: 'Meta Pixel & TikTok' },
+  { key: 'googleAnalytics', label: 'Google Analytics 4' },
+  { key: 'aiCaption', label: 'AI caption writer' },
+  { key: 'aiContent', label: 'Full AI content suite' },
+  { key: 'removeBg', label: 'AI image cleanup' },
+  { key: 'aiCopilot', label: 'AI store copilot' },
+  { key: 'whatsappRecovery', label: 'WhatsApp cart recovery' },
+  { key: 'emailSupport', label: 'Email support' },
+  { key: 'phoneSupport', label: 'Phone support' },
+  { key: 'prioritySupport', label: 'Priority 24/7 VIP support' },
 ];
 
 export default {

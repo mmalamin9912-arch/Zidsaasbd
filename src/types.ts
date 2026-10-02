@@ -500,25 +500,48 @@ export type BillingCycle = 'monthly' | 'yearly';
  * Machine-readable capability flags — the REAL tiering.
  *
  * `features: string[]` is prose the admin typed for display only; nothing gates
- * on it. These flags are what the plan cards, the Super Admin configurator and
- * (eventually) the entitlement checks read, so a merchant can compare tiers
- * without parsing English bullet points.
+ * on it. These flags are what the Super Admin configurator and the entitlement
+ * checks read, so a merchant can compare tiers without parsing English bullet
+ * points.
+ *
+ * The set is deliberately fine-grained rather than a few coarse buckets, because
+ * the published ladder differentiates inside a bucket: Growth gets Meta Pixel +
+ * GA4 tracking and an AI caption writer, while only Pro/Enterprise get the full
+ * AI suite, the CSS customizer and 24/7 VIP support. A single `aiTools` flag
+ * could not express that, and every card ended up claiming the same bullets.
  */
 export interface PlanFeatureFlags {
-  /** Premium theme library (Starter is limited to the standard themes). */
-  premiumThemes: boolean;
-  /** Bring-your-own-domain / subdomain configuration. */
+  /** Free platform subdomain, e.g. `yourstore.zidbd.com`. Every tier gets one. */
+  freeSubdomain: boolean;
+  /** Bring-your-own `.com` domain. */
   customDomain: boolean;
-  /** AI caption / description / pricing generators. */
-  aiTools: boolean;
-  /** Meta + TikTok + GA4 pixel injection and conversion tracking. */
+  /** Premium theme library. Starter is limited to the standard themes. */
+  premiumThemes: boolean;
+  /** Full CSS / brand-colour customizer. */
+  cssCustomizer: boolean;
+  /** Basic courier integration (one-click order push). */
+  courierApi: boolean;
+  /** Live courier API ordering with automatic status sync. */
+  courierAutoSync: boolean;
+  /** Meta Pixel + TikTok conversion tracking. */
   metaPixels: boolean;
+  /** Google Analytics 4. */
+  googleAnalytics: boolean;
+  /** AI social caption / product-description writer. */
+  aiCaption: boolean;
+  /** Full AI content generation suite. */
+  aiContent: boolean;
+  /** AI image cleanup / background remover. */
+  removeBg: boolean;
+  /** AI store copilot. */
+  aiCopilot: boolean;
   /** WhatsApp abandoned-cart auto-recovery. */
   whatsappRecovery: boolean;
-  /** Live courier API integrations (Steadfast/Pathao/RedX/…). */
-  courierApi: boolean;
-  /** Background-removal tool. */
-  removeBg: boolean;
+  /** Email support channel. */
+  emailSupport: boolean;
+  /** Business-hours phone support channel. */
+  phoneSupport: boolean;
+  /** 24/7 VIP phone + WhatsApp support. */
   prioritySupport: boolean;
 }
 

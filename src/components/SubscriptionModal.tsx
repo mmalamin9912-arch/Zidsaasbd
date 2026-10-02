@@ -316,13 +316,16 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                           )}
                         </div>
 
-                        {/* Feature list — derived from the plan's capability flags
-                            so the card cannot claim a tier the flags deny. */}
+                        {/* Feature list — the admin-authored bullets for THIS
+                            tier. Rendered in full: truncating to four is what
+                            previously hid the difference between Growth's
+                            "AI social caption writer" and Pro's "Full AI
+                            suite", making the tiers look identical. */}
                         <ul className="space-y-1 text-[10px] text-slate-300 mb-3">
-                          {featureLines.slice(0, 4).map((feat, idx) => (
+                          {featureLines.map((feat, idx) => (
                             <li key={idx} className="flex items-start gap-1.5">
                               <Check className="w-3 h-3 text-[#D4AF37] shrink-0 mt-0.5" />
-                              <span className="truncate">{feat}</span>
+                              <span>{feat}</span>
                             </li>
                           ))}
                         </ul>

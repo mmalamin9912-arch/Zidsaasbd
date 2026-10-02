@@ -49,17 +49,22 @@ export interface PlanListResult {
 /**
  * The default plan catalogue auto-seeded into an empty store.
  *
- * A Bangladesh-market SaaS ladder: Starter (basic) → Growth (popular) →
- * Pro → Enterprise (advanced). Lower tiers get the essentials with hard product
- * caps; the paid tiers unlock premium themes, AI tools, pixels, WhatsApp
- * recovery and a custom domain.
+ * A Bangladesh-market SaaS ladder: Starter → Growth → Pro → Enterprise, ordered
+ * by `display_order` (10/20/30/40).
+ *
+ * TIER DIFFERENCES ARE DELIBERATE AND NON-OVERLAPPING. Each tier lists only what
+ * it uniquely grants, so no bullet shows on two cards. `features` is the prose
+ * the card renders; `feature_flags` beside it is the machine-readable
+ * entitlement set the Super Admin toggles. Keep the two in step.
  *
  * Every field is written in BOTH snake_case and the camelCase spelling the API
  * layer uses, because `normalizePlanRow` (lib/serverApp.ts) accepts either and
  * the Supabase mirror columns are snake_case.
  *
- * `price_bdt` / `duration_days` are the LEGACY term kept for older readers; the
- * UI quotes `monthly_price_bdt` / `yearly_price_bdt` instead.
+ * `price_bdt` / `duration_days` are the LEGACY single-term pair kept for older
+ * readers. They are deliberately NOT what the merchant sees: the term is chosen
+ * with the Monthly/Yearly toggle, so the UI quotes `monthly_price_bdt` /
+ * `yearly_price_bdt`.
  */
 export const DEFAULT_PLANS: Record<string, any>[] = [
   {
@@ -71,20 +76,29 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
     monthly_price_bdt: 999, monthlyPrice: 999,
     yearly_price_bdt: 9590, yearlyPrice: 9590,
     annual_discount_percent: 20, annualDiscountPercent: 20,
-    max_products: 100, maxProducts: 100,
+    max_products: 50, maxProducts: 50,
     feature_flags: {
-      premiumThemes: false, customDomain: false, aiTools: false,
-      metaPixels: false, whatsappRecovery: false, courierApi: false,
-      removeBg: false, prioritySupport: false,
+      freeSubdomain: true, customDomain: false, premiumThemes: false,
+      cssCustomizer: false, courierApi: true, courierAutoSync: false,
+      metaPixels: false, googleAnalytics: false, aiCaption: false,
+      aiContent: false, removeBg: false, aiCopilot: false,
+      whatsappRecovery: false, emailSupport: true, phoneSupport: false,
+      prioritySupport: false,
     },
     featureFlags: {
-      premiumThemes: false, customDomain: false, aiTools: false,
-      metaPixels: false, whatsappRecovery: false, courierApi: false,
-      removeBg: false, prioritySupport: false,
+      freeSubdomain: true, customDomain: false, premiumThemes: false,
+      cssCustomizer: false, courierApi: true, courierAutoSync: false,
+      metaPixels: false, googleAnalytics: false, aiCaption: false,
+      aiContent: false, removeBg: false, aiCopilot: false,
+      whatsappRecovery: false, emailSupport: true, phoneSupport: false,
+      prioritySupport: false,
     },
     features: [
-      'Up to 100 products', 'Standard themes only', 'Order & customer management',
-      'bKash / Nagad / Cash on Delivery', 'Standard email support',
+      'Up to 50 products',
+      'Free subdomain (.zidbd.com)',
+      'Standard themes only',
+      'Basic courier integration',
+      'Email support',
     ],
     is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
@@ -99,18 +113,28 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
     annual_discount_percent: 20, annualDiscountPercent: 20,
     max_products: 500, maxProducts: 500,
     feature_flags: {
-      premiumThemes: true, customDomain: false, aiTools: true,
-      metaPixels: true, whatsappRecovery: false, courierApi: true,
-      removeBg: true, prioritySupport: false,
+      freeSubdomain: true, customDomain: true, premiumThemes: true,
+      cssCustomizer: false, courierApi: true, courierAutoSync: true,
+      metaPixels: true, googleAnalytics: true, aiCaption: true,
+      aiContent: false, removeBg: false, aiCopilot: false,
+      whatsappRecovery: false, emailSupport: true, phoneSupport: true,
+      prioritySupport: false,
     },
     featureFlags: {
-      premiumThemes: true, customDomain: false, aiTools: true,
-      metaPixels: true, whatsappRecovery: false, courierApi: true,
-      removeBg: true, prioritySupport: false,
+      freeSubdomain: true, customDomain: true, premiumThemes: true,
+      cssCustomizer: false, courierApi: true, courierAutoSync: true,
+      metaPixels: true, googleAnalytics: true, aiCaption: true,
+      aiContent: false, removeBg: false, aiCopilot: false,
+      whatsappRecovery: false, emailSupport: true, phoneSupport: true,
+      prioritySupport: false,
     },
     features: [
-      'Up to 500 products', 'Premium theme library', 'AI description & caption writer',
-      'Meta + TikTok pixels', 'Live courier API integrations', 'AI background remover',
+      'Up to 500 products',
+      'Custom domain integration (.com)',
+      'Premium theme library',
+      'Meta Pixel & Google Analytics tracking',
+      'AI social caption writer',
+      'Standard phone support',
     ],
     is_active: true, isActive: true, is_popular: true, isPopular: true,
   },
@@ -125,18 +149,27 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
     annual_discount_percent: 20, annualDiscountPercent: 20,
     max_products: 0, maxProducts: 0,
     feature_flags: {
-      premiumThemes: true, customDomain: true, aiTools: true,
-      metaPixels: true, whatsappRecovery: true, courierApi: true,
-      removeBg: true, prioritySupport: true,
+      freeSubdomain: true, customDomain: true, premiumThemes: true,
+      cssCustomizer: true, courierApi: true, courierAutoSync: true,
+      metaPixels: true, googleAnalytics: true, aiCaption: true,
+      aiContent: true, removeBg: true, aiCopilot: true,
+      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
+      prioritySupport: true,
     },
     featureFlags: {
-      premiumThemes: true, customDomain: true, aiTools: true,
-      metaPixels: true, whatsappRecovery: true, courierApi: true,
-      removeBg: true, prioritySupport: true,
+      freeSubdomain: true, customDomain: true, premiumThemes: true,
+      cssCustomizer: true, courierApi: true, courierAutoSync: true,
+      metaPixels: true, googleAnalytics: true, aiCaption: true,
+      aiContent: true, removeBg: true, aiCopilot: true,
+      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
+      prioritySupport: true,
     },
     features: [
-      'Unlimited products', 'Custom domain', 'WhatsApp abandoned-cart recovery',
-      'Full AI suite', 'Priority support',
+      'Unlimited products',
+      'All themes & CSS color customizer',
+      'Full AI suite (content, image cleanup, copilot)',
+      'WhatsApp abandoned-cart auto-recovery',
+      'Priority 24/7 VIP phone & WhatsApp support',
     ],
     is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
@@ -151,18 +184,27 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
     annual_discount_percent: 20, annualDiscountPercent: 20,
     max_products: 0, maxProducts: 0,
     feature_flags: {
-      premiumThemes: true, customDomain: true, aiTools: true,
-      metaPixels: true, whatsappRecovery: true, courierApi: true,
-      removeBg: true, prioritySupport: true,
+      freeSubdomain: true, customDomain: true, premiumThemes: true,
+      cssCustomizer: true, courierApi: true, courierAutoSync: true,
+      metaPixels: true, googleAnalytics: true, aiCaption: true,
+      aiContent: true, removeBg: true, aiCopilot: true,
+      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
+      prioritySupport: true,
     },
     featureFlags: {
-      premiumThemes: true, customDomain: true, aiTools: true,
-      metaPixels: true, whatsappRecovery: true, courierApi: true,
-      removeBg: true, prioritySupport: true,
+      freeSubdomain: true, customDomain: true, premiumThemes: true,
+      cssCustomizer: true, courierApi: true, courierAutoSync: true,
+      metaPixels: true, googleAnalytics: true, aiCaption: true,
+      aiContent: true, removeBg: true, aiCopilot: true,
+      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
+      prioritySupport: true,
     },
     features: [
-      'Everything in Pro', 'Unlimited products & staff seats',
-      'Dedicated account manager', 'Custom integrations on request',
+      'Unlimited products',
+      'All themes & CSS color customizer',
+      'Full AI suite (content, image cleanup, copilot)',
+      'WhatsApp abandoned-cart auto-recovery',
+      'Priority 24/7 VIP phone & WhatsApp support',
     ],
     is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
@@ -176,26 +218,58 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
  * Additions here are the single place a new tier capability must be declared.
  */
 export const PLAN_FEATURE_FLAG_KEYS = [
-  'premiumThemes',
+  'freeSubdomain',
   'customDomain',
-  'aiTools',
-  'metaPixels',
-  'whatsappRecovery',
+  'premiumThemes',
+  'cssCustomizer',
   'courierApi',
+  'courierAutoSync',
+  'metaPixels',
+  'googleAnalytics',
+  'aiCaption',
+  'aiContent',
   'removeBg',
+  'aiCopilot',
+  'whatsappRecovery',
+  'emailSupport',
+  'phoneSupport',
   'prioritySupport',
 ] as const;
+
+/**
+ * Legacy flag names migrated on read so plans written before the ladder was
+ * split into fine-grained capabilities keep their entitlements.
+ *
+ * `aiTools` used to mean "AI unlocked", which is the broadest reading, so it
+ * maps onto the full content suite — a merchant who already paid for it keeps
+ * working access instead of silently losing AI features.
+ */
+export const LEGACY_PLAN_FEATURE_FLAGS: Record<string, string> = {
+  aiTools: 'aiContent',
+};
 
 /** Coerce arbitrary input into a complete, boolean, whitelisted flag set. */
 export function normalizeFeatureFlags(raw: any): Record<string, boolean> {
   const src = raw && typeof raw === 'object' ? raw : {};
   const out: Record<string, boolean> = {};
-  for (const key of PLAN_FEATURE_FLAG_KEYS) {
+  const readFlag = (key: string): boolean => {
     // Accept the snake_case spelling too, so a hand-written document works.
     const snake = key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
     const value = src[key] ?? src[snake];
-    out[key] = value === true || value === 'true' || value === 1;
+    return value === true || value === 'true' || value === 1;
+  };
+
+  for (const key of PLAN_FEATURE_FLAG_KEYS) out[key] = readFlag(key);
+
+  // Migrate retired flag names so plans stored before the ladder was split into
+  // fine-grained capabilities keep granting what they were sold. An explicit
+  // current key always wins — this only fills a capability nothing else set.
+  for (const [legacy, current] of Object.entries(LEGACY_PLAN_FEATURE_FLAGS)) {
+    if (!(current in out)) continue;
+    if (out[current] === true) continue;
+    if (readFlag(legacy)) out[current] = true;
   }
+
   return out;
 }
 

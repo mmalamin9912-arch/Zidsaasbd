@@ -169,19 +169,27 @@ export const initialInvoices: InvoiceRecord[] = [];
 /**
  * Default plan catalogue — a Bangladesh-market SaaS ladder.
  *
- * Structure: Starter (basic) → Growth (popular) → Pro → Enterprise (advanced).
- * Lower tiers get the essentials with hard product caps and standard themes;
- * the paid tiers unlock premium themes, AI tools, tracking pixels, WhatsApp
- * recovery and finally a custom domain.
+ * Structure: Starter → Growth → Pro → Enterprise. `displayOrder` (10/20/30/40)
+ * is what renders the grid left-to-right; `sortPlansByTier` applies it.
+ *
+ * TIER DIFFERENCES ARE DELIBERATE AND NON-OVERLAPPING.
+ * Each tier lists only what it uniquely grants, so no bullet appears on two
+ * cards:
+ *   Starter    — 50 products, free subdomain, standard themes, basic courier, email support
+ *   Growth     — 500 products, custom .com, premium themes, Meta+GA tracking, AI caption, phone support
+ *   Pro        — unlimited products, all themes + CSS customizer, full AI suite, WhatsApp recovery, 24/7 VIP
+ *   Enterprise — the Pro capability set on the longest term
+ *
+ * `features` is the prose the card renders (see `derivePlanFeatures`); the
+ * `featureFlags` next to it are the machine-readable entitlements the Super
+ * Admin toggles. Keep the two in step when editing either.
  *
  * PRICING
- * `price` + `durationDays` remain the legacy term (what a record written before
- * the billing toggle stored) and drive nothing user-facing any more — the UI
- * quotes `monthlyPrice` / `yearlyPrice` through src/lib/planPricing.ts. They are
- * kept in step with the monthly figure so old readers still show something
- * sensible.
- *
- * `displayOrder` is the merchant-facing sort position the Super Admin edits.
+ * `price` + `durationDays` are the legacy single-term pair kept for older
+ * readers and deliberately NOT user-facing: the term a merchant buys is chosen
+ * with the Monthly/Yearly toggle, so a hardcoded term in the plan name or card
+ * would contradict the price they are being quoted. The UI quotes
+ * `monthlyPrice` / `yearlyPrice` through src/lib/planPricing.ts.
  */
 export const subscriptionPlans: SubscriptionPlan[] = [
   {
@@ -194,23 +202,31 @@ export const subscriptionPlans: SubscriptionPlan[] = [
     monthlyPrice: 999,
     yearlyPrice: 9590,
     annualDiscountPercent: 20,
-    maxProducts: 100,
+    maxProducts: 50,
     featureFlags: {
-      premiumThemes: false,
+      freeSubdomain: true,
       customDomain: false,
-      aiTools: false,
+      premiumThemes: false,
+      cssCustomizer: false,
+      courierApi: true,
+      courierAutoSync: false,
       metaPixels: false,
-      whatsappRecovery: false,
-      courierApi: false,
+      googleAnalytics: false,
+      aiCaption: false,
+      aiContent: false,
       removeBg: false,
+      aiCopilot: false,
+      whatsappRecovery: false,
+      emailSupport: true,
+      phoneSupport: false,
       prioritySupport: false,
     },
     features: [
-      'Up to 100 products',
+      'Up to 50 products',
+      'Free subdomain (.zidbd.com)',
       'Standard themes only',
-      'Order & customer management',
-      'bKash / Nagad / Cash on Delivery',
-      'Standard email support',
+      'Basic courier integration',
+      'Email support',
     ],
     isActive: true,
   },
@@ -226,22 +242,30 @@ export const subscriptionPlans: SubscriptionPlan[] = [
     annualDiscountPercent: 20,
     maxProducts: 500,
     featureFlags: {
+      freeSubdomain: true,
+      customDomain: true,
       premiumThemes: true,
-      customDomain: false,
-      aiTools: true,
-      metaPixels: true,
-      whatsappRecovery: false,
+      cssCustomizer: false,
       courierApi: true,
-      removeBg: true,
+      courierAutoSync: true,
+      metaPixels: true,
+      googleAnalytics: true,
+      aiCaption: true,
+      aiContent: false,
+      removeBg: false,
+      aiCopilot: false,
+      whatsappRecovery: false,
+      emailSupport: true,
+      phoneSupport: true,
       prioritySupport: false,
     },
     features: [
       'Up to 500 products',
+      'Custom domain integration (.com)',
       'Premium theme library',
-      'AI description & caption writer',
-      'Meta + TikTok pixels',
-      'Live courier API integrations',
-      'AI background remover',
+      'Meta Pixel & Google Analytics tracking',
+      'AI social caption writer',
+      'Standard phone support',
     ],
     isPopular: true,
     isActive: true,
@@ -258,21 +282,29 @@ export const subscriptionPlans: SubscriptionPlan[] = [
     annualDiscountPercent: 20,
     maxProducts: 0,
     featureFlags: {
-      premiumThemes: true,
+      freeSubdomain: true,
       customDomain: true,
-      aiTools: true,
-      metaPixels: true,
-      whatsappRecovery: true,
+      premiumThemes: true,
+      cssCustomizer: true,
       courierApi: true,
+      courierAutoSync: true,
+      metaPixels: true,
+      googleAnalytics: true,
+      aiCaption: true,
+      aiContent: true,
       removeBg: true,
+      aiCopilot: true,
+      whatsappRecovery: true,
+      emailSupport: true,
+      phoneSupport: true,
       prioritySupport: true,
     },
     features: [
       'Unlimited products',
-      'Custom domain',
-      'WhatsApp abandoned-cart recovery',
-      'Full AI suite',
-      'Priority support',
+      'All themes & CSS color customizer',
+      'Full AI suite (content, image cleanup, copilot)',
+      'WhatsApp abandoned-cart auto-recovery',
+      'Priority 24/7 VIP phone & WhatsApp support',
     ],
     isActive: true,
   },
@@ -288,20 +320,29 @@ export const subscriptionPlans: SubscriptionPlan[] = [
     annualDiscountPercent: 20,
     maxProducts: 0,
     featureFlags: {
-      premiumThemes: true,
+      freeSubdomain: true,
       customDomain: true,
-      aiTools: true,
-      metaPixels: true,
-      whatsappRecovery: true,
+      premiumThemes: true,
+      cssCustomizer: true,
       courierApi: true,
+      courierAutoSync: true,
+      metaPixels: true,
+      googleAnalytics: true,
+      aiCaption: true,
+      aiContent: true,
       removeBg: true,
+      aiCopilot: true,
+      whatsappRecovery: true,
+      emailSupport: true,
+      phoneSupport: true,
       prioritySupport: true,
     },
     features: [
-      'Everything in Pro',
-      'Unlimited products & staff seats',
-      'Dedicated account manager',
-      'Custom integrations on request',
+      'Unlimited products',
+      'All themes & CSS color customizer',
+      'Full AI suite (content, image cleanup, copilot)',
+      'WhatsApp abandoned-cart auto-recovery',
+      'Priority 24/7 VIP phone & WhatsApp support',
     ],
     isActive: true,
   },

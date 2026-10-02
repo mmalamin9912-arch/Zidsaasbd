@@ -147,24 +147,23 @@ export const getBillingDurationInDays = (
 };
 
 /**
- * Returns formatted human-readable plan name
+ * Returns the human-readable TIER name for a plan id.
+ *
+ * The term is deliberately NOT baked into the name. This used to return things
+ * like "Starter Plan (3 Months)", which is wrong now that the merchant picks
+ * Monthly or Yearly themselves — a yearly Starter purchase would have been
+ * labelled a 3-month plan, contradicting the price just charged. The active
+ * term is rendered separately, from `calculateRemainingDays` / the granted
+ * `durationDays`.
  */
 export const getPlanDisplayName = (planId?: string): string => {
-  if (!planId || planId === 'free_trial' || planId === 'trial') return 'Free Trial (30 Days)';
+  if (!planId || planId === 'free_trial' || planId === 'trial') return 'Free Trial';
   const lower = planId.toLowerCase();
-  if (lower.includes('12m') || lower.includes('enterprise')) {
-    return 'Enterprise Plan (12 Months)';
-  }
-  if (lower.includes('6m') || lower.includes('pro')) {
-    return 'Pro Plan (6 Months)';
-  }
-  if (lower.includes('3m') || lower.includes('starter')) {
-    return 'Starter Plan (3 Months)';
-  }
-  if (lower.includes('1m') || lower.includes('month') || lower === 'starter_1m') {
-    return '1-Month Plan';
-  }
-  return planId.replace(/_/g, ' ').toUpperCase();
+  if (lower.includes('enterprise')) return 'Enterprise';
+  if (lower.includes('pro')) return 'Pro';
+  if (lower.includes('growth')) return 'Growth';
+  if (lower.includes('starter')) return 'Starter';
+  return planId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
 /**
