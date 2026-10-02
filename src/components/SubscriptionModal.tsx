@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { MerchantProfile, SubscriptionPlan, SubscriptionRequest, AdminPaymentGatewayConfig, BillingCycle } from '../types';
 import { subscriptionPlans } from '../data/initialData';
 import { calculateRemainingDays, getPlanDisplayName, isPaidSubscriptionActive } from '../utils/subscriptionUtils';
-import { resolvePlanPricing, sortPlansByTier, derivePlanFeatures } from '../lib/planPricing';
+import { resolvePlanPricing, sortPlansByTier, derivePlanFeatures, isFreeTierPlan } from '../lib/planPricing';
 import SafeImage from './SafeImage';
 import {
   X,
@@ -230,14 +230,22 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                 );
               })()}
 
-              {/* ── Plans: 2 clean side-by-side tiers (Zid SaaS layout) ──
+              {/* ── Plans: Free Trial / Rise / Growth (Zid SaaS layout) ──
                   Monthly-only pricing; the old Monthly/Yearly toggle and
-                  4-card duration grid are gone. */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl mx-auto">
-                {planList.filter((p) => p.isActive !== false).slice(0, 2).map((plan) => {
+                  4-card duration grid are gone.
+
+                  The Free Trial is a REAL catalogue row (editable at
+                  /admin/plans) so all three tiers render from one source. It is
+                  deliberately NOT purchasable: trial access is granted at signup,
+                  so selecting it must never drop the merchant into the
+                  bKash/transaction-ID payment step or create a ৳0 pending
+                  request for an admin to approve. */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-4xl mx-auto">
+                {planList.filter((p) => p.isActive !== false).map((plan) => {
                   const isSelected = selectedPlanId === plan.id;
                   const pricing = resolvePlanPlanPricingSafe(plan);
                   const featureLines = derivePlanFeatures(plan);
+                  const isFree = isFreeTierPlan(plan.id);
                   return (
                     <div
                       key={plan.id}
@@ -266,16 +274,22 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                           )}
                         </div>
                         <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                          {plan.isPopular
-                            ? 'For scaling businesses needing full AI & tracking tools.'
-                            : 'For individuals & new businesses.'}
+                          {isFree
+                            ? 'Everything you need to launch and test your store.'
+                            : plan.isPopular
+                              ? 'For scaling businesses needing full AI & tracking tools.'
+                              : 'For individuals & new businesses.'}
                         </p>
                       </div>
 
-                      {/* Price block — flat monthly, no yearly clutter */}
+                      {/* Price block — flat monthly, no yearly clutter. The trial
+                          is free for its whole term, so it is labelled by
+                          duration instead of a meaningless "৳0 / month". */}
                       <div className="flex items-baseline gap-1.5">
                         <span className="text-2xl font-black text-white">BDT {pricing.price.toLocaleString()}</span>
-                        <span className="text-[11px] text-slate-400 font-medium">/ month</span>
+                        <span className="text-[11px] text-slate-400 font-medium">
+                          {isFree ? `/ ${pricing.durationDays} days` : '/ month'}
+                        </span>
                       </div>
 
                       {/* Feature list */}
@@ -288,26 +302,36 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                         ))}
                       </ul>
 
-                      {/* Select button */}
+                      {/* Select button. The trial is granted at signup, so its
+                          button only closes the modal — it must not advance to
+                          the payment step. */}
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
+                          if (isFree) {
+                            onClose();
+                            return;
+                          }
                           setSelectedPlanId(plan.id);
                           setStep('payment');
                         }}
                         className={
                           `w-full py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ` +
-                          (plan.isPopular
-                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-lg shadow-indigo-600/30'
-                            : 'bg-[#2E3548] hover:bg-[#3A435E] text-white border border-[#3A435E]')
+                          (isFree
+                            ? 'bg-[#2E3548] hover:bg-[#3A435E] text-white border border-[#3A435E]'
+                            : plan.isPopular
+                              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-lg shadow-indigo-600/30'
+                              : 'bg-[#2E3548] hover:bg-[#3A435E] text-white border border-[#3A435E]')
                         }
                       >
-                        {isSelected
-                          ? 'Continue to Payment'
-                          : plan.isPopular
-                            ? 'Choose Growth Plan'
-                            : 'Choose Starter Plan'}
+                        {isFree
+                          ? 'Included at signup'
+                          : isSelected
+                            ? 'Continue to Payment'
+                            : plan.isPopular
+                              ? 'Choose Growth Plan'
+                              : 'Choose Starter Plan'}
                       </button>
                     </div>
                   );
@@ -317,7 +341,16 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               {/* Bottom Action Footer */}
               <div className="pt-2 border-t border-[#2E3548] flex items-center justify-end gap-2">
                 <button
-                  onClick={() => setStep('payment')}
+                  onClick={() => {
+                    // Guard the shared footer button the same way the card
+                    // button is guarded: a ৳0 trial has nothing to pay, so it
+                    // must not open the gateway/tx-ID step.
+                    if (isFreeTierPlan(selectedPlanId)) {
+                      onClose();
+                      return;
+                    }
+                    setStep('payment');
+                  }}
                   className="bg-gradient-to-r from-[#D4AF37] to-[#00B377] hover:from-[#FCF6BA] text-slate-950 font-bold px-4 py-2 rounded-lg text-xs flex items-center justify-center gap-1.5 transition shadow-lg shadow-[#D4AF37]/20 cursor-pointer"
                 >
                   <span>Select Plan</span>

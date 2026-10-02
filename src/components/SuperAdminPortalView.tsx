@@ -68,7 +68,7 @@ import {
   MessageCircle,
   Image
 } from 'lucide-react';
-import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from '../types';
+import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, PlanFeatureFlags } from '../types';
 import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingDays, getPlanDisplayName } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { savePlan } from '../lib/plansApi';
@@ -797,6 +797,56 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       ? 'Subscription plans saved to MongoDB successfully!'
       : `Saved ${plansForm.length - failed.length}/${plansForm.length} plans — could not persist: ${failed.map((p) => p.id).join(', ')}`);
     setTimeout(() => setSaveSuccess(null), 3000);
+  };
+
+  /**
+   * Toggle one capability flag and persist it IMMEDIATELY.
+   *
+   * Previously a flag flip only mutated `plansForm`, so it was not written to
+   * MongoDB until the admin also pressed "Save Plans" — and an admin who flipped
+   * Meta Pixel off, saw the toggle move, and navigated away left the capability
+   * still granted. These flags ARE the live entitlement gate (see
+   * src/lib/planEntitlements.ts), so they are written on the spot.
+   *
+   * The local form is updated optimistically first, then the durable write is
+   * awaited; a failure rolls the toggle back and says so, so the switch can
+   * never display a state that is not in the database.
+   */
+  const handleTogglePlanFeature = async (
+    planIdx: number,
+    key: keyof PlanFeatureFlags,
+    next: boolean
+  ) => {
+    const target = plansForm[planIdx];
+    if (!target) return;
+
+    const prevFlags = featureFlagsOf(target);
+    const nextPlan: SubscriptionPlan = {
+      ...target,
+      featureFlags: { ...prevFlags, [key]: next },
+    };
+    const nextPlans = [...plansForm];
+    nextPlans[planIdx] = nextPlan;
+
+    // Optimistic update so the switch responds instantly.
+    setPlansForm(nextPlans);
+    setSaveSuccess(null);
+
+    const ok = await savePlan(nextPlan);
+    if (!ok) {
+      // Roll back — never leave the UI showing an unsaved capability state.
+      const rolled = [...plansForm];
+      rolled[planIdx] = target;
+      setPlansForm(rolled);
+      setSaveSuccess(`Could not save "${key}" for ${target.name} — reverted.`);
+      setTimeout(() => setSaveSuccess(null), 4000);
+      return;
+    }
+
+    // Push to the merchant-facing catalogue so the entitlement store re-resolves.
+    onUpdatePlatformPlans(nextPlans);
+    setSaveSuccess(`${next ? 'Enabled' : 'Disabled'} ${key} on ${target.name}.`);
+    setTimeout(() => setSaveSuccess(null), 2500);
   };
 
   const handleAddPlan = () => {
@@ -3219,12 +3269,9 @@ onUpdateMerchant(updatedCurrent);
                                 className="sr-only"
                                 checked={enabled}
                                 onChange={() => {
-                                  const newPlans = [...plansForm];
-                                  newPlans[planIdx].featureFlags = {
-                                    ...featureFlagsOf(plan),
-                                    [key]: !enabled
-                                  };
-                                  setPlansForm(newPlans);
+                                  // Persisted immediately — these flags gate live
+                                  // merchant capabilities, not just display.
+                                  void handleTogglePlanFeature(planIdx, key, !enabled);
                                 }}
                               />
                               <div className={`w-9 h-4 rounded-full transition-colors relative shrink-0 ${enabled ? 'bg-indigo-600' : 'bg-slate-700'}`}>

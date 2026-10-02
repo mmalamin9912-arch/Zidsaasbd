@@ -6,7 +6,7 @@ import { downscaleImage, readAndDownscaleImage } from '../../utils/imageUtils';
 import { readZidStoreData } from '../../lib/storeData';
 import { safeGetItem } from '../../utils/safeStorage';
 import { isProAccessGranted } from '../../lib/subscriptionStatusCache';
-import { isGrowthTierPlan } from '../../lib/planPricing';
+import { useEntitlements } from '../../lib/planEntitlements';
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
 import { generateAiText, aiErrorMessage } from '../../lib/aiService';
@@ -322,13 +322,11 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const isMountedRef = useRef(true);
   useEffect(() => () => { isMountedRef.current = false; }, []);
 
-  // Starter is still paid, but only an explicitly active/non-trial plan unlocks
-  // the PRO-labelled AI tools. This is derived synchronously from the merchant's
-  // persisted plan and never starts as an artificial `free_trial` value.
-  const isFreeTier = !isProAccessGranted(merchant?.subscriptionPlan, merchant?.subscription_status);
-
+  // AI locks are resolved per capability further down (see `isFeatureLocked`), so
+  // each button can be gated by its own admin toggle rather than one tier-wide
+  // boolean.
   const generateAiDescription = async () => {
-    if (isFreeTier) {
+    if (isFeatureLocked('aiContent')) {
       onOpenSubscriptionModal?.();
       return;
     }
@@ -379,7 +377,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
    * — i.e. the optimised URL — is what reaches MongoDB.
    */
   const enhanceImageWithAi = async () => {
-    if (isFreeTier) {
+    if (isFeatureLocked('aiBgRemover')) {
       onOpenSubscriptionModal?.();
       return;
     }
@@ -415,7 +413,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   };
 
   const suggestPricing = async () => {
-    if (isFreeTier) {
+    if (isFeatureLocked('aiCopilot')) {
       onOpenSubscriptionModal?.();
       return;
     }
@@ -913,28 +911,40 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     }
   };
 
-  // AI Feature Lock Logic
-  const isFeatureLocked = (featureKey: 'aiContent' | 'aiWhatsApp' | 'aiBgRemover') => {
+  // ── AI Feature Gating ──────────────────────────────────────────
+  // Two independent gates, both of which must pass:
+  //   1. the platform-wide "Pro only" switch in Platform Settings, and
+  //   2. the ACTIVE PLAN's own capability flag.
+  //
+  // (2) is what makes the Super Admin "FEATURE ACCESS TIERS" toggles real: an
+  // admin turning OFF `aiContent` for the Growth plan now locks AI drafting for
+  // Growth merchants on the next catalogue load. Previously this helper was
+  // dead code (`handleAiAction` had zero call sites), so the AI buttons were
+  // gated only by `isProAccessGranted`, i.e. "anyone not on trial".
+  const entitlements = useEntitlements();
+
+  // Maps each AI surface to the capability flag that unlocks it.
+  const AI_CAPABILITY = {
+    aiContent: 'aiContent',
+    aiCopilot: 'aiCopilot',
+    aiBgRemover: 'removeBg',
+    aiCaption: 'aiCaption',
+    aiWhatsApp: 'whatsappRecovery',
+  } as const;
+
+  const isFeatureLocked = (featureKey: keyof typeof AI_CAPABILITY) => {
     const isProOnly = platformSettings?.[`${featureKey}ProOnly`];
-    if (!isProOnly) return false;
-
-    const currentPlan = merchant?.subscriptionPlan || 'free_trial';
-    // Pro-only capabilities are the TOP tier only. This used to be
-    // `plan !== 'free_trial' && plan !== 'starter_3m'`, which once the
-    // catalogue moved to `starter_plan` / `growth_plan` made Starter look like
-    // Pro — unlocking the paid AI tools on the ৳1000 tier. Resolve the tier,
-    // don't pattern-match the id here.
-    return !isGrowthTierPlan(currentPlan);
+    // Per-plan capability flag wins first: it is the granular control.
+    if (!entitlements.can(AI_CAPABILITY[featureKey])) return true;
+    // Then the platform-wide switch, when set.
+    if (isProOnly && !entitlements.isGrowthTier) return true;
+    return false;
   };
 
-  const handleAiAction = (featureKey: 'aiContent' | 'aiWhatsApp' | 'aiBgRemover', action: () => void) => {
-    if (isFeatureLocked(featureKey)) {
-      if (onOpenSubscriptionModal) onOpenSubscriptionModal();
-      else toast.warning('Please upgrade your plan to unlock this Pro feature.');
-      return;
-    }
-    action();
-  };
+  // Per-surface locks consumed by the AI buttons and their PRO corner badges.
+  const lockAiContent = isFeatureLocked('aiContent');
+  const lockImageEnhance = isFeatureLocked('aiBgRemover');
+  const lockPricing = isFeatureLocked('aiCopilot');
 
   return (
     <form onSubmit={handleFormSubmit} className="space-y-6">
@@ -1050,7 +1060,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                         className="p-1.5 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 rounded-lg shadow-md cursor-pointer disabled:opacity-50 relative overflow-hidden"
                         title="Magic Enhance"
                       >
-                        {isFreeTier && (
+                        {lockImageEnhance && (
                           <div className="absolute top-0 right-0 bg-slate-950 text-white text-[6px] font-black px-1 py-0.2 rounded-bl-sm uppercase tracking-tighter leading-none">
                             P
                           </div>
@@ -1174,10 +1184,10 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                     </label>
                     <button
                       type="button"
-                      onClick={suggestPricing}
-                      className="text-[11px] text-[#00D68F] font-bold hover:bg-[#00D68F]/20 bg-[#00D68F]/10 px-2.5 py-1 rounded-lg border border-[#00D68F]/30 flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
-                    >
-                      {isFreeTier && (
+onClick={suggestPricing}
+                        className="text-[11px] text-[#00D68F] font-bold hover:text-[#00D68F]/20 bg-[#00D68F]/10 px-2.5 py-1 rounded-lg border border-[#00D68F]/30 flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
+                      >
+                        {lockPricing && (
                         <span className="bg-slate-900 text-[#00D68F] text-[9px] font-black px-1.5 py-0.5 rounded border border-[#00D68F]/40 uppercase tracking-wider">PRO</span>
                       )}
                       <Sparkles className="w-3.5 h-3.5" />
@@ -1568,7 +1578,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                         onClick={() => generateAiDescription()}
                         className="text-[10px] bg-[#00D68F] text-slate-950 font-black px-2 py-1 rounded-lg flex items-center gap-1 hover:bg-[#00E699] transition disabled:opacity-50 cursor-pointer relative overflow-hidden"
                       >
-                        {isFreeTier && (
+                        {lockAiContent && (
                           <div className="absolute top-0 right-0 bg-slate-950 text-white text-[7px] font-black px-1 py-0.5 rounded-bl-md border-l border-b border-[#00D68F]/30 uppercase tracking-tighter">
                             PRO
                           </div>
@@ -1618,7 +1628,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                         onClick={() => generateAiDescription()}
                         className="text-[10px] bg-[#00D68F] text-slate-950 font-black px-2 py-1 rounded-lg flex items-center gap-1 hover:bg-[#00E699] transition disabled:opacity-50 cursor-pointer relative overflow-hidden"
                       >
-                        {isFreeTier && (
+                        {lockAiContent && (
                           <div className="absolute top-0 right-0 bg-slate-950 text-white text-[7px] font-black px-1 py-0.5 rounded-bl-md border-l border-b border-[#00D68F]/30 uppercase tracking-tighter">
                             PRO
                           </div>

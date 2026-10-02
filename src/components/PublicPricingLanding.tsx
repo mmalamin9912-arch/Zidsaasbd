@@ -1,7 +1,7 @@
 import React from 'react';
 import { CheckCircle2, ArrowRight, Sparkles } from 'lucide-react';
 import { subscriptionPlans } from '../data/initialData';
-import { monthlyPriceOf, resolvePlanPricing, sortPlansByTier } from '../lib/planPricing';
+import { monthlyPriceOf, resolvePlanPricing, sortPlansByTier, derivePlanFeatures, isFreeTierPlan } from '../lib/planPricing';
 import { LanguageToggle } from './LanguageToggle';
 import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
@@ -73,35 +73,21 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
         </p>
 
         {/* Pricing Grid */}
-        <div id="pricing-plans-grid" className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6 w-full">
-          
-          {/* Free Trial Card */}
-          <div id="plan-card-free-trial" className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col text-left hover:border-slate-700 transition-colors relative">
-            <h3 className="text-xl font-bold text-white mb-2">{t('land_free_trial')}</h3>
-            <p className="text-sm text-slate-400 mb-4 h-10">{t('land_free_trial_desc')}</p>
-            <div className="mb-6">
-              <span className="text-4xl font-black text-white">৳0</span>
-              <span className="text-slate-500"> / 30 {t('land_days')}</span>
-            </div>
-            <button 
-              id="plan-btn-free-trial"
-              onClick={() => onSelectPlan('free_trial')}
-              className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold py-3 rounded-xl mb-6 transition cursor-pointer"
-            >
-              {t('start_free_trial')}
-            </button>
-            <div className="space-y-3 flex-1">
-              {['Up to 20 Products', 'Basic Theme', 'Standard Support'].map((feat, idx) => (
-                <div key={idx} className="flex items-start gap-2 text-sm text-slate-300">
-                  <CheckCircle2 className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
-                  <span>{feat}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+        {/* Three tiers in the live catalogue (Free Trial / Rise / Growth), so the
+            grid is a clean 3-up. The Free Trial is a real, admin-editable plan
+            row and renders from that data like any other card — the previously
+            hardcoded trial card duplicated it and could not be edited from
+            /admin/plans, so the marketing price and the billable catalogue
+            drifted apart. */}
+        <div id="pricing-plans-grid" className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full">
 
           {/* Map real subscription plans */}
-          {sortPlansByTier(subscriptionPlans.filter(p => p.isActive)).map((plan) => (
+          {sortPlansByTier(subscriptionPlans.filter(p => p.isActive)).map((plan) => {
+            const isFree = isFreeTierPlan(plan.id);
+            // Prefer the admin-authored bullet list; only derive from the flag
+            // matrix when the admin has not written one.
+            const bullets = derivePlanFeatures(plan);
+            return (
             <div 
               key={plan.id} 
               id={`plan-card-${plan.id}`}
@@ -119,17 +105,21 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
               <div className="flex justify-between items-start mb-2">
                 <h3 className="text-xl font-bold text-white">{plan.name}</h3>
               </div>
-              <p className="text-sm text-slate-400 mb-4 h-10">{t('land_plan_desc')}</p>
+              <p className="text-sm text-slate-400 mb-4 h-10">
+                {isFree ? t('land_free_trial_desc') : t('land_plan_desc')}
+              </p>
               <div className="mb-6">
                 {/* Quote the MONTHLY term — this is the entry price merchants
                     see before choosing a term, and `price` is kept in sync
-                    with `monthlyPrice` by the admin editor. */}
+                    with `monthlyPrice` by the admin editor. The trial is
+                    ৳0 for its whole term, so it is labelled by duration
+                    rather than as a per-month rate. */}
                 <span className="text-4xl font-black text-white">৳{monthlyPriceOf(plan).toLocaleString()}</span>
-                <span className="text-slate-500"> / {t('land_month')}</span>
+                <span className="text-slate-500"> {isFree ? `/ ${t('land_days')}` : `/ ${t('land_month')}`}</span>
               </div>
               {/* Tease the annual saving so the landing page matches the
                   checkout toggle the merchant will meet next. */}
-              {resolvePlanPricing(plan, 'yearly').discountPercent > 0 && (
+              {!isFree && resolvePlanPricing(plan, 'yearly').discountPercent > 0 && (
                 <div className="text-xs font-bold text-[#00D68F] mb-4">
                   {t('land_or_save')} ৳{resolvePlanPricing(plan, 'yearly').price.toLocaleString()}/{t('land_year')} — save{' '}
                   {resolvePlanPricing(plan, 'yearly').discountPercent}%
@@ -144,10 +134,10 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
                     : 'bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white'
                 }`}
               >
-                {t('land_subscribe_now')}
+                {isFree ? t('start_free_trial') : t('land_subscribe_now')}
               </button>
               <div className="space-y-3 flex-1">
-                {plan.features.map((feat, idx) => (
+                {bullets.map((feat, idx) => (
                   <div key={idx} className="flex items-start gap-2 text-sm text-slate-300">
                     <CheckCircle2 className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" />
                     <span>{feat}</span>
@@ -155,7 +145,8 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
                 ))}
               </div>
             </div>
-          ))}
+            );
+          })}
 
         </div>
       </div>

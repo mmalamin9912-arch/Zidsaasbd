@@ -3,7 +3,7 @@ import { DiscountCoupon, Customer, MerchantProfile, AdminPaymentGatewayConfig } 
 import { initialCoupons, initialCustomers } from '../../data/initialData';
 import { ProFeaturePaymentModal } from '../marketing/ProFeaturePaymentModal';
 import { safeSetItem } from '../../utils/safeStorage';
-import { isGrowthTierPlan } from '../../lib/planPricing';
+import { useEntitlements } from '../../lib/planEntitlements';
 import SafeImage from '../SafeImage';
 import {  useToast } from '../ToastProvider';
 import {
@@ -151,12 +151,19 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
   const [adjReason, setAdjReason] = useState('');
   const [pointHistoryLog, setPointHistoryLog] = useState<{ id: string; customerName: string; delta: number; reason: string; date: string }[]>([]);
 
-  // Merchant Subscription Tier State
-  // "Pro" means the TOP tier. This was `=== 'pro_6m' || === 'enterprise_12m'`,
-  // which after the catalogue moved to starter_plan/growth_plan matched NOTHING:
-  // merchants paying ৳2500 on growth_plan were shown as non-Pro and had the Pro
-  // app market locked against them. Resolve the tier, don't match the id.
-  const isProMerchant = isGrowthTierPlan(merchant?.subscriptionPlan);
+  // ── Dynamic feature entitlements ─────────────────────────────
+  // The Pro app market is gated by the ACTIVE PLAN's tracking + AI flags rather
+  // than a hardcoded plan id. Switching Meta Pixel, GA4 or the AI suite off for
+  // the Growth plan in Super Admin now locks the matching app immediately,
+  // instead of every paid merchant getting it regardless.
+  const entitlements = useEntitlements();
+  const isProMerchant = entitlements.can('metaPixels')
+    || entitlements.can('googleAnalytics')
+    || entitlements.can('aiContent')
+    || entitlements.isGrowthTier;
+  /** Per-capability checks, used to lock individual apps in the market. */
+  const canUseAppTier = (appTier: string) =>
+    String(appTier || '').toLowerCase() === 'pro' ? isProMerchant : true;
 
   // App Market & Pixels Integrations State
   const [integrations, setIntegrations] = useState<AppIntegrationConfig[]>(() => {

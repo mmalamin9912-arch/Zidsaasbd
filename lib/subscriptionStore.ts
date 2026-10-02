@@ -69,6 +69,52 @@ export interface PlanListResult {
  */
 export const DEFAULT_PLANS: Record<string, any>[] = [
   {
+    // The free tier is a REAL catalogue row, not the absence of a plan. It is
+    // editable from the Super Admin plan manager alongside the two paid tiers,
+    // and its capability flags gate what a trial merchant can actually use.
+    //
+    // It is the one row with price 0, so it needs the FREE_TIER_SLUGS exemption
+    // in isCataloguePlan() below — otherwise the zero-price rule drops it from
+    // the catalogue, `plans.length` never matches DEFAULT_PLANS.length, and the
+    // force-overwrite in listSubscriptionPlans() would wipe and re-seed the
+    // collection on every single request.
+    id: 'free_trial', slug: 'free_trial', plan_id: 'free_trial',
+    plan_name: 'Free Trial Plan', name: 'Free Trial Plan',
+    price_bdt: 0, priceBDT: 0, price: 0,
+    duration_days: 30, durationDays: 30,
+    badge_text: '', badge: '',
+    display_order: 0, displayOrder: 0,
+    // 0 on both cycle prices: the trial is never billed. resolvePlanPricing
+    // therefore quotes ৳0 and shows no annual saving for it.
+    monthly_price_bdt: 0, monthlyPrice: 0,
+    yearly_price_bdt: 0, yearlyPrice: 0,
+    annual_discount_percent: 0, annualDiscountPercent: 0,
+    max_products: 10, maxProducts: 10,
+    feature_flags: {
+      freeSubdomain: true, customDomain: false, premiumThemes: false,
+      cssCustomizer: false, courierApi: false, courierAutoSync: false,
+      metaPixels: false, googleAnalytics: false, aiCaption: false,
+      aiContent: false, removeBg: false, aiCopilot: false,
+      whatsappRecovery: false, emailSupport: false, phoneSupport: false,
+      prioritySupport: false,
+    },
+    featureFlags: {
+      freeSubdomain: true, customDomain: false, premiumThemes: false,
+      cssCustomizer: false, courierApi: false, courierAutoSync: false,
+      metaPixels: false, googleAnalytics: false, aiCaption: false,
+      aiContent: false, removeBg: false, aiCopilot: false,
+      whatsappRecovery: false, emailSupport: false, phoneSupport: false,
+      prioritySupport: false,
+    },
+    features: [
+      '10 Products',
+      'Free .zidbd.com Subdomain',
+      'Standard Themes',
+      'Limited Dashboard',
+    ],
+    is_active: true, isActive: true, is_popular: false, isPopular: false,
+  },
+  {
     id: 'starter_plan', slug: 'starter_plan', plan_id: 'starter_plan',
     plan_name: 'Rise / Starter Plan', name: 'Rise / Starter Plan',
     price_bdt: 1000, priceBDT: 1000, price: 1000,
@@ -370,6 +416,24 @@ export async function listSubscriptions(): Promise<HybridResult<Record<string, a
 export const PLAN_CATALOGUE_SLUGS = DEFAULT_PLANS.map((p) => String(p.slug));
 
 /**
+ * Catalogue rows that are legitimately free.
+ *
+ * `isCataloguePlan` rejects any row priced at 0 as a data artefact, which is
+ * right for tenant records but wrong for the Free Trial plan — a real,
+ * admin-editable tier that costs nothing. Without this exemption the trial row
+ * could never be read back as a plan, `plans.length` would permanently disagree
+ * with `DEFAULT_PLANS.length`, and the force-overwrite would delete and re-seed
+ * the whole collection on every request.
+ */
+export const FREE_TIER_SLUGS = DEFAULT_PLANS
+  .filter((p) => Number(p.price_bdt ?? p.priceBDT ?? p.price ?? 0) <= 0)
+  .map((p) => String(p.slug));
+
+export function isFreeTierSlug(slug: unknown): boolean {
+  return FREE_TIER_SLUGS.includes(String(slug ?? '').trim().toLowerCase());
+}
+
+/**
  * Is this row a catalogue PLAN, or a tenant renewal/request record?
  *
  * WHY THIS EXISTS
@@ -406,12 +470,14 @@ export function isCataloguePlan(row: Record<string, any>): boolean {
     Boolean(row.expires_at || row.expiresAt || row.subscription_expiry || row.subscriptionExpiry);
   if (owner || hasLifecycle) return false;
 
-  // A zero-value or zero-duration row is a data artefact, never a sellable plan.
+  // A zero-value or zero-duration row is a data artefact, never a sellable plan
+  // — UNLESS it is the Free Trial tier, which is priced at 0 by definition.
   const price = Number(row.price_bdt ?? row.priceBDT ?? row.price ?? row.amount_bdt ?? NaN);
   const duration = Number(row.duration_days ?? row.durationDays ?? row.duration ?? row.days ?? NaN);
-  const hasPrice = Number.isFinite(price) && price > 0;
   const hasDuration = Number.isFinite(duration) && duration > 0;
-  if (!hasPrice || !hasDuration) return false;
+  if (!hasDuration) return false;
+  const hasPrice = Number.isFinite(price) && price > 0;
+  if (!hasPrice && !isFreeTierSlug(slug)) return false;
 
   const name = String(row.plan_name || row.planName || row.name || row.title || '').trim();
   return Boolean(name || knownSlug);

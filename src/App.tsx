@@ -91,6 +91,7 @@ import { SettingsView } from './components/views/SettingsView';
 
 import { calculatePlanTimestamps, getPlanDurationInDays } from './utils/subscriptionUtils';
 import { resolvePlanPricing } from './lib/planPricing';
+import { primeEntitlements } from './lib/planEntitlements';
 import {
   resolveMerchantSubscription,
   fetchMerchantSubscriptionFromSupabase,
@@ -1085,6 +1086,19 @@ export default function App() {
     })();
     return () => { active = false; };
   }, []);
+
+  // ── Dynamic feature entitlements ─────────────────────────────
+  // Publish the active plan + catalogue into the entitlement store so every
+  // merchant view can ask `useEntitlements().can('metaPixels')` instead of
+  // hardcoding a plan-id comparison. Re-runs whenever the catalogue is
+  // (re)loaded or the merchant's plan changes, which is what makes a Super Admin
+  // feature toggle take effect without a redeploy.
+  useEffect(() => {
+    primeEntitlements({
+      planId: merchant?.subscriptionPlan ?? null,
+      plans: platformPlans,
+    });
+  }, [merchant?.subscriptionPlan, platformPlans]);
 
   // ── One-time cleanup of removed mock data ───────────────────
   // Earlier builds shipped mock support tickets (Dhaka Gadget Hub, Chittagong

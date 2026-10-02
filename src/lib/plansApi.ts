@@ -13,6 +13,7 @@
  */
 
 import type { PlanFeatureFlags, SubscriptionPlan } from '../types';
+import { isFreeTierPlan } from './planPricing';
 
 /** Raw plan row as returned by the API (DB-normalised shape). */
 export interface ApiPlanRow {
@@ -60,13 +61,18 @@ async function safeJson<T>(res: Response): Promise<T | null> {
 export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan | null {
   const price = Number(row.priceBDT ?? 0);
   const durationDays = Number(row.durationDays ?? 0);
+  const id = String(row?.id || '').trim().toLowerCase();
   // A plan with no identity, no price or no duration is not sellable.
   if (!row || !row.id) return null;
-  if (!Number.isFinite(price) || price <= 0) return null;
+  // The Free Trial tier is a real catalogue row that costs nothing, so the
+  // "must have a positive price" rule that discards stray renewal records must
+  // not discard it. Every other id still has to be paid: that guard exists so a
+  // tenant subscription document leaking into this endpoint cannot become a card.
+  if (!Number.isFinite(price) || (price <= 0 && !isFreeTierPlan(id))) return null;
   if (!Number.isFinite(durationDays) || durationDays <= 0) return null;
 
   return {
-    id: String(row.id || '').toLowerCase(),
+    id,
     name: String(row.name || 'Plan'),
     price,
     durationDays,

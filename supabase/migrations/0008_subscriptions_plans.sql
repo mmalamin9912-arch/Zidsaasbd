@@ -128,11 +128,13 @@ CREATE TRIGGER subscriptions_set_updated_at
 --    plan. Duration here is the legacy fallback only.
 -- -----------------------------------------------------------------------------
 DELETE FROM public.subscriptions
-WHERE slug IN ('starter_1m', 'starter_3m', 'pro_6m', 'enterprise_12m', 'rise', 'growth')
-   OR slug NOT IN ('starter_plan', 'growth_plan');
+ WHERE slug IN ('starter_1m', 'starter_3m', 'pro_6m', 'enterprise_12m', 'rise', 'growth')
+   OR slug NOT IN ('free_trial', 'starter_plan', 'growth_plan');
 
 INSERT INTO public.subscriptions (id, slug, plan_id, plan_name, name, price_bdt, duration_days, badge_text, badge, features, is_active, is_popular, max_products, display_order, monthly_price_bdt, yearly_price_bdt, annual_discount_percent)
 VALUES
+  (gen_random_uuid(), 'free_trial', 'free_trial', 'Free Trial Plan', 'Free Trial Plan', 0, 30, '', '',
+   '["10 Products","Free .zidbd.com Subdomain","Standard Themes","Limited Dashboard"]'::jsonb, true, false, 10, 0, 0, 0, 0),
   (gen_random_uuid(), 'starter_plan', 'starter_plan', 'Rise / Starter Plan', 'Rise / Starter Plan', 1000, 30, '', '',
    '["Up to 100 Products","Standard Themes","Basic AI Tools","Standard Support"]'::jsonb, true, false, 100, 1, 1000, 9600, 20),
   (gen_random_uuid(), 'growth_plan', 'growth_plan', 'Growth / Pro Plan', 'Growth / Pro Plan', 2500, 30, 'MOST POPULAR', 'MOST POPULAR',

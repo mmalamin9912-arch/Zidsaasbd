@@ -53,6 +53,7 @@ import {
   writeSubscription,
   listSubscriptions,
   listSubscriptionPlans,
+  isFreeTierSlug,
   deleteSubscription,
   ensureSubscriptionSeed,
   normalizeFeatureFlags as normalizePlanFeatureFlags,
@@ -6285,9 +6286,14 @@ app.all('/api/subscriptions', async (req, res) => {
       plans = planResult.data
         .map(normalizePlanRow)
         // Belt-and-braces: `listSubscriptionPlans` already filters tenant rows,
-        // but a legacy document could still reach here. A plan with no price or
-        // no duration is unsellable and must never render as a card.
-        .filter((p) => p.id && p.isActive !== false && p.priceBDT > 0 && p.durationDays > 0);
+        // but a legacy document could still reach here. A plan with no duration is
+        // unsellable and must never render as a card. A zero price is also
+        // unsellable — EXCEPT the Free Trial tier, which is a real, admin-editable
+        // catalogue row priced at 0 by definition and must reach the pricing grid
+        // as the first card.
+        .filter((p) => p.id && p.isActive !== false
+          && (p.priceBDT > 0 || isFreeTierSlug(p.id))
+          && p.durationDays > 0);
       planSources = planResult.sources;
       seeded = planResult.seeded;
     }

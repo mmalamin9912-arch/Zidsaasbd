@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CourierService, MerchantProfile, CodConfig } from '../../types';
-import { isGrowthTierPlan } from '../../lib/planPricing';
+import { useEntitlements } from '../../lib/planEntitlements';
 import SafeImage from '../SafeImage';
 import {  useToast } from '../ToastProvider';
 import {
@@ -58,11 +58,12 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
   // the whole dispatch flow without real Steadfast/Pathao/RedX credentials.
   const [sandboxMode, setSandboxMode] = useState(false);
 
-  // Courier API integration is a Growth/Pro capability (Starter ships "Basic
-  // courier integration" only). This was `!== 'trial'`, i.e. "anyone who isn't
-  // on trial", which handed the live courier API to every paid store including
-  // the entry tier once Starter became a real paid plan.
-  const isPro = isGrowthTierPlan(merchant?.subscriptionPlan);
+  // Live courier API is gated by the ACTIVE PLAN's `courierAutoSync` flag, not by
+  // a hardcoded plan id — an admin switching the toggle off in Super Admin now
+  // locks the courier tools immediately. Starter ships "Basic courier
+  // integration" (`courierApi`) only, so it cannot auto-sync.
+  const entitlements = useEntitlements();
+  const isPro = entitlements.can('courierAutoSync');
 
   // Standard Shipping Settings State
   const [shippingForm, setShippingForm] = useState<CodConfig>(codConfig);

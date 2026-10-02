@@ -3,6 +3,7 @@ import { TrendingUp, Sparkles, Search, MessageSquare, Zap, Globe, Check } from '
 
 import { MerchantProfile } from '../../types';
 import { useToast } from '../ToastProvider';
+import { useEntitlements } from '../../lib/planEntitlements';
 import {
   EMPTY_GROWTH_CONFIG,
   SECRET_PLACEHOLDER,
@@ -23,7 +24,14 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
   onSwitchToBilling
 }) => {
   const toast = useToast();
-  const isFreeTier = merchant?.subscriptionPlan === 'free_trial';
+  // Growth-tool locks come from the ACTIVE PLAN's capability flags, so an admin
+  // switching off the AI caption writer or WhatsApp cart recovery for a plan
+  // locks the matching tool here immediately. Previously this was a single
+  // `subscriptionPlan === 'free_trial'` check that ignored the plan's own flags.
+  const entitlements = useEntitlements();
+  const lockCaption = !entitlements.can('aiCaption');
+  const lockCartRecovery = !entitlements.can('whatsappRecovery');
+  const lockPixels = !(entitlements.can('metaPixels') && entitlements.can('googleAnalytics'));
   const storeSlug = merchant?.storeSlug || merchant?.store_slug || '';
   const storeName = merchant?.storeName || merchant?.name || '';
 
@@ -135,7 +143,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
   };
 
   const handleGenerateCaption = useCallback(async () => {
-    if (isFreeTier) {
+    if (lockCaption) {
       onSwitchToBilling?.();
       return;
     }
@@ -169,7 +177,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
     } finally {
       setIsGeneratingCaption(false);
     }
-  }, [captionPrompt, isFreeTier, onSwitchToBilling, storeName, toast]);
+  }, [captionPrompt, lockCaption, onSwitchToBilling, storeName, toast]);
 
   const copyCaption = () => {
     const text = formatCaptionForClipboard({
@@ -242,7 +250,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
               disabled={isGeneratingCaption}
               className="w-full py-2 bg-[#D4AF37] text-slate-950 font-bold text-xs rounded-xl hover:bg-[#C49F27] transition cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 relative overflow-hidden"
             >
-              {isFreeTier && (
+              {lockCaption && (
                 <div className="absolute top-0 right-0 bg-slate-950 text-white text-[8px] font-black px-1.5 py-0.5 rounded-bl-lg border-l border-b border-[#D4AF37]/30 uppercase tracking-tighter">
                   PRO
                 </div>
@@ -266,11 +274,18 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
               </div>
             </div>
 
-            <label className="relative inline-flex items-center cursor-pointer">
+            {/* Disabled (not just hidden) when the active plan's
+                `whatsappRecovery` flag is off, so the merchant can see the tool
+                exists and understand it is plan-gated rather than missing. */}
+            <label className={`relative inline-flex items-center ${lockCartRecovery ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
               <input
                 type="checkbox"
                 checked={cartRecoveryEnabled}
-                onChange={(e) => setCartRecoveryEnabled(e.target.checked)}
+                disabled={lockCartRecovery}
+                onChange={(e) => {
+                  if (lockCartRecovery) { onSwitchToBilling?.(); return; }
+                  setCartRecoveryEnabled(e.target.checked);
+                }}
                 className="sr-only peer"
               />
               <div className="w-9 h-5 bg-[#181B26] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#D4AF37]"></div>

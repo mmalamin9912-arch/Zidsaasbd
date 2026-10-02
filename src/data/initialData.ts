@@ -188,6 +188,46 @@ export const initialInvoices: InvoiceRecord[] = [];
  */
 export const subscriptionPlans: SubscriptionPlan[] = [
   {
+    // Free tier is a real, admin-editable catalogue row so all THREE cards
+    // (Free Trial / Rise / Growth) render from the same source and can be
+    // edited from /admin/plans. Its flags gate what a trial merchant can use.
+    id: 'free_trial',
+    name: 'Free Trial Plan',
+    price: 0,
+    durationDays: 30,
+    badge: '',
+    displayOrder: 0,
+    monthlyPrice: 0,
+    yearlyPrice: 0,
+    annualDiscountPercent: 0,
+    maxProducts: 10,
+    featureFlags: {
+      freeSubdomain: true,
+      customDomain: false,
+      premiumThemes: false,
+      cssCustomizer: false,
+      courierApi: false,
+      courierAutoSync: false,
+      metaPixels: false,
+      googleAnalytics: false,
+      aiCaption: false,
+      aiContent: false,
+      removeBg: false,
+      aiCopilot: false,
+      whatsappRecovery: false,
+      emailSupport: false,
+      phoneSupport: false,
+      prioritySupport: false,
+    },
+    features: [
+      '10 Products',
+      'Free .zidbd.com Subdomain',
+      'Standard Themes',
+      'Limited Dashboard',
+    ],
+    isActive: true,
+  },
+  {
     id: 'starter_plan',
     name: 'Rise / Starter Plan',
     price: 1000,

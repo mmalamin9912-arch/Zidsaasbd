@@ -2,7 +2,7 @@ import React from 'react';
 import { MerchantProfile, SubscriptionRequest, InvoiceRecord, SubscriptionPlan, BillingCycle } from '../../types';
 import { subscriptionPlans, initialInvoices } from '../../data/initialData';
 import { calculateRemainingDays, getPlanDisplayName, isPaidSubscriptionActive } from '../../utils/subscriptionUtils';
-import { resolvePlanPricing, sortPlansByTier, derivePlanFeatures } from '../../lib/planPricing';
+import { resolvePlanPricing, sortPlansByTier, derivePlanFeatures, isFreeTierPlan } from '../../lib/planPricing';
 import { 
   TrendingUp, 
   Sparkles, 
@@ -64,8 +64,11 @@ export const BillingView: React.FC<BillingViewProps> = ({
       const id = String(plan?.id || '').trim().toLowerCase();
       const monthly = Number(plan?.monthlyPrice ?? plan?.price ?? 0);
       const durationDays = Number(plan?.durationDays ?? 0);
-      // A sellable plan needs an identity, a price and a duration.
-      if (!id || !Number.isFinite(monthly) || monthly <= 0) return false;
+      // A sellable plan needs an identity, a price and a duration. The
+      // Free Trial tier is priced at 0 by definition, so the positive-price
+      // rule that keeps stray tenant renewal rows out must exempt it —
+      // otherwise the trial card silently disappears from this grid.
+      if (!id || !Number.isFinite(monthly) || (monthly <= 0 && !isFreeTierPlan(id))) return false;
       if (!Number.isFinite(durationDays) || durationDays <= 0) return false;
       if (seen.has(id)) return false;
       seen.add(id);
@@ -222,7 +225,10 @@ export const BillingView: React.FC<BillingViewProps> = ({
             ) : null;
           })()}
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Three tiers live in the catalogue (Free Trial / Rise / Growth), so the
+            grid is a 3-up on wide screens instead of leaving a gap in a 4-col
+            track. It still collapses to 2 then 1 column on smaller widths. */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {visiblePlans.map((plan) => {
             const pricing = resolvePlanPricing(plan, billingCycle);
             return (
