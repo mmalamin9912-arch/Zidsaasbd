@@ -88,7 +88,12 @@ import {
   updateOrderFields,
   recordCourierDispatch,
 } from './orderStatus.js';
-import { sendRecoveryCoupon, listRecoveryLogs } from './abandonedCarts.js';
+import {
+  sendRecoveryCoupon,
+  listRecoveryLogs,
+  MESSAGE_LOGS_COLLECTION,
+  RECOVERY_TEMPLATE_PLACEHOLDERS,
+} from './abandonedCarts.js';
 import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId } from './supabaseSchema.js';
 import { sanitizeImagePayload, formatBytes } from './imagePayload.js';
 
@@ -2046,6 +2051,139 @@ app.post('/api/ai/suggest-pricing', async (req, res) => {
 });
 
 
+/**
+ * Pull a structured caption out of a Gemini response.
+ *
+ * The prompt asks for raw JSON, but models still sometimes wrap it in a markdown
+ * fence or add a sentence of preamble, so the first balanced `{…}` block is
+ * extracted rather than assuming the whole body parses. Returns null when there
+ * is no usable caption — the caller then serves the fallback copy instead of
+ * handing the merchant half a sentence.
+ */
+function parseCaptionResponse(text: string): { caption: string; hashtags: string[]; callToAction: string } | null {
+  const cleaned = String(text || '').trim();
+  if (!cleaned) return null;
+
+  const candidates = [cleaned, cleaned.match(/\{[\s\S]*\}/)?.[0] || ''];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      const caption = String(parsed?.caption || '').trim();
+      if (!caption) continue;
+
+      const hashtags = (Array.isArray(parsed?.hashtags) ? parsed.hashtags : [])
+        .map((tag: any) => String(tag || '').trim().replace(/^#+/, '#'))
+        .filter((tag: string) => /^#\S+$/.test(tag))
+        .slice(0, 12);
+
+      return {
+        caption,
+        hashtags,
+        callToAction: String(parsed?.callToAction || '').trim(),
+      };
+    } catch {
+      /* not JSON — try the next candidate */
+    }
+  }
+
+  // A model that ignored the JSON instruction still produced usable copy; take
+  // the hashtags out of the prose rather than discarding the whole answer.
+  const caption = cleaned.replace(/```[a-z]*|```/g, '').trim();
+  if (!caption) return null;
+  const hashtags = Array.from(new Set(caption.match(/#\w+/g) || [])).slice(0, 12);
+  const body = caption.replace(/#\w+/g, '').replace(/\s{2,}/g, ' ').trim();
+  if (!body) return null;
+  return { caption: body, hashtags, callToAction: '' };
+}
+
+app.post('/api/ai/generate-caption', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = (req.body || {}) as {
+    prompt?: string;
+    storeName?: string;
+    platform?: string;
+    tone?: string;
+  };
+
+  const subject = String(body.prompt || '').trim();
+  if (!subject) {
+    return res.status(400).json({ ok: false, error: 'bad_request', message: 'Describe what the post is about.' });
+  }
+
+  const platform = String(body.platform || 'facebook').trim().toLowerCase();
+  const tone = String(body.tone || 'enthusiastic and premium').trim();
+  const storeName = String(body.storeName || 'our store').trim();
+
+  // Never fail the merchant's workflow: a provider outage yields clearly-flagged
+  // fallback copy rather than a 5xx, exactly like /api/ai/suggest-pricing.
+  const fallback = {
+    ok: false,
+    caption: `${storeName} just dropped something worth a second look — ${subject}. Order while stocks last.`,
+    hashtags: ['#NewArrival', '#OnlineShopping', '#BD'],
+    callToAction: 'Order now via DM or the website.',
+    platform,
+    fallback: true,
+    error: 'server_error',
+  };
+
+  try {
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      return res.status(200).json({ ...fallback, error: 'missing_api_key' });
+    }
+
+    const prompt = [
+      `Write a promotional social media post for the online store "${storeName}".`,
+      `The post is about: ${subject}`,
+      `Platform: ${platform}. Tone: ${tone}.`,
+      'Keep the body copy under 60 words, use 2-4 tasteful emojis, and write in the',
+      'language the subject is written in.',
+      'Return ONLY JSON in exactly this shape, no prose and no markdown fence:',
+      '{"caption": string, "hashtags": string[], "callToAction": string}',
+      '`hashtags` must be 6-10 relevant tags, each starting with #, no spaces, no duplicates.',
+    ].join('\n');
+
+    for (const model of GEMINI_MODEL_CANDIDATES) {
+      try {
+        const provider = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { temperature: 0.9, maxOutputTokens: 800 },
+              systemInstruction: {
+                parts: [{ text: 'You are a senior social media strategist for a modern e-commerce brand. You always answer with raw JSON.' }],
+              },
+            }),
+            signal: AbortSignal.timeout(20000),
+          }
+        );
+        if (!provider.ok) continue;
+
+        const data: any = await provider.json();
+        const text: string =
+          data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
+        if (!text) continue;
+
+        const structured = parseCaptionResponse(text);
+        if (structured) {
+          return res.status(200).json({ ok: true, ...structured, platform, model, fallback: false });
+        }
+      } catch {
+        /* try the next model, then fall back */
+      }
+    }
+
+    return res.status(200).json(fallback);
+  } catch (error) {
+    console.warn('[Server] POST /api/ai/generate-caption provider failure; using fallback:', error);
+    return res.status(200).json(fallback);
+  }
+});
+
 app.all('/api/categories', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -3460,6 +3598,37 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       return null;
     });
 
+    // ── Growth Engine tracking pixels ──
+    // The Growth page is the primary place a merchant configures Meta/TikTok/GA4,
+    // so its IDs are folded into the `integrationsConfig` the storefront already
+    // hands `useStorefrontTracking`. An ID saved in Settings still wins; the
+    // Growth value only fills a gap. Secrets are not read here — the storefront
+    // only ever needs the public identifiers.
+    const growthConfig = await readStoreConfig('growth', slug).catch((growthErr: any) => {
+      console.warn('[Server] storefront growthConfig warning:', growthErr?.message || growthErr);
+      return null;
+    });
+
+    let storefrontMerchant: any = merchantRecord;
+    if (merchantRecord && growthConfig) {
+      const base: Record<string, any> =
+        (merchantRecord.integrationsConfig && typeof merchantRecord.integrationsConfig === 'object')
+          ? merchantRecord.integrationsConfig
+          : {};
+      const injected: Record<string, any> = {};
+      if (!base.fbPixelId && growthConfig.fbPixelId) injected.fbPixelId = growthConfig.fbPixelId;
+      if (!base.tiktokPixelId && growthConfig.tiktokPixelId) injected.tiktokPixelId = growthConfig.tiktokPixelId;
+      if (!base.ga4MeasurementId && growthConfig.ga4MeasurementId) {
+        injected.ga4MeasurementId = growthConfig.ga4MeasurementId;
+      }
+      if (Object.keys(injected).length) {
+        storefrontMerchant = {
+          ...merchantRecord,
+          integrationsConfig: { ...base, ...injected },
+        };
+      }
+    }
+
     // ── Online Store modules (brand / navigation / pages / blog / FAQ / SEO) ──
     // Read through the same normalisers the dashboard writes with, so the
     // customer storefront renders exactly what the merchant configured and a
@@ -3483,7 +3652,7 @@ app.get('/api/storefront/:slug?', async (req, res) => {
     ]);
 
     const storefront = {
-      merchant: merchantRecord,
+      merchant: storefrontMerchant,
       products: storeProducts,
       categories: Array.isArray(payload.categories) ? payload.categories : [],
       themes: Array.isArray(payload.themes) ? payload.themes : [],
@@ -7156,6 +7325,7 @@ function normalizeIntegrationsConfig(raw: any, fallback: Record<string, any> = {
 
     fbPixelId: cfgStr(src.fbPixelId, fallback.fbPixelId),
     fbCapiToken: cfgStr(src.fbCapiToken, fallback.fbCapiToken),
+    tiktokPixelId: cfgStr(src.tiktokPixelId, fallback.tiktokPixelId),
     ga4MeasurementId: cfgStr(src.ga4MeasurementId, fallback.ga4MeasurementId),
     ga4ApiSecret: cfgStr(src.ga4ApiSecret, fallback.ga4ApiSecret),
 
@@ -7164,6 +7334,82 @@ function normalizeIntegrationsConfig(raw: any, fallback: Record<string, any> = {
 
     orderWebhookUrl: cfgStr(src.orderWebhookUrl, fallback.orderWebhookUrl),
     webhookSecret: cfgStr(src.webhookSecret, fallback.webhookSecret),
+  };
+}
+
+/**
+ * Sanitise the Growth Engine settings (tracking pixels + WhatsApp cart recovery).
+ *
+ * THE PROBLEM
+ * -----------
+ * The Growth page kept every one of its inputs in React `useState`, so a merchant
+ * configured a Meta Pixel, a WhatsApp provider key and a recovery message and all
+ * of it vanished on reload — nothing was ever written anywhere, so the storefront
+ * had no pixel to inject and the "auto-recovery" could never send a message.
+ *
+ * THIS CONFIG
+ * -----------
+ * It is persisted two ways (see the `growth` entry in `storeConfigs`):
+ *   • on the store record as `growthConfig` — the source the dashboard and the
+ *     storefront read,
+ *   • mirrored into the `store_settings` collection as `growth_tools` so an
+ *     external tag manager or automation worker can read the tracking IDs and
+ *     the recovery template without knowing the store document's schema.
+ *
+ * `whatsappApiKey` is a write-only credential: it is stored but redacted on every
+ * read (see `redactGrowthSecrets`).
+ */
+const DEFAULT_RECOVERY_TEMPLATE =
+  "Hi {{name}}! 👋\n\n" +
+  'You left your *{{itemName}}* in your cart at {{storeName}} — we saved it for you.\n\n' +
+  '👉 Coupon code: *{{couponCode}}* ({{discount}})\n' +
+  'Offer expires {{expiresAt}}.\n\n' +
+  'Reply to this message or visit the store to complete your order.';
+
+function normalizeGrowthConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+
+  // The template may arrive under the Growth page's own field name.
+  const template = cfgStr(
+    src.whatsappRecoveryTemplate ?? src.messageTemplate,
+    fallback.whatsappRecoveryTemplate,
+  );
+
+  return {
+    // Tracking pixels — non-secret identifiers, injected into the storefront.
+    fbPixelId: cfgStr(src.fbPixelId ?? src.pixelId, fallback.fbPixelId),
+    tiktokPixelId: cfgStr(src.tiktokPixelId, fallback.tiktokPixelId),
+    ga4MeasurementId: cfgStr(src.ga4MeasurementId ?? src.ga4Id, fallback.ga4MeasurementId),
+    seoOptimized: cfgBool(src.seoOptimized, fallback.seoOptimized ?? true),
+
+    // WhatsApp abandoned-cart auto-recovery.
+    whatsappRecoveryEnabled: cfgBool(src.whatsappRecoveryEnabled, fallback.whatsappRecoveryEnabled),
+    whatsappApiKey: cfgStr(src.whatsappApiKey, fallback.whatsappApiKey),
+    whatsappInstanceId: cfgStr(src.whatsappInstanceId, fallback.whatsappInstanceId),
+    // An emptied template must fall back to working prose — an empty recovery
+    // message would send a blank WhatsApp bubble.
+    whatsappRecoveryTemplate: template.trim() || DEFAULT_RECOVERY_TEMPLATE,
+    /** Headline offer baked into the template's `{{discount}}` placeholder. */
+    whatsappDiscountPercent: cfgNumOrNull(
+      src.whatsappDiscountPercent,
+      fallback.whatsappDiscountPercent ?? 10,
+      { min: 1, max: 90 },
+    ) ?? 10,
+  };
+}
+
+/**
+ * Redact the write-only WhatsApp credential before the config leaves the server.
+ *
+ * The browser only needs to know a key IS set (so the field can show "saved"),
+ * never its value. `normalizeGrowthConfig` treats '••' as "keep the stored value",
+ * so a redacted config round-tripped back through a save cannot erase the key.
+ */
+function redactGrowthSecrets(config: Record<string, any>) {
+  if (!config) return config;
+  return {
+    ...config,
+    whatsappApiKey: config.whatsappApiKey ? '••' : '',
   };
 }
 
@@ -7353,6 +7599,17 @@ const storeConfigs = {
     legacyKeys: ['courier_config'],
     cache: new Map<string, Record<string, any>>(),
     normalize: normalizeCourierConfig,
+    settingsKey: 'courier_config',
+  },
+  // Growth Engine (tracking pixels + WhatsApp cart-recovery credentials).
+  // Mirrored into `store_settings` as `growth_tools` for the same reason as the
+  // courier credentials: an external tag manager / automation worker needs the
+  // tracking IDs and the recovery template without the store document schema.
+  growth: {
+    key: 'growthConfig',
+    cache: new Map<string, Record<string, any>>(),
+    normalize: normalizeGrowthConfig,
+    settingsKey: 'growth_tools',
   },
 } as const;
 
@@ -7431,20 +7688,22 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
     console.warn(`[Server] ${key} mongo persist warning:`, err?.message || err);
   }
 
-  // 1b. Courier credentials are additionally mirrored into the `store_settings`
-  //     collection as `courier_config`, so an external integrator (or the
-  //     dispatch worker) can read the connection state and sandbox flag without
-  //     having to know the store document's schema.
-  if (name === 'courier') {
+  // 1b. Some configs are ALSO mirrored into the `store_settings` collection
+  //     (keyed `{store_slug, key, value, updated_at}`), so an external
+  //     integrator — a tag manager, a dispatch worker, an automation job — can
+  //     read the connection state without having to know the store document's
+  //     schema. Only configs declaring `settingsKey` are mirrored.
+  const settingsKey = (storeConfigs[name] as { settingsKey?: string }).settingsKey;
+  if (settingsKey) {
     try {
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
         await (mongoose.connection.db.collection('store_settings') as any).updateOne(
-          { store_slug: slug, key: 'courier_config' },
+          { store_slug: slug, key: settingsKey },
           {
             $set: {
               store_slug: slug,
-              key: 'courier_config',
+              key: settingsKey,
               value: next,
               updated_at: new Date().toISOString(),
             },
@@ -7453,7 +7712,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
         );
       }
     } catch (settingsErr: any) {
-      console.warn('[Server] store_settings.courier_config mirror warning:', settingsErr?.message || settingsErr);
+      console.warn(`[Server] store_settings.${settingsKey} mirror warning:`, settingsErr?.message || settingsErr);
     }
   }
 
@@ -8190,6 +8449,132 @@ const saveIntegrationProperties = async (req: any, res: any) => {
 
 app.post('/api/store/integration-properties', saveIntegrationProperties);
 app.put('/api/store/integration-properties', saveIntegrationProperties);
+
+/* ────────────────────────────
+ * Growth Engine — tracking pixels + WhatsApp cart recovery
+ * ---------------------------------------------------------------------------
+ * Everything the Growth page collects used to live in component state, so a
+ * reload threw it away and the storefront had no pixel to inject. It is now the
+ * same store-record + `store_settings` mirror path every other settings panel
+ * uses (see the `growth` entry in `storeConfigs`).
+ */
+app.get('/api/store/growth-tools', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.storeSlug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const growthConfig = await readStoreConfig('growth', storeRef);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      growthConfig: redactGrowthSecrets(growthConfig),
+      // Echoed so the editor can show the merchant exactly which tokens render.
+      templatePlaceholders: RECOVERY_TEMPLATE_PLACEHOLDERS,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/growth-tools error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load Growth settings.' });
+  }
+});
+
+const saveGrowthTools = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const patch: Record<string, any> = { ...(body.growthConfig || body.growth || body) };
+    // Drop the redaction placeholder so a save that round-trips exactly what the
+    // form displayed cannot overwrite the real provider token with '••'.
+    if (patch.whatsappApiKey === '••') delete patch.whatsappApiKey;
+
+    const growthConfig = await writeStoreConfig('growth', storeRef, patch);
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      growthConfig: redactGrowthSecrets(growthConfig),
+      templatePlaceholders: RECOVERY_TEMPLATE_PLACEHOLDERS,
+      message: 'Growth settings saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/growth-tools error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save Growth settings.' });
+  }
+};
+
+app.post('/api/store/growth-tools', saveGrowthTools);
+app.put('/api/store/growth-tools', saveGrowthTools);
+
+/**
+ * GET /api/store/growth-tools/recovered-sales — the headline number on the
+ * Growth page.
+ *
+ * Counts the carts the merchant actually recovered this calendar month and sums
+ * what they were worth, so the "Recovered Sales This Month" figure is a real
+ * aggregate instead of a hardcoded zero.
+ */
+app.get('/api/store/growth-tools/recovered-sales', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.storeSlug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const empty = { recoveredCarts: 0, recoveredSalesBDT: 0, deliveredMessages: 0, from: monthStart.toISOString() };
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(200).json({ ok: false, ...empty, error: 'MongoDB is unavailable.' });
+    }
+
+    const db = mongoose.connection.db as any;
+    const storeFilter: Record<string, any> = {
+      $or: [{ store_slug: storeRef }, { storeSlug: storeRef }],
+    };
+
+    // Carts marked recovered by `sendRecoveryCoupon`, plus the messages that
+    // actually went out — the two numbers tell different halves of the story
+    // (a recovered cart whose WhatsApp send failed is worth surfacing).
+    const [carts, messages] = await Promise.all([
+      db.collection('abandoned_carts')
+        .find({ ...storeFilter, status: 'recovered', recovered_at: { $gte: monthStart } })
+        .toArray()
+        .catch((e: any) => {
+          console.warn('[Server] recovered-sales cart query warning:', e?.message || e);
+          return [] as any[];
+        }),
+      db.collection(MESSAGE_LOGS_COLLECTION)
+        .countDocuments({ ...storeFilter, status: 'sent', sent_at: { $gte: monthStart } })
+        .catch((e: any) => {
+          console.warn('[Server] recovered-sales message query warning:', e?.message || e);
+          return 0;
+        }),
+    ]);
+
+    const recoveredSalesBDT = carts.reduce((sum: number, cart: any) => {
+      const value = Number(cart?.total_price ?? cart?.totalPrice ?? cart?.cart_value ?? 0);
+      return sum + (Number.isFinite(value) ? value : 0);
+    }, 0);
+
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      recoveredCarts: carts.length,
+      recoveredSalesBDT: Math.round(recoveredSalesBDT),
+      deliveredMessages: Number(messages) || 0,
+      from: monthStart.toISOString(),
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/growth-tools/recovered-sales error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not read recovered sales.' });
+  }
+});
 
 /* ────────────────────────────
  * App Market — merchant_integrations persistence
@@ -9895,6 +10280,25 @@ app.post('/api/abandoned-carts/:cartId/recovery', async (req, res) => {
   }
 
   const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+  const storeRef = cleanStoreRef(body.storeSlug ?? body.store_slug ?? body.storeRef ?? '');
+
+  // The merchant's own copy + provider credentials, saved in Growth. Without
+  // these the route falls back to the built-in prose and a wa.me link; with
+  // them the message actually leaves the building.
+  let growth: Record<string, any> | null = null;
+  if (storeRef) {
+    growth = await readStoreConfig('growth', storeRef).catch((growthErr: any) => {
+      console.warn('[Server] recovery growthConfig warning:', growthErr?.message || growthErr);
+      return null as any;
+    });
+  }
+  // An explicit `autoSend` from the caller always wins (it is how the merchant's
+  // "automatic sending" switch is expressed), otherwise follow the saved setting.
+  const autoSend = typeof body.autoSend === 'boolean'
+    ? body.autoSend
+    : growth
+      ? Boolean(growth.whatsappRecoveryEnabled)
+      : true;
 
   try {
     const result = await sendRecoveryCoupon({
@@ -9903,13 +10307,17 @@ app.post('/api/abandoned-carts/:cartId/recovery', async (req, res) => {
       customerPhone: body.customerPhone ?? body.customer_phone ?? body.phone ?? '',
       itemName: body.itemName ?? body.item_name ?? body.productName ?? '',
       storeName: body.storeName ?? body.store_name,
-      storeSlug: body.storeSlug ?? body.store_slug ?? body.storeRef ?? '',
+      storeSlug: storeRef,
       merchantId: body.merchantId ?? body.merchant_id ?? '',
-      discountValue: body.discountValue ?? body.discount_value ?? 10,
+      discountValue: body.discountValue ?? body.discount_value ?? growth?.whatsappDiscountPercent ?? 10,
       discountType: body.discountType === 'fixed' ? 'fixed' : 'percentage',
       minOrderValue: body.minOrderValue ?? body.min_order_value ?? 0,
       maxDiscount: body.maxDiscount ?? body.max_discount ?? null,
       validDays: body.validDays ?? body.valid_days ?? 7,
+      template: growth?.whatsappRecoveryTemplate,
+      whatsappInstanceId: growth?.whatsappInstanceId,
+      whatsappApiKey: growth?.whatsappApiKey,
+      autoSend,
     });
 
     // Always 200 with a shaped body — the client still needs the link when the
@@ -9925,6 +10333,7 @@ app.post('/api/abandoned-carts/:cartId/recovery', async (req, res) => {
       error: result.error ?? null,
       persisted: Boolean(result.persisted),
       supabaseSynced: Boolean(result.supabaseSynced),
+      delivery: result.delivery ?? null,
     });
   } catch (err: any) {
     console.error('[Server] POST /api/abandoned-carts/:cartId/recovery error:', err);

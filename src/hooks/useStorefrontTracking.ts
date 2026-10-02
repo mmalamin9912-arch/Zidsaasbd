@@ -8,6 +8,7 @@ export interface StorefrontTrackingConfig {
   fbPixelId?: string;
   /** Reserved for server-side Conversions API calls; never exposed client-side. */
   fbCapiToken?: string;
+  tiktokPixelId?: string;
   ga4MeasurementId?: string;
   ga4ApiSecret?: string;
 }
@@ -61,6 +62,28 @@ function injectMetaPixel(pixelId: string): void {
 }
 
 /**
+ * Inject the TikTok Pixel loader and queue an initial PageView.
+ *
+ * Mirrors the Meta bootstrap approach: the inlined `ttq` queue means events
+ * fired before TikTok's remote script arrives are still captured.
+ */
+function injectTikTokPixel(pixelId: string): void {
+  if (typeof window === 'undefined') return;
+
+  const w = window as unknown as { ttq?: any[] };
+  w.ttq = w.ttq || [];
+
+  injectScript('tiktok-pixel', () => {
+    const el = document.createElement('script');
+    el.src = 'https://analytics.tiktok.com/i18n/pixel/events.js';
+    return el;
+  });
+
+  w.ttq.push(['init', pixelId]);
+  w.ttq.push(['track', 'PageView']);
+}
+
+/**
  * Inject Google Analytics 4 (gtag.js) and configure the data stream.
  *
  * `ga4ApiSecret` is deliberately NOT used here — it is a write-only credential
@@ -96,12 +119,14 @@ function injectGa4(measurementId: string): void {
  */
 export function useStorefrontTracking(config?: StorefrontTrackingConfig | null): void {
   const pixelId = config?.fbPixelId;
+  const tiktokPixelId = config?.tiktokPixelId;
   const ga4Id = config?.ga4MeasurementId;
 
   useEffect(() => {
     if (isSet(pixelId)) injectMetaPixel(String(pixelId).trim());
+    if (isSet(tiktokPixelId)) injectTikTokPixel(String(tiktokPixelId).trim());
     if (isSet(ga4Id)) injectGa4(String(ga4Id).trim());
-  }, [pixelId, ga4Id]);
+  }, [pixelId, tiktokPixelId, ga4Id]);
 }
 
 export default useStorefrontTracking;

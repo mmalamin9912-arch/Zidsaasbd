@@ -62,6 +62,44 @@ export interface RecoveryResult {
   /** Set when the DB write failed but a usable fallback still exists. */
   persisted?: boolean;
   supabaseSynced?: boolean;
+  /** Whether the message actually left the building via the provider. */
+  delivery?: WhatsAppDispatchResult;
+}
+
+/**
+ * Placeholders a merchant-authored recovery template may use.
+ *
+ * Surfaced to the Growth page as the helper text under the template editor so
+ * the merchant knows exactly which tokens are substituted.
+ */
+export const RECOVERY_TEMPLATE_PLACEHOLDERS = [
+  'name',
+  'storeName',
+  'itemName',
+  'couponCode',
+  'discount',
+  'expiresAt',
+] as const;
+
+/**
+ * Fill a merchant-authored WhatsApp template.
+ *
+ * The Growth page lets a merchant write their own copy (`{{name}}`,
+ * `{{storeName}}`, …) so the message reads like their brand instead of the
+ * built-in prose. An UNKNOWN placeholder is left verbatim rather than blanked —
+ * a silent deletion would hide a typo, whereas `{{coupnCode}}` left in the
+ * preview is immediately obvious.
+ */
+export function renderRecoveryTemplate(
+  template: string,
+  vars: Record<string, string>
+): string {
+  const text = String(template || '').trim();
+  if (!text) return '';
+  return text.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key: string) => {
+    const value = vars[key];
+    return value === undefined || value === null ? match : value;
+  });
 }
 
 /** Build the recovery message body carrying the REAL coupon code. */
@@ -70,12 +108,28 @@ export function buildRecoveryMessage(input: {
   itemName: string;
   storeName?: string;
   coupon: RecoveryCoupon;
+  /** Optional merchant-authored template; the built-in prose is the fallback. */
+  template?: string;
 }): string {
-  const { customerName, itemName, storeName, coupon } = input;
+  const { customerName, itemName, storeName, coupon, template } = input;
   const offer =
     coupon.discountType === 'percentage'
       ? `${coupon.discountValue}% OFF`
       : `৳${coupon.discountValue} OFF`;
+
+  const rendered = renderRecoveryTemplate(String(template || ''), {
+    name: customerName || 'Customer',
+    customerName: customerName || 'Customer',
+    itemName: itemName || 'item',
+    storeName: storeName || 'our store',
+    couponCode: coupon.code,
+    code: coupon.code,
+    discount: offer,
+    expiresAt: coupon.expiresAt,
+  });
+  // A merchant template always wins — but an empty one falls through to the
+  // built-in copy so a recovery message is never sent as a blank bubble.
+  if (rendered) return rendered;
 
   return (
     `Hi ${customerName}! 👋\n\n` +
@@ -89,22 +143,130 @@ export function buildRecoveryMessage(input: {
   );
 }
 
+/**
+ * Normalise a customer phone number to the bare, country-prefixed form wa.me and
+ * every WhatsApp provider expect. '017…' must become '88017…' or the chat opens
+ * with the wrong contact.
+ */
+export function normalizeWhatsAppPhone(rawPhone: string): string {
+  let digits = String(rawPhone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('880')) return digits;
+  if (digits.length === 10 && digits.startsWith('0')) return `880${digits.slice(1)}`;
+  if (digits.length === 10) return `880${digits}`;
+  if (digits.length === 11 && digits.startsWith('0')) return `880${digits.slice(1)}`;
+  return digits;
+}
+
 /** Build a `wa.me` click-to-chat link. Always returns a usable URL. */
 export function buildWhatsAppLink(phone: string, message: string): string {
-  // wa.me requires a bare, country-prefixed number. '017…' must become
-  // '88017…' or the link silently opens a chat with the wrong contact.
-  let digits = String(phone || '').replace(/\D/g, '');
+  const digits = normalizeWhatsAppPhone(phone);
   if (!digits) return `https://wa.me/?text=${encodeURIComponent(message)}`;
-  if (digits.startsWith('880')) {
-    // already country-prefixed
-  } else if (digits.length === 10 && digits.startsWith('0')) {
-    digits = `880${digits.slice(1)}`;
-  } else if (digits.length === 10) {
-    digits = `880${digits}`;
-  } else if (digits.length === 11 && digits.startsWith('0')) {
-    digits = `880${digits.slice(1)}`;
-  }
   return `https://wa.me/${digits}?text=${encodeURIComponent(message)}`;
+}
+
+/* ────────────────────────── live WhatsApp dispatch ────────────────────────── */
+
+export interface WhatsAppDispatchInput {
+  phone: string;
+  message: string;
+  /** Provider instance id saved in Growth (UltraMsg semantics). */
+  instanceId?: string;
+  /** Provider access token saved in Growth. */
+  apiKey?: string;
+}
+
+export interface WhatsAppDispatchResult {
+  /** False when no credentials are saved, so nothing was sent. */
+  attempted: boolean;
+  sent: boolean;
+  provider: 'ultramsg' | 'manual_link';
+  details?: string;
+  error?: string;
+}
+
+/**
+ * Actually SEND the recovery message through the merchant's WhatsApp provider.
+ *
+ * The Growth page saves an instance id + API key; those are UltraMsg
+ * credentials (`instanceId` = `Instance ID`, `apiKey` = `Token`). Without them
+ * the merchant gets a `wa.me` link instead — so this never throws and never
+ * blocks recovery on a provider outage.
+ */
+export async function dispatchRecoveryWhatsApp(
+  input: WhatsAppDispatchInput
+): Promise<WhatsAppDispatchResult> {
+  const instanceId = String(input.instanceId || '').trim();
+  const apiKey = String(input.apiKey || '').trim();
+  const phone = normalizeWhatsAppPhone(input.phone);
+
+  if (!instanceId || !apiKey) {
+    return {
+      attempted: false,
+      sent: false,
+      provider: 'manual_link',
+      error: 'WhatsApp credentials are not configured for this store.',
+    };
+  }
+  if (!phone) {
+    return {
+      attempted: false,
+      sent: false,
+      provider: 'manual_link',
+      error: 'A customer phone number is required.',
+    };
+  }
+
+  // A provider that accepts the socket and never answers would otherwise hang the
+  // merchant's request forever, so the attempt gets a hard deadline.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const providerRes = await fetch(
+      `https://api.ultramsg.com/${encodeURIComponent(instanceId)}/messages/chat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          token: apiKey,
+          to: phone,
+          body: String(input.message || ''),
+        }),
+        signal: controller.signal,
+      }
+    );
+
+    const data: any = await providerRes.json().catch(() => ({}));
+    const accepted =
+      String(data?.status || '').toLowerCase() === 'true' || Boolean(data?.id);
+
+    if (!providerRes.ok || !accepted) {
+      return {
+        attempted: true,
+        sent: false,
+        provider: 'ultramsg',
+        error: data?.message || `The WhatsApp provider returned ${providerRes.status}.`,
+      };
+    }
+    return {
+      attempted: true,
+      sent: true,
+      provider: 'ultramsg',
+      details: data?.id ? `Message ID ${data.id}` : 'Accepted by the WhatsApp provider.',
+    };
+  } catch (err: any) {
+    return {
+      attempted: true,
+      sent: false,
+      provider: 'ultramsg',
+      error:
+        err?.name === 'AbortError'
+          ? 'The WhatsApp provider did not respond within 15s.'
+          : err?.message || 'The WhatsApp provider could not be reached.',
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /* ────────────────────────── Supabase mirror ────────────────────────── */
@@ -179,6 +341,13 @@ export interface SendRecoveryInput {
   maxDiscount?: number | null;
   /** Validity window in days; defaults to 7. */
   validDays?: number;
+  /** Merchant-authored message template saved in the Growth page. */
+  template?: string;
+  /** WhatsApp provider credentials saved in the Growth page. */
+  whatsappInstanceId?: string;
+  whatsappApiKey?: string;
+  /** false mints the coupon and returns the link without dispatching. */
+  autoSend?: boolean;
 }
 
 /**
@@ -218,8 +387,32 @@ export async function sendRecoveryCoupon(
     itemName,
     storeName: input.storeName,
     coupon,
+    template: input.template,
   });
   const whatsappLink = buildWhatsAppLink(rawPhone, message);
+
+  // Push the message through the merchant's own WhatsApp provider when one is
+  // configured. This is the "automated" in auto-recovery — without credentials
+  // the result degrades to a wa.me link and `delivery.attempted` stays false, so
+  // the merchant can see the message was NOT actually sent.
+  const delivery =
+    input.autoSend === false
+      ? ({
+          attempted: false,
+          sent: false,
+          provider: 'manual_link',
+          error: 'Automatic WhatsApp sending is switched off for this store.',
+        } as WhatsAppDispatchResult)
+      : await dispatchRecoveryWhatsApp({
+          phone: rawPhone,
+          message,
+          instanceId: input.whatsappInstanceId,
+          apiKey: input.whatsappApiKey,
+        });
+
+  if (delivery.attempted && !delivery.sent) {
+    console.warn('[AbandonedCarts] WhatsApp dispatch failed:', delivery.error);
+  }
 
   const now = new Date();
   const couponRow = {
@@ -251,9 +444,13 @@ export async function sendRecoveryCoupon(
     recipient_phone: rawPhone,
     message_body: message,
     coupon_code: coupon.code,
-    status: 'sent',
-    provider: 'manual_link',
-    sent_at: now,
+    // 'pending' means the merchant still has to tap the wa.me link; 'failed'
+    // means the provider was tried and refused, which is worth surfacing.
+    status: delivery.sent ? 'sent' : delivery.attempted ? 'failed' : 'pending',
+    provider: delivery.provider,
+    delivery_details: delivery.details || null,
+    delivery_error: delivery.error || null,
+    sent_at: delivery.sent ? now : null,
     created_at: now,
   };
 
@@ -324,9 +521,14 @@ export async function sendRecoveryCoupon(
     whatsappLink,
     persisted,
     supabaseSynced,
-    message: persisted
-      ? `Recovery coupon ${coupon.code} created and logged for ${name}.`
-      : `${error || 'The coupon was generated but not saved.'} Send it manually with code ${coupon.code}.`,
+    delivery,
+    message: !persisted
+      ? `${error || 'The coupon was generated but not saved.'} Send it manually with code ${coupon.code}.`
+      : delivery.sent
+        ? `Recovery coupon ${coupon.code} sent to ${name} on WhatsApp.`
+        : delivery.error
+          ? `Recovery coupon ${coupon.code} created and logged for ${name}, but the message was not delivered (${delivery.error}).`
+          : `Recovery coupon ${coupon.code} created and logged for ${name}.`,
   };
 }
 
@@ -367,6 +569,10 @@ export default {
   listRecoveryLogs,
   buildRecoveryMessage,
   buildWhatsAppLink,
+  renderRecoveryTemplate,
+  dispatchRecoveryWhatsApp,
+  normalizeWhatsAppPhone,
+  RECOVERY_TEMPLATE_PLACEHOLDERS,
   COUPONS_COLLECTION,
   MESSAGE_LOGS_COLLECTION,
 };
