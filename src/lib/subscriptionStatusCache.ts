@@ -300,6 +300,11 @@ export function peekSubscriptionStatus(
  * available, preferring the authoritative DB status when we have it and falling
  * back to the plan id, so an approved store is never shown a paywall it has
  * already paid for.
+ *
+ * IMPORTANT — this answers "not on trial", NOT "is on the top tier".
+ * `starter_plan` is a real paid tier, so this returns true for a Starter store.
+ * Any capability sold as Pro-only MUST gate on `isGrowthTierPlan` instead;
+ * using this there would grant the paid feature to the ৳1000 tier.
  */
 export function isProAccessGranted(
   planId: string | null | undefined,

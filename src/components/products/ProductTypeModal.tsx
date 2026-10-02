@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ProductType, MerchantProfile } from '../../types';
-import {  isProAccessGranted, peekSubscriptionStatus } from '../../lib/subscriptionStatusCache';
+import {  peekSubscriptionStatus } from '../../lib/subscriptionStatusCache';
+import { isGrowthTierPlan } from '../../lib/planPricing';
 import {
   Package,
   Boxes,
@@ -58,10 +59,14 @@ export const ProductTypeModal: React.FC<ProductTypeModalProps> = ({
   // So an approved Pro store renders "PRO UNLOCKED" immediately and stays that
   // way, because every consumer now reads the same cached value.
   const cachedStatus = peekSubscriptionStatus(merchant?.email, merchant?.storeSlug || merchant?.storeName);
-  const isProPlanActive = isProAccessGranted(
-    cachedStatus?.planId ?? merchant?.subscriptionPlan,
-    cachedStatus?.status
-  );
+  // Grouped/voucher/digital/bundle product types are Pro-ONLY capabilities, so
+  // they gate on the TOP TIER. `isProAccessGranted` means "not on trial" and
+  // would return true for `starter_plan`, handing a paid feature to the entry
+  // tier. An explicit ACTIVE DB status is still honoured first, so an approved
+  // store never regresses to locked.
+  const dbStatus = String(cachedStatus?.status || '').toUpperCase();
+  const isProPlanActive = dbStatus === 'ACTIVE'
+    || isGrowthTierPlan(cachedStatus?.planId ?? merchant?.subscriptionPlan);
 
   if (!isOpen) return null;
 

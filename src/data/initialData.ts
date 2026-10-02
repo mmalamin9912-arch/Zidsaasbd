@@ -167,50 +167,49 @@ export const initialCoupons: DiscountCoupon[] = [];
 export const initialInvoices: InvoiceRecord[] = [];
 
 /**
- * Default plan catalogue — a Bangladesh-market SaaS ladder.
+ * Client-side FALLBACK plan catalogue.
  *
- * Structure: Starter → Growth → Pro → Enterprise. `displayOrder` (10/20/30/40)
- * is what renders the grid left-to-right; `sortPlansByTier` applies it.
- *
- * TIER DIFFERENCES ARE DELIBERATE AND NON-OVERLAPPING.
- * Each tier lists only what it uniquely grants, so no bullet appears on two
- * cards:
- *   Starter    — 50 products, free subdomain, standard themes, basic courier, email support
- *   Growth     — 500 products, custom .com, premium themes, Meta+GA tracking, AI caption, phone support
- *   Pro        — unlimited products, all themes + CSS customizer, full AI suite, WhatsApp recovery, 24/7 VIP
- *   Enterprise — the Pro capability set on the longest term
+ * This is NOT the source of truth — `DEFAULT_PLANS` in lib/subscriptionStore.ts
+ * is, and `listSubscriptionPlans` force-overwrites MongoDB from it on every
+ * read. This array only renders while `/api/plans` is still in flight or if it
+ * fails, so it MUST stay byte-identical to the seed: same ids, displayOrder,
+ * prices, badge and feature lists. It previously drifted to `rise`/`growth` with
+ * displayOrder 10/20 while the database served `starter_plan`/`growth_plan` at
+ * 1/2, so a merchant who hit the fallback submitted a purchase for a plan id
+ * that does not exist in the catalogue.
  *
  * `features` is the prose the card renders (see `derivePlanFeatures`); the
- * `featureFlags` next to it are the machine-readable entitlements the Super
- * Admin toggles. Keep the two in step when editing either.
+ * `featureFlags` beside it are the machine-readable entitlements. Keep the two
+ * in step when editing either.
  *
- * PRICING
  * `price` + `durationDays` are the legacy single-term pair kept for older
- * readers and deliberately NOT user-facing: the term a merchant buys is chosen
- * with the Monthly/Yearly toggle, so a hardcoded term in the plan name or card
- * would contradict the price they are being quoted. The UI quotes
- * `monthlyPrice` / `yearlyPrice` through src/lib/planPricing.ts.
+ * readers and deliberately NOT user-facing: the term is chosen with the
+ * Monthly/Yearly toggle, so the UI quotes `monthlyPrice` / `yearlyPrice`.
  */
 export const subscriptionPlans: SubscriptionPlan[] = [
   {
-    id: 'rise',
+    id: 'starter_plan',
     name: 'Rise / Starter Plan',
     price: 1000,
     durationDays: 30,
     badge: '',
-    displayOrder: 10,
+    displayOrder: 1,
     monthlyPrice: 1000,
+    yearlyPrice: 9600,
+    annualDiscountPercent: 20,
     maxProducts: 100,
     featureFlags: {
       freeSubdomain: true,
-      customDomain: true,
+      customDomain: false,
       premiumThemes: false,
       cssCustomizer: false,
       courierApi: true,
       courierAutoSync: false,
       metaPixels: false,
       googleAnalytics: false,
-      aiCaption: false,
+      // The card advertises "Basic AI Tools", so the flag backing it must be
+      // set — otherwise the entitlement gate denies the feature the tier sells.
+      aiCaption: true,
       aiContent: false,
       removeBg: false,
       aiCopilot: false,
@@ -228,13 +227,15 @@ export const subscriptionPlans: SubscriptionPlan[] = [
     isActive: true,
   },
   {
-    id: 'growth',
+    id: 'growth_plan',
     name: 'Growth / Pro Plan',
     price: 2500,
     durationDays: 30,
-    badge: '',
-    displayOrder: 20,
+    badge: 'MOST POPULAR',
+    displayOrder: 2,
     monthlyPrice: 2500,
+    yearlyPrice: 24000,
+    annualDiscountPercent: 20,
     maxProducts: 0,
     featureFlags: {
       freeSubdomain: true,

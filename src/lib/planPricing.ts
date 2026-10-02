@@ -281,6 +281,62 @@ export const FEATURE_FLAG_LABELS: Array<{ key: keyof PlanFeatureFlags; label: st
   { key: 'prioritySupport', label: 'Priority 24/7 VIP support' },
 ];
 
+/**
+ * THE TWO PAID TIERS.
+ *
+ * Entitlement gates must NOT compare a raw plan-id string inline. When the
+ * catalogue was rebuilt around `starter_plan` / `growth_plan`, every
+ * `plan === 'pro_6m'` check silently inverted its meaning:
+ *   - `SingleProductForm` treated `starter_plan` as Pro (Starter unlocked Pro
+ *     AI tools on a ৳1000 plan), because its old guard excluded `starter_3m`.
+ *   - `MarketingView` treated `growth_plan` as non-Pro, so merchants paying
+ *     ৳2500 lost the Pro apps they had bought.
+ * A tier change is therefore a data change, not a code change — which is why
+ * membership is resolved here, from the id alone, in one place.
+ *
+ * The retired ids are retained so merchants ALREADY subscribed under them keep
+ * the tier they paid for instead of being silently demoted.
+ */
+export const PLAN_TIERS = {
+  /** Free / trial — nothing unlocked. */
+  free: ['free_trial', 'trial', 'free', ''],
+  /** Rise / Starter — the entry paid tier. */
+  starter: ['starter_plan', 'starter_1m', 'starter_3m', 'rise'],
+  /** Growth / Pro — the top tier. */
+  growth: ['growth_plan', 'pro_6m', 'enterprise_12m', 'growth', 'pro', 'enterprise'],
+} as const;
+
+const tierMatches = (planId: unknown, tier: readonly string[]): boolean =>
+  tier.includes(String(planId ?? '').trim().toLowerCase());
+
+/** Top tier (Growth / Pro). Gates every "Pro" capability behind this. */
+export function isGrowthTierPlan(planId?: string | null): boolean {
+  return tierMatches(planId, PLAN_TIERS.growth);
+}
+
+/** Entry paid tier (Rise / Starter). */
+export function isStarterTierPlan(planId?: string | null): boolean {
+  return tierMatches(planId, PLAN_TIERS.starter);
+}
+
+/** Free trial — never a paid tier. */
+export function isFreeTierPlan(planId?: string | null): boolean {
+  return tierMatches(planId, PLAN_TIERS.free);
+}
+
+/**
+ * Any active paid tier (Starter or Growth).
+ *
+ * NOTE this is deliberately WEAKER than `isGrowthTierPlan`. Use the growth
+ * predicate for Pro-only capabilities; use this only where "not on trial" is
+ * genuinely the question.
+ */
+export function isPaidTierPlan(planId?: string | null): boolean {
+  const p = String(planId ?? '').trim().toLowerCase();
+  if (!p || isFreeTierPlan(p)) return false;
+  return isGrowthTierPlan(p) || isStarterTierPlan(p);
+}
+
 export default {
   resolvePlanPricing,
   sortPlansByTier,
@@ -289,6 +345,11 @@ export default {
   derivePlanFeatures,
   productLimitOf,
   productLimitLabel,
+  isGrowthTierPlan,
+  isStarterTierPlan,
+  isFreeTierPlan,
+  isPaidTierPlan,
+  PLAN_TIERS,
   FEATURE_FLAG_LABELS,
   CYCLE_DURATION_DAYS,
   DEFAULT_ANNUAL_DISCOUNT_PERCENT,

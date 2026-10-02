@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CourierService, MerchantProfile, CodConfig } from '../../types';
+import { isGrowthTierPlan } from '../../lib/planPricing';
 import SafeImage from '../SafeImage';
 import {  useToast } from '../ToastProvider';
 import {
@@ -57,7 +58,11 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
   // the whole dispatch flow without real Steadfast/Pathao/RedX credentials.
   const [sandboxMode, setSandboxMode] = useState(false);
 
-  const isPro = merchant?.subscriptionPlan !== 'trial';
+  // Courier API integration is a Growth/Pro capability (Starter ships "Basic
+  // courier integration" only). This was `!== 'trial'`, i.e. "anyone who isn't
+  // on trial", which handed the live courier API to every paid store including
+  // the entry tier once Starter became a real paid plan.
+  const isPro = isGrowthTierPlan(merchant?.subscriptionPlan);
 
   // Standard Shipping Settings State
   const [shippingForm, setShippingForm] = useState<CodConfig>(codConfig);

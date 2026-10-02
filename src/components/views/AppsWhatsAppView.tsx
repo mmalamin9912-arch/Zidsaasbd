@@ -95,7 +95,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
         iconText: 'TK',
         badge: 'Popular',
         tier: 'PRO',
-        priceLabel: 'Pro ($19/mo)',
+        priceLabel: 'Pro (৳2,500/mo)',
         isConnected: false,
         field1Label: 'TikTok Pixel ID',
         field1Value: '',
@@ -159,7 +159,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
         iconText: 'SMS',
         badge: 'BD Gateway',
         tier: 'PRO',
-        priceLabel: 'Pro ($19/mo)',
+        priceLabel: 'Pro (৳2,500/mo)',
         isConnected: false,
         field1Label: 'SMS Gateway Provider',
         field1Value: 'Greenweb BD',
@@ -175,7 +175,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
         iconText: 'bK',
         badge: 'Automated',
         tier: 'PRO',
-        priceLabel: 'Pro ($19/mo)',
+        priceLabel: 'Pro (৳2,500/mo)',
         isConnected: true,
         field1Label: 'bKash Merchant Wallet Number',
         field1Value: '+8801811992233',
@@ -365,7 +365,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
                 : 'bg-blue-500/10 text-blue-400 border-blue-500/30'
             }`}>
               {merchantPlan === 'PRO' ? <Crown className="w-3 h-3 text-amber-400" /> : <ShieldCheck className="w-3 h-3 text-blue-400" />}
-              <span>CURRENT PLAN: {merchantPlan === 'PRO' ? 'PRO PLAN ($19/MO)' : 'STANDARD FREE PLAN'}</span>
+              <span>CURRENT PLAN: {merchantPlan === 'PRO' ? 'PRO PLAN (৳2,500/MO)' : 'STANDARD FREE PLAN'}</span>
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-white flex items-center gap-2">
@@ -534,14 +534,14 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
               </div>
               <h3 className="text-xl font-black text-white">Upgrade Required</h3>
               <p className="text-xs text-slate-300 leading-relaxed pt-1">
-                This is a Pro Integration. Upgrade your account to Pro Plan ($19/mo) to unlock Bulk SMS & bKash Auto-Verification.
+                This is a Pro Integration. Upgrade your account to Pro Plan (৳2,500/mo) to unlock Bulk SMS & bKash Auto-Verification.
               </p>
             </div>
 
             <div className="p-4 bg-[#13161F] rounded-2xl border border-[#2E3548] space-y-2 text-xs">
               <div className="font-bold text-slate-200 flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-amber-400" />
-                <span>What's included in Pro Plan ($19/mo):</span>
+                <span>What's included in Pro Plan (৳2,500/mo):</span>
               </div>
               <ul className="space-y-1.5 text-slate-400 text-[11px] pl-6 list-disc">
                 <li>TikTok Pixel & Ads CAPI Integration</li>
@@ -558,7 +558,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
                 className="w-full py-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-xs uppercase tracking-wider transition cursor-pointer shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
               >
                 <Crown className="w-4 h-4 fill-slate-950" />
-                <span>Upgrade Now ($19/mo)</span>
+                <span>Upgrade Now (৳2,500/mo)</span>
               </button>
               <button
                 type="button"

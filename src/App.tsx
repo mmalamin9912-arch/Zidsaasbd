@@ -877,10 +877,16 @@ export default function App() {
     try {
       const saved = localStorage.getItem('ZID_PLATFORM_PLANS');
       const parsed = saved ? JSON.parse(saved) : null;
-      // Force refresh if the number of plans has changed (e.g. from 3 to 4)
-      if (parsed && parsed.length === subscriptionPlans.length) {
-        return parsed;
-      }
+      // Only reuse the cache when it holds the SAME plan ids as the seed.
+      // A length check alone is not enough: the catalogue was rebuilt from four
+      // tiers (`rise`/`growth`/…) to two (`starter_plan`/`growth_plan`), and a
+      // two-entry stale cache would have passed it — painting retired plan ids
+      // that no longer exist in MongoDB and letting a merchant purchase one.
+      const cachedIds = Array.isArray(parsed) ? parsed.map((p: any) => String(p?.id || '')) : [];
+      const seedIds = subscriptionPlans.map((p) => String(p.id));
+      const sameCatalogue = cachedIds.length === seedIds.length
+        && cachedIds.every((id) => seedIds.includes(id));
+      if (sameCatalogue) return parsed;
       return subscriptionPlans;
     } catch (e) {
       return subscriptionPlans;

@@ -1666,11 +1666,14 @@ onUpdateMerchant(updatedCurrent);
     const m = allMerchants.find(x => x?.storeName === storeName);
     if (!m) return;
 
-    // Cycle through plans for demo/simple logic
-    const plans: SubscriptionPlanId[] = ['free_trial', 'starter_3m', 'pro_6m', 'enterprise_12m'];
-    const currentIndex = plans.indexOf(m.subscriptionPlan || 'free_trial');
-    const nextIndex = (currentIndex + 1) % plans.length;
-    const nextPlan = plans[nextIndex];
+    // Cycle free_trial → Starter → Growth → free_trial. Built from the LIVE
+    // catalogue in `displayOrder` so this can never hand a merchant a plan that
+    // no longer exists — it used to hardcode starter_3m/pro_6m/enterprise_12m,
+    // which the 2-tier catalogue no longer serves.
+    const cyclePlans: SubscriptionPlanId[] = ['free_trial', ...sortPlansByTier(platformPlans).map(p => p.id)];
+    const currentIndex = cyclePlans.indexOf((m.subscriptionPlan || 'free_trial') as SubscriptionPlanId);
+    const nextIndex = currentIndex < 0 ? 1 : (currentIndex + 1) % cyclePlans.length;
+    const nextPlan = cyclePlans[nextIndex];
 
     const isNowTrial = nextPlan === 'free_trial';
     const { expiryDate, durationDays, plan_started_at, expires_at } = calculateSubscriptionExpiry(nextPlan, new Date());

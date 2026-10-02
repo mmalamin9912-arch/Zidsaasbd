@@ -6,6 +6,7 @@ import { downscaleImage, readAndDownscaleImage } from '../../utils/imageUtils';
 import { readZidStoreData } from '../../lib/storeData';
 import { safeGetItem } from '../../utils/safeStorage';
 import { isProAccessGranted } from '../../lib/subscriptionStatusCache';
+import { isGrowthTierPlan } from '../../lib/planPricing';
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
 import { generateAiText, aiErrorMessage } from '../../lib/aiService';
@@ -918,9 +919,12 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     if (!isProOnly) return false;
 
     const currentPlan = merchant?.subscriptionPlan || 'free_trial';
-    // 'free_trial' and 'starter_3m' are considered "Free/Basic" for this simulation
-    const isProPlan = currentPlan !== 'free_trial' && currentPlan !== 'starter_3m';
-    return !isProPlan;
+    // Pro-only capabilities are the TOP tier only. This used to be
+    // `plan !== 'free_trial' && plan !== 'starter_3m'`, which once the
+    // catalogue moved to `starter_plan` / `growth_plan` made Starter look like
+    // Pro — unlocking the paid AI tools on the ৳1000 tier. Resolve the tier,
+    // don't pattern-match the id here.
+    return !isGrowthTierPlan(currentPlan);
   };
 
   const handleAiAction = (featureKey: 'aiContent' | 'aiWhatsApp' | 'aiBgRemover', action: () => void) => {

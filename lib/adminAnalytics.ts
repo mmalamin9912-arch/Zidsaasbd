@@ -97,6 +97,10 @@ const PLAN_LABELS: Record<string, string> = {
   free_trial: 'Free Trial',
   trial: 'Free Trial',
   free: 'Free',
+  starter_plan: 'Rise / Starter Plan',
+  growth_plan: 'Growth / Pro Plan',
+  // Retired ids, still present on subscriptions written before the 2-tier
+  // rebuild. Labelled so existing merchants read correctly in reports.
   starter_1m: 'Rise / Starter Plan',
   starter_3m: 'Growth / Pro Plan',
   pro_6m: 'Growth / Pro Plan',
@@ -107,6 +111,15 @@ const PLAN_LABELS: Record<string, string> = {
 
 /** Non-paying plan ids — everything else is considered a paid subscription. */
 const NON_PAID_PLANS = new Set(['free_trial', 'trial', 'free', 'basic', 'starter', '']);
+
+/** Paid plan ids resolved by name. `starter_plan` has no duration suffix, so it
+ *  does NOT match the duration regexes below and must be listed explicitly —
+ *  otherwise Starter revenue silently drops out of every analytics report. */
+const PAID_PLANS = new Set([
+  'starter_plan', 'growth_plan',
+  'starter_1m', 'starter_3m', 'pro_6m', 'enterprise_12m',
+  'rise', 'growth', 'pro', 'enterprise', 'business', 'premium',
+]);
 
 /** Order statuses that are explicitly NOT revenue. */
 const VOID_STATUSES = new Set(['cancelled', 'canceled', 'returned', 'refunded', 'failed']);
@@ -124,6 +137,7 @@ export function getPlanLabel(planId: string): string {
 export function isPaidPlan(planId: string): boolean {
   const key = String(planId || '').toLowerCase().trim();
   if (NON_PAID_PLANS.has(key)) return false;
+  if (PAID_PLANS.has(key)) return true;
   if (key.includes('pro') || key.includes('enterprise') || key.includes('business') || key.includes('premium') || key.includes('growth')) return true;
   // Any id containing a paid duration marker (e.g. starter_3m) is paid.
   return /(?:^|_)(1m|3m|6m|12m)$/.test(key) || /(?:^|_)(1|3|6|12)$/.test(key);
@@ -131,10 +145,14 @@ export function isPaidPlan(planId: string): boolean {
 
 /** Price table used to value a subscription when no explicit amount is stored. */
 const PLAN_PRICE_BDT: Record<string, number> = {
-  starter_1m: 500,
-  starter_3m: 1300,
-  pro_6m: 2400,
-  enterprise_12m: 4200,
+  starter_plan: 1000,
+  growth_plan: 2500,
+  // Retired ids retain the price they were sold at, so historical revenue is
+  // not restated when the catalogue is rebuilt.
+  starter_1m: 1000,
+  starter_3m: 2500,
+  pro_6m: 2500,
+  enterprise_12m: 2500,
 };
 
 /** Fall back to the plan's catalog price when a record stores no amount. */

@@ -162,7 +162,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
             className="bg-gradient-to-r from-[#00D68F] to-[#00B377] hover:from-[#00E699] text-slate-950 font-extrabold px-6 py-3 rounded-xl text-xs sm:text-sm flex items-center gap-2 cursor-pointer shadow-lg shadow-[#00D68F]/20 shrink-0"
           >
             <Sparkles className="w-4 h-4 fill-slate-950" />
-            <span>{isPaid ? 'Extend / Upgrade Subscription' : 'Renew / Upgrade Subscription (3/6/12 Months)'}</span>
+            <span>{isPaid ? 'Extend / Upgrade Subscription' : 'Renew / Upgrade Subscription'}</span>
           </button>
         </div>
 

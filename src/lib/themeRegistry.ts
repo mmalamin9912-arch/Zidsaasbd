@@ -294,7 +294,7 @@ export const SAMPLE_STORE = {
     ownerName: 'Demo Merchant',
     email: 'demo@zidbd.com',
     phone: '+8801700000',
-    subscriptionPlan: 'pro_6m',
+    subscriptionPlan: 'growth_plan',
     logoUrl: '',
     heroTitle: 'Welcome to Your Store',
     heroSubtitle: 'Discover our curated collection of products',

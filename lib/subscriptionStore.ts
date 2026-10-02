@@ -50,7 +50,8 @@ export interface PlanListResult {
  * The default plan catalogue auto-seeded into an empty store.
  *
  * A Bangladesh-market SaaS ladder in the Zid SaaS two-tier layout:
- * Rise (entry) → Growth (full-featured), ordered by `display_order` (10/20).
+ * starter_plan (Rise / Starter) → growth_plan (Growth / Pro), ordered by
+ * `display_order` (1/2).
  *
  * TIER DIFFERENCES ARE DELIBERATE AND NON-OVERLAPPING. Each tier lists only what
  * it uniquely grants, so no bullet shows on two cards. `features` is the prose
@@ -68,25 +69,27 @@ export interface PlanListResult {
  */
 export const DEFAULT_PLANS: Record<string, any>[] = [
   {
-    id: 'rise', slug: 'rise', plan_id: 'rise',
+    id: 'starter_plan', slug: 'starter_plan', plan_id: 'starter_plan',
     plan_name: 'Rise / Starter Plan', name: 'Rise / Starter Plan',
     price_bdt: 1000, priceBDT: 1000, price: 1000,
     duration_days: 30, durationDays: 30, badge_text: '', badge: '',
-    display_order: 10, displayOrder: 10,
+    display_order: 1, displayOrder: 1,
     monthly_price_bdt: 1000, monthlyPrice: 1000,
+    yearly_price_bdt: 9600, yearlyPrice: 9600,
+    annual_discount_percent: 20, annualDiscountPercent: 20,
     max_products: 100, maxProducts: 100,
     feature_flags: {
-      freeSubdomain: true, customDomain: true, premiumThemes: false,
+      freeSubdomain: true, customDomain: false, premiumThemes: false,
       cssCustomizer: false, courierApi: true, courierAutoSync: false,
-      metaPixels: false, googleAnalytics: false, aiCaption: false,
+      metaPixels: false, googleAnalytics: false, aiCaption: true,
       aiContent: false, removeBg: false, aiCopilot: false,
       whatsappRecovery: false, emailSupport: true, phoneSupport: false,
       prioritySupport: false,
     },
     featureFlags: {
-      freeSubdomain: true, customDomain: true, premiumThemes: false,
+      freeSubdomain: true, customDomain: false, premiumThemes: false,
       cssCustomizer: false, courierApi: true, courierAutoSync: false,
-      metaPixels: false, googleAnalytics: false, aiCaption: false,
+      metaPixels: false, googleAnalytics: false, aiCaption: true,
       aiContent: false, removeBg: false, aiCopilot: false,
       whatsappRecovery: false, emailSupport: true, phoneSupport: false,
       prioritySupport: false,
@@ -100,12 +103,14 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
     is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
   {
-    id: 'growth', slug: 'growth', plan_id: 'growth',
+    id: 'growth_plan', slug: 'growth_plan', plan_id: 'growth_plan',
     plan_name: 'Growth / Pro Plan', name: 'Growth / Pro Plan',
     price_bdt: 2500, priceBDT: 2500, price: 2500,
-    duration_days: 30, durationDays: 30, badge_text: '', badge: '',
-    display_order: 20, displayOrder: 20,
+    duration_days: 30, durationDays: 30, badge_text: 'MOST POPULAR', badge: 'MOST POPULAR',
+    display_order: 2, displayOrder: 2,
     monthly_price_bdt: 2500, monthlyPrice: 2500,
+    yearly_price_bdt: 24000, yearlyPrice: 24000,
+    annual_discount_percent: 20, annualDiscountPercent: 20,
     max_products: 0, maxProducts: 0,
     feature_flags: {
       freeSubdomain: true, customDomain: true, premiumThemes: true,
@@ -448,44 +453,48 @@ export async function listSubscriptionPlans(): Promise<PlanListResult> {
 
   let seeded = false;
 
-  // LEGACY TIER MIGRATION — the catalogue was simplified from four duration
-  // tiers (Starter/Growth/Pro/Enterprise) to two monthly tiers (Rise/Growth).
-  // Retired rows are tombstoned; legacy slugs map onto the tier whose features
-  // they best match (Starter/1m → Rise, everything paid above it → Growth), so
-  // a database seeded by an older build reads the new layout without manual
-  // cleanup.
-  if (plans.length > 0) {
-    const retired = new Set(['starter_1m', 'starter_3m', 'pro_6m', 'enterprise_12m']);
-    const legacyTarget: Record<string, string> = {
-      starter_1m: 'rise',
-      starter_3m: 'growth',
-      pro_6m: 'growth',
-      enterprise_12m: 'growth',
-    };
-    const presentSlugs = new Set(plans.map((p) => String(p.slug || p.id || '').toLowerCase()));
-    const mappingActive = ['rise', 'growth'].some((t) => presentSlugs.has(t));
+  // FORCE OVERWRITE — the catalogue is defined ONLY by DEFAULT_PLANS in this
+  // file. Whatever exists in the `subscriptions` collection (including legacy
+  // starter_1m/starter_3m/pro_6m/enterprise_12m rows and any drift from older
+  // seeds) is wiped and re-seeded from the 2-tier definition on init. Catalogue
+  // rows only — tenant renewal/request rows are never touched.
+  const catalogueIds = DEFAULT_PLANS.map((p) => String(p.slug));
+  const needsOverwrite =
+    plans.length !== DEFAULT_PLANS.length ||
+    plans.some((p) => !catalogueIds.includes(String(p.slug || p.id || '').toLowerCase())) ||
+    DEFAULT_PLANS.some((seed) => {
+      const existing = plans.find((p) => String(p.slug || p.id || '').toLowerCase() === String(seed.slug));
+      return !existing || Number(existing.price) !== Number(seed.price);
+    });
 
-    if (mappingActive) {
-      for (const plan of plans) {
-        const slug = String(plan.slug || plan.id || '').toLowerCase();
-        if (!retired.has(slug)) continue;
-        const target = legacyTarget[slug];
-        // Copy popularity over to the surviving tier before tombstoning, then
-        // deactivate the legacy row so it stops rendering everywhere.
-        const alive = plans.find((p) => String(p.slug || p.id || '').toLowerCase() === target);
-        if (alive && plan.isPopular && !alive.isPopular) {
-          const merged = { ...alive, isPopular: true, is_popular: true };
-          await writeSubscription(merged);
-          plans = plans.map((p) => (p === alive ? normalizeSubscription(merged) : p));
-        }
-        await upsertMongoRecord('subscriptions', { slug, is_active: false, isActive: false }, 'slug');
-        plans = plans.filter((p) => String(p.slug || p.id || '').toLowerCase() !== slug);
+  if (needsOverwrite) {
+    // Delete every catalogue-like row (known slugs + anything that survived the
+    // isCataloguePlan filter), then re-seed the canonical 2 tiers.
+    const allKnownSlugs = new Set([
+      ...catalogueIds,
+      'starter_1m', 'starter_3m', 'pro_6m', 'enterprise_12m',
+      'rise', 'growth',
+    ]);
+    for (const slug of allKnownSlugs) {
+      await deleteMongoRecord('subscriptions', 'slug', slug);
+      await deleteMongoRecord('subscription_plans', 'slug', slug);
+    }
+    // Any other row that passed isCataloguePlan but isn't one of ours is
+    // deleted too, so the collection holds exactly the 2 tiers.
+    for (const plan of plans) {
+      const slug = String(plan.slug || plan.id || '').toLowerCase();
+      if (!allKnownSlugs.has(slug)) {
+        await deleteMongoRecord('subscriptions', 'slug', slug);
+        await deleteMongoRecord('subscription_plans', 'slug', slug);
       }
     }
+    const seedResults = await Promise.all(DEFAULT_PLANS.map((p) => writeSubscription(p)));
+    seeded = seedResults.some((r) => r.ok);
+    plans = DEFAULT_PLANS.map((p) => normalizeSubscription(p));
+    sources.push('mongodb');
   }
 
-  // Auto-init: an empty catalogue is seeded into MongoDB so the very first
-  // request (a fresh deployment/collection) still returns real prices.
+  // Auto-init fallback (kept for the rare case the overwrite path was skipped):
   if (plans.length === 0) {
     const seedResults = await Promise.all(DEFAULT_PLANS.map((p) => writeSubscription(p)));
     seeded = seedResults.some((r) => r.ok);

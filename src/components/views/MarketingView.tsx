@@ -3,6 +3,7 @@ import { DiscountCoupon, Customer, MerchantProfile, AdminPaymentGatewayConfig } 
 import { initialCoupons, initialCustomers } from '../../data/initialData';
 import { ProFeaturePaymentModal } from '../marketing/ProFeaturePaymentModal';
 import { safeSetItem } from '../../utils/safeStorage';
+import { isGrowthTierPlan } from '../../lib/planPricing';
 import SafeImage from '../SafeImage';
 import {  useToast } from '../ToastProvider';
 import {
@@ -151,7 +152,11 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
   const [pointHistoryLog, setPointHistoryLog] = useState<{ id: string; customerName: string; delta: number; reason: string; date: string }[]>([]);
 
   // Merchant Subscription Tier State
-  const isProMerchant = merchant?.subscriptionPlan === 'pro_6m' || merchant?.subscriptionPlan === 'enterprise_12m';
+  // "Pro" means the TOP tier. This was `=== 'pro_6m' || === 'enterprise_12m'`,
+  // which after the catalogue moved to starter_plan/growth_plan matched NOTHING:
+  // merchants paying ৳2500 on growth_plan were shown as non-Pro and had the Pro
+  // app market locked against them. Resolve the tier, don't match the id.
+  const isProMerchant = isGrowthTierPlan(merchant?.subscriptionPlan);
 
   // App Market & Pixels Integrations State
   const [integrations, setIntegrations] = useState<AppIntegrationConfig[]>(() => {
@@ -198,7 +203,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
         badge: 'Popular',
         isConnected: false,
         pricingTier: 'Pro',
-        priceLabel: 'Pro App - Subscription Required ($15/mo)',
+        priceLabel: 'Pro App - Subscription Required (৳2,500/mo)',
         field1Label: 'TikTok Pixel ID',
         field1Value: '',
         field2Label: 'Access Token',
@@ -265,7 +270,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
         badge: 'BD Gateway',
         isConnected: false,
         pricingTier: 'Pro',
-        priceLabel: 'Pro App - Subscription Required ($10/mo)',
+        priceLabel: 'Pro App - Subscription Required (৳2,500/mo)',
         field1Label: 'SMS Gateway Provider',
         field1Value: '',
         field2Label: 'API Token / Masking Sender ID',
@@ -287,7 +292,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
         badge: 'Automated',
         isConnected: false,
         pricingTier: 'Pro',
-        priceLabel: 'Pro App - Subscription Required ($12/mo)',
+        priceLabel: 'Pro App - Subscription Required (৳2,500/mo)',
         field1Label: 'bKash Merchant Wallet Number',
         field1Value: '',
         field2Label: 'Merchant API Username/Password',
@@ -943,7 +948,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                   <span className="text-xs font-bold text-white">Merchant Account Plan:</span>
                   {isProMerchant ? (
                     <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1">
-                      <Crown className="w-3 h-3" /> Pro Merchant Subscription ($19/mo)
+                      <Crown className="w-3 h-3" /> Pro Merchant Subscription (৳2,500/mo)
                     </span>
                   ) : (
                     <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
@@ -966,7 +971,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                 className="px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black rounded-xl text-xs transition cursor-pointer shadow-lg shrink-0 flex items-center gap-1.5"
               >
                 <Crown className="w-3.5 h-3.5" />
-                <span>{pendingProUpgrade ? 'Payment Pending Admin Approval' : 'Upgrade to Pro ($19/mo)'}</span>
+                <span>{pendingProUpgrade ? 'Payment Pending Admin Approval' : 'Upgrade to Pro (৳2,500/mo)'}</span>
               </button>
             )}
           </div>
@@ -2041,7 +2046,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                     <div>
                       <p className="font-extrabold text-white">{pendingProUpgrade ? 'Upgrade Request Pending Approval' : 'Upgrade to Pro Merchant Plan to unlock this app'}</p>
                       <p className="text-[11px] text-amber-200/80 mt-0.5">
-                        Pro integrations require an active Zid Pro plan ($19/mo) for server-side API access and live conversion tracking.
+                        Pro integrations require an active Zid Pro plan (৳2,500/mo) for server-side API access and live conversion tracking.
                       </p>
                     </div>
                   </div>
@@ -2223,13 +2228,13 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
             {/* Lock Notice */}
             <div className="space-y-3">
               <p className="text-xs text-slate-200 leading-relaxed font-medium">
-                This is a Pro Integration. Upgrade your account to Pro Plan ($19/mo) to unlock Bulk SMS & bKash Auto-Verification.
+                This is a Pro Integration. Upgrade your account to Pro Plan (৳2,500/mo) to unlock Bulk SMS & bKash Auto-Verification.
               </p>
 
               <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-2xl space-y-2 text-xs text-amber-200">
                 <div className="font-extrabold text-amber-300 flex items-center gap-1.5 text-xs">
                   <Crown className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>Pro Plan ($19/mo) Unlocks:</span>
+                  <span>Pro Plan (৳2,500/mo) Unlocks:</span>
                 </div>
                 <ul className="space-y-1.5 text-slate-300 pl-1 text-[11px]">
                   <li className="flex items-center gap-1.5">
@@ -2266,7 +2271,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                 className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-xs transition cursor-pointer shadow-lg flex items-center gap-1.5"
               >
                 <Crown className="w-4 h-4" />
-                <span>{pendingProUpgrade ? 'Payment Pending Approval' : 'Upgrade Now ($19/mo)'}</span>
+                <span>{pendingProUpgrade ? 'Payment Pending Approval' : 'Upgrade Now (৳2,500/mo)'}</span>
               </button>
             </div>
           </div>

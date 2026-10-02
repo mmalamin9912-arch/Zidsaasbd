@@ -113,20 +113,40 @@ CREATE TRIGGER subscriptions_set_updated_at
   EXECUTE FUNCTION public.set_subscriptions_updated_at();
 
 -- -----------------------------------------------------------------------------
--- 6. Seed the default plan catalogue (upsert by slug). Prices match the product
---    spec: 1-Month ৳1000, Starter 3-Month ৳3000, Pro 6-Month ৳5000,
---    Enterprise 12-Month ৳15000.
+-- 6. Seed the default plan catalogue (upsert by slug).
+--
+--    TWO TIERS: Rise / Starter ৳1000 (order 1) and Growth / Pro ৳2500 (order 2).
+--
+--    This seeds only what the Supabase MIRROR needs. The authoritative
+--    catalogue is DEFAULT_PLANS in lib/subscriptionStore.ts, which
+--    listSubscriptionPlans() force-overwrites into MongoDB on every read.
+--
+--    No plan name and no badge carries a duration ("1-Month Plan",
+--    "Pro Plan (6 Months)", "1_MONTH", "6_MONTHS"). The term is chosen by the
+--    merchant with the Monthly/Yearly toggle, so a baked-in term contradicted
+--    the price actually charged — a yearly purchase was labelled a 6-month
+--    plan. Duration here is the legacy fallback only.
 -- -----------------------------------------------------------------------------
-INSERT INTO public.subscriptions (id, slug, plan_id, plan_name, name, price_bdt, duration_days, badge_text, badge, features, is_active, is_popular, max_products)
+DELETE FROM public.subscriptions
+WHERE slug IN ('starter_1m', 'starter_3m', 'pro_6m', 'enterprise_12m', 'rise', 'growth')
+   OR slug NOT IN ('starter_plan', 'growth_plan');
+
+INSERT INTO public.subscriptions (id, slug, plan_id, plan_name, name, price_bdt, duration_days, badge_text, badge, features, is_active, is_popular, max_products, display_order, monthly_price_bdt, yearly_price_bdt, annual_discount_percent)
 VALUES
-  (gen_random_uuid(), 'starter_1m', 'starter_1m', '1-Month Plan', '1-Month Plan', 1000, 30, '1_MONTH', '1_MONTH',
-   '["Up to 100 Products","Standard Themes","Basic AI Tools","Standard Support"]'::jsonb, true, false, 100),
-  (gen_random_uuid(), 'starter_3m', 'starter_3m', 'Starter Plan (3 Months)', 'Starter Plan (3 Months)', 3000, 90, '3_MONTHS', '3_MONTHS',
-   '["Up to 500 Products","Standard Themes","Pro AI Tools (Description, Image, Pricing)","Standard Support"]'::jsonb, true, false, 500),
-  (gen_random_uuid(), 'pro_6m', 'pro_6m', 'Pro Plan (6 Months)', 'Pro Plan (6 Months)', 5000, 180, '6_MONTHS', '6_MONTHS',
-   '["Unlimited Products","Premium Themes","Pro AI Marketing & Caption Tools","Priority Support"]'::jsonb, true, true, 0),
-  (gen_random_uuid(), 'enterprise_12m', 'enterprise_12m', 'Enterprise Plan (12 Months)', 'Enterprise Plan (12 Months)', 15000, 365, '12_MONTHS', '12_MONTHS',
-   '["Unlimited Products","Full AI Suite Unlocked","Priority Support","Custom Domain"]'::jsonb, true, false, 0)
-ON CONFLICT (slug) DO NOTHING;
+  (gen_random_uuid(), 'starter_plan', 'starter_plan', 'Rise / Starter Plan', 'Rise / Starter Plan', 1000, 30, '', '',
+   '["Up to 100 Products","Standard Themes","Basic AI Tools","Standard Support"]'::jsonb, true, false, 100, 1, 1000, 9600, 20),
+  (gen_random_uuid(), 'growth_plan', 'growth_plan', 'Growth / Pro Plan', 'Growth / Pro Plan', 2500, 30, 'MOST POPULAR', 'MOST POPULAR',
+   '["Unlimited Products","Premium Themes","Pro AI Marketing & Caption Tools","Priority Support"]'::jsonb, true, true, 0, 2, 2500, 24000, 20)
+ON CONFLICT (slug) DO UPDATE SET
+  plan_name = EXCLUDED.plan_name,
+  name = EXCLUDED.name,
+  price_bdt = EXCLUDED.price_bdt,
+  badge_text = EXCLUDED.badge_text,
+  badge = EXCLUDED.badge,
+  features = EXCLUDED.features,
+  display_order = EXCLUDED.display_order,
+  monthly_price_bdt = EXCLUDED.monthly_price_bdt,
+  yearly_price_bdt = EXCLUDED.yearly_price_bdt,
+  annual_discount_percent = EXCLUDED.annual_discount_percent;
 
 COMMIT;
