@@ -491,7 +491,7 @@ export interface ThemeConfig {
   logoImageUrl?: string;
 }
 
-export type SubscriptionPlanId = 'free_trial' | 'starter_3m' | 'pro_6m' | 'enterprise_12m' | (string & {});
+export type SubscriptionPlanId = 'free_trial' | 'rise' | 'growth' | (string & {});
 
 /** Billing term the merchant is quoting/buying. Drives price AND granted days. */
 export type BillingCycle = 'monthly' | 'yearly';

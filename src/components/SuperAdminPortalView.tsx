@@ -2998,7 +2998,7 @@ onUpdateMerchant(updatedCurrent);
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
                 <h3 className="text-base font-bold text-white">Subscription Plans Configurator</h3>
-                <p className="text-xs text-slate-400">Edit monthly/yearly prices and feature lists for Starter, Pro, and Enterprise plans.</p>
+                <p className="text-xs text-slate-400">Edit monthly prices and feature flags for the two live tiers: Rise (Starter) and Growth (Enterprise).</p>
               </div>
               <button
                 onClick={handleAddPlan}

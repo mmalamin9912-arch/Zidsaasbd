@@ -49,8 +49,8 @@ export interface PlanListResult {
 /**
  * The default plan catalogue auto-seeded into an empty store.
  *
- * A Bangladesh-market SaaS ladder: Starter → Growth → Pro → Enterprise, ordered
- * by `display_order` (10/20/30/40).
+ * A Bangladesh-market SaaS ladder in the Zid SaaS two-tier layout:
+ * Rise (entry) → Growth (full-featured), ordered by `display_order` (10/20).
  *
  * TIER DIFFERENCES ARE DELIBERATE AND NON-OVERLAPPING. Each tier lists only what
  * it uniquely grants, so no bullet shows on two cards. `features` is the prose
@@ -68,17 +68,15 @@ export interface PlanListResult {
  */
 export const DEFAULT_PLANS: Record<string, any>[] = [
   {
-    id: 'starter_1m', slug: 'starter_1m', plan_id: 'starter_1m',
-    plan_name: 'Starter', name: 'Starter',
+    id: 'rise', slug: 'rise', plan_id: 'rise',
+    plan_name: 'Rise', name: 'Rise',
     price_bdt: 999, priceBDT: 999, price: 999,
-    duration_days: 30, durationDays: 30, badge_text: 'BASIC', badge: 'BASIC',
+    duration_days: 30, durationDays: 30, badge_text: 'STARTER', badge: 'STARTER',
     display_order: 10, displayOrder: 10,
     monthly_price_bdt: 999, monthlyPrice: 999,
-    yearly_price_bdt: 9590, yearlyPrice: 9590,
-    annual_discount_percent: 20, annualDiscountPercent: 20,
-    max_products: 50, maxProducts: 50,
+    max_products: 100, maxProducts: 100,
     feature_flags: {
-      freeSubdomain: true, customDomain: false, premiumThemes: false,
+      freeSubdomain: true, customDomain: true, premiumThemes: false,
       cssCustomizer: false, courierApi: true, courierAutoSync: false,
       metaPixels: false, googleAnalytics: false, aiCaption: false,
       aiContent: false, removeBg: false, aiCopilot: false,
@@ -86,7 +84,7 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
       prioritySupport: false,
     },
     featureFlags: {
-      freeSubdomain: true, customDomain: false, premiumThemes: false,
+      freeSubdomain: true, customDomain: true, premiumThemes: false,
       cssCustomizer: false, courierApi: true, courierAutoSync: false,
       metaPixels: false, googleAnalytics: false, aiCaption: false,
       aiContent: false, removeBg: false, aiCopilot: false,
@@ -94,119 +92,47 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
       prioritySupport: false,
     },
     features: [
-      'Up to 50 products',
-      'Free subdomain (.zidbd.com)',
-      'Standard themes only',
-      'Basic courier integration',
-      'Email support',
+      'Up to 100 Products',
+      'Standard Themes Store',
+      'Link Custom Domain',
+      'Integrated Courier & COD Payments',
+      'Standard Support',
     ],
     is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
   {
-    id: 'starter_3m', slug: 'starter_3m', plan_id: 'starter_3m',
+    id: 'growth', slug: 'growth', plan_id: 'growth',
     plan_name: 'Growth', name: 'Growth',
     price_bdt: 2499, priceBDT: 2499, price: 2499,
-    duration_days: 90, durationDays: 90, badge_text: 'POPULAR', badge: 'POPULAR',
+    duration_days: 30, durationDays: 30, badge_text: 'ENTERPRISE', badge: 'ENTERPRISE',
     display_order: 20, displayOrder: 20,
     monthly_price_bdt: 2499, monthlyPrice: 2499,
-    yearly_price_bdt: 23990, yearlyPrice: 23990,
-    annual_discount_percent: 20, annualDiscountPercent: 20,
-    max_products: 500, maxProducts: 500,
+    max_products: 0, maxProducts: 0,
     feature_flags: {
       freeSubdomain: true, customDomain: true, premiumThemes: true,
-      cssCustomizer: false, courierApi: true, courierAutoSync: true,
+      cssCustomizer: true, courierApi: true, courierAutoSync: true,
       metaPixels: true, googleAnalytics: true, aiCaption: true,
-      aiContent: false, removeBg: false, aiCopilot: false,
-      whatsappRecovery: false, emailSupport: true, phoneSupport: true,
-      prioritySupport: false,
+      aiContent: true, removeBg: true, aiCopilot: true,
+      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
+      prioritySupport: true,
     },
     featureFlags: {
       freeSubdomain: true, customDomain: true, premiumThemes: true,
-      cssCustomizer: false, courierApi: true, courierAutoSync: true,
+      cssCustomizer: true, courierApi: true, courierAutoSync: true,
       metaPixels: true, googleAnalytics: true, aiCaption: true,
-      aiContent: false, removeBg: false, aiCopilot: false,
-      whatsappRecovery: false, emailSupport: true, phoneSupport: true,
-      prioritySupport: false,
+      aiContent: true, removeBg: true, aiCopilot: true,
+      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
+      prioritySupport: true,
     },
     features: [
-      'Up to 500 products',
-      'Custom domain integration (.com)',
-      'Premium theme library',
-      'Meta Pixel & Google Analytics tracking',
-      'AI social caption writer',
-      'Standard phone support',
+      'UNLIMITED Products',
+      'Access All Premium Themes & Custom CSS',
+      'Meta Pixel, TikTok Pixel & Google Analytics (GA4)',
+      'AI Social Caption & Description Generator',
+      'WhatsApp Abandoned Cart Auto-Recovery',
+      'Priority 24/7 Direct Support',
     ],
     is_active: true, isActive: true, is_popular: true, isPopular: true,
-  },
-  {
-    id: 'pro_6m', slug: 'pro_6m', plan_id: 'pro_6m',
-    plan_name: 'Pro', name: 'Pro',
-    price_bdt: 4999, priceBDT: 4999, price: 4999,
-    duration_days: 180, durationDays: 180, badge_text: 'ADVANCED', badge: 'ADVANCED',
-    display_order: 30, displayOrder: 30,
-    monthly_price_bdt: 4999, monthlyPrice: 4999,
-    yearly_price_bdt: 47990, yearlyPrice: 47990,
-    annual_discount_percent: 20, annualDiscountPercent: 20,
-    max_products: 0, maxProducts: 0,
-    feature_flags: {
-      freeSubdomain: true, customDomain: true, premiumThemes: true,
-      cssCustomizer: true, courierApi: true, courierAutoSync: true,
-      metaPixels: true, googleAnalytics: true, aiCaption: true,
-      aiContent: true, removeBg: true, aiCopilot: true,
-      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
-      prioritySupport: true,
-    },
-    featureFlags: {
-      freeSubdomain: true, customDomain: true, premiumThemes: true,
-      cssCustomizer: true, courierApi: true, courierAutoSync: true,
-      metaPixels: true, googleAnalytics: true, aiCaption: true,
-      aiContent: true, removeBg: true, aiCopilot: true,
-      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
-      prioritySupport: true,
-    },
-    features: [
-      'Unlimited products',
-      'All themes & CSS color customizer',
-      'Full AI suite (content, image cleanup, copilot)',
-      'WhatsApp abandoned-cart auto-recovery',
-      'Priority 24/7 VIP phone & WhatsApp support',
-    ],
-    is_active: true, isActive: true, is_popular: false, isPopular: false,
-  },
-  {
-    id: 'enterprise_12m', slug: 'enterprise_12m', plan_id: 'enterprise_12m',
-    plan_name: 'Enterprise', name: 'Enterprise',
-    price_bdt: 9999, priceBDT: 9999, price: 9999,
-    duration_days: 365, durationDays: 365, badge_text: 'ENTERPRISE', badge: 'ENTERPRISE',
-    display_order: 40, displayOrder: 40,
-    monthly_price_bdt: 9999, monthlyPrice: 9999,
-    yearly_price_bdt: 95980, yearlyPrice: 95980,
-    annual_discount_percent: 20, annualDiscountPercent: 20,
-    max_products: 0, maxProducts: 0,
-    feature_flags: {
-      freeSubdomain: true, customDomain: true, premiumThemes: true,
-      cssCustomizer: true, courierApi: true, courierAutoSync: true,
-      metaPixels: true, googleAnalytics: true, aiCaption: true,
-      aiContent: true, removeBg: true, aiCopilot: true,
-      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
-      prioritySupport: true,
-    },
-    featureFlags: {
-      freeSubdomain: true, customDomain: true, premiumThemes: true,
-      cssCustomizer: true, courierApi: true, courierAutoSync: true,
-      metaPixels: true, googleAnalytics: true, aiCaption: true,
-      aiContent: true, removeBg: true, aiCopilot: true,
-      whatsappRecovery: true, emailSupport: true, phoneSupport: true,
-      prioritySupport: true,
-    },
-    features: [
-      'Unlimited products',
-      'All themes & CSS color customizer',
-      'Full AI suite (content, image cleanup, copilot)',
-      'WhatsApp abandoned-cart auto-recovery',
-      'Priority 24/7 VIP phone & WhatsApp support',
-    ],
-    is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
 ];
 
@@ -524,6 +450,42 @@ export async function listSubscriptionPlans(): Promise<PlanListResult> {
   if (orderedRows.length) sources.push('mongodb');
 
   let seeded = false;
+
+  // LEGACY TIER MIGRATION — the catalogue was simplified from four duration
+  // tiers (Starter/Growth/Pro/Enterprise) to two monthly tiers (Rise/Growth).
+  // Retired rows are tombstoned; legacy slugs map onto the tier whose features
+  // they best match (Starter/1m → Rise, everything paid above it → Growth), so
+  // a database seeded by an older build reads the new layout without manual
+  // cleanup.
+  if (plans.length > 0) {
+    const retired = new Set(['starter_1m', 'starter_3m', 'pro_6m', 'enterprise_12m']);
+    const legacyTarget: Record<string, string> = {
+      starter_1m: 'rise',
+      starter_3m: 'growth',
+      pro_6m: 'growth',
+      enterprise_12m: 'growth',
+    };
+    const presentSlugs = new Set(plans.map((p) => String(p.slug || p.id || '').toLowerCase()));
+    const mappingActive = ['rise', 'growth'].some((t) => presentSlugs.has(t));
+
+    if (mappingActive) {
+      for (const plan of plans) {
+        const slug = String(plan.slug || plan.id || '').toLowerCase();
+        if (!retired.has(slug)) continue;
+        const target = legacyTarget[slug];
+        // Copy popularity over to the surviving tier before tombstoning, then
+        // deactivate the legacy row so it stops rendering everywhere.
+        const alive = plans.find((p) => String(p.slug || p.id || '').toLowerCase() === target);
+        if (alive && plan.isPopular && !alive.isPopular) {
+          const merged = { ...alive, isPopular: true, is_popular: true };
+          await writeSubscription(merged);
+          plans = plans.map((p) => (p === alive ? normalizeSubscription(merged) : p));
+        }
+        await upsertMongoRecord('subscriptions', { slug, is_active: false, isActive: false }, 'slug');
+        plans = plans.filter((p) => String(p.slug || p.id || '').toLowerCase() !== slug);
+      }
+    }
+  }
 
   // Auto-init: an empty catalogue is seeded into MongoDB so the very first
   // request (a fresh deployment/collection) still returns real prices.

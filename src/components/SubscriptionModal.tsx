@@ -67,8 +67,10 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     () => sortPlansByTier(plans && plans.length > 0 ? plans : subscriptionPlans),
     [plans]
   );
-  const [billingCycle, setBillingCycle] = useState<BillingCycle>(initialBillingCycle || 'monthly');
-  const [selectedPlanId, setSelectedPlanId] = useState<string>(initialPlanId || 'pro_6m');
+  // Monthly-only: the 2-tier Zid SaaS layout quotes a flat monthly price, so
+  // the yearly toggle was removed. The parameter is kept for API compatibility.
+  const [billingCycle] = useState<BillingCycle>(initialBillingCycle || 'monthly');
+  const [selectedPlanId, setSelectedPlanId] = useState<string>(initialPlanId || 'growth');
   const [step, setStep] = useState<'select' | 'payment' | 'invoice'>(initialPlanId && initialPlanId !== 'free_trial' ? 'payment' : 'select');
   const [adminPaymentMethod, setAdminPaymentMethod] = useState<string>('');
   const [transactionId, setTransactionId] = useState('');
@@ -79,7 +81,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
       // Prefer the current plan list's own "popular" plan, then its first entry,
       // so a DB-configured catalogue with different ids still selects correctly.
       const fallbackPlanId =
-        planList.find((p) => p.isPopular)?.id || planList[0]?.id || 'pro_6m';
+        planList.find((p) => p.isPopular)?.id || planList[0]?.id || 'growth';
       if (initialPlanId) {
         setSelectedPlanId(initialPlanId);
         setStep(initialPlanId !== 'free_trial' ? 'payment' : 'select');
@@ -113,6 +115,8 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   // the card, the payment summary, the QR amount and the receipt can never
   // quote different figures for the same selection.
   const currentPricing = currentPlan ? resolvePlanPricing(currentPlan, billingCycle) : null;
+  // Monthly quote for the plan cards (the 2-tier layout is monthly-only).
+  const resolvePlanPlanPricingSafe = (plan: SubscriptionPlan) => resolvePlanPricing(plan, 'monthly');
 
   const handleCopy = (text: string, fieldName: string) => {
     navigator.clipboard.writeText(text);
@@ -226,110 +230,79 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                 );
               })()}
 
-              {/* ── Billing cycle toggle ──
-                  The yearly saving is computed from the catalogue (see
-                  resolvePlanPricing), not hardcoded, so an admin changing a
-                  yearly price automatically changes the badge. */}
-              <div className="flex items-center justify-center gap-3">
-                <div className="inline-flex items-center p-1 bg-[#181B26] border border-[#2E3548] rounded-xl">
-                  {(['monthly', 'yearly'] as BillingCycle[]).map((cycle) => (
-                    <button
-                      key={cycle}
-                      type="button"
-                      onClick={() => setBillingCycle(cycle)}
-                      className={`px-4 py-1.5 rounded-lg text-xs font-bold capitalize transition cursor-pointer ${
-                        billingCycle === cycle
-                          ? 'bg-[#D4AF37] text-slate-950'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      {cycle === 'monthly' ? 'Monthly' : 'Yearly'}
-                    </button>
-                  ))}
-                </div>
-                {(() => {
-                  // Largest real saving across the catalogue, so the badge is
-                  // never a promise the cheapest plan cannot keep.
-                  const best = Math.max(
-                    ...planList.map((p) => resolvePlanPricing(p, 'yearly').discountPercent),
-                    0
-                  );
-                  return best > 0 ? (
-                    <span className="text-[10px] font-bold text-[#00D68F] bg-[#00D68F]/10 border border-[#00D68F]/30 px-2 py-1 rounded-full">
-                      Save up to {best}% on Annual
-                    </span>
-                  ) : null;
-                })()}
-              </div>
-
-              {/* Plans Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-                {planList.map((plan) => {
+              {/* ── Plans: 2 clean side-by-side tiers (Zid SaaS layout) ──
+                  Monthly-only pricing; the old Monthly/Yearly toggle and
+                  4-card duration grid are gone. */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl mx-auto">
+                {planList.filter((p) => p.isActive !== false).slice(0, 2).map((plan) => {
                   const isSelected = selectedPlanId === plan.id;
-                  const pricing = resolvePlanPricing(plan, billingCycle);
+                  const pricing = resolvePlanPlanPricingSafe(plan);
                   const featureLines = derivePlanFeatures(plan);
                   return (
                     <div
                       key={plan.id}
                       onClick={() => setSelectedPlanId(plan.id)}
-                      className={`
-                        relative bg-[#202533] rounded-xl p-3 border cursor-pointer transition-all duration-200 flex flex-col justify-between
-                        ${isSelected
-                          ? 'border-[#D4AF37] ring-1 ring-[#D4AF37]/20 bg-gradient-to-b from-[#202533] to-[#252C3E]'
-                          : 'border-[#2E3548] hover:border-slate-500 hover:bg-[#252B3B]'
-                        }
-                      `}
+                      className={
+                        `relative rounded-2xl p-5 border cursor-pointer transition-all duration-200 flex flex-col gap-4 ` +
+                        (plan.isPopular
+                          ? `bg-gradient-to-b from-[#1B2233] to-[#181B26] border-2 shadow-xl shadow-indigo-500/10 ${isSelected ? 'border-[#6366F1] ring-2 ring-indigo-500/30' : 'border-indigo-500/60 hover:border-indigo-400'}
+                          ` : `bg-[#202533] ${isSelected ? 'border-2 border-[#6366F1] ring-2 ring-indigo-500/30' : 'border-[#2E3548] hover:border-slate-500'}`)
+                      }
                     >
+                      {plan.isPopular && (
+                        <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-[9px] font-black uppercase tracking-widest px-3 py-1 rounded-full shadow-lg whitespace-nowrap">
+                          Most Popular
+                        </span>
+                      )}
+
+                      {/* Header: tier name + audience tag */}
                       <div>
-                        <div className="flex justify-between items-start mb-2">
-                          <div>
-                            <h3 className="font-bold text-white text-xs">{plan.name}</h3>
-                            {plan.badge && (
-                              <span className="text-[8px] font-black uppercase tracking-wider text-[#D4AF37] bg-[#D4AF37]/10 border border-[#D4AF37]/20 px-1.5 py-0.5 rounded mt-1 inline-block">
-                                {plan.badge}
-                              </span>
-                            )}
-                          </div>
-                          {isSelected && <Check className="w-3 h-3 text-[#D4AF37] stroke-[3]" />}
+                        <div className="flex items-center justify-between gap-2">
+                          <h3 className="text-base font-extrabold text-white">{plan.name}</h3>
+                          <span className="text-[9px] font-black uppercase tracking-wider text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 rounded-full">
+                            {plan.badge}
+                          </span>
                         </div>
-
-                        {/* Price Block — quote for the SELECTED billing term */}
-                        <div className="mb-2 pb-2 border-b border-[#2E3548]">
-                          {billingCycle === 'yearly' && pricing.compareAtPrice > pricing.price && (
-                            <div className="flex items-center gap-1.5 mb-0.5">
-                              <span className="text-[10px] text-slate-500 line-through">
-                                ৳{pricing.compareAtPrice.toLocaleString()}
-                              </span>
-                              <span className="text-[9px] font-bold text-[#00D68F]">
-                                Save ৳{pricing.savingsBDT.toLocaleString()}
-                              </span>
-                            </div>
-                          )}
-                          <div className="flex items-baseline gap-1">
-                            <span className="text-lg font-extrabold text-white">৳{pricing.price.toLocaleString()}</span>
-                            <span className="text-slate-400 text-[9px]">/ {billingCycle === 'yearly' ? 'year' : 'month'}</span>
-                          </div>
-                          {billingCycle === 'yearly' && pricing.perMonth > 0 && (
-                            <div className="text-[9px] text-slate-400">
-                              ≈ ৳{pricing.perMonth.toLocaleString()}/mo · {pricing.durationDays} days
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Feature list — the admin-authored bullets for THIS
-                            tier. Rendered in full: truncating to four is what
-                            previously hid the difference between Growth's
-                            "AI social caption writer" and Pro's "Full AI
-                            suite", making the tiers look identical. */}
-                        <ul className="space-y-1 text-[10px] text-slate-300 mb-3">
-                          {featureLines.map((feat, idx) => (
-                            <li key={idx} className="flex items-start gap-1.5">
-                              <Check className="w-3 h-3 text-[#D4AF37] shrink-0 mt-0.5" />
-                              <span>{feat}</span>
-                            </li>
-                          ))}
-                        </ul>
+                        <p className="text-[11px] text-slate-400 mt-1 leading-snug">
+                          {plan.isPopular
+                            ? 'For scaling businesses needing full AI & tracking tools.'
+                            : 'For individuals & new businesses.'}
+                        </p>
                       </div>
+
+                      {/* Price block — flat monthly, no yearly clutter */}
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="text-2xl font-black text-white">BDT {pricing.price.toLocaleString()}</span>
+                        <span className="text-[11px] text-slate-400 font-medium">/ month</span>
+                      </div>
+
+                      {/* Feature list */}
+                      <ul className="space-y-2 text-xs text-slate-300 flex-1">
+                        {featureLines.map((feat, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <Check className="w-3.5 h-3.5 text-[#6366F1] shrink-0 mt-0.5" />
+                            <span>{feat}</span>
+                          </li>
+                        ))}
+                      </ul>
+
+                      {/* Select button */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedPlanId(plan.id);
+                          setStep('payment');
+                        }}
+                        className={
+                          `w-full py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ` +
+                          (plan.isPopular
+                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-lg shadow-indigo-600/30'
+                            : 'bg-[#2E3548] hover:bg-[#3A435E] text-white border border-[#3A435E]')
+                        }
+                      >
+                        {isSelected ? 'Continue to Payment' : `Choose ${plan.name}`}
+                      </button>
                     </div>
                   );
                 })}
@@ -356,16 +329,11 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                 <div>
                   <span className="text-xs text-slate-400">Selected SaaS Renewal Plan</span>
                   <h4 className="text-base font-bold text-white">
-                    {currentPlan.name} ({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} · {currentPricing?.durationDays} Days)
+                    {currentPlan.name} (Monthly · {currentPricing?.durationDays} Days)
                   </h4>
                 </div>
                 <div className="text-right">
                   <div className="text-xl font-extrabold text-[#D4AF37]">৳{currentPricing?.price.toLocaleString()} BDT</div>
-                  {billingCycle === 'yearly' && (currentPricing?.savingsBDT ?? 0) > 0 && (
-                    <div className="text-[10px] text-[#00D68F] font-bold">
-                      Saving ৳{currentPricing?.savingsBDT.toLocaleString()} ({currentPricing?.discountPercent}%)
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -654,7 +622,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                       <span>Submitting Request...</span>
                     ) : (
                       <>
-                        <span>Submit Payment for Verification ({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} · {currentPricing?.durationDays} Days)</span>
+                        <span>Submit Payment for Verification (Monthly · {currentPricing?.durationDays} Days)</span>
                         <Check className="w-4 h-4 stroke-[3]" />
                       </>
                     )}
@@ -702,7 +670,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                   <div className="flex justify-between text-slate-300">
                     <span>Requested Plan:</span>
                     <span className="font-semibold text-white">
-                      {currentPlan.name} ({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} · {currentPricing?.durationDays} Days)
+                      {currentPlan.name} (Monthly · {currentPricing?.durationDays} Days)
                     </span>
                   </div>
                   <div className="flex justify-between text-slate-300">
