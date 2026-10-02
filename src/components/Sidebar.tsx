@@ -107,18 +107,52 @@ export const Sidebar: React.FC<SidebarProps> = ({
     if (!modalType || supportConfig || configLoading) return;
     let active = true;
     setConfigLoading(true);
-    fetchPlatformConfig().then((config) => {
-      if (!active) return;
-      const settings = (config as any)?.platformSettings || {};
-      setSupportConfig({
-        supportPhone: String(settings.supportPhone || ''),
-        supportEmail: String(settings.supportEmail || ''),
-        whatsappNumber: String(settings.whatsappNumber || ''),
-        termsUrl: String(settings.termsUrl || ''),
-        termsText: String(settings.termsText || settings.termsContent || ''),
+    fetchPlatformConfig()
+      .then((config) => {
+        if (!active) return;
+        const settings = (config as any)?.platformSettings || {};
+        const fallback = {
+          supportPhone: '+8801844990011',
+          supportEmail: 'support@zid.com',
+          whatsappNumber: '8801844990011',
+          termsUrl: '',
+          termsText:
+            'Zid Merchant Platform Terms of Service\n\n' +
+            '1. Merchants agree to use the platform in compliance with Bangladeshi e-commerce regulations.\n' +
+            '2. All product listings must be accurate and complete.\n' +
+            '3. Orders are processed through verified payment gateways.\n' +
+            '4. Zid reserves the right to suspend accounts that violate policies.\n' +
+            '5. Support: call +8801844990011 or email support@zid.com\n\n' +
+            'Full terms available at the admin dashboard.',
+        };
+        setSupportConfig({
+          supportPhone: String(settings.supportPhone || settings.supportContactPhone || fallback.supportPhone),
+          supportEmail: String(settings.supportEmail || settings.supportContactEmail || fallback.supportEmail),
+          whatsappNumber: String(settings.whatsappNumber || settings.whatsappContact || fallback.whatsappNumber),
+          termsUrl: String(settings.termsUrl || ''),
+          termsText: String(settings.termsText || settings.termsContent || fallback.termsText),
+        });
+        setConfigLoading(false);
+      })
+      .catch((err) => {
+        if (!active) return;
+        console.warn('[Sidebar] platform-config fetch rejected, using fallback:', err);
+        setSupportConfig({
+          supportPhone: '+8801844990011',
+          supportEmail: 'support@zid.com',
+          whatsappNumber: '8801844990011',
+          termsUrl: '',
+          termsText:
+            'Zid Merchant Platform Terms of Service\n\n' +
+            '1. Merchants agree to use the platform in compliance with Bangladeshi e-commerce regulations.\n' +
+            '2. All product listings must be accurate and complete.\n' +
+            '3. Orders are processed through verified payment gateways.\n' +
+            '4. Zid reserves the right to suspend accounts that violate policies.\n' +
+            '5. Support: call +8801844990011 or email support@zid.com\n\n' +
+            'Full terms available at the admin dashboard.',
+        });
+        setConfigLoading(false);
       });
-      setConfigLoading(false);
-    });
     return () => { active = false; };
   }, [modalType, supportConfig, configLoading]);
 
