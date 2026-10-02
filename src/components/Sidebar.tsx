@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { NavigationTab, ProductSubTab, CustomerSubTab, StoreSubTab, SettingsSubTab } from '../types';
-import { fetchPlatformConfig } from '../lib/platformConfigApi';
+import { fetchSupportContactConfig } from '../lib/platformConfigApi';
+import type { SupportContactConfig } from '../lib/platformConfigApi';
 import { BrandLogo } from './BrandLogo';
 import {
   LayoutDashboard,
@@ -98,63 +99,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [isStoreExpanded, setIsStoreExpanded] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [modalType, setModalType] = useState<'terms' | 'support' | null>(null);
-  const [supportConfig, setSupportConfig] = useState<{ supportPhone: string; supportEmail: string; whatsappNumber: string; termsUrl: string; termsText: string } | null>(null);
+  const [supportConfig, setSupportConfig] = useState<SupportContactConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
 
   // Dynamically fetch the Super Admin platform config (stored in MongoDB via
   // /api/admin/platform-config) the first time a dialog is opened.
+  //
+  // WHY THE DEPS ARE ONLY [modalType, supportConfig]
+  // This effect used to list `configLoading` as a dependency as well. That is
+  // self-defeating: `setConfigLoading(true)` below re-renders, React runs this
+  // effect's cleanup, `active` flips to false, and the re-run hits the
+  // `configLoading` guard and returns. The in-flight request then resolves into
+  // a dead callback that does nothing — `configLoading` stays true forever and
+  // both modals spin on "Loading…" permanently. Any state the effect writes must
+  // therefore stay OUT of the dependency array, or the effect cancels itself.
   useEffect(() => {
-    if (!modalType || supportConfig || configLoading) return;
+    if (!modalType) return;
+    // Already have it (a previous modal was opened this session).
+    if (supportConfig) return;
+
     let active = true;
     setConfigLoading(true);
-    fetchPlatformConfig()
-      .then((config) => {
-        if (!active) return;
-        const settings = (config as any)?.platformSettings || {};
-        const fallback = {
-          supportPhone: '+8801844990011',
-          supportEmail: 'support@zid.com',
-          whatsappNumber: '8801844990011',
-          termsUrl: '',
-          termsText:
-            'Zid Merchant Platform Terms of Service\n\n' +
-            '1. Merchants agree to use the platform in compliance with Bangladeshi e-commerce regulations.\n' +
-            '2. All product listings must be accurate and complete.\n' +
-            '3. Orders are processed through verified payment gateways.\n' +
-            '4. Zid reserves the right to suspend accounts that violate policies.\n' +
-            '5. Support: call +8801844990011 or email support@zid.com\n\n' +
-            'Full terms available at the admin dashboard.',
-        };
-        setSupportConfig({
-          supportPhone: String(settings.supportPhone || settings.supportContactPhone || fallback.supportPhone),
-          supportEmail: String(settings.supportEmail || settings.supportContactEmail || fallback.supportEmail),
-          whatsappNumber: String(settings.whatsappNumber || settings.whatsappContact || fallback.whatsappNumber),
-          termsUrl: String(settings.termsUrl || ''),
-          termsText: String(settings.termsText || settings.termsContent || fallback.termsText),
-        });
-        setConfigLoading(false);
-      })
-      .catch((err) => {
-        if (!active) return;
-        console.warn('[Sidebar] platform-config fetch rejected, using fallback:', err);
-        setSupportConfig({
-          supportPhone: '+8801844990011',
-          supportEmail: 'support@zid.com',
-          whatsappNumber: '8801844990011',
-          termsUrl: '',
-          termsText:
-            'Zid Merchant Platform Terms of Service\n\n' +
-            '1. Merchants agree to use the platform in compliance with Bangladeshi e-commerce regulations.\n' +
-            '2. All product listings must be accurate and complete.\n' +
-            '3. Orders are processed through verified payment gateways.\n' +
-            '4. Zid reserves the right to suspend accounts that violate policies.\n' +
-            '5. Support: call +8801844990011 or email support@zid.com\n\n' +
-            'Full terms available at the admin dashboard.',
-        });
-        setConfigLoading(false);
-      });
-    return () => { active = false; };
-  }, [modalType, supportConfig, configLoading]);
+
+    // `fetchSupportContactConfig` never rejects and never returns null — it
+    // resolves to the admin's values, or to the built-in fallbacks on timeout,
+    // network failure, or a non-JSON response. So `configLoading` is always
+    // cleared and the modal always renders something.
+    fetchSupportContactConfig().then((resolved) => {
+      if (!active) return;
+      setSupportConfig(resolved);
+      setConfigLoading(false);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [modalType, supportConfig]);
 
   const accountSubItems: { id: SettingsSubTab; label: string; icon: React.ElementType }[] = [
     { id: 'settings_account', label: 'Account details', icon: User },

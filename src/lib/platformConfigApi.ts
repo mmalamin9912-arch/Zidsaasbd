@@ -38,6 +38,139 @@ export async function fetchPlatformConfig(): Promise<PlatformConfigDocument | nu
   }
 }
 
+/* ────────────────────────────
+ * Support / Terms contacts (Sidebar modals)
+ * ---------------------------------------------------------------------------
+ * The Terms and Support modals render this data, and both used to be able to sit
+ * on "Loading…" forever. Two independent causes, both handled below:
+ *
+ *   1. `fetch()` has no deadline. A server that accepts the connection and never
+ *      answers leaves the promise pending, so no `.then` AND no `.catch` ever
+ *      runs — a timeout is the only way out. Hence `AbortSignal`.
+ *   2. Even with the fallback values, the modal must never depend on the network
+ *      to leave its loading state, so `resolveSupportConfig` ALWAYS returns a
+ *      complete, displayable object.
+ */
+
+/** Contact + legal copy shown in the Terms and Support modals. */
+export interface SupportContactConfig {
+  supportPhone: string;
+  supportEmail: string;
+  /** wa.me expects digits only; stored without the '+'. */
+  whatsappNumber: string;
+  /** Optional link to a full published terms document. */
+  termsUrl: string;
+  termsText: string;
+}
+
+/** Shown when the Super Admin has not published anything for this store. */
+export const DEFAULT_SUPPORT_CONTACT: SupportContactConfig = {
+  supportPhone: '+8801844990011',
+  supportEmail: 'support@zid.com',
+  whatsappNumber: '8801844990011',
+  termsUrl: '',
+  termsText:
+    'Zid Merchant Platform Terms of Service\n\n' +
+    '1. Merchants agree to use the platform in compliance with Bangladeshi e-commerce regulations.\n' +
+    '2. All product listings must be accurate and complete.\n' +
+    '3. Orders are processed through verified payment gateways.\n' +
+    '4. Zid reserves the right to suspend accounts that violate policies.\n' +
+    '5. Support: call +8801844990011 or email support@zid.com\n\n' +
+    'Full terms available at the admin dashboard.',
+};
+
+const firstString = (...values: unknown[]): string => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  }
+  return '';
+};
+
+/**
+ * Merge a platform-config document over the default contact block.
+ *
+ * Never returns a partial object, so the Support modal always has something to
+ * render and the Terms modal always has copy to show — a null/undefined field
+ * would drop the corresponding row out of the modal entirely.
+ *
+ * Several spellings are accepted because the admin form and older records
+ * disagree on the key names (`supportPhone` vs `supportContactPhone`, …).
+ */
+export function resolveSupportConfig(config: PlatformConfigDocument | null | undefined): SupportContactConfig {
+  const settings = (config?.platformSettings || {}) as Record<string, any>;
+
+  const supportPhone = firstString(
+    settings.supportPhone,
+    settings.supportContactPhone,
+    settings.support_contact_phone,
+    DEFAULT_SUPPORT_CONTACT.supportPhone
+  );
+  const supportEmail = firstString(
+    settings.supportEmail,
+    settings.supportContactEmail,
+    settings.support_contact_email,
+    DEFAULT_SUPPORT_CONTACT.supportEmail
+  );
+
+  // Derive the WhatsApp number from the support phone when it is not set
+  // explicitly, so a merchant who fills in one field still gets a wa.me link.
+  const whatsappNumber =
+    firstString(settings.whatsappNumber, settings.whatsappContact, settings.supportWhatsapp) ||
+    supportPhone.replace(/\D/g, '') ||
+    DEFAULT_SUPPORT_CONTACT.whatsappNumber;
+
+  return {
+    supportPhone,
+    supportEmail,
+    whatsappNumber,
+    termsUrl: firstString(settings.termsUrl, settings.terms_url),
+    termsText: firstString(
+      settings.termsText,
+      settings.termsContent,
+      settings.terms_text,
+      DEFAULT_SUPPORT_CONTACT.termsText
+    ),
+  };
+}
+
+/** Deadline for the support-config fetch. Comfortably under a browser's own timeout. */
+const SUPPORT_CONFIG_TIMEOUT_MS = 10000;
+
+/**
+ * Load the Terms/Support contact block, always resolving.
+ *
+ * Unlike `fetchPlatformConfig`, this NEVER returns null and NEVER rejects: the
+ * caller's loading flag is cleared in a `finally`-equivalent path no matter what,
+ * which is what stops the modal spinning forever when the endpoint is slow,
+ * unreachable, or returns an HTML error page.
+ */
+export async function fetchSupportContactConfig(
+  timeoutMs: number = SUPPORT_CONFIG_TIMEOUT_MS
+): Promise<SupportContactConfig> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch('/api/admin/platform-config', {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const data = await safeJson<{ ok: boolean; config: PlatformConfigDocument | null }>(res);
+    return resolveSupportConfig(data?.config);
+  } catch (err: any) {
+    // An abort here means the server never answered — the fallback is the whole
+    // point of this helper, so a timeout is a normal outcome, not an error.
+    console.warn(
+      '[platformConfigApi] fetchSupportContactConfig fell back to defaults:',
+      err?.name === 'AbortError' ? 'request timed out' : err?.message || err
+    );
+    return { ...DEFAULT_SUPPORT_CONTACT };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function savePlatformConfig(config: PlatformConfigDocument): Promise<boolean> {
   try {
     const res = await fetch('/api/admin/platform-config', {
@@ -129,4 +262,7 @@ export default {
   fetchAuditLogs,
   appendAuditLog,
   clearAuditLogs,
+  fetchSupportContactConfig,
+  resolveSupportConfig,
+  DEFAULT_SUPPORT_CONTACT,
 };
