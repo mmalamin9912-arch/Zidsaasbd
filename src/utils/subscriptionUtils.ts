@@ -159,11 +159,18 @@ export const getBillingDurationInDays = (
 export const getPlanDisplayName = (planId?: string): string => {
   if (!planId || planId === 'free_trial' || planId === 'trial') return 'Free Trial';
   const lower = planId.toLowerCase();
-  if (lower.includes('enterprise')) return 'Enterprise';
-  if (lower.includes('pro')) return 'Pro';
-  if (lower.includes('growth')) return 'Growth';
-  if (lower.includes('starter')) return 'Starter';
-  return planId.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  if (lower.includes('growth')) return 'Growth / Pro Plan';
+  if (lower.includes('rise') || lower.includes('starter')) return 'Rise / Starter Plan';
+  if (lower.includes('enterprise')) return 'Growth / Pro Plan';
+  if (lower.includes('pro')) return 'Growth / Pro Plan';
+  // Strip any legacy duration markers so no "(6 Months)" or "6_MONTHS" ever
+  // reaches a header.
+  return planId
+    .replace(/_/g, ' ')
+    .replace(/\b(\d+)[- _]?(month|months|year|years|m|y)\b/gi, '')
+    .replace(/\((\d+\s*(months?|years?))\)/gi, '')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
 /**

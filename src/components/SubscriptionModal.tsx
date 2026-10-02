@@ -259,9 +259,11 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                       <div>
                         <div className="flex items-center justify-between gap-2">
                           <h3 className="text-base font-extrabold text-white">{plan.name}</h3>
-                          <span className="text-[9px] font-black uppercase tracking-wider text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 rounded-full">
-                            {plan.badge}
-                          </span>
+                          {plan.badge && (
+                            <span className="text-[9px] font-black uppercase tracking-wider text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 rounded-full">
+                              {plan.badge}
+                            </span>
+                          )}
                         </div>
                         <p className="text-[11px] text-slate-400 mt-1 leading-snug">
                           {plan.isPopular
@@ -301,7 +303,11 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                             : 'bg-[#2E3548] hover:bg-[#3A435E] text-white border border-[#3A435E]')
                         }
                       >
-                        {isSelected ? 'Continue to Payment' : `Choose ${plan.name}`}
+                        {isSelected
+                          ? 'Continue to Payment'
+                          : plan.isPopular
+                            ? 'Choose Growth Plan'
+                            : 'Choose Starter Plan'}
                       </button>
                     </div>
                   );

@@ -97,10 +97,12 @@ const PLAN_LABELS: Record<string, string> = {
   free_trial: 'Free Trial',
   trial: 'Free Trial',
   free: 'Free',
-  starter_1m: 'Starter (1 Month)',
-  starter_3m: 'Starter (3 Months)',
-  pro_6m: 'Pro (6 Months)',
-  enterprise_12m: 'Enterprise (12 Months)',
+  starter_1m: 'Rise / Starter Plan',
+  starter_3m: 'Growth / Pro Plan',
+  pro_6m: 'Growth / Pro Plan',
+  enterprise_12m: 'Growth / Pro Plan',
+  rise: 'Rise / Starter Plan',
+  growth: 'Growth / Pro Plan',
 };
 
 /** Non-paying plan ids — everything else is considered a paid subscription. */

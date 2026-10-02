@@ -309,11 +309,15 @@ function calculatePlanTimestamps(planId?: string, startDate: Date = new Date()) 
 function getPlanDisplayName(planId?: string): string {
   if (!planId || planId === 'free_trial' || planId === 'trial') return 'Free Trial (30 Days)';
   const lower = planId.toLowerCase();
-  if (lower.includes('12m') || lower.includes('enterprise')) return 'Enterprise Plan (12 Months)';
-  if (lower.includes('6m') || lower.includes('pro')) return 'Pro Plan (6 Months)';
-  if (lower.includes('3m') || lower.includes('starter')) return 'Starter Plan (3 Months)';
-  if (lower.includes('1m') || lower.includes('month')) return '1-Month Plan';
-  return planId.replace(/_/g, ' ').toUpperCase();
+  // Duration markers are no longer baked into names — the tiers are monthly.
+  if (lower.includes('growth') || lower.includes('pro') || lower.includes('enterprise')) return 'Growth / Pro Plan';
+  if (lower.includes('rise') || lower.includes('starter') || lower.includes('month')) return 'Rise / Starter Plan';
+  return planId
+    .replace(/_/g, ' ')
+    .replace(/\b(\d+)[- _]?(month|months|year|years|m|y)\b/gi, '')
+    .replace(/\((\d+\s*(months?|years?))\)/gi, '')
+    .trim()
+    .toUpperCase();
 }
 
 function cleanEnvUrl(raw?: string): string {
