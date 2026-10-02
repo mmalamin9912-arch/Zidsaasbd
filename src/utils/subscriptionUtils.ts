@@ -130,6 +130,23 @@ export const getPlanDurationInDays = (planId?: string): number => {
 };
 
 /**
+ * Resolve the granted duration for a plan + billing term.
+ *
+ * The plan-id mapping above is the LEGACY default term. Once the catalogue has a
+ * Monthly/Yearly toggle, the term the merchant actually selected must win —
+ * otherwise paying the yearly price on `starter_3m` would silently grant the
+ * 90-day legacy term. Mirrors CYCLE_DURATION_DAYS in src/lib/planPricing.ts.
+ */
+export const getBillingDurationInDays = (
+  planId?: string,
+  billingCycle?: 'monthly' | 'yearly'
+): number => {
+  if (billingCycle === 'yearly') return 365;
+  if (billingCycle === 'monthly') return 30;
+  return getPlanDurationInDays(planId);
+};
+
+/**
  * Returns formatted human-readable plan name
  */
 export const getPlanDisplayName = (planId?: string): string => {
@@ -156,7 +173,8 @@ export const getPlanDisplayName = (planId?: string): string => {
  */
 export const calculatePlanTimestamps = (
   planId?: string,
-  startDate: Date = new Date()
+  startDate: Date = new Date(),
+  billingCycle?: 'monthly' | 'yearly'
 ): {
   plan_started_at: string;
   expires_at: string;
@@ -164,7 +182,7 @@ export const calculatePlanTimestamps = (
   durationDays: number;
   durationMs: number;
 } => {
-  const durationDays = getPlanDurationInDays(planId);
+  const durationDays = getBillingDurationInDays(planId, billingCycle);
   const durationMs = durationDays * 24 * 60 * 60 * 1000;
   const startMs = startDate.getTime();
   const expiryMs = startMs + durationMs;

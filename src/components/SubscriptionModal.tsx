@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { MerchantProfile, SubscriptionPlan, SubscriptionRequest, AdminPaymentGatewayConfig } from '../types';
+import { MerchantProfile, SubscriptionPlan, SubscriptionRequest, AdminPaymentGatewayConfig, BillingCycle } from '../types';
 import { subscriptionPlans } from '../data/initialData';
 import { calculateRemainingDays, getPlanDisplayName, isPaidSubscriptionActive } from '../utils/subscriptionUtils';
+import { resolvePlanPricing, sortPlansByTier, derivePlanFeatures } from '../lib/planPricing';
 import SafeImage from './SafeImage';
 import {
   X,
@@ -24,9 +25,21 @@ interface SubscriptionModalProps {
   onClose: () => void;
   merchant: MerchantProfile;
   pendingRequests?: SubscriptionRequest[];
-  onConfirmSubscription: (planId: string, paymentMethod: string, txId: string) => void;
+  onConfirmSubscription: (
+    planId: string,
+    paymentMethod: string,
+    txId: string,
+    billingCycle: BillingCycle
+  ) => void;
   adminPaymentConfig: AdminPaymentGatewayConfig;
   initialPlanId?: string;
+  /**
+   * Billing term chosen with the Monthly/Yearly toggle. Threaded into
+   * `onConfirmSubscription` so the granted subscription length follows the
+   * term the merchant actually paid for — without it the expiry is derived from
+   * the plan id alone and a yearly payment would only grant the legacy term.
+   */
+  billingCycle?: BillingCycle;
   /**
    * Live plan catalogue configured by the Super Admin (Supabase/MongoDB).
    * When omitted the fallback catalogue is used, but the dashboard always
@@ -43,11 +56,18 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   onConfirmSubscription,
   adminPaymentConfig,
   initialPlanId,
+  billingCycle: initialBillingCycle,
   plans,
 }) => {
   // The live catalogue from the DB; falls back to the default seed only when the
-  // admin catalogue has not loaded yet.
-  const planList = plans && plans.length > 0 ? plans : subscriptionPlans;
+  // admin catalogue has not loaded yet. Sorted so the merchant always reads the
+  // ladder bottom-up (Starter → Growth → Pro → Enterprise) regardless of the
+  // order rows came back from Mongo in.
+  const planList = React.useMemo(
+    () => sortPlansByTier(plans && plans.length > 0 ? plans : subscriptionPlans),
+    [plans]
+  );
+  const [billingCycle, setBillingCycle] = useState<BillingCycle>(initialBillingCycle || 'monthly');
   const [selectedPlanId, setSelectedPlanId] = useState<string>(initialPlanId || 'pro_6m');
   const [step, setStep] = useState<'select' | 'payment' | 'invoice'>(initialPlanId && initialPlanId !== 'free_trial' ? 'payment' : 'select');
   const [adminPaymentMethod, setAdminPaymentMethod] = useState<string>('');
@@ -89,6 +109,10 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   if (!isOpen) return null;
 
   const currentPlan = planList.find((p) => p.id === selectedPlanId) || planList[0];
+  // Every price/duration shown in the modal resolves through this one object, so
+  // the card, the payment summary, the QR amount and the receipt can never
+  // quote different figures for the same selection.
+  const currentPricing = currentPlan ? resolvePlanPricing(currentPlan, billingCycle) : null;
 
   const handleCopy = (text: string, fieldName: string) => {
     navigator.clipboard.writeText(text);
@@ -104,7 +128,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     setTimeout(() => {
       setIsSubmitting(false);
       setStep('invoice');
-      onConfirmSubscription(selectedPlanId, adminPaymentMethod, transactionId);
+      onConfirmSubscription(selectedPlanId, adminPaymentMethod, transactionId, billingCycle);
     }, 1000);
   };
 
@@ -202,10 +226,48 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                 );
               })()}
 
+              {/* ── Billing cycle toggle ──
+                  The yearly saving is computed from the catalogue (see
+                  resolvePlanPricing), not hardcoded, so an admin changing a
+                  yearly price automatically changes the badge. */}
+              <div className="flex items-center justify-center gap-3">
+                <div className="inline-flex items-center p-1 bg-[#181B26] border border-[#2E3548] rounded-xl">
+                  {(['monthly', 'yearly'] as BillingCycle[]).map((cycle) => (
+                    <button
+                      key={cycle}
+                      type="button"
+                      onClick={() => setBillingCycle(cycle)}
+                      className={`px-4 py-1.5 rounded-lg text-xs font-bold capitalize transition cursor-pointer ${
+                        billingCycle === cycle
+                          ? 'bg-[#D4AF37] text-slate-950'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {cycle === 'monthly' ? 'Monthly' : 'Yearly'}
+                    </button>
+                  ))}
+                </div>
+                {(() => {
+                  // Largest real saving across the catalogue, so the badge is
+                  // never a promise the cheapest plan cannot keep.
+                  const best = Math.max(
+                    ...planList.map((p) => resolvePlanPricing(p, 'yearly').discountPercent),
+                    0
+                  );
+                  return best > 0 ? (
+                    <span className="text-[10px] font-bold text-[#00D68F] bg-[#00D68F]/10 border border-[#00D68F]/30 px-2 py-1 rounded-full">
+                      Save up to {best}% on Annual
+                    </span>
+                  ) : null;
+                })()}
+              </div>
+
               {/* Plans Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
                 {planList.map((plan) => {
                   const isSelected = selectedPlanId === plan.id;
+                  const pricing = resolvePlanPricing(plan, billingCycle);
+                  const featureLines = derivePlanFeatures(plan);
                   return (
                     <div
                       key={plan.id}
@@ -220,21 +282,44 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                     >
                       <div>
                         <div className="flex justify-between items-start mb-2">
-                          <h3 className="font-bold text-white text-xs">{plan.name}</h3>
+                          <div>
+                            <h3 className="font-bold text-white text-xs">{plan.name}</h3>
+                            {plan.badge && (
+                              <span className="text-[8px] font-black uppercase tracking-wider text-[#D4AF37] bg-[#D4AF37]/10 border border-[#D4AF37]/20 px-1.5 py-0.5 rounded mt-1 inline-block">
+                                {plan.badge}
+                              </span>
+                            )}
+                          </div>
                           {isSelected && <Check className="w-3 h-3 text-[#D4AF37] stroke-[3]" />}
                         </div>
 
-                      {/* Price Block */}
+                        {/* Price Block — quote for the SELECTED billing term */}
                         <div className="mb-2 pb-2 border-b border-[#2E3548]">
+                          {billingCycle === 'yearly' && pricing.compareAtPrice > pricing.price && (
+                            <div className="flex items-center gap-1.5 mb-0.5">
+                              <span className="text-[10px] text-slate-500 line-through">
+                                ৳{pricing.compareAtPrice.toLocaleString()}
+                              </span>
+                              <span className="text-[9px] font-bold text-[#00D68F]">
+                                Save ৳{pricing.savingsBDT.toLocaleString()}
+                              </span>
+                            </div>
+                          )}
                           <div className="flex items-baseline gap-1">
-                            <span className="text-lg font-extrabold text-white">৳{plan.price.toLocaleString()}</span>
-                            <span className="text-slate-400 text-[9px]">/ {plan.durationDays}d</span>
+                            <span className="text-lg font-extrabold text-white">৳{pricing.price.toLocaleString()}</span>
+                            <span className="text-slate-400 text-[9px]">/ {billingCycle === 'yearly' ? 'year' : 'month'}</span>
                           </div>
+                          {billingCycle === 'yearly' && pricing.perMonth > 0 && (
+                            <div className="text-[9px] text-slate-400">
+                              ≈ ৳{pricing.perMonth.toLocaleString()}/mo · {pricing.durationDays} days
+                            </div>
+                          )}
                         </div>
 
-                        {/* Features List */}
+                        {/* Feature list — derived from the plan's capability flags
+                            so the card cannot claim a tier the flags deny. */}
                         <ul className="space-y-1 text-[10px] text-slate-300 mb-3">
-                          {plan.features.slice(0, 3).map((feat, idx) => (
+                          {featureLines.slice(0, 4).map((feat, idx) => (
                             <li key={idx} className="flex items-start gap-1.5">
                               <Check className="w-3 h-3 text-[#D4AF37] shrink-0 mt-0.5" />
                               <span className="truncate">{feat}</span>
@@ -267,10 +352,17 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               <div className="bg-[#202533] border border-[#2E3548] rounded-xl p-4 flex items-center justify-between">
                 <div>
                   <span className="text-xs text-slate-400">Selected SaaS Renewal Plan</span>
-                  <h4 className="text-base font-bold text-white">{currentPlan.name} ({currentPlan.durationDays} Days)</h4>
+                  <h4 className="text-base font-bold text-white">
+                    {currentPlan.name} ({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} · {currentPricing?.durationDays} Days)
+                  </h4>
                 </div>
                 <div className="text-right">
-                  <div className="text-xl font-extrabold text-[#D4AF37]">৳{currentPlan.price.toLocaleString()} BDT</div>
+                  <div className="text-xl font-extrabold text-[#D4AF37]">৳{currentPricing?.price.toLocaleString()} BDT</div>
+                  {billingCycle === 'yearly' && (currentPricing?.savingsBDT ?? 0) > 0 && (
+                    <div className="text-[10px] text-[#00D68F] font-bold">
+                      Saving ৳{currentPricing?.savingsBDT.toLocaleString()} ({currentPricing?.discountPercent}%)
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -482,7 +574,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                 {adminPaymentMethod === 'qr_admin' && (
                   <div className="space-y-4 text-center">
                     <p className="text-xs text-slate-300 leading-relaxed">
-                      Scan the QR code below to pay <span className="text-white font-bold">৳{currentPlan.price.toLocaleString()} BDT</span> to Zid Admin.
+                      Scan the QR code below to pay <span className="text-white font-bold">৳{currentPricing?.price.toLocaleString()} BDT</span> to Zid Admin.
                     </p>
 
                     {adminPaymentConfig.qrImageUrl ? (
@@ -559,7 +651,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                       <span>Submitting Request...</span>
                     ) : (
                       <>
-                        <span>Submit bKash Payment for Verification ({currentPlan.durationDays} Days)</span>
+                        <span>Submit Payment for Verification ({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} · {currentPricing?.durationDays} Days)</span>
                         <Check className="w-4 h-4 stroke-[3]" />
                       </>
                     )}
@@ -606,7 +698,9 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                   </div>
                   <div className="flex justify-between text-slate-300">
                     <span>Requested Plan:</span>
-                    <span className="font-semibold text-white">{currentPlan.name} ({currentPlan.durationDays} Days)</span>
+                    <span className="font-semibold text-white">
+                      {currentPlan.name} ({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} · {currentPricing?.durationDays} Days)
+                    </span>
                   </div>
                   <div className="flex justify-between text-slate-300">
                     <span>Transaction ID:</span>
@@ -614,13 +708,13 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                   </div>
                   <div className="flex justify-between text-slate-300">
                     <span>SaaS Fee (0% Order Commission):</span>
-                    <span className="font-semibold text-white">৳{currentPlan.price.toLocaleString()} BDT</span>
+                    <span className="font-semibold text-white">৳{currentPricing?.price.toLocaleString()} BDT</span>
                   </div>
                 </div>
 
                 <div className="pt-3 border-t border-[#2E3548] flex justify-between items-center text-sm font-extrabold text-white">
                   <span>Amount Submitted:</span>
-                  <span className="text-[#D4AF37]">৳{currentPlan.price.toLocaleString()} BDT</span>
+                  <span className="text-[#D4AF37]">৳{currentPricing?.price.toLocaleString()} BDT</span>
                 </div>
               </div>
 

@@ -493,6 +493,35 @@ export interface ThemeConfig {
 
 export type SubscriptionPlanId = 'free_trial' | 'starter_3m' | 'pro_6m' | 'enterprise_12m' | (string & {});
 
+/** Billing term the merchant is quoting/buying. Drives price AND granted days. */
+export type BillingCycle = 'monthly' | 'yearly';
+
+/**
+ * Machine-readable capability flags — the REAL tiering.
+ *
+ * `features: string[]` is prose the admin typed for display only; nothing gates
+ * on it. These flags are what the plan cards, the Super Admin configurator and
+ * (eventually) the entitlement checks read, so a merchant can compare tiers
+ * without parsing English bullet points.
+ */
+export interface PlanFeatureFlags {
+  /** Premium theme library (Starter is limited to the standard themes). */
+  premiumThemes: boolean;
+  /** Bring-your-own-domain / subdomain configuration. */
+  customDomain: boolean;
+  /** AI caption / description / pricing generators. */
+  aiTools: boolean;
+  /** Meta + TikTok + GA4 pixel injection and conversion tracking. */
+  metaPixels: boolean;
+  /** WhatsApp abandoned-cart auto-recovery. */
+  whatsappRecovery: boolean;
+  /** Live courier API integrations (Steadfast/Pathao/RedX/…). */
+  courierApi: boolean;
+  /** Background-removal tool. */
+  removeBg: boolean;
+  prioritySupport: boolean;
+}
+
 export interface SubscriptionPlan {
   id: string;
   name: string;
@@ -502,6 +531,22 @@ export interface SubscriptionPlan {
   features: string[];
   isPopular?: boolean;
   isActive?: boolean;
+  /**
+   * Ascending sort position for the merchant-facing plan grid. Lower shows
+   * first. Unset falls back to catalogue order, then price — see
+   * `sortPlansByTier` in src/lib/planPricing.ts.
+   */
+  displayOrder?: number;
+  /** Price for one 30-day term. Falls back to `price` when unset. */
+  monthlyPrice?: number;
+  /** Price for one 365-day term. Falls back to a discount off monthly × 12. */
+  yearlyPrice?: number;
+  /** Annual saving as a whole percent, used for the "Save N%" badge. */
+  annualDiscountPercent?: number;
+  /** Product cap for the tier. 0 (or absent) means unlimited. */
+  maxProducts?: number;
+  /** Per-tier capability flags; see `PlanFeatureFlags`. */
+  featureFlags?: Partial<PlanFeatureFlags>;
 }
 
 export interface BankAccount {
@@ -676,6 +721,14 @@ export interface SubscriptionRequest {
   transactionId: string;
   requestedAt: string;
   status: 'pending' | 'approved' | 'rejected';
+  /** Term the merchant actually paid for. Optional for legacy rows. */
+  billingCycle?: BillingCycle;
+  /**
+   * Days to grant on approval. Recorded at purchase time because approving a
+   * yearly purchase of a plan whose id still encodes the legacy 90-day term
+   * would otherwise grant 90 days.
+   */
+  durationDays?: number;
 }
 
 export interface AdminCustomGateway {

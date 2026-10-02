@@ -166,44 +166,145 @@ export const initialCustomers: Customer[] = [];
 export const initialCoupons: DiscountCoupon[] = [];
 export const initialInvoices: InvoiceRecord[] = [];
 
+/**
+ * Default plan catalogue — a Bangladesh-market SaaS ladder.
+ *
+ * Structure: Starter (basic) → Growth (popular) → Pro → Enterprise (advanced).
+ * Lower tiers get the essentials with hard product caps and standard themes;
+ * the paid tiers unlock premium themes, AI tools, tracking pixels, WhatsApp
+ * recovery and finally a custom domain.
+ *
+ * PRICING
+ * `price` + `durationDays` remain the legacy term (what a record written before
+ * the billing toggle stored) and drive nothing user-facing any more — the UI
+ * quotes `monthlyPrice` / `yearlyPrice` through src/lib/planPricing.ts. They are
+ * kept in step with the monthly figure so old readers still show something
+ * sensible.
+ *
+ * `displayOrder` is the merchant-facing sort position the Super Admin edits.
+ */
 export const subscriptionPlans: SubscriptionPlan[] = [
   {
     id: 'starter_1m',
-    name: '1-Month Plan',
-    price: 1000,
+    name: 'Starter',
+    price: 999,
     durationDays: 30,
-    badge: '1_MONTH',
-    features: ['Up to 100 Products', 'Standard Themes', 'Basic AI Tools', 'Standard Support'],
-    isActive: true
+    badge: 'BASIC',
+    displayOrder: 10,
+    monthlyPrice: 999,
+    yearlyPrice: 9590,
+    annualDiscountPercent: 20,
+    maxProducts: 100,
+    featureFlags: {
+      premiumThemes: false,
+      customDomain: false,
+      aiTools: false,
+      metaPixels: false,
+      whatsappRecovery: false,
+      courierApi: false,
+      removeBg: false,
+      prioritySupport: false,
+    },
+    features: [
+      'Up to 100 products',
+      'Standard themes only',
+      'Order & customer management',
+      'bKash / Nagad / Cash on Delivery',
+      'Standard email support',
+    ],
+    isActive: true,
   },
   {
     id: 'starter_3m',
-    name: 'Starter Plan (3 Months)',
-    price: 3000,
+    name: 'Growth',
+    price: 2499,
     durationDays: 90,
-    badge: '3_MONTHS',
-    features: ['Up to 500 Products', 'Standard Themes', 'Pro AI Tools (Description, Image, Pricing)', 'Standard Support'],
-    isActive: true
+    badge: 'POPULAR',
+    displayOrder: 20,
+    monthlyPrice: 2499,
+    yearlyPrice: 23990,
+    annualDiscountPercent: 20,
+    maxProducts: 500,
+    featureFlags: {
+      premiumThemes: true,
+      customDomain: false,
+      aiTools: true,
+      metaPixels: true,
+      whatsappRecovery: false,
+      courierApi: true,
+      removeBg: true,
+      prioritySupport: false,
+    },
+    features: [
+      'Up to 500 products',
+      'Premium theme library',
+      'AI description & caption writer',
+      'Meta + TikTok pixels',
+      'Live courier API integrations',
+      'AI background remover',
+    ],
+    isPopular: true,
+    isActive: true,
   },
   {
     id: 'pro_6m',
-    name: 'Pro Plan (6 Months)',
-    price: 5000,
+    name: 'Pro',
+    price: 4999,
     durationDays: 180,
-    badge: '6_MONTHS',
-    features: ['Unlimited Products', 'Premium Themes', 'Pro AI Marketing & Caption Tools', 'Priority Support'],
-    isPopular: true,
-    isActive: true
+    badge: 'ADVANCED',
+    displayOrder: 30,
+    monthlyPrice: 4999,
+    yearlyPrice: 47990,
+    annualDiscountPercent: 20,
+    maxProducts: 0,
+    featureFlags: {
+      premiumThemes: true,
+      customDomain: true,
+      aiTools: true,
+      metaPixels: true,
+      whatsappRecovery: true,
+      courierApi: true,
+      removeBg: true,
+      prioritySupport: true,
+    },
+    features: [
+      'Unlimited products',
+      'Custom domain',
+      'WhatsApp abandoned-cart recovery',
+      'Full AI suite',
+      'Priority support',
+    ],
+    isActive: true,
   },
   {
     id: 'enterprise_12m',
-    name: 'Enterprise Plan (12 Months)',
-    price: 15000,
+    name: 'Enterprise',
+    price: 9999,
     durationDays: 365,
-    badge: '12_MONTHS',
-    features: ['Unlimited Products', 'Full AI Suite Unlocked', 'Priority Support', 'Custom Domain'],
-    isActive: true
-  }
+    badge: 'ENTERPRISE',
+    displayOrder: 40,
+    monthlyPrice: 9999,
+    yearlyPrice: 95980,
+    annualDiscountPercent: 20,
+    maxProducts: 0,
+    featureFlags: {
+      premiumThemes: true,
+      customDomain: true,
+      aiTools: true,
+      metaPixels: true,
+      whatsappRecovery: true,
+      courierApi: true,
+      removeBg: true,
+      prioritySupport: true,
+    },
+    features: [
+      'Everything in Pro',
+      'Unlimited products & staff seats',
+      'Dedicated account manager',
+      'Custom integrations on request',
+    ],
+    isActive: true,
+  },
 ];
 
 export const initialCodConfig: CodConfig = {

@@ -263,10 +263,26 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       try {
         const parsed = JSON.parse(prePayment);
         if (parsed.planId) {
+          // Apply the term the merchant actually PAID for. `resolveMerchantSubscription`
+          // re-derives duration from the plan id, so a yearly pre-payment would be
+          // downgraded to the legacy 90-day term without these explicit timestamps.
+          const startMs = Date.now();
+          const paidDays = parsed.durationDays > 0 ? parsed.durationDays : null;
+          const paidExpiryMs = paidDays ? startMs + paidDays * 86400000 : 0;
           return resolveMerchantSubscription({
             ...profile,
             subscriptionPlan: parsed.planId,
-            plan_started_at: new Date().toISOString()
+            plan_started_at: new Date(startMs).toISOString(),
+            ...(paidDays
+              ? {
+                duration_days: paidDays,
+                durationDays: paidDays,
+                selectedPlanDays: paidDays,
+                expires_at: new Date(paidExpiryMs).toISOString(),
+                expiresAt: new Date(paidExpiryMs).toISOString(),
+                subscriptionExpiry: new Date(paidExpiryMs).toISOString().split('T')[0]
+              }
+              : {})
           });
         }
       } catch (e) {
@@ -294,7 +310,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     syncMerchantSubscription({
       merchant: enrichedProfile,
       planId: enrichedProfile.subscriptionPlan || 'free_trial',
-      startDate: new Date(enrichedProfile.plan_started_at || Date.now())
+      startDate: new Date(enrichedProfile.plan_started_at || Date.now()),
+      // Carry the paid term through, or the background sync would overwrite the
+      // expiry above with the legacy plan-id duration.
+      ...(enrichedProfile.durationDays && enrichedProfile.durationDays > 0
+        ? { durationDays: enrichedProfile.durationDays }
+        : {})
     }).catch(err => console.warn('Background subscription sync notice:', err));
 
     onLoginSuccess(enrichedProfile);

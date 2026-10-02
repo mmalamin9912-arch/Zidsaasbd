@@ -19,6 +19,12 @@ export interface SubscriptionSyncOptions {
   transactionId?: string;
   paymentMethod?: string;
   status?: 'active' | 'pending';
+  /**
+   * Explicit granted term, e.g. 365 for a yearly purchase of a plan whose id
+   * still encodes the legacy 90-day term. When omitted the legacy plan-id
+   * mapping is used.
+   */
+  durationDays?: number;
 }
 
 /**
@@ -50,7 +56,15 @@ export function resolveMerchantSubscription(
     'free_trial';
 
   const isPaid = planId !== 'free_trial' && planId !== 'trial';
-  const durationDays = getPlanDurationInDays(planId);
+  // A recorded duration is the ACTUAL granted term and outranks the legacy
+  // plan-id mapping. Without this, a merchant who paid for a yearly term on a
+  // plan whose id still encodes 90 days would be reported as a 90-day
+  // subscriber everywhere the profile is rendered.
+  const recordedDays = Number(
+    merged.duration_days ?? merged.durationDays ?? merged.selectedPlanDays ?? 0
+  );
+  const legacyDays = getPlanDurationInDays(planId);
+  const durationDays = recordedDays > 0 ? Math.round(recordedDays) : legacyDays;
   const durationMs = durationDays * 24 * 60 * 60 * 1000;
 
   // Resolve start timestamp
@@ -208,10 +222,20 @@ export async function fetchMerchantSubscriptionFromSupabase(
 export async function syncMerchantSubscription(
   options: SubscriptionSyncOptions
 ): Promise<{ success: boolean; updatedProfile: MerchantProfile }> {
-  const { merchant, planId, startDate = new Date(), transactionId, paymentMethod, status = 'active' } = options;
+  const { merchant, planId, startDate = new Date(), transactionId, paymentMethod, status = 'active', durationDays: explicitDurationDays } = options;
 
-  const durationDays = getPlanDurationInDays(planId);
-  const { plan_started_at, expires_at, expiryDate, durationMs } = calculatePlanTimestamps(planId, startDate);
+  // An explicit term (from the merchant's Monthly/Yearly choice) outranks the
+  // legacy plan-id mapping, otherwise a yearly payment on `starter_3m` would
+  // persist a 90-day expiry. Every timestamp below is derived from this ONE
+  // resolved value so start/expiry/duration can never disagree.
+  const durationDays = explicitDurationDays && explicitDurationDays > 0
+    ? explicitDurationDays
+    : getPlanDurationInDays(planId);
+  const startMs = startDate.getTime();
+  const durationMs = durationDays * 24 * 60 * 60 * 1000;
+  const plan_started_at = new Date(startMs).toISOString();
+  const expires_at = new Date(startMs + durationMs).toISOString();
+  const expiryDate = expires_at.split('T')[0];
   const isPaid = planId !== 'free_trial' && planId !== 'trial';
 
   const updatedProfile: MerchantProfile = {

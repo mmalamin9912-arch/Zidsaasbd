@@ -12,7 +12,7 @@
  * null/empty result rather than throwing, so a render never breaks.
  */
 
-import type { SubscriptionPlan } from '../types';
+import type { PlanFeatureFlags, SubscriptionPlan } from '../types';
 
 /** Raw plan row as returned by the API (DB-normalised shape). */
 export interface ApiPlanRow {
@@ -25,6 +25,12 @@ export interface ApiPlanRow {
   features?: string[];
   badge?: string;
   isPopular?: boolean;
+  /** Ascending merchant-facing sort position; null when the admin left it unset. */
+  displayOrder?: number | null;
+  monthlyPriceBDT?: number | null;
+  yearlyPriceBDT?: number | null;
+  annualDiscountPercent?: number;
+  featureFlags?: Partial<PlanFeatureFlags>;
   subscriberCount?: number;
   source?: string;
 }
@@ -68,6 +74,20 @@ export function mapApiPlanToSubscriptionPlan(row: ApiPlanRow): SubscriptionPlan 
     features: Array.isArray(row.features) ? row.features : [],
     isActive: row.isActive !== false,
     isPopular: Boolean(row.isPopular),
+    // `null` (admin never set one) is preserved as "unset" rather than coerced
+    // to 0, which would pin the plan to the top of every merchant's grid.
+    displayOrder: row.displayOrder === null || row.displayOrder === undefined
+      ? undefined
+      : Number(row.displayOrder),
+    monthlyPrice: Number(row.monthlyPriceBDT) > 0 ? Number(row.monthlyPriceBDT) : undefined,
+    yearlyPrice: Number(row.yearlyPriceBDT) > 0 ? Number(row.yearlyPriceBDT) : undefined,
+    annualDiscountPercent: Number.isFinite(Number(row.annualDiscountPercent))
+      ? Number(row.annualDiscountPercent)
+      : undefined,
+    maxProducts: Number(row.maxProducts) || 0,
+    featureFlags: (row.featureFlags && typeof row.featureFlags === 'object')
+      ? { ...row.featureFlags }
+      : undefined,
   };
 }
 
@@ -135,9 +155,18 @@ export async function ensurePlansSeeded(): Promise<ApiPlanRow[]> {
   }
 }
 
-/** Persist a single plan (create or update) to Supabase + MongoDB. */
+/**
+ * Persist a single plan (create or update) to MongoDB.
+ *
+ * The billing-cycle prices, display order and feature flags are written under
+ * BOTH their snake_case (Mongo / Supabase mirror) and camelCase (API layer)
+ * spellings, because `normalizePlanRow` and `normalizeSubscription` each accept
+ * either and a half-written pair would leave the merchant UI quoting a stale
+ * price the admin believes they changed.
+ */
 export async function savePlan(plan: SubscriptionPlan): Promise<boolean> {
   try {
+    const flags = plan.featureFlags || {};
     const payload = {
       slug: plan.id,
       id: plan.id,
@@ -156,6 +185,23 @@ export async function savePlan(plan: SubscriptionPlan): Promise<boolean> {
       isActive: plan.isActive !== false,
       is_popular: Boolean(plan.isPopular),
       isPopular: Boolean(plan.isPopular),
+      // ── Product cap & tiering ──
+      max_products: Number(plan.maxProducts) || 0,
+      maxProducts: Number(plan.maxProducts) || 0,
+      display_order: Number.isFinite(Number(plan.displayOrder)) ? Number(plan.displayOrder) : null,
+      displayOrder: Number.isFinite(Number(plan.displayOrder)) ? Number(plan.displayOrder) : null,
+      monthly_price_bdt: plan.monthlyPrice ?? null,
+      monthlyPrice: plan.monthlyPrice ?? null,
+      yearly_price_bdt: plan.yearlyPrice ?? null,
+      yearlyPrice: plan.yearlyPrice ?? null,
+      annual_discount_percent: Number.isFinite(Number(plan.annualDiscountPercent))
+        ? Number(plan.annualDiscountPercent)
+        : 20,
+      annualDiscountPercent: Number.isFinite(Number(plan.annualDiscountPercent))
+        ? Number(plan.annualDiscountPercent)
+        : 20,
+      feature_flags: flags,
+      featureFlags: flags,
     };
     // Save through the MongoDB-backed catalogue endpoint so the admin price
     // edit is durable the moment the configurator reports success (no refresh

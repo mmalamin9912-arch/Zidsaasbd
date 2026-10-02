@@ -1,6 +1,7 @@
 import React from 'react';
 import { CheckCircle2, ArrowRight, Sparkles } from 'lucide-react';
 import { subscriptionPlans } from '../data/initialData';
+import { monthlyPriceOf, resolvePlanPricing, sortPlansByTier } from '../lib/planPricing';
 import { LanguageToggle } from './LanguageToggle';
 import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
@@ -100,7 +101,7 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
           </div>
 
           {/* Map real subscription plans */}
-          {subscriptionPlans.filter(p => p.isActive).map((plan) => (
+          {sortPlansByTier(subscriptionPlans.filter(p => p.isActive)).map((plan) => (
             <div 
               key={plan.id} 
               id={`plan-card-${plan.id}`}
@@ -120,9 +121,20 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
               </div>
               <p className="text-sm text-slate-400 mb-4 h-10">{t('land_plan_desc')}</p>
               <div className="mb-6">
-                <span className="text-4xl font-black text-white">৳{plan.price}</span>
-                <span className="text-slate-500"> / {plan.durationDays} {t('land_days')}</span>
+                {/* Quote the MONTHLY term — this is the entry price merchants
+                    see before choosing a term, and `price` is kept in sync
+                    with `monthlyPrice` by the admin editor. */}
+                <span className="text-4xl font-black text-white">৳{monthlyPriceOf(plan).toLocaleString()}</span>
+                <span className="text-slate-500"> / {t('land_month')}</span>
               </div>
+              {/* Tease the annual saving so the landing page matches the
+                  checkout toggle the merchant will meet next. */}
+              {resolvePlanPricing(plan, 'yearly').discountPercent > 0 && (
+                <div className="text-xs font-bold text-[#00D68F] mb-4">
+                  {t('land_or_save')} ৳{resolvePlanPricing(plan, 'yearly').price.toLocaleString()}/{t('land_year')} — save{' '}
+                  {resolvePlanPricing(plan, 'yearly').discountPercent}%
+                </div>
+              )}
               <button 
                 id={`plan-btn-${plan.id}`}
                 onClick={() => onSelectPlan(plan.id)}

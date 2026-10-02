@@ -49,7 +49,14 @@ import {
 } from './adminRequests.js';
 import { pick, toNumber } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
-import { writeSubscription, listSubscriptions, listSubscriptionPlans, deleteSubscription, ensureSubscriptionSeed } from './subscriptionStore.js';
+import {
+  writeSubscription,
+  listSubscriptions,
+  listSubscriptionPlans,
+  deleteSubscription,
+  ensureSubscriptionSeed,
+  normalizeFeatureFlags as normalizePlanFeatureFlags,
+} from './subscriptionStore.js';
 import { checkOnboardingStatus, ONBOARDING_STEP_IDS } from './onboarding.js';
 import type { OnboardingStepId } from './onboarding.js';
 import { fetchHybridCatalog, fetchHybridThemes, fetchHybridAddons, supabaseThemes, supabaseAddons } from './supabaseAdminCRUD.js';
@@ -514,13 +521,25 @@ function sanitizeServerMerchant(m: any) {
   if (!m || typeof m !== 'object') return m;
   const planId = m.subscriptionPlan || m.subscription_plan || 'free_trial';
   const isPaid = planId !== 'free_trial' && planId !== 'trial';
-  const durationDays = getPlanDurationInDays(planId);
+
+  // A recorded duration is the term the merchant actually PAID for and outranks
+  // the legacy plan-id mapping. Re-deriving here would shorten a yearly
+  // subscriber on `starter_3m` to 90 days on the very next read.
+  const recordedDays = Number(m.duration_days ?? m.durationDays ?? m.selectedPlanDays ?? 0);
+  const durationDays = recordedDays > 0 ? Math.round(recordedDays) : getPlanDurationInDays(planId);
 
   const rawStart = m.plan_started_at || m.planStartedAt || m.created_at || new Date().toISOString();
-  const { plan_started_at: calcStart, expires_at: calcExpiry, expiryDate } = calculatePlanTimestamps(planId, new Date(rawStart));
+  const { plan_started_at: calcStart } = calculatePlanTimestamps(planId, new Date(rawStart));
+  const calcExpiry = new Date(
+    (isNaN(new Date(rawStart).getTime()) ? Date.now() : new Date(rawStart).getTime()) +
+    durationDays * 86400000
+  ).toISOString();
 
-  const existingExpiryMs = m.expires_at ? new Date(m.expires_at).getTime() : 0;
-  const isStale = !existingExpiryMs || isNaN(existingExpiryMs) || (isPaid && durationDays >= 90 && (existingExpiryMs - Date.now() < 35 * 86400000));
+  // A plan is only "stale" when there is NO usable expiry. Treating an expiry
+  // that is merely close as stale would hand every merchant approaching renewal
+  // a free extra term on each read.
+  const existingExpiryMs = m.expires_at || m.expiresAt ? new Date(m.expires_at || m.expiresAt).getTime() : 0;
+  const isStale = !existingExpiryMs || isNaN(existingExpiryMs);
 
   const plan_started_at = isStale ? new Date().toISOString() : (m.plan_started_at || m.planStartedAt || calcStart);
   const expires_at = isStale ? new Date(Date.now() + durationDays * 86400000).toISOString() : (m.expires_at || m.expiresAt || calcExpiry);
@@ -6148,15 +6167,42 @@ function firstQueryValue(raw: unknown): string {
 /** Normalise a raw plan row (Supabase table / Mongo doc) into the API shape. */
 function normalizePlanRow(plan: Record<string, any>) {
   const id = String(pick(plan, ['slug', 'plan_id', 'planId', 'id', 'code']) || '').toLowerCase();
+  const durationDays = toNumber(pick(plan, ['duration_days', 'durationDays', 'duration', 'days']), 30);
+  const priceBDT = toNumber(pick(plan, ['price_bdt', 'priceBDT', 'price', 'amount_bdt', 'amount']), 0);
+
+  // Billing-cycle pricing. `null`/absent monthly means "derive from the legacy
+  // term price" — the client does that maths in src/lib/planPricing.ts, so the
+  // server deliberately passes the raw values through rather than inventing
+  // figures here that could disagree with the UI.
+  const monthlyRaw = pick(plan, ['monthly_price_bdt', 'monthlyPrice', 'monthly_price']);
+  const yearlyRaw = pick(plan, ['yearly_price_bdt', 'yearlyPrice', 'yearly_price']);
+  const discountRaw = pick(plan, ['annual_discount_percent', 'annualDiscountPercent']);
+  const orderRaw = pick(plan, ['display_order', 'displayOrder', 'sort_order']);
+
+  const monthlyPriceBDT = monthlyRaw === null || monthlyRaw === undefined ? null : toNumber(monthlyRaw, 0);
+  const yearlyPriceBDT = yearlyRaw === null || yearlyRaw === undefined ? null : toNumber(yearlyRaw, 0);
+
   return {
     id,
     name: String(pick(plan, ['plan_name', 'planName', 'name', 'title', 'label']) || id || 'Plan'),
-    priceBDT: toNumber(pick(plan, ['price_bdt', 'priceBDT', 'price', 'amount_bdt', 'amount']), 0),
-    durationDays: toNumber(pick(plan, ['duration_days', 'durationDays', 'duration', 'days']), 30),
+    priceBDT,
+    durationDays,
     badge: String(pick(plan, ['badge_text', 'badge', 'tag']) || id || ''),
     isActive: pick(plan, ['is_active', 'isActive', 'active', 'enabled', 'is_published']) !== false,
     isPopular: pick(plan, ['is_popular', 'isPopular', 'popular']) === true,
     maxProducts: toNumber(pick(plan, ['max_products', 'maxProducts', 'product_limit']), 0),
+    // 0 = unlimited.
+    displayOrder: orderRaw === null || orderRaw === undefined ? null : toNumber(orderRaw, 0),
+    monthlyPriceBDT,
+    yearlyPriceBDT,
+    annualDiscountPercent: discountRaw === null || discountRaw === undefined
+      ? 20
+      : toNumber(discountRaw, 20),
+    // Derived monthly rate for a legacy row that has no explicit monthly price,
+    // so the billing toggle has something to quote for pre-existing plans.
+    effectiveMonthlyPriceBDT: monthlyPriceBDT
+      ?? (durationDays > 0 ? Math.round((priceBDT / durationDays) * 30) : 0),
+    featureFlags: normalizePlanFeatureFlags(plan.featureFlags ?? plan.feature_flags),
     features: Array.isArray(plan.features) ? plan.features : [],
   };
 }

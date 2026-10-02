@@ -1,7 +1,8 @@
 import React from 'react';
-import { MerchantProfile, SubscriptionRequest, InvoiceRecord } from '../../types';
+import { MerchantProfile, SubscriptionRequest, InvoiceRecord, SubscriptionPlan, BillingCycle } from '../../types';
 import { subscriptionPlans, initialInvoices } from '../../data/initialData';
 import { calculateRemainingDays, getPlanDisplayName, isPaidSubscriptionActive } from '../../utils/subscriptionUtils';
+import { resolvePlanPricing, sortPlansByTier, derivePlanFeatures } from '../../lib/planPricing';
 import { 
   TrendingUp, 
   Sparkles, 
@@ -21,6 +22,8 @@ interface BillingViewProps {
   pendingRequests?: SubscriptionRequest[];
   onOpenSubscriptionModal: () => void;
   onBack: () => void;
+  /** Live admin-configured catalogue; falls back to the seed when absent. */
+  plans?: SubscriptionPlan[];
 }
 
 export const BillingView: React.FC<BillingViewProps> = ({
@@ -28,6 +31,7 @@ export const BillingView: React.FC<BillingViewProps> = ({
   pendingRequests = [],
   onOpenSubscriptionModal,
   onBack,
+  plans,
 }) => {
   const pendingRequest = pendingRequests?.find(
     r => r.status === 'pending' && (
@@ -56,18 +60,20 @@ export const BillingView: React.FC<BillingViewProps> = ({
    */
   const visiblePlans = React.useMemo(() => {
     const seen = new Set<string>();
-    return (subscriptionPlans || []).filter(plan => {
+    return sortPlansByTier(plans && plans.length > 0 ? plans : subscriptionPlans || []).filter(plan => {
       const id = String(plan?.id || '').trim().toLowerCase();
-      const price = Number(plan?.price ?? 0);
+      const monthly = Number(plan?.monthlyPrice ?? plan?.price ?? 0);
       const durationDays = Number(plan?.durationDays ?? 0);
       // A sellable plan needs an identity, a price and a duration.
-      if (!id || !Number.isFinite(price) || price <= 0) return false;
+      if (!id || !Number.isFinite(monthly) || monthly <= 0) return false;
       if (!Number.isFinite(durationDays) || durationDays <= 0) return false;
       if (seen.has(id)) return false;
       seen.add(id);
       return true;
     });
-  }, []);
+  }, [plans]);
+
+  const [billingCycle, setBillingCycle] = React.useState<BillingCycle>('monthly');
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
@@ -190,8 +196,36 @@ export const BillingView: React.FC<BillingViewProps> = ({
       {/* Subscription Pricing Cards Display */}
       <div>
         <h2 className="text-base font-bold text-white mb-3">Merchant Subscription Options (Standard SaaS)</h2>
+        {/* Term toggle — mirrors the one in the checkout modal so the price the
+            merchant reads here is the price they are about to be charged. */}
+        <div className="flex items-center justify-center gap-3 mb-4">
+          <div className="inline-flex items-center p-1 bg-[#181B26] border border-[#2E3548] rounded-xl">
+            {(['monthly', 'yearly'] as BillingCycle[]).map((cycle) => (
+              <button
+                key={cycle}
+                type="button"
+                onClick={() => setBillingCycle(cycle)}
+                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  billingCycle === cycle ? 'bg-[#D4AF37] text-slate-950' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {cycle === 'monthly' ? 'Monthly' : 'Yearly'}
+              </button>
+            ))}
+          </div>
+          {(() => {
+            const best = Math.max(...visiblePlans.map((p) => resolvePlanPricing(p, 'yearly').discountPercent), 0);
+            return best > 0 ? (
+              <span className="text-[10px] font-bold text-[#00D68F] bg-[#00D68F]/10 border border-[#00D68F]/30 px-2 py-1 rounded-full">
+                Save up to {best}% on Annual
+              </span>
+            ) : null;
+          })()}
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {visiblePlans.map((plan) => (
+          {visiblePlans.map((plan) => {
+            const pricing = resolvePlanPricing(plan, billingCycle);
+            return (
             <div
               key={plan.id}
               className={`bg-[#202533] border rounded-2xl p-5 flex flex-col justify-between relative ${
@@ -207,14 +241,30 @@ export const BillingView: React.FC<BillingViewProps> = ({
               <div>
                 <h3 className="font-bold text-white text-base">{plan.name}</h3>
                 <div className="my-3">
-                  <div className="text-2xl font-black text-white">৳{plan.price.toLocaleString()} <span className="text-xs font-normal text-slate-400">/ {plan.durationDays} Days</span></div>
+                  {billingCycle === 'yearly' && pricing.compareAtPrice > pricing.price && (
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs text-slate-500 line-through">৳{pricing.compareAtPrice.toLocaleString()}</span>
+                      <span className="text-[10px] font-bold text-[#00D68F]">Save ৳{pricing.savingsBDT.toLocaleString()}</span>
+                    </div>
+                  )}
+                  <div className="text-2xl font-black text-white">
+                    ৳{pricing.price.toLocaleString()}{' '}
+                    <span className="text-xs font-normal text-slate-400">
+                      / {billingCycle === 'yearly' ? 'year' : 'month'}
+                    </span>
+                  </div>
                   <div className="text-[11px] text-slate-400 mt-1.5">
-                    Approx. ৳{Math.round(plan.price / (plan.durationDays / 30)).toLocaleString()} BDT/mo
+                    {pricing.durationDays} days
+                    {billingCycle === 'yearly' && pricing.perMonth > 0
+                      ? ` · ৳${pricing.perMonth.toLocaleString()} BDT/mo`
+                      : ''}
                   </div>
                 </div>
 
+                {/* Features derived from the capability flags, so this card
+                    cannot advertise a tier the plan's entitlements deny. */}
                 <ul className="space-y-1.5 text-xs text-slate-300 mb-4">
-                  {plan.features.map((f, i) => (
+                  {derivePlanFeatures(plan).slice(0, 6).map((f, i) => (
                     <li key={i} className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#00D68F] shrink-0" />
                       <span>{f}</span>
@@ -230,7 +280,8 @@ export const BillingView: React.FC<BillingViewProps> = ({
                 Select Plan
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

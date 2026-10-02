@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { ArrowLeft, Check, Copy, ShieldCheck, Sparkles } from 'lucide-react';
 import { subscriptionPlans } from './data/initialData';
-import { AdminPaymentGatewayConfig } from './types';
+import { AdminPaymentGatewayConfig, BillingCycle } from './types';
+import { resolvePlanPricing } from './lib/planPricing';
 
 interface PublicCheckoutProps {
   planId: string;
   adminPaymentConfig: AdminPaymentGatewayConfig;
-  onPaymentSuccess: (txId: string) => void;
+  onPaymentSuccess: (txId: string, billingCycle: BillingCycle) => void;
   onCancel: () => void;
 }
 
@@ -16,12 +17,16 @@ export const PublicCheckout: React.FC<PublicCheckoutProps> = ({
   onPaymentSuccess,
   onCancel,
 }) => {
+  const [billingCycle, setBillingCycle] = useState<BillingCycle>('monthly');
   const [adminPaymentMethod, setAdminPaymentMethod] = useState<string>('bkash_admin');
   const [transactionId, setTransactionId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
   const plan = subscriptionPlans.find((p) => p.id === planId) || subscriptionPlans[1];
+  // Amount, term label and the "send exactly ৳X" instruction all come from this
+  // one resolve, so the quoted figure can never disagree with itself.
+  const pricing = plan ? resolvePlanPricing(plan, billingCycle) : null;
 
   const handleCopy = (text: string, fieldName: string) => {
     navigator.clipboard.writeText(text);
@@ -37,7 +42,7 @@ export const PublicCheckout: React.FC<PublicCheckoutProps> = ({
     // Simulate payment validation
     setTimeout(() => {
       setIsSubmitting(false);
-      onPaymentSuccess(transactionId);
+      onPaymentSuccess(transactionId, billingCycle);
     }, 1500);
   };
 
@@ -55,13 +60,41 @@ export const PublicCheckout: React.FC<PublicCheckoutProps> = ({
         </div>
 
         <div className="p-6 space-y-6">
-          <div className="bg-[#202533] border border-[#2E3548] rounded-xl p-4 flex items-center justify-between">
+          <div className="bg-[#202533] border border-[#2E3548] rounded-xl p-4">
+            <div className="flex items-center justify-center gap-3 mb-4">
+              <div className="inline-flex items-center p-1 bg-[#181B26] border border-[#2E3548] rounded-xl">
+                {(['monthly', 'yearly'] as BillingCycle[]).map((cycle) => (
+                  <button
+                    key={cycle}
+                    type="button"
+                    onClick={() => setBillingCycle(cycle)}
+                    className={`px-4 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                      billingCycle === cycle ? 'bg-[#D4AF37] text-slate-950' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {cycle === 'monthly' ? 'Monthly' : 'Yearly'}
+                  </button>
+                ))}
+              </div>
+              {plan && resolvePlanPricing(plan, 'yearly').discountPercent > 0 && (
+                <span className="text-[10px] font-bold text-[#00D68F] bg-[#00D68F]/10 border border-[#00D68F]/30 px-2 py-1 rounded-full">
+                  Save {resolvePlanPricing(plan, 'yearly').discountPercent}% on Annual
+                </span>
+              )}
+            </div>
+            <div className="flex items-center justify-between">
             <div>
               <span className="text-xs text-slate-400">Selected Plan</span>
-              <h4 className="text-base font-bold text-white">{plan.name} ({plan.durationDays} Days)</h4>
+              <h4 className="text-base font-bold text-white">
+                {plan.name} ({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} · {pricing?.durationDays} Days)
+              </h4>
             </div>
             <div className="text-right">
-              <div className="text-xl font-extrabold text-[#D4AF37]">৳{plan.price.toLocaleString()} BDT</div>
+              <div className="text-xl font-extrabold text-[#D4AF37]">৳{pricing?.price.toLocaleString()} BDT</div>
+              {billingCycle === 'yearly' && (pricing?.savingsBDT ?? 0) > 0 && (
+                <div className="text-[10px] text-[#00D68F] font-bold">Save ৳{pricing?.savingsBDT.toLocaleString()}</div>
+              )}
+            </div>
             </div>
           </div>
 
@@ -105,7 +138,7 @@ export const PublicCheckout: React.FC<PublicCheckoutProps> = ({
             <h5 className="font-bold text-sm text-white">Instruction</h5>
             
             <div className="text-sm text-slate-400 space-y-2">
-              <p>1. Send exactly <strong className="text-white">৳{plan.price.toLocaleString()}</strong> via {adminPaymentMethod.split('_')[0].toUpperCase()} to our official Merchant Number.</p>
+              <p>1. Send exactly <strong className="text-white">৳{pricing?.price.toLocaleString()}</strong> via {adminPaymentMethod.split('_')[0].toUpperCase()} to our official Merchant Number.</p>
               <div className="flex items-center gap-2 bg-[#181B26] p-2 rounded-lg border border-[#3A435E] max-w-sm">
                 <span className="font-mono text-[#D4AF37] font-bold text-lg flex-1">
                   {adminPaymentMethod === 'bkash_admin' ? adminPaymentConfig.bkashNumber : adminPaymentConfig.nagadNumber}

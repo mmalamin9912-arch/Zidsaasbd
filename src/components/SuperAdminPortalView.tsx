@@ -72,6 +72,7 @@ import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminC
 import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingDays, getPlanDisplayName } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { savePlan } from '../lib/plansApi';
+import { FEATURE_FLAG_LABELS, featureFlagsOf, monthlyPriceOf, productLimitLabel, sortPlansByTier } from '../lib/planPricing';
 import { safeJson } from '../lib/storeApi';
 import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 import { normalizeMerchantSlug, validateMerchantSlug, updateMerchantSlug } from '../lib/adminMerchantsApi';
@@ -337,8 +338,11 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
   // The plan catalogue is hydrated from Supabase/MongoDB after mount; mirror it
   // into the configurator form so admin edits are made against the live data.
+  // Sorted by the SAME resolver the merchant grid uses, so the editor shows the
+  // ladder exactly as merchants see it — otherwise "display order 1" is
+  // invisible while the admin is trying to set it.
   useEffect(() => {
-    setPlansForm(platformPlans);
+    setPlansForm(sortPlansByTier(platformPlans));
   }, [platformPlans]);
 
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
@@ -796,12 +800,18 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   };
 
   const handleAddPlan = () => {
-    const newPlan: SubscriptionPlan = {
+const newPlan: SubscriptionPlan = {
       id: `plan-${Date.now()}`,
-      name: 'New Subscription Plan',
-      price: 0,
+      name: 'New Tier',
+      price: 999,
+      monthlyPrice: 999,
+      annualDiscountPercent: 20,
+      maxProducts: 50,
       durationDays: 30,
       badge: 'NEW',
+      // A new plan inherits NO capabilities. Defaulting these to true would
+      // hand a merchant access the admin never granted.
+      featureFlags: {},
       features: ['Feature 1', 'Feature 2'],
       isActive: true,
       isPopular: false
@@ -1187,8 +1197,19 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     const req = pendingRequests.find(r => r.id === reqId);
     if (!req) return;
 
-    // Calculate dynamic expiration date starting from TODAY based ONLY on the purchased plan duration (no leftover trial days added)
-    const { expiryDate, durationDays, plan_started_at, expires_at } = calculateSubscriptionExpiry(req.planId, new Date());
+    // Validity starts TODAY and lasts the TERM THE MERCHANT PAID FOR. The request
+    // carries its own `durationDays`; `calculateSubscriptionExpiry` is only the
+    // fallback for legacy rows submitted before the Monthly/Yearly toggle
+    // existed. Re-deriving from `req.planId` alone would silently grant 90 days
+    // for a 365-day yearly purchase.
+    const grantedDays = req.durationDays && req.durationDays > 0
+      ? req.durationDays
+      : getPlanDurationInDays(req.planId);
+    const approvedAt = new Date();
+    const plan_started_at = approvedAt.toISOString();
+    const expires_at = new Date(approvedAt.getTime() + grantedDays * 24 * 60 * 60 * 1000).toISOString();
+    const expiryDate = expires_at.split('T')[0];
+    const durationDays = grantedDays;
     const planName = getPlanDisplayName(req.planId);
 
     // Update request status
@@ -3055,13 +3076,17 @@ onUpdateMerchant(updatedCurrent);
 
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Price (BDT)</label>
+                        <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Base Price (BDT)</label>
                         <input
                           type="number"
                           value={plan.price}
                           onChange={(e) => {
                             const newPlans = [...plansForm];
+                            // Keep `price` pointing at the monthly quote so
+                            // `price`/`monthlyPrice` can never drift apart —
+                            // every consumer falls back to one of them.
                             newPlans[planIdx].price = parseInt(e.target.value) || 0;
+                            newPlans[planIdx].monthlyPrice = parseInt(e.target.value) || 0;
                             setPlansForm(newPlans);
                           }}
                           className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
@@ -3080,6 +3105,135 @@ onUpdateMerchant(updatedCurrent);
                           className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
                         />
                       </div>
+                    </div>
+
+                    {/* ── Monthly / Yearly pricing ──
+                        The merchant-facing toggle quotes `monthlyPrice` or
+                        `yearlyPrice`; `annualDiscountPercent` is the derived
+                        default used when no explicit yearly price is entered. */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Monthly Price (BDT)</label>
+                        <input
+                          type="number"
+                          value={plan.monthlyPrice ?? plan.price}
+                          onChange={(e) => {
+                            const newPlans = [...plansForm];
+                            const monthly = parseInt(e.target.value) || 0;
+                            newPlans[planIdx].monthlyPrice = monthly;
+                            newPlans[planIdx].price = monthly;
+                            setPlansForm(newPlans);
+                          }}
+                          className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Annual Discount %</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={90}
+                          value={plan.annualDiscountPercent ?? 20}
+                          onChange={(e) => {
+                            const newPlans = [...plansForm];
+                            newPlans[planIdx].annualDiscountPercent = Math.min(90, Math.max(0, parseInt(e.target.value) || 0));
+                            setPlansForm(newPlans);
+                          }}
+                          className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Yearly Price (BDT, blank = derived)</label>
+                        <input
+                          type="number"
+                          placeholder={String(monthlyPriceOf(plan) * 12 * (1 - (plan.annualDiscountPercent ?? 20) / 100))}
+                          value={plan.yearlyPrice ?? ''}
+                          onChange={(e) => {
+                            const newPlans = [...plansForm];
+                            const parsed = parseInt(e.target.value);
+                            newPlans[planIdx].yearlyPrice = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+                            setPlansForm(newPlans);
+                          }}
+                          className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Max Products</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={plan.maxProducts ?? 0}
+                          onChange={(e) => {
+                            const newPlans = [...plansForm];
+                            newPlans[planIdx].maxProducts = Math.max(0, parseInt(e.target.value) || 0);
+                            setPlansForm(newPlans);
+                          }}
+                          className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Display Order (merchant grid position)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        placeholder="Auto (from price)"
+                        value={plan.displayOrder ?? ''}
+                        onChange={(e) => {
+                          const newPlans = [...plansForm];
+                          const parsed = parseInt(e.target.value);
+                          // Blank must mean "unset" (sort by price), not 0 —
+                          // 0 would pin this plan to the top of every grid.
+                          newPlans[planIdx].displayOrder = Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+                          setPlansForm(newPlans);
+                        }}
+                        className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none"
+                      />
+                    </div>
+
+                    {/* ── Feature tiers ──
+                        These flags are the actual entitlement gate; the feature
+                        bullets merchants read are derived from them, so a flag
+                        switched off here immediately disappears from the plan
+                        card and blocks the capability. */}
+                    <div>
+                      <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Feature Access Tiers</label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {FEATURE_FLAG_LABELS.map(({ key, label }) => {
+                          const enabled = Boolean(featureFlagsOf(plan)[key]);
+                          return (
+                            <label
+                              key={key}
+                              className="flex items-center justify-between gap-2 bg-[#181B26] border border-[#2E3548] rounded-lg px-3 py-2 cursor-pointer hover:border-indigo-500/40 transition-colors"
+                            >
+                              <span className="text-[11px] text-slate-300">{label}</span>
+                              <input
+                                type="checkbox"
+                                className="sr-only"
+                                checked={enabled}
+                                onChange={() => {
+                                  const newPlans = [...plansForm];
+                                  newPlans[planIdx].featureFlags = {
+                                    ...featureFlagsOf(plan),
+                                    [key]: !enabled
+                                  };
+                                  setPlansForm(newPlans);
+                                }}
+                              />
+                              <div className={`w-9 h-4 rounded-full transition-colors relative shrink-0 ${enabled ? 'bg-indigo-600' : 'bg-slate-700'}`}>
+                                <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${enabled ? 'left-5' : 'left-0.5'}`} />
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[9px] text-slate-500 mt-2">
+                        Product cap: <span className="text-slate-300 font-semibold">{productLimitLabel(plan)}</span>
+                      </p>
                     </div>
 
                     <div className="flex flex-col sm:flex-row gap-6 py-2 border-t border-b border-[#2E3548]">
@@ -5302,23 +5456,40 @@ onUpdateMerchant(updatedCurrent);
                 </div>
               </div>
 
-              {selectedApprovalRequest.type === 'subscription' && (
+              {selectedApprovalRequest.type === 'subscription' && (() => {
+                  // Preview the EXACT term `handleApproveRequest` will grant.
+                  // A yearly purchase is 365 days even though `starter_3m`
+                  // alone would read as 90, so the quoted expiry must come
+                  // from the request's recorded duration, not the plan id.
+                  const previewDays = selectedApprovalRequest.durationDays && selectedApprovalRequest.durationDays > 0
+                    ? selectedApprovalRequest.durationDays
+                    : getPlanDurationInDays(selectedApprovalRequest.planId);
+                  const previewExpiry = new Date(
+                    Date.now() + previewDays * 24 * 60 * 60 * 1000
+                  ).toISOString().split('T')[0];
+                  return (
                 <div className="bg-[#12151F] border border-[#2E3548] rounded-2xl p-4 space-y-2">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-slate-400 font-bold">Purchased Plan:</span>
-                    <span className="text-amber-400 font-black">{getPlanDisplayName(selectedApprovalRequest.planId)}</span>
+                    <span className="text-amber-400 font-black">
+                      {getPlanDisplayName(selectedApprovalRequest.planId)}
+                      {selectedApprovalRequest.billingCycle && (
+                        <span className="text-slate-400 font-bold"> · {selectedApprovalRequest.billingCycle === 'yearly' ? 'Yearly' : 'Monthly'}</span>
+                      )}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-slate-400 font-bold">Validity from Today:</span>
                     <span className="text-emerald-400 font-black">
-                      {getPlanDurationInDays(selectedApprovalRequest.planId)} Days (Valid until {calculateSubscriptionExpiry(selectedApprovalRequest.planId, new Date()).expiryDate})
+                      {previewDays} Days (Valid until {previewExpiry})
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-400/90 pt-1 border-t border-[#2E3548] leading-relaxed">
-                    💡 <strong className="text-slate-300">Policy:</strong> Upon approval, validity starts strictly today for {getPlanDurationInDays(selectedApprovalRequest.planId)} days. Remaining free trial days are cleared and not added.
+                    💡 <strong className="text-slate-300">Policy:</strong> Upon approval, validity starts strictly today for {previewDays} days. Remaining free trial days are cleared and not added.
                   </div>
                 </div>
-              )}
+                  );
+                })()}
 
               <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-5 shadow-inner">
                 <div className="flex items-center justify-between mb-4">

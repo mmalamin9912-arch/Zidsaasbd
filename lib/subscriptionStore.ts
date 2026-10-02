@@ -46,41 +46,165 @@ export interface PlanListResult {
   diagnostics?: Record<string, any>;
 }
 
-/** The default plan catalogue auto-seeded into an empty store. */
+/**
+ * The default plan catalogue auto-seeded into an empty store.
+ *
+ * A Bangladesh-market SaaS ladder: Starter (basic) → Growth (popular) →
+ * Pro → Enterprise (advanced). Lower tiers get the essentials with hard product
+ * caps; the paid tiers unlock premium themes, AI tools, pixels, WhatsApp
+ * recovery and a custom domain.
+ *
+ * Every field is written in BOTH snake_case and the camelCase spelling the API
+ * layer uses, because `normalizePlanRow` (lib/serverApp.ts) accepts either and
+ * the Supabase mirror columns are snake_case.
+ *
+ * `price_bdt` / `duration_days` are the LEGACY term kept for older readers; the
+ * UI quotes `monthly_price_bdt` / `yearly_price_bdt` instead.
+ */
 export const DEFAULT_PLANS: Record<string, any>[] = [
   {
     id: 'starter_1m', slug: 'starter_1m', plan_id: 'starter_1m',
-    plan_name: '1-Month Plan', name: '1-Month Plan',
-    price_bdt: 1000, priceBDT: 1000, price: 1000,
-    duration_days: 30, durationDays: 30, badge_text: '1_MONTH', badge: '1_MONTH',
-    features: ['Up to 100 Products', 'Standard Themes', 'Basic AI Tools', 'Standard Support'],
-    is_active: true, isActive: true, is_popular: false, isPopular: false, max_products: 100,
+    plan_name: 'Starter', name: 'Starter',
+    price_bdt: 999, priceBDT: 999, price: 999,
+    duration_days: 30, durationDays: 30, badge_text: 'BASIC', badge: 'BASIC',
+    display_order: 10, displayOrder: 10,
+    monthly_price_bdt: 999, monthlyPrice: 999,
+    yearly_price_bdt: 9590, yearlyPrice: 9590,
+    annual_discount_percent: 20, annualDiscountPercent: 20,
+    max_products: 100, maxProducts: 100,
+    feature_flags: {
+      premiumThemes: false, customDomain: false, aiTools: false,
+      metaPixels: false, whatsappRecovery: false, courierApi: false,
+      removeBg: false, prioritySupport: false,
+    },
+    featureFlags: {
+      premiumThemes: false, customDomain: false, aiTools: false,
+      metaPixels: false, whatsappRecovery: false, courierApi: false,
+      removeBg: false, prioritySupport: false,
+    },
+    features: [
+      'Up to 100 products', 'Standard themes only', 'Order & customer management',
+      'bKash / Nagad / Cash on Delivery', 'Standard email support',
+    ],
+    is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
   {
     id: 'starter_3m', slug: 'starter_3m', plan_id: 'starter_3m',
-    plan_name: 'Starter Plan (3 Months)', name: 'Starter Plan (3 Months)',
-    price_bdt: 3000, priceBDT: 3000, price: 3000,
-    duration_days: 90, durationDays: 90, badge_text: '3_MONTHS', badge: '3_MONTHS',
-    features: ['Up to 500 Products', 'Standard Themes', 'Pro AI Tools (Description, Image, Pricing)', 'Standard Support'],
-    is_active: true, isActive: true, is_popular: false, isPopular: false, max_products: 500,
+    plan_name: 'Growth', name: 'Growth',
+    price_bdt: 2499, priceBDT: 2499, price: 2499,
+    duration_days: 90, durationDays: 90, badge_text: 'POPULAR', badge: 'POPULAR',
+    display_order: 20, displayOrder: 20,
+    monthly_price_bdt: 2499, monthlyPrice: 2499,
+    yearly_price_bdt: 23990, yearlyPrice: 23990,
+    annual_discount_percent: 20, annualDiscountPercent: 20,
+    max_products: 500, maxProducts: 500,
+    feature_flags: {
+      premiumThemes: true, customDomain: false, aiTools: true,
+      metaPixels: true, whatsappRecovery: false, courierApi: true,
+      removeBg: true, prioritySupport: false,
+    },
+    featureFlags: {
+      premiumThemes: true, customDomain: false, aiTools: true,
+      metaPixels: true, whatsappRecovery: false, courierApi: true,
+      removeBg: true, prioritySupport: false,
+    },
+    features: [
+      'Up to 500 products', 'Premium theme library', 'AI description & caption writer',
+      'Meta + TikTok pixels', 'Live courier API integrations', 'AI background remover',
+    ],
+    is_active: true, isActive: true, is_popular: true, isPopular: true,
   },
   {
     id: 'pro_6m', slug: 'pro_6m', plan_id: 'pro_6m',
-    plan_name: 'Pro Plan (6 Months)', name: 'Pro Plan (6 Months)',
-    price_bdt: 5000, priceBDT: 5000, price: 5000,
-    duration_days: 180, durationDays: 180, badge_text: '6_MONTHS', badge: '6_MONTHS',
-    features: ['Unlimited Products', 'Premium Themes', 'Pro AI Marketing & Caption Tools', 'Priority Support'],
-    is_active: true, isActive: true, is_popular: true, isPopular: true, max_products: 0,
+    plan_name: 'Pro', name: 'Pro',
+    price_bdt: 4999, priceBDT: 4999, price: 4999,
+    duration_days: 180, durationDays: 180, badge_text: 'ADVANCED', badge: 'ADVANCED',
+    display_order: 30, displayOrder: 30,
+    monthly_price_bdt: 4999, monthlyPrice: 4999,
+    yearly_price_bdt: 47990, yearlyPrice: 47990,
+    annual_discount_percent: 20, annualDiscountPercent: 20,
+    max_products: 0, maxProducts: 0,
+    feature_flags: {
+      premiumThemes: true, customDomain: true, aiTools: true,
+      metaPixels: true, whatsappRecovery: true, courierApi: true,
+      removeBg: true, prioritySupport: true,
+    },
+    featureFlags: {
+      premiumThemes: true, customDomain: true, aiTools: true,
+      metaPixels: true, whatsappRecovery: true, courierApi: true,
+      removeBg: true, prioritySupport: true,
+    },
+    features: [
+      'Unlimited products', 'Custom domain', 'WhatsApp abandoned-cart recovery',
+      'Full AI suite', 'Priority support',
+    ],
+    is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
   {
     id: 'enterprise_12m', slug: 'enterprise_12m', plan_id: 'enterprise_12m',
-    plan_name: 'Enterprise Plan (12 Months)', name: 'Enterprise Plan (12 Months)',
-    price_bdt: 15000, priceBDT: 15000, price: 15000,
-    duration_days: 365, durationDays: 365, badge_text: '12_MONTHS', badge: '12_MONTHS',
-    features: ['Unlimited Products', 'Full AI Suite Unlocked', 'Priority Support', 'Custom Domain'],
-    is_active: true, isActive: true, is_popular: false, isPopular: false, max_products: 0,
+    plan_name: 'Enterprise', name: 'Enterprise',
+    price_bdt: 9999, priceBDT: 9999, price: 9999,
+    duration_days: 365, durationDays: 365, badge_text: 'ENTERPRISE', badge: 'ENTERPRISE',
+    display_order: 40, displayOrder: 40,
+    monthly_price_bdt: 9999, monthlyPrice: 9999,
+    yearly_price_bdt: 95980, yearlyPrice: 95980,
+    annual_discount_percent: 20, annualDiscountPercent: 20,
+    max_products: 0, maxProducts: 0,
+    feature_flags: {
+      premiumThemes: true, customDomain: true, aiTools: true,
+      metaPixels: true, whatsappRecovery: true, courierApi: true,
+      removeBg: true, prioritySupport: true,
+    },
+    featureFlags: {
+      premiumThemes: true, customDomain: true, aiTools: true,
+      metaPixels: true, whatsappRecovery: true, courierApi: true,
+      removeBg: true, prioritySupport: true,
+    },
+    features: [
+      'Everything in Pro', 'Unlimited products & staff seats',
+      'Dedicated account manager', 'Custom integrations on request',
+    ],
+    is_active: true, isActive: true, is_popular: false, isPopular: false,
   },
 ];
+
+/**
+ * The capability flags a plan tier understands.
+ *
+ * Anything not listed here is DROPPED rather than passed through: an untrusted
+ * admin payload must not be able to inject arbitrary keys into the document.
+ * Additions here are the single place a new tier capability must be declared.
+ */
+export const PLAN_FEATURE_FLAG_KEYS = [
+  'premiumThemes',
+  'customDomain',
+  'aiTools',
+  'metaPixels',
+  'whatsappRecovery',
+  'courierApi',
+  'removeBg',
+  'prioritySupport',
+] as const;
+
+/** Coerce arbitrary input into a complete, boolean, whitelisted flag set. */
+export function normalizeFeatureFlags(raw: any): Record<string, boolean> {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out: Record<string, boolean> = {};
+  for (const key of PLAN_FEATURE_FLAG_KEYS) {
+    // Accept the snake_case spelling too, so a hand-written document works.
+    const snake = key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    const value = src[key] ?? src[snake];
+    out[key] = value === true || value === 'true' || value === 1;
+  }
+  return out;
+}
+
+/** A missing/negative price is stored as null so it is distinguishable from 0. */
+function toMoney(value: any): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
 
 /** Normalise an arbitrary subscription/plan payload into the canonical row. */
 export function normalizeSubscription(raw: Record<string, any>): Record<string, any> {
@@ -117,6 +241,21 @@ export function normalizeSubscription(raw: Record<string, any>): Record<string, 
     is_popular: raw?.is_popular ?? raw?.isPopular ?? false,
     isPopular: raw?.isPopular ?? raw?.is_popular ?? false,
     max_products: Number(raw?.max_products ?? raw?.maxProducts ?? 0),
+    // ── Billing-cycle pricing ──
+    // The merchant-facing toggle quotes these; `price`/`duration_days` above are
+    // the legacy single-term pair and are kept for older readers.
+    monthly_price_bdt: toMoney(raw?.monthly_price_bdt ?? raw?.monthlyPrice),
+    yearly_price_bdt: toMoney(raw?.yearly_price_bdt ?? raw?.yearlyPrice),
+    annual_discount_percent: Number(raw?.annual_discount_percent ?? raw?.annualDiscountPercent ?? 20),
+    display_order: Number.isFinite(Number(raw?.display_order ?? raw?.displayOrder))
+      ? Number(raw?.display_order ?? raw?.displayOrder)
+      : null,
+    // ── Per-tier capability flags ──
+    // Stored as a plain object so the Super Admin can toggle a tier without a
+    // schema migration; unknown keys are preserved so a future flag added to the
+    // UI survives a round-trip through an older server.
+    feature_flags: normalizeFeatureFlags(raw?.feature_flags ?? raw?.featureFlags),
+    featureFlags: normalizeFeatureFlags(raw?.featureFlags ?? raw?.feature_flags),
     // Renewal fields (present only for tenant rows).
     subscription_plan: raw?.subscription_plan || raw?.planId || raw?.plan_id || null,
     plan_started_at: raw?.plan_started_at || raw?.planStartedAt || null,

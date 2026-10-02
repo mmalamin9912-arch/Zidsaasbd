@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { NavigationTab, ProductSubTab, CustomerSubTab, StoreSubTab, SettingsSubTab, MerchantProfile, BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig, CourierService, Order, Product, Customer, AdminPaymentGatewayConfig, SubscriptionRequest, ThemeConfig, ThemePurchaseRequest, SubscriptionPlan, PlatformTheme, SupportTicket, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission } from './types';
+import { NavigationTab, ProductSubTab, CustomerSubTab, StoreSubTab, SettingsSubTab, MerchantProfile, BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig, CourierService, Order, Product, Customer, AdminPaymentGatewayConfig, SubscriptionRequest, ThemeConfig, ThemePurchaseRequest, SubscriptionPlan, PlatformTheme, SupportTicket, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, BillingCycle } from './types';
 
 import {
   initialMerchant,
@@ -90,6 +90,7 @@ import { ChannelsView } from './components/views/ChannelsView';
 import { SettingsView } from './components/views/SettingsView';
 
 import { calculatePlanTimestamps, getPlanDurationInDays } from './utils/subscriptionUtils';
+import { resolvePlanPricing } from './lib/planPricing';
 import {
   resolveMerchantSubscription,
   fetchMerchantSubscriptionFromSupabase,
@@ -1539,14 +1540,28 @@ export default function App() {
     }));
   };
 
-  const handleConfirmSubscription = async (planId: string, paymentMethod: string, txId: string) => {
+  const handleConfirmSubscription = async (
+    planId: string,
+    paymentMethod: string,
+    txId: string,
+    billingCycle: BillingCycle = 'monthly'
+  ) => {
     // Resolve the plan from the LIVE database-backed catalogue so the recorded
     // amount/name match exactly what the merchant saw in the plan modal.
     const catalogue = platformPlans.length > 0 ? platformPlans : subscriptionPlans;
     const plan = catalogue.find(p => p.id === planId) || catalogue[0];
 
-    // Calculate exact start and expiry timestamps dynamically based on chosen plan
-    const { plan_started_at, expires_at, expiryDate, durationDays } = calculatePlanTimestamps(planId, new Date());
+    // The amount and the term both come from the billing cycle the merchant
+    // chose. Recording `plan.price` here while the modal showed the yearly
+    // figure would put a mismatched BDT amount on the admin's approval screen.
+    const pricing = plan ? resolvePlanPricing(plan, billingCycle) : null;
+
+    // Calculate exact start and expiry timestamps for the SELECTED term.
+    const { plan_started_at, expires_at, expiryDate, durationDays } = calculatePlanTimestamps(
+      planId,
+      new Date(),
+      billingCycle
+    );
     const expiryDateStr = expiryDate;
 
     const newReq: SubscriptionRequest = {
@@ -1554,12 +1569,16 @@ export default function App() {
       storeName: merchant?.storeName || 'My Store',
       email: merchant?.email || '',
       planId,
-      planName: plan.name,
-      amountBDT: plan.price,
+      planName: plan?.name || '',
+      amountBDT: pricing?.price ?? plan?.price ?? 0,
       paymentMethod,
       transactionId: txId,
       requestedAt: new Date().toISOString().split('T')[0],
-      status: 'pending'
+      status: 'pending',
+      // Carried onto the request so the admin's approval grants the term that
+      // was actually paid for, not the legacy term implied by `planId`.
+      billingCycle,
+      durationDays
     };
 
     setPendingRequests(prev => [newReq, ...prev]);
@@ -1569,6 +1588,7 @@ export default function App() {
         merchant,
         planId,
         startDate: new Date(),
+        durationDays,
         transactionId: txId,
         paymentMethod,
         status: 'pending'
@@ -1841,8 +1861,16 @@ onPlaceOrder={async (newOrder) => {
         <PublicCheckout
           planId={preAuthCheckoutPlan}
           adminPaymentConfig={adminPaymentConfig}
-          onPaymentSuccess={(txId: string) => {
-            safeSetItem('zid_pre_payment', { planId: preAuthCheckoutPlan, txId });
+          onPaymentSuccess={(txId: string, cycle: BillingCycle) => {
+            // The paid term must survive the sign-up redirect, otherwise the
+            // post-auth purchase is re-derived from the plan id and a yearly
+            // payment would end up granting the legacy term.
+            safeSetItem('zid_pre_payment', {
+              planId: preAuthCheckoutPlan,
+              txId,
+              billingCycle: cycle,
+              durationDays: cycle === 'yearly' ? 365 : 30
+            });
             setPreAuthCheckoutPlan(null);
             setAuthMode('signup');
           }}
@@ -2097,6 +2125,7 @@ onPlaceOrder={async (newOrder) => {
               <BillingView
                 merchant={merchant}
                 pendingRequests={pendingRequests}
+                plans={platformPlans}
                 onOpenSubscriptionModal={() => setIsSubscriptionModalOpen(true)}
                 onBack={() => setActiveTab('settings')}
               />
