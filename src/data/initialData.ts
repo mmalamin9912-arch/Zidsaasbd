@@ -324,6 +324,10 @@ export const initialPlatformSettings: PlatformSettings = {
   whatsappNumber: '+8801844990011',
   termsUrl: '/terms',
   privacyUrl: '/privacy',
+  // Intentionally blank: the Super Admin authors these in Platform
+  // Configuration → Trial & Legal. Seeded with no copy so the merchant modal
+  // shows its "not published" notice instead of fabricated legal text.
+  platformRules: '',
   globalTrialDays: 30,
   aiContentProOnly: true,
   aiWhatsAppMarketingProOnly: true,

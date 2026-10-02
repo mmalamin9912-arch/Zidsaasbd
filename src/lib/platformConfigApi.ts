@@ -60,23 +60,28 @@ export interface SupportContactConfig {
   whatsappNumber: string;
   /** Optional link to a full published terms document. */
   termsUrl: string;
-  termsText: string;
+  /**
+   * The merchant guidelines authored in Super Admin → Platform Configuration →
+   * Trial & Legal. EMPTY when the operator has published nothing — the modal
+   * renders a "not published yet" notice instead of a hardcoded paragraph.
+   */
+  platformRules: string;
 }
 
-/** Shown when the Super Admin has not published anything for this store. */
+/**
+ * Contact details shown when the Super Admin has not published any.
+ *
+ * Note what is NOT here: default legal copy. Earlier versions baked a five-clause
+ * "Terms of Service" paragraph into this constant, which meant every merchant saw
+ * boilerplate terms the platform operator had never written or agreed to. The
+ * rules text is now sourced only from the database.
+ */
 export const DEFAULT_SUPPORT_CONTACT: SupportContactConfig = {
   supportPhone: '+8801844990011',
   supportEmail: 'support@zid.com',
   whatsappNumber: '8801844990011',
   termsUrl: '',
-  termsText:
-    'Zid Merchant Platform Terms of Service\n\n' +
-    '1. Merchants agree to use the platform in compliance with Bangladeshi e-commerce regulations.\n' +
-    '2. All product listings must be accurate and complete.\n' +
-    '3. Orders are processed through verified payment gateways.\n' +
-    '4. Zid reserves the right to suspend accounts that violate policies.\n' +
-    '5. Support: call +8801844990011 or email support@zid.com\n\n' +
-    'Full terms available at the admin dashboard.',
+  platformRules: '',
 };
 
 const firstString = (...values: unknown[]): string => {
@@ -91,11 +96,12 @@ const firstString = (...values: unknown[]): string => {
  * Merge a platform-config document over the default contact block.
  *
  * Never returns a partial object, so the Support modal always has something to
- * render and the Terms modal always has copy to show — a null/undefined field
- * would drop the corresponding row out of the modal entirely.
+ * render. The contact fields fall back to the defaults; the rules text does NOT
+ * — it stays empty unless the operator published it (see `DEFAULT_SUPPORT_CONTACT`).
  *
- * Several spellings are accepted because the admin form and older records
- * disagree on the key names (`supportPhone` vs `supportContactPhone`, …).
+ * Several spellings are accepted because the admin form, older records and
+ * hand-edited documents disagree on the key names (`platformRules` vs
+ * `platform_rules` vs `termsText`).
  */
 export function resolveSupportConfig(config: PlatformConfigDocument | null | undefined): SupportContactConfig {
   const settings = (config?.platformSettings || {}) as Record<string, any>;
@@ -125,11 +131,13 @@ export function resolveSupportConfig(config: PlatformConfigDocument | null | und
     supportEmail,
     whatsappNumber,
     termsUrl: firstString(settings.termsUrl, settings.terms_url),
-    termsText: firstString(
+    // Empty string when unpublished — the caller decides how to present that.
+    platformRules: firstString(
+      settings.platformRules,
+      settings.platform_rules,
       settings.termsText,
       settings.termsContent,
-      settings.terms_text,
-      DEFAULT_SUPPORT_CONTACT.termsText
+      settings.terms_text
     ),
   };
 }

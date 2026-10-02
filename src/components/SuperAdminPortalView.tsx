@@ -3523,6 +3523,32 @@ onUpdateMerchant(updatedCurrent);
                       />
                     </div>
                   </div>
+
+                  {/* Platform Rules & Terms — the body copy every merchant sees in
+                      the dashboard sidebar's "Platform Rules & Terms" modal. It
+                      used to be a hardcoded paragraph baked into the Sidebar, so
+                      the operator had no way to change what merchants are told
+                      they agreed to. Saving here writes it to the shared
+                      `platform_config` document. */}
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">
+                      Platform Rules &amp; Terms (Merchant Guidelines)
+                    </label>
+                    <textarea
+                      value={settingsForm.platformRules || ''}
+                      onChange={(e) => setSettingsForm({...settingsForm, platformRules: e.target.value})}
+                      rows={10}
+                      placeholder={'e.g.\n1. Merchants must list accurate, in-stock products.\n2. Orders are fulfilled within the promised delivery window.\n3. Prohibited items are not permitted.\n\nLeave blank to show merchants a "not published yet" notice.'}
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-sm text-white focus:ring-2 focus:ring-indigo-500/50 outline-none resize-y leading-relaxed font-mono"
+                    />
+                    <p className="mt-1.5 text-[10px] text-slate-500">
+                      Plain text. Line breaks are preserved exactly as written and shown to every merchant
+                      in the sidebar&apos;s &ldquo;Platform Rules &amp; Terms&rdquo; modal.
+                      {settingsForm.platformRules?.trim()
+                        ? ` Currently ${settingsForm.platformRules.trim().length} characters.`
+                        : ' Currently empty — merchants see a placeholder notice.'}
+                    </p>
+                  </div>
                 </div>
 
                 {/* AI FREEMIUM CONTROL */}

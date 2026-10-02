@@ -554,13 +554,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
             <div className="p-5 overflow-y-auto text-sm text-slate-300 leading-relaxed space-y-3">
               {configLoading && <p className="text-slate-400">Loading terms…</p>}
-              {!configLoading && supportConfig?.termsText && <p className="whitespace-pre-wrap">{supportConfig.termsText}</p>}
-              {!configLoading && !supportConfig?.termsText && (
-                <p className="text-slate-400">
-                  No custom terms have been published yet. All merchants must follow the Zid BD platform rules:
-                  direct settlements to your own bKash/bank accounts, accurate product listings, and timely order fulfillment.
-                </p>
+
+              {/* Rules authored by the Super Admin in Platform Configuration →
+                  Trial & Legal, read live from `platform_config`. This paragraph
+                  used to be a hardcoded five-clause Terms of Service baked into
+                  the component — merchants were shown boilerplate the platform
+                  operator had never written. */}
+              {!configLoading && supportConfig?.platformRules && (
+                <p className="whitespace-pre-wrap">{supportConfig.platformRules}</p>
               )}
+
+              {!configLoading && !supportConfig?.platformRules && (
+                <div className="p-4 bg-[#202533] border border-[#2E3548] rounded-xl text-slate-400">
+                  <p className="font-semibold text-slate-300">Platform rules have not been published yet.</p>
+                  <p className="mt-1.5">
+                    The platform administrator has not published merchant guidelines. If you have questions about
+                    using Zid, contact support using the details in the Support &amp; Help section.
+                  </p>
+                </div>
+              )}
+
               {!configLoading && supportConfig?.termsUrl && (
                 <a href={supportConfig.termsUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[#E6C587] hover:underline font-semibold">
                   Read full terms <ChevronRight className="w-3.5 h-3.5" />

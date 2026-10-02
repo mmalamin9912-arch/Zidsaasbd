@@ -732,6 +732,14 @@ export interface PlatformSettings {
   whatsappNumber: string;
   termsUrl: string;
   privacyUrl: string;
+  /**
+   * Merchant guidelines shown in the dashboard sidebar's "Platform Rules &
+   * Terms" modal. Authored by the Super Admin in Platform Configuration →
+   * Trial & Legal, and read by every merchant — so it is deliberately EMPTY by
+   * default: the modal shows a placeholder notice rather than inventing legal
+   * copy that the platform operator never agreed to.
+   */
+  platformRules: string;
   globalTrialDays: number;
   aiContentProOnly: boolean;
   aiWhatsAppMarketingProOnly: boolean;
