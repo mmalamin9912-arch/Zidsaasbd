@@ -62,22 +62,42 @@ export async function fetchBroadcastHistory(): Promise<BroadcastMessage[]> {
   }
 }
 
-/** Append a single mass broadcast to the database. */
+/**
+ * Append a single mass broadcast to the database.
+ *
+ * Also fans the broadcast out to the merchant notification feed, which is what
+ * lights the dashboard header bell. Returns the full result rather than a bare
+ * boolean so the Super Admin can be told whether the message actually reached
+ * merchants' bells — saving to the history table alone is not the same as
+ * delivering it.
+ */
 export async function saveBroadcast(
   broadcast: BroadcastMessage,
   adminUser = 'Super Admin'
 ): Promise<boolean> {
+  const result = await saveBroadcastDetailed(broadcast, adminUser);
+  return result.ok;
+}
+
+/** Same as `saveBroadcast`, but surfaces the notification fan-out outcome. */
+export async function saveBroadcastDetailed(
+  broadcast: BroadcastMessage,
+  adminUser = 'Super Admin'
+): Promise<{ ok: boolean; notificationDelivered: boolean }> {
   try {
     const res = await fetch('/api/admin/broadcast-history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ broadcast, adminUser }),
     });
-    const data = await safeJson<{ ok: boolean }>(res);
-    return Boolean(data?.ok);
+    const data = await safeJson<{ ok?: boolean; notificationDelivered?: boolean }>(res);
+    return {
+      ok: Boolean(data?.ok),
+      notificationDelivered: Boolean(data?.notificationDelivered),
+    };
   } catch (err) {
     console.warn('[supportCommsApi] saveBroadcast failed:', err);
-    return false;
+    return { ok: false, notificationDelivered: false };
   }
 }
 
@@ -117,6 +137,7 @@ export default {
   saveSupportTicket,
   fetchBroadcastHistory,
   saveBroadcast,
+  saveBroadcastDetailed,
   fetchAnnouncement,
   saveAnnouncement,
 };

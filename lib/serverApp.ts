@@ -80,6 +80,11 @@ import {
   writeAnnouncement,
 } from './supportComms.js';
 import {
+  createNotification,
+  readNotificationsForMerchant,
+  markNotificationRead,
+} from './notificationStore.js';
+import {
   readAdminTeam,
   writeAdminMember,
   deleteAdminMember,
@@ -1273,6 +1278,191 @@ app.get('/api/admin/broadcast-history', async (_req, res) => {
   }
 });
 
+// ── Merchant Notifications (MongoDB `notifications`, Supabase mirror) ───────────
+//   GET  /api/notifications            — live feed + unread count for one store.
+//   POST /api/notifications            — Super Admin sends a broadcast (all or specific).
+//   POST /api/notifications/:id/read   — mark one notification read for this store.
+//
+// Identity note: like every other store-scoped route here, the caller supplies
+// its own store reference (`?store_slug=`) — there is no server-side session.
+// `resolveStoreIdentity` fans that one reference out to the store's uuid, slug
+// and code so a notification addressed by ANY of those spellings is found.
+
+// Which plan id does this store currently sit on? Used to honour the Super Admin
+// audience picker ("Free Trial Users" / "Paid Subscriptions") without having to
+// enumerate store ids at send time. Falls back to the client-supplied plan, then
+// free_trial, so the bell never crashes on a store whose row has not loaded.
+async function resolveStorePlanId(storeRef: string): Promise<string> {
+  const ref = String(storeRef || '').trim();
+  if (!ref) return 'free_trial';
+  try {
+    const record = await resolveStoreRecordFlexible(ref);
+    const plan = record && (
+      record.subscription_plan || record.subscriptionPlan || record.plan || record.plan_id || record.planId
+    );
+    if (plan) return String(plan).toLowerCase();
+  } catch (e: any) {
+    console.warn('[Server] resolveStorePlanId warning:', e?.message || e);
+  }
+  return 'free_trial';
+}
+
+/** Collect every spelling of the calling store, for alias-safe notification reads. */
+async function notificationAliasesFor(storeRef: string): Promise<string[]> {
+  const ref = String(storeRef || '').split(':')[0].trim();
+  if (!ref) return [];
+  const aliases = new Set<string>([ref.toLowerCase()]);
+  try {
+    const identity = await resolveStoreIdentity(ref);
+    if (identity.storeId) aliases.add(String(identity.storeId).trim().toLowerCase());
+    if (identity.storeSlug) aliases.add(String(identity.storeSlug).trim().toLowerCase());
+    if (identity.storeCode) aliases.add(String(identity.storeCode).trim().toLowerCase());
+  } catch (e: any) {
+    console.warn('[Server] notificationAliasesFor warning:', e?.message || e);
+  }
+  return [...aliases];
+}
+
+app.get('/api/notifications', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = String(
+      (req.query.store_slug as string) || (req.query.storeSlug as string) ||
+      (req.query.store_id as string) || (req.query.storeId as string) ||
+      (req.query.slug as string) || ''
+    ).trim();
+
+    const aliases = await notificationAliasesFor(storeRef);
+    const planId = await resolveStorePlanId(storeRef);
+    const result = await readNotificationsForMerchant(aliases, { planId });
+
+    const notifications = result.data || [];
+    return res.status(200).json({
+      ok: true,
+      notifications,
+      // The badge count is derived server-side so the client never has to trust
+      // its own list length while a fetch is still in flight.
+      unreadCount: notifications.filter((n) => !n.isRead).length,
+      planId,
+      sources: result.sources,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/notifications error:', err);
+    return res.status(200).json({
+      ok: false,
+      notifications: [],
+      unreadCount: 0,
+      error: err?.message || 'Could not load notifications.',
+    });
+  }
+});
+
+app.post('/api/notifications', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const payload = body.notification && typeof body.notification === 'object' ? body.notification : body;
+
+    const title = String(payload?.title || payload?.subject || '').trim();
+    if (!title) {
+      return res.status(200).json({ ok: false, error: 'A notification title is required.' });
+    }
+
+    // An explicit list of stores wins; otherwise the payload is either
+    // audience-wide or narrowed by a plan cohort.
+    const merchantIds = [
+      ...(Array.isArray(payload?.merchantIds) ? payload.merchantIds : []),
+      ...(Array.isArray(payload?.merchant_ids) ? payload.merchant_ids : []),
+      ...(payload?.merchantId ? [payload.merchantId] : []),
+      ...(payload?.merchant_id ? [payload.merchant_id] : []),
+    ]
+      .map((value: any) => String(value || '').trim())
+      .filter(Boolean);
+
+    const wantsSpecific = merchantIds.length > 0
+      || String(payload?.targetAudience || payload?.target_audience || '').toLowerCase() === 'specific';
+
+    const created: any[] = [];
+    const failures: string[] = [];
+
+    if (wantsSpecific) {
+      for (const merchantId of [...new Set(merchantIds)]) {
+        // Record every spelling this store is known by, so the notification is
+        // still found by a read that only has the uuid (or only the slug).
+        const aliases = await notificationAliasesFor(merchantId);
+        const result = await createNotification({
+          ...payload,
+          title,
+          targetAudience: 'specific',
+          merchantId,
+          merchantAliases: aliases,
+          audienceFilter: 'all',
+        });
+        if (result.ok) created.push(result.data);
+        else failures.push(result.error || merchantId);
+      }
+    } else {
+      const result = await createNotification({
+        ...payload,
+        title,
+        targetAudience: 'all',
+        audienceFilter: payload?.audienceFilter || payload?.audience_filter || 'all',
+      });
+      if (result.ok) created.push(result.data);
+      else failures.push(result.error || 'broadcast');
+    }
+
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: `Sent merchant notification: ${title}`,
+      targetEntity: 'notifications',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Info',
+    });
+
+    const delivered = created.length;
+    return res.status(200).json({
+      ok: delivered > 0,
+      notifications: created,
+      delivered,
+      message: delivered > 0
+        ? `Notification delivered to ${delivered} audience${delivered === 1 ? '' : 's'}.`
+        : (failures[0] || 'Could not save notification.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/notifications error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save notification.' });
+  }
+});
+
+app.post('/api/notifications/:id/read', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = String(
+      (req.query.store_slug as string) || (req.query.storeSlug as string) ||
+      (req.query.store_id as string) || (req.query.storeId as string) ||
+      (req.query.slug as string) || ''
+    ).trim();
+
+    const aliases = await notificationAliasesFor(storeRef);
+    if (!aliases.length) {
+      return res.status(200).json({ ok: false, error: 'A store reference is required.' });
+    }
+
+    const result = await markNotificationRead(String(req.params?.id || ''), aliases);
+    return res.status(200).json({
+      ok: result.ok,
+      notification: result.data,
+      sources: result.sources,
+      error: result.error,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/notifications/:id/read error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not mark notification read.' });
+  }
+});
+
 app.post('/api/admin/broadcast-history', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -1282,6 +1472,46 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
       return res.status(200).json({ ok: false, error: 'A broadcast with a subject is required.' });
     }
     const result = await writeBroadcast(broadcast);
+
+    // Fan the broadcast out to the merchant notification feed so the Super Admin
+    // "Broadcast & Emails" screen actually drives the dashboard bell. Before this,
+    // a broadcast was only ever an audit record: it was written to
+    // broadcast_history and read by nothing except the admin's own history table,
+    // so the merchant bell stayed permanently on its hardcoded dummy rows.
+    //
+    // The admin audience picker is mapped onto the store's `audienceFilter`, which
+    // the GET resolves per-merchant — that way a "Free Trial Users" send never
+    // has to enumerate store ids, and never leaks to a paid store.
+    const audience = String(broadcast.audience || 'All Merchants');
+    const audienceFilter = /free\s*trial/i.test(audience)
+      ? 'free_trial'
+      : /paid|subscri/i.test(audience)
+        ? 'paid'
+        : 'all';
+
+    let notificationDelivered = false;
+    try {
+      const fanout = await createNotification({
+        // Derive a deterministic id from the broadcast id so a retried send
+        // upserts the SAME notification instead of duplicating it in every
+        // merchant's bell.
+        id: `ntf-bc-${broadcast.id}`,
+        title: broadcast.subject,
+        message: broadcast.body || broadcast.message || '',
+        type: 'broadcast',
+        targetAudience: 'all',
+        audienceFilter,
+        meta: { broadcastId: broadcast.id, broadcastType: broadcast.type, audience },
+      });
+      notificationDelivered = fanout.ok;
+      if (!fanout.ok) {
+        console.warn('[Server] broadcast notification fan-out warning:', fanout.error);
+      }
+    } catch (fanoutErr: any) {
+      // The broadcast itself is already saved; a fan-out failure must not make
+      // the whole request look like it failed.
+      console.warn('[Server] broadcast notification fan-out error:', fanoutErr?.message || fanoutErr);
+    }
 
     void appendAuditLog({
       adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
@@ -1295,6 +1525,9 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
       ok: result.ok,
       broadcast: result.data,
       sources: result.sources,
+      // Surfaced so the admin UI can tell the operator the message reached the
+      // merchant bell, not just the history table.
+      notificationDelivered,
       message: result.ok ? 'Broadcast saved.' : (result.error || 'Could not save broadcast.'),
     });
   } catch (err: any) {

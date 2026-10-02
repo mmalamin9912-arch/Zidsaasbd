@@ -1,5 +1,36 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { MerchantProfile, SubscriptionRequest } from '../types';
+import {
+  fetchNotifications,
+  markNotificationRead,
+  type MerchantNotification,
+} from '../lib/notificationsApi';
+
+/** How often the bell re-checks for a broadcast, when it is worth checking. */
+const NOTIFICATION_POLL_MS = 60_000;
+
+/** Relative time for the bell rows ("5m ago"). Falls back to a plain date. */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return '';
+  const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(then).toLocaleDateString();
+}
+
+/** Icon colour per notification kind, so an admin warning reads differently. */
+const NOTIFICATION_ACCENT: Record<MerchantNotification['type'], string> = {
+  broadcast: '#6366F1',
+  warning: '#F59E0B',
+  success: '#00D68F',
+  info: '#D4AF37',
+};
 import { getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive, toUtcMs, TRIAL_DURATION_DAYS } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { subscribeToSubscriptionStatus } from '../lib/subscriptionStatusCache';
@@ -458,11 +489,91 @@ export const Header: React.FC<HeaderProps> = ({
   const trialDaysTotal = merchant?.trialDaysTotal ?? merchant?.selectedPlanDays ?? TRIAL_DURATION_DAYS;
   const trialPercentage = Math.min(100, Math.max(0, Math.round(((trialDaysTotal - trialDaysRemaining) / trialDaysTotal) * 100)));
 
-  const notificationsList = [
-    { id: 1, title: 'New bKash Order #ZID-9082', desc: 'Customer Paid ৳3,400 via bKash TrxID #8X92K1', time: '5m ago', unread: true },
-    { id: 2, title: 'Courier Pickup Dispatched', desc: 'Packages picked up from your warehouse', time: '1h ago', unread: true },
-    { id: 3, title: 'WhatsApp Bot Active', desc: 'Sent 12 order tracking links automatically', time: '3h ago', unread: false },
-  ];
+  // ── Merchant notifications (live) ─────────────────────────────────────────
+  //
+  // These used to be a hardcoded array literal rebuilt on every render, so the
+  // bell showed the same three dummy rows (a bKash payment, a courier pickup, a
+  // WhatsApp summary) for every store forever, with a fixed "2 New" badge and a
+  // gold dot that never reflected anything. The list, the unread count and the
+  // read state now all come from `/api/notifications`, which the Super Admin
+  // populates by broadcasting.
+  const [notifications, setNotifications] = useState<MerchantNotification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
+  // Guards against a slow first response overwriting a newer one, and against a
+  // logout/remount leaving a request to update an unmounted component.
+  const notificationRequestRef = useRef(0);
+
+  const storeRef = merchant?.storeSlug || merchant?.store_slug || merchant?.id || '';
+
+  const loadNotifications = useCallback(async (options: { silent?: boolean } = {}) => {
+    const requestId = ++notificationRequestRef.current;
+    if (!options.silent) setNotificationsLoading(true);
+    const feed = await fetchNotifications(storeRef);
+    // Drop a stale response: a newer load has already started.
+    if (requestId !== notificationRequestRef.current) return;
+    setNotifications(feed.notifications);
+    setUnreadCount(feed.unreadCount);
+    setNotificationsError(feed.ok ? null : (feed.error || 'Could not load notifications.'));
+    setNotificationsLoading(false);
+  }, [storeRef]);
+
+  // Load on mount and whenever the active store changes.
+  React.useEffect(() => {
+    if (!storeRef) return;
+    void loadNotifications();
+  }, [loadNotifications, storeRef]);
+
+  // Poll while the header is mounted so a broadcast sent after the page loaded
+  // still lights the bell up without a manual refresh. Only re-checks while the
+  // dropdown is open or there is still something unread — a settled, fully-read
+  // bell stops polling so an idle dashboard makes no requests.
+  React.useEffect(() => {
+    if (!storeRef) return;
+    const needsPolling = showNotifications || unreadCount > 0;
+    if (!needsPolling) return;
+    const timer = window.setInterval(() => {
+      void loadNotifications({ silent: true });
+    }, NOTIFICATION_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [loadNotifications, storeRef, showNotifications, unreadCount]);
+
+  const handleMarkRead = useCallback(async (id: string) => {
+    const target = notifications.find((n) => n.id === id);
+    if (!target || target.isRead) return;
+
+    // Optimistic: the click must feel instant. `previous` is captured so the
+    // row can be put back exactly as it was if the write fails — the list is
+    // never left showing a read state that MongoDB does not have.
+    const previous = notifications;
+    setNotifications((list) => list.map((n) => (n.id === id ? { ...n, isRead: true } : n)));
+    setUnreadCount((count) => Math.max(0, count - 1));
+
+    const ok = await markNotificationRead(id, storeRef);
+    if (!ok) {
+      setNotifications(previous);
+      setUnreadCount(previous.filter((n) => !n.isRead).length);
+      toast.error('Could not mark that notification as read.');
+    }
+  }, [notifications, storeRef, toast]);
+
+  const handleMarkAllRead = useCallback(async () => {
+    const unread = notifications.filter((n) => !n.isRead);
+    if (!unread.length) return;
+    const previous = notifications;
+    setNotifications((list) => list.map((n) => ({ ...n, isRead: true })));
+    setUnreadCount(0);
+
+    // One request per unread row. If ANY of them fails the whole set is rolled
+    // back, so the badge never shows a partially-acknowledged feed.
+    const results = await Promise.all(unread.map((n) => markNotificationRead(n.id, storeRef)));
+    if (results.some((ok) => !ok)) {
+      setNotifications(previous);
+      setUnreadCount(previous.filter((n) => !n.isRead).length);
+      toast.error('Could not mark all notifications as read.');
+    }
+  }, [notifications, storeRef, toast]);
 
   const handleAiSend = (e: React.FormEvent) => {
     e.preventDefault();
@@ -894,30 +1005,84 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               onClick={() => setShowNotifications(!showNotifications)}
               className="p-2 text-slate-300 hover:text-white bg-[#252B3B] hover:bg-[#2E3548] rounded-xl border border-[#3A435E] relative transition cursor-pointer"
-              title="Notifications"
+              title={unreadCount > 0 ? `${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}` : 'Notifications'}
             >
-              <Bell className="w-4 h-4" />
-              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-[#D4AF37] rounded-full border-2 border-[#1D212E]" />
+              <Bell className={`w-4 h-4 ${notificationsLoading ? 'animate-pulse' : ''}`} />
+              {/* The badge is driven by the unread count, not a permanent dot:
+                  it now appears only when there is genuinely something unread. */}
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 bg-[#D4AF37] text-slate-950 rounded-full border-2 border-[#1D212E] text-[9px] font-black leading-[0.85rem] text-center">
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </span>
+              )}
             </button>
 
             {/* Notifications Dropdown */}
             {showNotifications && (
-              <div className="absolute right-0 mt-2 w-72 bg-[#1D212E] border border-[#2E3548] rounded-2xl shadow-2xl p-3 z-50 text-xs">
+              <div className="absolute right-0 mt-2 w-80 bg-[#1D212E] border border-[#2E3548] rounded-2xl shadow-2xl p-3 z-50 text-xs">
                 <div className="flex justify-between items-center pb-2 border-b border-[#2E3548] mb-2">
                   <span className="font-bold text-white">Notifications</span>
-                  <span className="text-[10px] text-[#E6C587] bg-[#D4AF37]/10 px-2 py-0.5 rounded font-semibold">2 New</span>
-                </div>
-                <div className="space-y-2 max-h-60 overflow-y-auto">
-                  {notificationsList.map(n => (
-                    <div key={n.id} className="p-2 bg-[#181B26] rounded-xl border border-[#2E3548] text-left">
-                      <div className="flex justify-between font-semibold text-slate-200">
-                        <span>{n.title}</span>
-                        <span className="text-[10px] text-slate-400">{n.time}</span>
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-0.5">{n.desc}</p>
+                  {unreadCount > 0 ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => void handleMarkAllRead()}
+                        className="text-[10px] text-slate-400 hover:text-white transition cursor-pointer"
+                      >
+                        Mark all read
+                      </button>
+                      <span className="text-[10px] text-[#E6C587] bg-[#D4AF37]/10 px-2 py-0.5 rounded font-semibold">
+                        {unreadCount} New
+                      </span>
                     </div>
-                  ))}
+                  ) : (
+                    <span className="text-[10px] text-slate-500 font-semibold">All caught up</span>
+                  )}
                 </div>
+
+                {notificationsLoading && notifications.length === 0 ? (
+                  <p className="py-6 text-center text-slate-500 text-[11px]">Loading notifications…</p>
+                ) : notifications.length === 0 ? (
+                  <p className="py-6 text-center text-slate-500 text-[11px]">
+                    {notificationsError ? 'Could not load notifications.' : 'No notifications yet.'}
+                  </p>
+                ) : (
+                  <div className="space-y-2 max-h-72 overflow-y-auto">
+                    {notifications.map((n) => {
+                      const accent = NOTIFICATION_ACCENT[n.type] || NOTIFICATION_ACCENT.info;
+                      return (
+                        <button
+                          key={n.id}
+                          type="button"
+                          onClick={() => void handleMarkRead(n.id)}
+                          title={n.isRead ? 'Read' : 'Mark as read'}
+                          className={`w-full p-2 rounded-xl border text-left transition cursor-pointer ${
+                            n.isRead
+                              ? 'bg-[#181B26] border-[#2E3548] opacity-60 hover:opacity-90'
+                              : 'bg-[#181B26] border-[#3A435E] hover:border-[#6366F1]/60'
+                          }`}
+                        >
+                          <div className="flex justify-between gap-2 font-semibold text-slate-200">
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              {!n.isRead && (
+                                <span
+                                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                                  style={{ backgroundColor: accent }}
+                                />
+                              )}
+                              <span className="truncate">{n.title}</span>
+                            </span>
+                            <span className="text-[10px] text-slate-400 shrink-0">
+                              {relativeTime(n.createdAt)}
+                            </span>
+                          </div>
+                          {n.message && (
+                            <p className="text-[11px] text-slate-400 mt-0.5 whitespace-pre-line">{n.message}</p>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </div>

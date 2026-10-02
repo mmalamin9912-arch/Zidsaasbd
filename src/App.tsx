@@ -54,6 +54,7 @@ import {
   saveSupportTicket,
   fetchBroadcastHistory,
   saveBroadcast,
+  saveBroadcastDetailed,
   fetchAnnouncement,
   saveAnnouncement,
 } from './lib/supportCommsApi';
@@ -1254,7 +1255,21 @@ export default function App() {
 
     const prevIds = new Set(prev.map(b => b.id));
     for (const broadcast of next) {
-      if (!prevIds.has(broadcast.id)) void saveBroadcast(broadcast);
+      if (prevIds.has(broadcast.id)) continue;
+      // Fire-and-forget, but not silent: the same POST fans the broadcast out to
+      // the merchant notification feed that drives the dashboard header bell. If
+      // that leg fails the broadcast is still safely in the history table, so
+      // this only warns rather than surfacing an error to the admin.
+      void saveBroadcastDetailed(broadcast).then((result) => {
+        if (!result.ok) {
+          console.warn('[broadcast] could not save broadcast:', broadcast.id);
+        } else if (!result.notificationDelivered) {
+          console.warn(
+            '[broadcast] saved to history but NOT delivered to merchant notification bells:',
+            broadcast.id
+          );
+        }
+      });
     }
   }, []);
 
