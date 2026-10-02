@@ -7,7 +7,7 @@ import {
 } from '../lib/notificationsApi';
 
 /** How often the bell re-checks for a broadcast, when it is worth checking. */
-const NOTIFICATION_POLL_MS = 60_000;
+const NOTIFICATION_POLL_MS = 10_000;
 
 /** Relative time for the bell rows ("5m ago"). Falls back to a plain date. */
 function relativeTime(iso: string): string {

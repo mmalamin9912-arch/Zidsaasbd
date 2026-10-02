@@ -1539,6 +1539,69 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
   }
 });
 
+// POST /api/admin/broadcast — alias for /api/admin/broadcast-history.
+// Some clients may POST to this simpler path; it runs the exact same logic:
+// persist the broadcast to history AND fan out a notification to all merchants
+// (or a filtered cohort) so the dashboard bell lights up in real time.
+app.post('/api/admin/broadcast', async (req, res) => {
+  // Reuse the exact same handler logic by forwarding to the broadcast-history route.
+  // We simulate the same request internally to avoid code duplication.
+  try {
+    const body = req.body || {};
+    const broadcast = body.broadcast && typeof body.broadcast === 'object' ? body.broadcast : body;
+    if (!broadcast || !broadcast.subject) {
+      return res.status(200).json({ ok: false, error: 'A broadcast with a subject is required.' });
+    }
+    const result = await writeBroadcast(broadcast);
+
+    const audience = String(broadcast.audience || 'All Merchants');
+    const audienceFilter = /free\s*trial/i.test(audience)
+      ? 'free_trial'
+      : /paid|subscri/i.test(audience)
+        ? 'paid'
+        : 'all';
+
+    let notificationDelivered = false;
+    try {
+      const fanout = await createNotification({
+        id: `ntf-bc-${broadcast.id}`,
+        title: broadcast.subject,
+        message: broadcast.body || broadcast.message || '',
+        type: 'broadcast',
+        targetAudience: 'all',
+        audienceFilter,
+        actionUrl: broadcast.actionUrl || broadcast.action_url || broadcast.actionLink,
+        meta: { broadcastId: broadcast.id, broadcastType: broadcast.type, audience },
+      });
+      notificationDelivered = fanout.ok;
+      if (!fanout.ok) {
+        console.warn('[Server] broadcast notification fan-out warning:', fanout.error);
+      }
+    } catch (fanoutErr: any) {
+      console.warn('[Server] broadcast notification fan-out error:', fanoutErr?.message || fanoutErr);
+    }
+
+    void appendAuditLog({
+      adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
+      action: `Sent mass broadcast: ${broadcast.subject}`,
+      targetEntity: 'broadcast_history',
+      ipAddress: String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || ''),
+      severity: 'Info',
+    });
+
+    return res.status(200).json({
+      ok: result.ok,
+      broadcast: result.data,
+      sources: result.sources,
+      notificationDelivered,
+      message: result.ok ? 'Broadcast saved.' : (result.error || 'Could not save broadcast.'),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/broadcast error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save broadcast.' });
+  }
+});
+
 // ── Admin Global Notice Banner (stored in platform_config singleton) ──────────
 //   GET  /api/admin/announcement — read the shared notice banner config.
 //   POST /api/admin/announcement — upsert it so all merchants see it live.
