@@ -25,6 +25,7 @@ import { getMongoDb, getMongoUri, describeMongoError, DB_NAME } from './db.js';
 import { getSupabaseServerConfig, querySupabaseTable, queryMongoCollection } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
 import { readPlatformConfig, writePlatformConfig } from './platformConfig.js';
+import { cacheUpsert, cacheRows, cacheLastError, RUNTIME_CACHE_WARNING } from './runtimeCache.js';
 
 /* ────────────────────────── result envelope ────────────────────────── */
 
@@ -33,6 +34,10 @@ export interface CommsResult<T = Record<string, any>> {
   data: T | null;
   sources: DataSource[];
   error?: string;
+  /** Set when the write only reached the runtime cache, never a database. */
+  warning?: string;
+  /** True when the returned data came (partly) from the runtime cache. */
+  fromCache?: boolean;
   diagnostics?: Record<string, any>;
 }
 
@@ -250,15 +255,22 @@ export async function writeSupportTicket(raw: Record<string, any>): Promise<Comm
 
 /* ────────────────────────── broadcast history ────────────────────────── */
 
-/** Read the mass-broadcast history from Supabase + MongoDB, newest-first. */
+/**
+ * Read the mass-broadcast history from Supabase + MongoDB, newest-first.
+ *
+ * The runtime cache is merged in LAST so a database row always wins on
+ * conflict; the cache only supplies broadcasts the databases rejected.
+ */
 export async function readBroadcastHistory(): Promise<CommsResult<Record<string, any>[]>> {
   const [supa, mongo] = await Promise.all([
     querySupabaseTable<Record<string, any>>('broadcast_history', { limit: 1000 }),
     queryMongoCollection<Record<string, any>>('broadcast_history', {}, { limit: 1000 }),
   ]);
 
+  const cached = cacheRows('broadcast_history');
+
   const byId = new Map<string, Record<string, any>>();
-  for (const row of [...mongo.rows, ...supa.rows]) {
+  for (const row of [...mongo.rows, ...supa.rows, ...cached]) {
     const bc = normalizeBroadcast(row);
     byId.set(bc.id, { ...(byId.get(bc.id) || {}), ...bc });
   }
@@ -271,48 +283,93 @@ export async function readBroadcastHistory(): Promise<CommsResult<Record<string,
   if (supa.rows.length) sources.push('supabase');
   if (mongo.rows.length) sources.push('mongodb');
 
+  const dbIds = new Set([...mongo.rows, ...supa.rows].map((row) => String(row?.id || '')));
+  const usedCache = cached.some((row) => !dbIds.has(String(row?.id || '')));
+  if (usedCache) sources.push('runtime');
+
   return {
     ok: true,
     data: history,
     sources,
-    error: supa.error || mongo.error,
+    fromCache: usedCache,
+    warning: usedCache ? RUNTIME_CACHE_WARNING : undefined,
+    error: supa.error || mongo.error || (usedCache ? cacheLastError('broadcast_history') : undefined),
     diagnostics: {
       supabase: { ok: !supa.error, count: supa.rows.length, error: supa.error },
       mongodb: { ok: !mongo.error, count: mongo.rows.length, error: mongo.error },
+      runtime: { ok: true, count: cached.length },
     },
   };
 }
 
-/** Append a single mass broadcast to BOTH providers. Never throws. */
+/**
+ * Append a single mass broadcast to BOTH providers. Never throws.
+ *
+ * If neither database accepts the row (expired credentials, an unreachable
+ * cluster, a missing table) the broadcast is retained in the runtime cache so
+ * the merchant bell still receives it, and the result carries a `warning`
+ * telling the caller it was only cached — never a silent success.
+ */
 export async function writeBroadcast(raw: Record<string, any>): Promise<CommsResult<Record<string, any>>> {
   const bc = normalizeBroadcast(raw);
   const sources: DataSource[] = [];
+  const failures: string[] = [];
   const now = new Date().toISOString();
 
-  const sb = await writeSupabaseRow('broadcast_history', {
-    id: bc.id,
-    timestamp: bc.timestamp,
-    audience: bc.audience,
-    subject: bc.subject,
-    type: bc.type,
-    body: bc.body,
-    status: bc.status,
-    action_url: bc.actionUrl,
-    payload: bc,
-    updated_at: now,
-  }, 'id');
-  if (sb.ok) sources.push('supabase');
-  else console.warn('[supportComms] broadcast_history Supabase write warning:', sb.error);
+  try {
+    const sb = await writeSupabaseRow('broadcast_history', {
+      id: bc.id,
+      timestamp: bc.timestamp,
+      audience: bc.audience,
+      subject: bc.subject,
+      type: bc.type,
+      body: bc.body,
+      status: bc.status,
+      action_url: bc.actionUrl,
+      payload: bc,
+      updated_at: now,
+    }, 'id');
+    if (sb.ok) sources.push('supabase');
+    else {
+      failures.push(`supabase: ${sb.error || 'write failed'}`);
+      console.warn('[supportComms] broadcast_history Supabase write warning:', sb.error);
+    }
+  } catch (err: any) {
+    failures.push(`supabase: ${err?.message || err}`);
+    console.warn('[supportComms] broadcast_history Supabase write threw:', err?.message || err);
+  }
 
-  const mongo = await upsertMongoById('broadcast_history', bc);
-  if (mongo.ok) sources.push('mongodb');
-  else console.warn('[supportComms] broadcast_history Mongo write warning:', mongo.error);
+  try {
+    const mongo = await upsertMongoById('broadcast_history', bc);
+    if (mongo.ok) sources.push('mongodb');
+    else {
+      failures.push(`mongodb: ${mongo.error || 'write failed'}`);
+      console.warn('[supportComms] broadcast_history Mongo write warning:', mongo.error);
+    }
+  } catch (err: any) {
+    failures.push(`mongodb: ${err?.message || err}`);
+    console.warn('[supportComms] broadcast_history Mongo write threw:', err?.message || err);
+  }
+
+  // Degraded mode: keep the broadcast in-process so the bell still lights up.
+  if (sources.length === 0) {
+    const reason = failures.join(' | ') || 'no provider available';
+    cacheUpsert('broadcast_history', bc, reason);
+    sources.push('runtime');
+    return {
+      ok: true,
+      data: bc,
+      sources,
+      warning: RUNTIME_CACHE_WARNING,
+      fromCache: true,
+      error: reason,
+    };
+  }
 
   return {
-    ok: sources.length > 0,
+    ok: true,
     data: bc,
     sources,
-    error: sources.length ? undefined : 'Failed to persist broadcast to any provider.',
   };
 }
 

@@ -79,25 +79,48 @@ export async function saveBroadcast(
   return result.ok;
 }
 
-/** Same as `saveBroadcast`, but surfaces the notification fan-out outcome. */
+/**
+ * Same as `saveBroadcast`, but surfaces the notification fan-out outcome and
+ * any runtime-cache fallback.
+ *
+ * `fromCache` is true when the server could not reach MongoDB or Supabase and
+ * kept the broadcast in its in-process cache instead. `ok` is still true in
+ * that case — the merchant bell DID receive it — so callers must check
+ * `fromCache`/`warning` before telling the operator the broadcast is durable.
+ */
 export async function saveBroadcastDetailed(
   broadcast: BroadcastMessage,
   adminUser = 'Super Admin'
-): Promise<{ ok: boolean; notificationDelivered: boolean }> {
+): Promise<{
+  ok: boolean;
+  notificationDelivered: boolean;
+  fromCache: boolean;
+  warning?: string;
+}> {
   try {
     const res = await fetch('/api/admin/broadcast-history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ broadcast, adminUser }),
     });
-    const data = await safeJson<{ ok?: boolean; notificationDelivered?: boolean }>(res);
+    const data = await safeJson<{
+      ok?: boolean;
+      success?: boolean;
+      notificationDelivered?: boolean;
+      fromCache?: boolean;
+      warning?: string;
+    }>(res);
     return {
-      ok: Boolean(data?.ok),
+      // Accept either flag so an older server build that only sends `ok` still
+      // registers as a success.
+      ok: Boolean(data?.ok ?? data?.success),
       notificationDelivered: Boolean(data?.notificationDelivered),
+      fromCache: Boolean(data?.fromCache),
+      warning: data?.warning,
     };
   } catch (err) {
     console.warn('[supportCommsApi] saveBroadcast failed:', err);
-    return { ok: false, notificationDelivered: false };
+    return { ok: false, notificationDelivered: false, fromCache: false };
   }
 }
 

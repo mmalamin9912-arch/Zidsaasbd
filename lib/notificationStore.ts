@@ -45,6 +45,13 @@
 import { getMongoDb, getMongoUri, describeMongoError, DB_NAME } from './db.js';
 import { queryMongoCollection, querySupabaseTable } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
+import {
+  cacheUpsert,
+  cachePatch,
+  cacheRows,
+  cacheLastError,
+  RUNTIME_CACHE_WARNING,
+} from './runtimeCache.js';
 
 /* ────────────────────────── types ────────────────────────── */
 
@@ -84,6 +91,14 @@ export interface NotificationResult<T = any> {
   data: T | null;
   sources: DataSource[];
   error?: string;
+  /**
+   * Set when the write could not reach a database and was kept in the runtime
+   * cache instead. The API surfaces this verbatim so the operator is told the
+   * truth rather than a bare "saved".
+   */
+  warning?: string;
+  /** True when the returned data came (partly) from the runtime cache. */
+  fromCache?: boolean;
 }
 
 const COLLECTION = 'notifications';
@@ -336,9 +351,13 @@ export async function readNotificationsForMerchant(
     }),
   ]);
 
+  // The runtime cache holds anything the databases rejected. It is read LAST so
+  // a live database row always wins on conflict — the cache only fills the gap.
+  const cached = cacheRows(COLLECTION);
+
   const readKey = mine[0] || '';
   const byId = new Map<string, MerchantNotification>();
-  for (const row of [...mongo.rows, ...supa.rows]) {
+  for (const row of [...mongo.rows, ...supa.rows, ...cached]) {
     const notification = normalizeNotification(row, readKey);
     if (!isAddressedToMerchant(notification, mine)) continue;
     if (!matchesAudienceFilter(notification, options.planId || '')) continue;
@@ -359,11 +378,21 @@ export async function readNotificationsForMerchant(
   if (mongo.rows.length) sources.push('mongodb');
   if (supa.rows.length) sources.push('supabase');
 
+  // Only report the runtime source when it actually contributed a row that the
+  // databases did not already supply, so a healthy deployment never claims it.
+  const dbIds = new Set([...mongo.rows, ...supa.rows].map((row) => String(row?.id || '')));
+  const usedCache = cached.some((row) => !dbIds.has(String(row?.id || '')));
+  if (usedCache) sources.push('runtime');
+
+  const cacheError = usedCache ? cacheLastError(COLLECTION) : undefined;
+
   return {
     ok: true,
     data: notifications,
     sources,
-    error: mongo.error || supa.error,
+    fromCache: usedCache,
+    warning: usedCache ? RUNTIME_CACHE_WARNING : undefined,
+    error: mongo.error || supa.error || cacheError,
   };
 }
 
@@ -410,38 +439,72 @@ export async function createNotification(
   };
 
   const sources: DataSource[] = [];
+  const failures: string[] = [];
 
-  const mongo = await upsertMongoById(COLLECTION, notification);
-  if (mongo.ok) {
-    sources.push('mongodb');
-    void ensureIndexes();
-  } else {
-    console.warn('[notificationStore] notifications Mongo write warning:', mongo.error);
+  // Each provider write is independently guarded: a rejected auth/network rule
+  // must never escape as a thrown error and, critically, must never stop the
+  // OTHER provider from being attempted.
+  try {
+    const mongo = await upsertMongoById(COLLECTION, notification);
+    if (mongo.ok) {
+      sources.push('mongodb');
+      void ensureIndexes();
+    } else {
+      failures.push(`mongodb: ${mongo.error || 'write failed'}`);
+      console.warn('[notificationStore] notifications Mongo write warning:', mongo.error);
+    }
+  } catch (err: any) {
+    failures.push(`mongodb: ${err?.message || err}`);
+    console.warn('[notificationStore] notifications Mongo write threw:', err?.message || err);
   }
 
-  const sb = await writeSupabaseRow({
-    id: notification.id,
-    target_audience: notification.targetAudience,
-    merchant_id: notification.merchantId,
-    merchant_aliases: notification.merchantAliases,
-    title: notification.title,
-    message: notification.message,
-    type: notification.type,
-    created_at: notification.createdAt,
-    is_read: notification.isRead,
-    read_by: notification.readBy,
-    audience_filter: notification.audienceFilter,
-    meta: notification.meta,
-    action_url: notification.actionUrl,
-  });
-  if (sb.ok) sources.push('supabase');
-  else console.warn('[notificationStore] notifications Supabase write warning:', sb.error);
+  try {
+    const sb = await writeSupabaseRow({
+      id: notification.id,
+      target_audience: notification.targetAudience,
+      merchant_id: notification.merchantId,
+      merchant_aliases: notification.merchantAliases,
+      title: notification.title,
+      message: notification.message,
+      type: notification.type,
+      created_at: notification.createdAt,
+      is_read: notification.isRead,
+      read_by: notification.readBy,
+      audience_filter: notification.audienceFilter,
+      meta: notification.meta,
+      action_url: notification.actionUrl,
+    });
+    if (sb.ok) sources.push('supabase');
+    else {
+      failures.push(`supabase: ${sb.error || 'write failed'}`);
+      console.warn('[notificationStore] notifications Supabase write warning:', sb.error);
+    }
+  } catch (err: any) {
+    failures.push(`supabase: ${err?.message || err}`);
+    console.warn('[notificationStore] notifications Supabase write threw:', err?.message || err);
+  }
+
+  // Neither database accepted the row. Keep it in the process so the merchant
+  // bell still lights up, and report the degraded mode honestly instead of
+  // failing the request.
+  if (sources.length === 0) {
+    const reason = failures.join(' | ') || 'no provider available';
+    cacheUpsert(COLLECTION, notification, reason);
+    sources.push('runtime');
+    return {
+      ok: true,
+      data: notification,
+      sources,
+      warning: RUNTIME_CACHE_WARNING,
+      fromCache: true,
+      error: reason,
+    };
+  }
 
   return {
-    ok: sources.length > 0,
+    ok: true,
     data: notification,
     sources,
-    error: sources.length ? undefined : 'Failed to persist notification to any provider.',
   };
 }
 
@@ -468,10 +531,65 @@ export async function markNotificationRead(
   }
 
   const { db, error } = await safeMongoDb();
-  if (!db) return { ok: false, data: null, sources: [], error };
+
+  // No database available: the notification may still be sitting in the runtime
+  // cache, so acknowledge it there rather than failing the click in the bell.
+  if (!db) {
+    const cachedRow = cacheRows(COLLECTION).find(
+      (row) => String(row?.id || '') === notificationId
+    );
+    if (!cachedRow) return { ok: false, data: null, sources: [], error };
+
+    const cachedStored = normalizeNotification(cachedRow);
+    if (!isAddressedToMerchant(cachedStored, mine)) {
+      return { ok: false, data: null, sources: [], error: 'Notification does not belong to this store.' };
+    }
+
+    const cachedTargeted = cachedStored.targetAudience === 'specific';
+    cachePatch(
+      COLLECTION,
+      notificationId,
+      cachedTargeted
+        ? { isRead: true, is_read: true }
+        : { readBy: { ...cachedStored.readBy, [readKey]: true } }
+    );
+
+    return {
+      ok: true,
+      data: { id: notificationId, isRead: true as const, targeted: cachedTargeted },
+      sources: ['runtime'],
+      warning: RUNTIME_CACHE_WARNING,
+      fromCache: true,
+      error,
+    };
+  }
 
   const existing = await db.collection(COLLECTION).findOne({ id: notificationId });
   if (!existing) {
+    // Not in the database — it may only exist in the runtime cache.
+    const cachedRow = cacheRows(COLLECTION).find(
+      (row) => String(row?.id || '') === notificationId
+    );
+    if (cachedRow) {
+      const cachedStored = normalizeNotification(cachedRow);
+      if (isAddressedToMerchant(cachedStored, mine)) {
+        const cachedTargeted = cachedStored.targetAudience === 'specific';
+        cachePatch(
+          COLLECTION,
+          notificationId,
+          cachedTargeted
+            ? { isRead: true, is_read: true }
+            : { readBy: { ...cachedStored.readBy, [readKey]: true } }
+        );
+        return {
+          ok: true,
+          data: { id: notificationId, isRead: true as const, targeted: cachedTargeted },
+          sources: ['runtime'],
+          warning: RUNTIME_CACHE_WARNING,
+          fromCache: true,
+        };
+      }
+    }
     return { ok: false, data: null, sources: [], error: `Notification ${notificationId} not found.` };
   }
 

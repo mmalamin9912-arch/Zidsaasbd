@@ -480,16 +480,26 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       return;
     }
 
-    // Only mirror into the admin's local history table AFTER the database write
-    // succeeded, so the table never shows a broadcast that was never persisted.
+    // Only mirror into the admin's local history table AFTER the save
+    // succeeded, so the table never shows a broadcast that was never stored.
     onUpdateBroadcastHistory([newBroadcast, ...broadcastHistory]);
 
-    setSaveSuccess(
-      result.notificationDelivered
-        ? `Broadcast sent successfully to ${newBroadcast.audience}.`
-        : `Broadcast saved, but it could not reach the merchant notification bells.`
-    );
-    setTimeout(() => setSaveSuccess(null), 4000);
+    // Tell the operator the truth about WHERE it landed: durable storage, the
+    // in-process fallback, or nowhere durable at all. A green "sent" over a
+    // runtime-cache-only write would hide a broken database indefinitely.
+    if (result.fromCache) {
+      toast.warning(
+        'Broadcast is live in the merchant bell, but it was saved to the runtime cache only. Fix the database credentials before restarting the server.'
+      );
+      setSaveSuccess(
+        `Broadcast delivered to merchant bells via the runtime cache (not saved to the database).`
+      );
+    } else if (result.notificationDelivered) {
+      setSaveSuccess(`Broadcast sent successfully to ${newBroadcast.audience}.`);
+    } else {
+      setSaveSuccess('Broadcast saved, but it could not reach the merchant notification bells.');
+    }
+    setTimeout(() => setSaveSuccess(null), 6000);
   };
 
   const filteredLogs = auditLogs.filter(log => {

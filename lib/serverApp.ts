@@ -84,6 +84,7 @@ import {
   readNotificationsForMerchant,
   markNotificationRead,
 } from './notificationStore.js';
+import { RUNTIME_CACHE_WARNING } from './runtimeCache.js';
 import {
   readAdminTeam,
   writeAdminMember,
@@ -1385,6 +1386,10 @@ app.get('/api/notifications', async (req, res) => {
       unreadCount: notifications.filter((n) => !n.isRead).length,
       planId,
       sources: result.sources,
+      // True when some rows came from the in-process fallback cache rather than
+      // a database, so the client can tell "empty" from "degraded".
+      fromCache: Boolean(result.fromCache),
+      warning: result.warning,
       error: result.error,
     });
   } catch (err: any) {
@@ -1564,18 +1569,27 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
       severity: 'Info',
     });
 
+    // Degraded (runtime-cache) writes are still a SUCCESS from the caller's
+    // point of view — the broadcast reached the bell — but the operator is told
+    // via `warning` that it never reached durable storage.
+    const cachedOnly = result.sources.includes('runtime');
     return res.status(200).json({
       ok: result.ok,
+      success: result.ok,
       broadcast: result.data,
       sources: result.sources,
       // Surfaced so the admin UI can tell the operator the message reached the
       // merchant bell, not just the history table.
       notificationDelivered,
-      message: result.ok ? 'Broadcast saved.' : (result.error || 'Could not save broadcast.'),
+      fromCache: Boolean(result.fromCache),
+      warning: result.warning,
+      message: cachedOnly
+        ? RUNTIME_CACHE_WARNING
+        : (result.ok ? 'Broadcast saved.' : (result.error || 'Could not save broadcast.')),
     });
   } catch (err: any) {
     console.error('[Server] POST /api/admin/broadcast-history error:', err);
-    return res.status(200).json({ ok: false, error: err?.message || 'Could not save broadcast.' });
+    return res.status(200).json({ ok: false, success: false, error: err?.message || 'Could not save broadcast.' });
   }
 });
 
@@ -1629,16 +1643,26 @@ app.post('/api/admin/broadcast', async (req, res) => {
       severity: 'Info',
     });
 
+    // A runtime-cache write is still reported as success (the bell got it) plus
+    // a `warning` making clear it is not durable storage.
+    const cachedOnly = result.sources.includes('runtime');
     return res.status(200).json({
       ok: result.ok,
+      success: result.ok,
       broadcast: result.data,
       sources: result.sources,
       notificationDelivered,
-      message: result.ok ? 'Broadcast saved.' : (result.error || 'Could not save broadcast.'),
+      fromCache: Boolean(result.fromCache),
+      warning: result.warning,
+      message: cachedOnly
+        ? RUNTIME_CACHE_WARNING
+        : (result.ok ? 'Broadcast saved.' : (result.error || 'Could not save broadcast.')),
     });
   } catch (err: any) {
+    // Even an unexpected throw must not surface as a 500 to the admin UI — the
+    // client treats a non-2xx as "the broadcast is gone".
     console.error('[Server] POST /api/admin/broadcast error:', err);
-    return res.status(200).json({ ok: false, error: err?.message || 'Could not save broadcast.' });
+    return res.status(200).json({ ok: false, success: false, error: err?.message || 'Could not save broadcast.' });
   }
 });
 

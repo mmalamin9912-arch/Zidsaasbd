@@ -85,7 +85,7 @@ export function getSupabaseServerConfig() {
 
 /* ────────────────────────── result envelope ────────────────────────── */
 
-export type DataSource = 'mongodb' | 'supabase' | 'none';
+export type DataSource = 'mongodb' | 'supabase' | 'runtime' | 'none';
 
 export interface HybridResult<T> {
   /** Merged rows (Mongo first, Supabase filling the gaps). */

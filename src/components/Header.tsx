@@ -511,6 +511,10 @@ export const Header: React.FC<HeaderProps> = ({
   const [unreadCount, setUnreadCount] = useState(0);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [notificationsError, setNotificationsError] = useState<string | null>(null);
+  // True when the server served the feed from its in-process fallback cache
+  // because no database was reachable. The notifications are still real and are
+  // shown normally — this only drives an explanatory hint in the dropdown.
+  const [notificationsFromCache, setNotificationsFromCache] = useState(false);
   // Guards against a slow first response overwriting a newer one, and against a
   // logout/remount leaving a request to update an unmounted component.
   const notificationRequestRef = useRef(0);
@@ -525,6 +529,9 @@ export const Header: React.FC<HeaderProps> = ({
     if (requestId !== notificationRequestRef.current) return;
     setNotifications(feed.notifications);
     setUnreadCount(feed.unreadCount);
+    setNotificationsFromCache(Boolean(feed.fromCache));
+    // A runtime-cache feed is a successful read with a caveat, not an error —
+    // reporting it as an error would hide the broadcast the merchant just got.
     setNotificationsError(feed.ok ? null : (feed.error || 'Could not load notifications.'));
     setNotificationsLoading(false);
   }, [storeRef]);
@@ -1068,6 +1075,15 @@ export const Header: React.FC<HeaderProps> = ({
                     <span className="text-[10px] text-slate-500 font-semibold">All caught up</span>
                   )}
                 </div>
+
+                {/* Degraded-mode hint. The rows below are genuine; this only
+                    explains that the server is serving them from its in-process
+                    cache because no database is currently reachable. */}
+                {notificationsFromCache && (
+                  <p className="mb-2 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] text-amber-300 leading-snug">
+                    Showing notifications from the server's runtime cache.
+                  </p>
+                )}
 
                 {notificationsLoading && notifications.length === 0 ? (
                   <p className="py-6 text-center text-slate-500 text-[11px]">Loading notifications…</p>

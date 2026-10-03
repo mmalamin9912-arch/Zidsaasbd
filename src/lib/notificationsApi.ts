@@ -40,12 +40,22 @@ export interface NotificationFeed {
   /** True when the request succeeded, so the caller can tell empty from broken. */
   ok: boolean;
   error?: string;
+  /**
+   * True when some notifications came from the server's in-process fallback
+   * cache because no database was reachable. The rows are real and should be
+   * displayed; this just lets a caller label the degraded state.
+   */
+  fromCache?: boolean;
+  /** Server warning, e.g. 'Saved to runtime cache'. */
+  warning?: string;
 }
 
 interface NotificationResponse {
   ok?: boolean;
   notifications?: MerchantNotification[];
   unreadCount?: number;
+  fromCache?: boolean;
+  warning?: string;
   error?: string;
 }
 
@@ -90,6 +100,8 @@ export async function fetchNotifications(storeRef?: string | null): Promise<Noti
         ? Number(data.unreadCount)
         : notifications.filter((n) => !n.isRead).length,
       ok: true,
+      fromCache: Boolean(data.fromCache),
+      warning: data.warning,
     };
   } catch (err: any) {
     console.warn('[notificationsApi] fetchNotifications failed:', err?.message || err);
