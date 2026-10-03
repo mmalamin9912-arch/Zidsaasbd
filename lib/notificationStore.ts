@@ -114,11 +114,32 @@ async function upsertMongoById(
   const now = new Date().toISOString();
   // `_id` is stripped: upserting it back would attempt to overwrite an
   // immutable Mongo identifier.
-  const { _id: _ignored, ...doc } = record;
+  //
+  // The created-* fields are pulled out of the update body as well. The incoming
+  // record is a `normalizeNotification()` output, which already carries
+  // `createdAt`, so leaving it in `$set` while ALSO listing `createdAt` in
+  // `$setOnInsert` makes MongoDB reject the whole write with:
+  //   "Updating the path 'createdAt' would create a conflict at 'createdAt'"
+  // That single conflict silently failed EVERY notification insert, so the
+  // broadcast never reached the merchant bell even when MongoDB was reachable.
+  const {
+    _id: _ignored,
+    createdAt: _createdAt,
+    created_at: _created_at,
+    ...doc
+  } = record;
+
+  // Preserve the caller's original creation time on INSERT; on an upsert of an
+  // existing row the stored value must not be rewritten.
+  const createdAt = record.createdAt || record.created_at || now;
+
   try {
     await db.collection(collection).updateOne(
       { id },
-      { $set: { ...doc, updated_at: now, updatedAt: now }, $setOnInsert: { created_at: now, createdAt: now } },
+      {
+        $set: { ...doc, updated_at: now, updatedAt: now },
+        $setOnInsert: { created_at: createdAt, createdAt },
+      },
       { upsert: true }
     );
     return { ok: true };

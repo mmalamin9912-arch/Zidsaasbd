@@ -1258,6 +1258,46 @@ app.post('/api/admin/support-tickets', async (req, res) => {
   }
 });
 
+/**
+ * Normalise the many spellings a broadcast POST may arrive in.
+ *
+ * The Super Admin screen posts the rich `{ broadcast: { subject, body, … } }`
+ * shape, but the API is also advertised as taking the flat
+ * `{ title, message, actionUrl, targetAudience: 'all' }` payload. Accepting both
+ * here means a directly-POSTed broadcast is NOT silently rejected as
+ * "a subject is required" just because it named the field `title`.
+ *
+ * Always returns an object (possibly with an empty `subject`, which the caller
+ * validates) so the route never dereferences undefined.
+ */
+function normalizeBroadcastPayload(body: any): Record<string, any> {
+  const source = body?.broadcast && typeof body.broadcast === 'object' ? body.broadcast : (body || {});
+  const subject = String(source.subject || source.title || '').trim();
+  const bodyText = String(source.body || source.message || source.desc || '').trim();
+
+  // `targetAudience: 'all'` is the API's name for "every merchant"; the admin
+  // screen instead sends the human label. Map either one onto the audience
+  // string the fan-out already understands.
+  const rawAudience = source.audience || source.targetAudience || source.target_audience;
+  const audience = /^(all|everyone|every merchant)/i.test(String(rawAudience || ''))
+    ? 'All Merchants'
+    : String(rawAudience || 'All Merchants');
+
+  return {
+    ...source,
+    // A stable id matters: the notification fan-out derives `ntf-bc-<id>` from
+    // it, so a missing id would fan out an undefined-keyed notification.
+    id: String(source.id || `bc-${Date.now()}`),
+    subject,
+    body: bodyText,
+    audience,
+    type: source.type || 'In-App Announcement',
+    timestamp: source.timestamp || new Date().toISOString(),
+    status: source.status || 'Delivered',
+    actionUrl: source.actionUrl || source.action_url || source.actionLink || undefined,
+  };
+}
+
 // ── Admin Broadcast History (Supabase-first, MongoDB fallback) ────────────────
 //   GET  /api/admin/broadcast-history — delivery records, newest first.
 //   POST /api/admin/broadcast-history — append one mass broadcast.
@@ -1467,7 +1507,7 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const body = req.body || {};
-    const broadcast = body.broadcast && typeof body.broadcast === 'object' ? body.broadcast : body;
+    const broadcast = normalizeBroadcastPayload(body);
     if (!broadcast || !broadcast.subject) {
       return res.status(200).json({ ok: false, error: 'A broadcast with a subject is required.' });
     }
@@ -1548,7 +1588,7 @@ app.post('/api/admin/broadcast', async (req, res) => {
   // We simulate the same request internally to avoid code duplication.
   try {
     const body = req.body || {};
-    const broadcast = body.broadcast && typeof body.broadcast === 'object' ? body.broadcast : body;
+    const broadcast = normalizeBroadcastPayload(body);
     if (!broadcast || !broadcast.subject) {
       return res.status(200).json({ ok: false, error: 'A broadcast with a subject is required.' });
     }

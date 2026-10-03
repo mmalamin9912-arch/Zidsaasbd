@@ -95,11 +95,27 @@ async function upsertMongoById(
   if (!id) return { ok: false, error: 'Record id is required.' };
 
   const now = new Date().toISOString();
-  const doc = { ...record, updated_at: now, updatedAt: now };
+  // Strip `_id` (immutable) and the created-* fields before building the update.
+  // A record that was read back from Mongo already carries `createdAt`, and
+  // listing the same path in BOTH `$set` and `$setOnInsert` makes MongoDB reject
+  // the write with "Updating the path 'createdAt' would create a conflict".
+  const {
+    _id: _ignored,
+    createdAt: _createdAt,
+    created_at: _created_at,
+    ...rest
+  } = record;
+
+  const createdAt = record.createdAt || record.created_at || now;
+  const doc = { ...rest, updated_at: now, updatedAt: now };
+
   try {
     await db.collection(collection).updateOne(
       { id },
-      { $set: doc, $setOnInsert: { created_at: now, createdAt: now } },
+      {
+        $set: doc,
+        $setOnInsert: { created_at: createdAt, createdAt },
+      },
       { upsert: true }
     );
     return { ok: true };

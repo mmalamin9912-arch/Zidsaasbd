@@ -6,8 +6,18 @@ import {
   type MerchantNotification,
 } from '../lib/notificationsApi';
 
-/** How often the bell re-checks for a broadcast, when it is worth checking. */
+/** How often the bell re-checks while the dropdown is open (the list is visible). */
 const NOTIFICATION_POLL_MS = 10_000;
+
+/**
+ * Slower background cadence for a settled bell.
+ *
+ * The bell MUST keep polling even at zero unread: a merchant whose notifications
+ * were all read still has to receive the NEXT broadcast. Polling only while
+ * something was unread meant the timer switched itself off and new announcements
+ * never arrived until a manual refresh.
+ */
+const NOTIFICATION_IDLE_POLL_MS = 30_000;
 
 /** Relative time for the bell rows ("5m ago"). Falls back to a plain date. */
 function relativeTime(iso: string): string {
@@ -526,18 +536,38 @@ export const Header: React.FC<HeaderProps> = ({
   }, [loadNotifications, storeRef]);
 
   // Poll while the header is mounted so a broadcast sent after the page loaded
-  // still lights the bell up without a manual refresh. Only re-checks while the
-  // dropdown is open or there is still something unread — a settled, fully-read
-  // bell stops polling so an idle dashboard makes no requests.
+  // still lights the bell up without a manual refresh.
+  //
+  // This deliberately polls EVEN WHEN the bell is fully read. An earlier version
+  // stopped polling once `unreadCount === 0` to save requests, which meant a
+  // merchant whose bell had ever been read never saw a NEW broadcast — the poll
+  // had switched itself off and only a manual page refresh would reveal it. That
+  // is what produced the "No notifications yet." report in production.
+  //
+  // The dropdown-open case polls faster because the list is on screen and is
+  // expected to feel live; the settled case falls back to a cheaper interval.
   React.useEffect(() => {
     if (!storeRef) return;
-    const needsPolling = showNotifications || unreadCount > 0;
-    if (!needsPolling) return;
+    const intervalMs = showNotifications ? NOTIFICATION_POLL_MS : NOTIFICATION_IDLE_POLL_MS;
     const timer = window.setInterval(() => {
+      // Skip a background poll while the tab is hidden — the user cannot see the
+      // bell, and the next focus/visibility change or open re-reads anyway.
+      if (typeof document !== 'undefined' && document.hidden && !showNotifications) return;
       void loadNotifications({ silent: true });
-    }, NOTIFICATION_POLL_MS);
+    }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [loadNotifications, storeRef, showNotifications, unreadCount]);
+  }, [loadNotifications, storeRef, showNotifications]);
+
+  // A tab returning to the foreground is the moment a merchant most expects the
+  // bell to be current, so re-read immediately instead of waiting for the timer.
+  React.useEffect(() => {
+    if (!storeRef || typeof document === 'undefined') return;
+    const onVisible = () => {
+      if (!document.hidden) void loadNotifications({ silent: true });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [loadNotifications, storeRef]);
 
   const handleMarkRead = useCallback(async (id: string) => {
     const target = notifications.find((n) => n.id === id);

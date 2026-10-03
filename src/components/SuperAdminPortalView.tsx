@@ -7,6 +7,7 @@ import LiveThemePreview from './LiveThemePreview';
 import { resolveLayoutForTheme, LAYOUT_LABELS } from '../lib/themeRegistry';
 import { readAndDownscaleImage } from '../utils/imageUtils';
 import { fetchAuditLogs } from '../lib/platformConfigApi';
+import { saveBroadcastDetailed } from '../lib/supportCommsApi';
 import {
   ShieldAlert,
   DollarSign,
@@ -440,8 +441,9 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     body: '',
     actionUrl: ''
   });
+  const [isSendingBroadcast, setIsSendingBroadcast] = useState(false);
 
-  const handleSendBroadcast = (e: React.FormEvent) => {
+  const handleSendBroadcast = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!broadcastForm.subject || !broadcastForm.body) return;
 
@@ -456,7 +458,14 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       status: 'Delivered'
     };
 
-    onUpdateBroadcastHistory([newBroadcast, ...broadcastHistory]);
+    // Persist through the same route the history table uses: it writes the
+    // broadcast to Supabase/MongoDB AND fans a notification out to the merchant
+    // bell. Awaiting it here (rather than only updating local state) is what
+    // makes "Send Broadcast Now" actually reach the database and the bell.
+    setIsSendingBroadcast(true);
+    const result = await saveBroadcastDetailed(newBroadcast);
+    setIsSendingBroadcast(false);
+
     setBroadcastForm({
       audience: 'All Merchants',
       subject: '',
@@ -464,8 +473,23 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       body: '',
       actionUrl: ''
     });
-    setSaveSuccess('Broadcast sent successfully to ' + newBroadcast.audience);
-    setTimeout(() => setSaveSuccess(null), 3000);
+
+    if (!result.ok) {
+      toast.error('Broadcast could not be saved to the database. Check the server logs.');
+      setSaveSuccess(null);
+      return;
+    }
+
+    // Only mirror into the admin's local history table AFTER the database write
+    // succeeded, so the table never shows a broadcast that was never persisted.
+    onUpdateBroadcastHistory([newBroadcast, ...broadcastHistory]);
+
+    setSaveSuccess(
+      result.notificationDelivered
+        ? `Broadcast sent successfully to ${newBroadcast.audience}.`
+        : `Broadcast saved, but it could not reach the merchant notification bells.`
+    );
+    setTimeout(() => setSaveSuccess(null), 4000);
   };
 
   const filteredLogs = auditLogs.filter(log => {
@@ -4212,10 +4236,11 @@ onUpdateMerchant(updatedCurrent);
 
                     <button
                       type="submit"
-                      className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl text-sm transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 cursor-pointer focus:ring-4 focus:ring-indigo-500/30 outline-none active:scale-[0.98]"
+                      disabled={isSendingBroadcast}
+                      className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl text-sm transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2 cursor-pointer focus:ring-4 focus:ring-indigo-500/30 outline-none active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <Send className="w-4 h-4" />
-                      <span>Send Broadcast Now</span>
+                      <span>{isSendingBroadcast ? 'Sending...' : 'Send Broadcast Now'}</span>
                     </button>
                   </form>
                 </div>
