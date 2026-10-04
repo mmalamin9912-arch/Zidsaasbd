@@ -115,13 +115,13 @@ export async function generateAiText(
         message:
           data?.message ||
           (res.status === 404
-            ? 'The AI service is temporarily unavailable. You can continue saving the product.'
-            : 'AI request failed. You can continue saving the product.')
+            ? 'The AI service could not be reached. Please try again in a moment.'
+            : 'AI request failed. Please try again.')
       };
     }
 
     if (!data?.text) {
-      return { ok: false, error: 'server_error', message: 'AI generation is temporarily unavailable. You can continue saving the product.' };
+      return { ok: false, error: 'server_error', message: 'The AI did not return a response. Please try again.' };
     }
 
     return { ok: true, text: data.text };
@@ -145,13 +145,54 @@ export async function generateAiText(
   }
 }
 
+// ── Multi-turn chat (Zid AI assistant) ─────────────────────────────────────────
+
+const ZID_AI_CHAT_ENDPOINT = '/api/zid-ai';
+
+/** One turn in a Zid AI conversation. */
+export interface ZidAiChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * Sends the FULL conversation to the Zid AI chat endpoint so the model keeps
+ * language + topic context across turns. The server prefers OPENAI_API_KEY and
+ * falls back to GEMINI_API_KEY; when neither is configured it answers with the
+ * smart fallback engine. Either way a usable `reply` comes back.
+ */
+export async function chatWithZidAi(messages: ZidAiChatTurn[]): Promise<{ ok: boolean; reply: string; fallback?: boolean }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(ZID_AI_CHAT_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages }),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data?.reply && typeof data.reply === 'string') {
+      return { ok: true, reply: data.reply, fallback: !!data.fallback };
+    }
+    if (data?.text && typeof data.text === 'string') {
+      return { ok: true, reply: data.text, fallback: !!data.fallback };
+    }
+    return { ok: false, reply: '' };
+  } catch {
+    return { ok: false, reply: '' };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /** Maps an AI error to a short, user-facing alert message (English + Bangla). */
 export function aiErrorMessage(result: AiTextResult): string {
   switch (result.error) {
     case 'missing_api_key':
-      return 'AI is not configured: the GEMINI_API_KEY is missing on the server.\n\nAI is not configured: the GEMINI_API_KEY is missing on the server (Vercel > Settings > Environment Variables).';
+      return 'AI is running in offline mode — answers come from the built-in guidance engine. Add OPENAI_API_KEY or GEMINI_API_KEY on the server for full live responses.';
     case 'invalid_api_key':
-      return 'The AI API key is invalid or rejected.\n\nThe configured AI API key is invalid — verify GEMINI_API_KEY on the server.';
+      return 'The configured AI API key was rejected. Verify OPENAI_API_KEY / GEMINI_API_KEY on the server.';
     case 'rate_limited':
       return 'AI usage limit reached. Please try again in a minute.\n\nAI usage limit reached — please try again in a while.';
     case 'network_error':

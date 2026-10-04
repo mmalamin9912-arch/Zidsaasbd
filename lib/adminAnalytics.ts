@@ -617,6 +617,23 @@ export function getGeminiApiKey(): string {
   return key;
 }
 
+/**
+ * Resolve the OpenAI API key (OPENAI_API_KEY, or the VITE_ spelling).
+ *
+ * Zid AI prefers OpenAI when configured and falls back to Gemini otherwise, so
+ * either provider is enough to bring the assistant fully online. Returns '' when
+ * nothing usable is set.
+ */
+export function getOpenAiApiKey(): string {
+  const raw = process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY || '';
+  const key = String(raw).trim();
+  if (!key || key === 'MY_OPENAI_API_KEY') return '';
+  return key;
+}
+
+/** The OpenAI chat model Zid AI uses when OPENAI_API_KEY is configured. */
+export const OPENAI_CHAT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
 /** True when `value` carries at least one usable metric (so 0 counts as real). */
 function hasMetric(value: unknown): boolean {
   return value !== undefined && value !== null && value !== '';

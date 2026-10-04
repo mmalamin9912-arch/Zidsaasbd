@@ -1,88 +1,77 @@
-import React, { useState } from 'react';
+﻿import React, { useEffect, useState } from 'react';
 import { Sparkles, Send, MessageSquare, BarChart2, X, Bot } from 'lucide-react';
-import { generateAiText, ZID_AI_SYSTEM_INSTRUCTION } from '../lib/aiService';
+import { chatWithZidAi, type ZidAiChatTurn } from '../lib/aiService';
+import { getZidAiSmartFallback } from '../lib/zidAiFallback';
 
 interface ChatMessage {
   role: 'user' | 'ai';
   content: string;
 }
 
+const CHAT_STORAGE_KEY = 'zid_ai_assistant_history';
+
 const WELCOME_MESSAGE =
   'Hello! I am Zid AI — your Sales Copilot & Platform Support Specialist. Ask me about products, orders, payments, plans/subscriptions, or how to grow your sales.\n\n' +
   'আমি বাংলা ও ইংরেজি — দুই ভাষাতেই উত্তর দিতে পারি। যে ভাষায় লিখবেন, সেই ভাষায়ই উত্তর পাবেন।';
 
-/** Detects Bengali script or Banglish (romanized Bengali) input for offline fallbacks. */
-function looksBengali(text: string): boolean {
-  if (/[\u0980-\u09FF]/.test(text)) return true;
-  return /\b(ami|amar|kivabe|kemne|kothay|korte|pari|parbo|korbo|korle|hobe|koto|koyta|keno|jonno|lagbe|chai|dorkar|bikri|dokan|ache|chilo|korchen|hocche|jabe|kora|hvbe)\b/i.test(text);
-}
-
-/** Offline fallback answers (used when the AI service is unreachable). */
-function getFallbackResponse(query: string): string {
-  const q = query.toLowerCase();
-  const isBangla = looksBengali(query);
-
-  // Subscription / plan / billing questions — Admin-approval policy
-  if (/plan|subscription|upgrade|billing|package|approve|verify/.test(q) || /প্ল্যান|সাবস্ক্রিপশন|আপগ্রেড|বিলিং|পেন্ডিং/.test(query)) {
-    return isBangla
-      ? "আপনি যখন প্ল্যান আপগ্রেড বা কেনাকাটা করেন, তা Admin পেমেন্ট যাচাই না করা পর্যন্ত 'Pending' স্ট্যাটাসে থাকে। পেমেন্ট যাচাই হওয়ার পর আপনার প্ল্যান স্বয়ংক্রিয়ভাবে অ্যাক্টিভ হয়ে যাবে।\n\nযদি পেমেন্টের অনেক সময় পরেও প্ল্যান অ্যাক্টিভ না হয়, অনুগ্রহ করে প্ল্যাটফর্ম সাপোর্টে যোগাযোগ করুন।"
-      : "When you upgrade or purchase a plan, it stays in 'Pending' status until the Admin verifies the payment. Once verified, your plan will be activated automatically.\n\nIf your plan remains inactive long after payment, please contact platform support.";
+/** Loads the persisted conversation so multi-turn chat survives reloads. */
+function loadHistory(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) return parsed;
+    }
+  } catch {
+    /* ignore malformed storage */
   }
-      if (q.includes('domain') || q.includes('ডোমেইন')) return isBangla
-        ? "কাস্টম ডোমেইন যুক্ত করতে Settings -> Domains এ যান এবং আপনার ডোমেইনের নাম লিখুন। নির্দেশিকা অনুযায়ী আপনার DNS রেকর্ড আপডেট করুন।"
-        : "To connect a custom domain, go to Settings -> Domains and enter your domain name. Ensure your DNS records are updated as instructed.";
-      if (q.includes('product') || q.includes('upload') || q.includes('পণ্য') || q.includes('আপলোড')) return isBangla
-        ? "পণ্য আপলোড করতে 'Products' ট্যাবে যান এবং 'Add Product' এ ক্লিক করুন। পণ্যের নাম, দাম এবং ছবি দিয়ে 'Save' করুন।"
-        : "To upload products, navigate to the 'Products' tab and click 'Add Product'. Fill in the details like title, price, and images, then click 'Save'.";
-      if (q.includes('order') || q.includes('অর্ডার')) return isBangla
-        ? "অর্ডার পরিচালনা করতে 'Orders' ট্যাবটি দেখুন। এখানে আপনি গ্রাহকের অর্ডার দেখতে এবং স্ট্যাটাস আপডেট করতে পারবেন।"
-        : "To manage orders, check the 'Orders' tab. You can view, process, and update the status of your customer orders here.";
-      if (q.includes('payment') || q.includes('bkash') || q.includes('পেমেন্ট') || q.includes('বিকাশ')) return isBangla
-        ? "পেমেন্ট গেটওয়ের জন্য Settings -> Payments এ যান। সেখান থেকে আপনি বিকাশ, কার্ড বা ক্যাশ অন ডেলিভারি (COD) চালু করতে পারবেন।"
-        : "For payment gateways, visit Settings -> Payments. You can enable various methods like bKash, card, or COD there.";
-  // Sales / marketing / growth questions
-  if (/sale|grow|market|revenue|analytic|tips|advertis|boost|promot|seo/.test(q) || /বিক্রি|মার্কেটিং|বৃদ্ধি|টিপস|গ্রোথ/.test(query)) return isBangla
-    ? "বিক্রয় বাড়াতে: ১) ফ্ল্যাশ সেল ও কাউন্টডাউন টাইমার ব্যবহার করুন, ২) সোশ্যাল মিডিয়ায় নিয়মিত পোস্ট দিন, ৩) বান্ডেল অফার ও ফ্রি শিপিং চালু করুন, ৪) পুরনো গ্রাহকদের WhatsApp-এ নতুন অফার জানান।"
-    : "To grow sales: 1) Run flash sales with countdown timers, 2) Post consistently on social media, 3) Offer bundles and free shipping, 4) Re-engage past customers on WhatsApp with new offers.";
-  return isBangla
-    ? "আমি পণ্য, অর্ডার, পেমেন্ট, প্ল্যান/সাবস্ক্রিপশন এবং বিক্রয় বৃদ্ধি — সব বিষয়ে সাহায্য করতে পারি। আপনার কী জানতে চান?"
-    : "I can help with products, orders, payments, plans/subscriptions, and growing your sales. What would you like to know?";
+  return [{ role: 'ai', content: WELCOME_MESSAGE }];
 }
-
 
 export const ZidAiAssistant: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'ai', content: WELCOME_MESSAGE }
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>(loadHistory);
   const [input, setInput] = useState('');
   const [isThinking, setIsThinking] = useState(false);
+
+  // Persist the chat stream so the merchant can hold a multi-turn conversation
+  // across drawer open/close and page reloads.
+  useEffect(() => {
+    try {
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
+    } catch {
+      /* storage full or unavailable — chat still works in-memory */
+    }
+  }, [messages]);
 
   const sendQuery = async (query: string) => {
     const trimmed = query.trim();
     if (!trimmed || isThinking) return;
 
     const userMsg: ChatMessage = { role: 'user', content: trimmed };
-    setMessages(prev => [...prev, userMsg]);
+    const history = messages.concat(userMsg);
+    setMessages(history);
     setInput('');
     setIsThinking(true);
 
-    let answer = '';
-    try {
-      // Build the conversation so the AI keeps language + topic context.
-      const conversation = messages
-        .concat(userMsg)
-        .map(m => `${m.role === 'user' ? 'Merchant' : 'Zid AI'}: ${m.content}`)
-        .join('\n');
-      const prompt = `${conversation}\n\nRespond to the Merchant's latest message. Remember: always reply in the exact same language the merchant used (Bengali/Banglish → Bengali, English → English), and never switch languages mid-conversation.`;
+    // Send the FULL conversation to the live endpoint so the model keeps
+    // language + topic context across turns.
+    const turns: ZidAiChatTurn[] = history.map((m) => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: m.content,
+    }));
 
-      const result = await generateAiText(prompt, ZID_AI_SYSTEM_INSTRUCTION);
-      answer = result.ok && result.text ? result.text : getFallbackResponse(trimmed);
+    let answer: string;
+    try {
+      const result = await chatWithZidAi(turns);
+      // Live answer when available, otherwise the smart fallback engine — never
+      // a generic "temporarily unavailable" message.
+      answer = result.ok && result.reply ? result.reply : getZidAiSmartFallback(trimmed);
     } catch {
-      answer = getFallbackResponse(trimmed);
+      answer = getZidAiSmartFallback(trimmed);
     }
 
-    setMessages(prev => [...prev, { role: 'ai', content: answer }]);
+    setMessages((prev) => [...prev, { role: 'ai', content: answer }]);
     setIsThinking(false);
   };
 

@@ -44,6 +44,8 @@ const NOTIFICATION_ACCENT: Record<MerchantNotification['type'], string> = {
 import { getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive, toUtcMs, TRIAL_DURATION_DAYS } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { subscribeToSubscriptionStatus } from '../lib/subscriptionStatusCache';
+import { chatWithZidAi, type ZidAiChatTurn } from '../lib/aiService';
+import { getZidAiSmartFallback } from '../lib/zidAiFallback';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
 import { useToast } from './ToastProvider';
@@ -138,12 +140,26 @@ export const Header: React.FC<HeaderProps> = ({
     m.email?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const [aiResponses, setAiResponses] = useState<Array<{ sender: 'user' | 'ai'; text: string }>>([
-    {
-      sender: 'ai',
-      text: `Marhaba! I am Zid AI Assistant. How can I help boost sales for ${merchant?.storeName || 'your store'} today? I can help optimize product titles, write marketing WhatsApp copy, or check bKash settlements.`
+  const [aiResponses, setAiResponses] = useState<Array<{ sender: 'user' | 'ai'; text: string }>>(() => {
+    // Persist the Zid AI chat stream so the merchant can hold a multi-turn
+    // conversation across modal open/close and page reloads.
+    try {
+      const raw = localStorage.getItem('zid_ai_chat_history');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      }
+    } catch {
+      /* ignore malformed storage */
     }
-  ]);
+    return [
+      {
+        sender: 'ai',
+        text: `Hello! I am Zid AI — your Sales Copilot & Platform Support Specialist. Ask me about products, orders, payments, plans/subscriptions, or how to grow your sales.\n\nআমি বাংলা ও ইংরেজি — দুই ভাষাতেই উত্তর দিতে পারি। যে ভাষায় লিখবেন, সেই ভাষায়ই উত্তর পাবেন।`
+      }
+    ];
+  });
+  const [aiThinking, setAiThinking] = useState(false);
 
   // Ctrl + K Global Search Shortcut Listener
   useEffect(() => {
@@ -612,22 +628,42 @@ export const Header: React.FC<HeaderProps> = ({
     }
   }, [notifications, storeRef, toast]);
 
-  const handleAiSend = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!aiPrompt.trim()) return;
-    const userMsg = aiPrompt.trim();
-    setAiResponses(prev => [...prev, { sender: 'user', text: userMsg }]);
-    setAiPrompt('');
+  // Persist the chat stream on every change (multi-turn conversation survives reloads).
+  useEffect(() => {
+    try {
+      localStorage.setItem('zid_ai_chat_history', JSON.stringify(aiResponses));
+    } catch {
+      /* storage full or unavailable — chat still works in-memory */
+    }
+  }, [aiResponses]);
 
-    setTimeout(() => {
-      let reply = `Zid AI Analysis for "${userMsg}":\n\nI recommend creating a 10% discount coupon in Marketing, turning on WhatsApp Bot for instant receipt delivery, and adding 2 trending products to Ethnic Wear collection!`;
-      if (userMsg.toLowerCase().includes('bkash') || userMsg.toLowerCase().includes('payment')) {
-        reply = `Zid AI Payment Insight: bKash conversion rate is currently 4.2% higher when 1-tap merchant checkout is highlighted at cart checkout.`;
-      } else if (userMsg.toLowerCase().includes('product') || userMsg.toLowerCase().includes('stock')) {
-        reply = `Zid AI Stock Suggestion: Your top selling item is Jamdani Saree. You should restock 15 units before weekend sales.`;
-      }
-      setAiResponses(prev => [...prev, { sender: 'ai', text: reply }]);
-    }, 600);
+  const handleAiSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiPrompt.trim() || aiThinking) return;
+    const userMsg = aiPrompt.trim();
+    const history = aiResponses.concat({ sender: 'user', text: userMsg });
+    setAiResponses(history);
+    setAiPrompt('');
+    setAiThinking(true);
+
+    // Send the FULL conversation so the model keeps language + topic context.
+    const turns: ZidAiChatTurn[] = history.map((m) => ({
+      role: m.sender === 'user' ? 'user' : 'assistant',
+      content: m.text,
+    }));
+
+    let reply: string;
+    try {
+      const result = await chatWithZidAi(turns);
+      // Live answer if available, otherwise the smart fallback engine — never a
+      // generic "temporarily unavailable" message.
+      reply = result.ok && result.reply ? result.reply : getZidAiSmartFallback(userMsg);
+    } catch {
+      reply = getZidAiSmartFallback(userMsg);
+    }
+
+    setAiResponses((prev) => [...prev, { sender: 'ai', text: reply }]);
+    setAiThinking(false);
   };
 
   return (
@@ -1247,7 +1283,7 @@ export const Header: React.FC<HeaderProps> = ({
                     if (confirm('Are you sure you want to clear the entire chat history?')) {
                       setAiResponses([{
                         sender: 'ai',
-                        text: `Marhaba! I am Zid AI Assistant. How can I help boost sales for ${merchant?.storeName || 'your store'} today? I can help optimize product titles, write marketing WhatsApp copy, or check bKash settlements.`
+                        text: `Hello! I am Zid AI — your Sales Copilot & Platform Support Specialist. Ask me about products, orders, payments, plans/subscriptions, or how to grow your sales.\n\nআমি বাংলা ও ইংরেজি — দুই ভাষাতেই উত্তর দিতে পারি। যে ভাষায় লিখবেন, সেই ভাষায়ই উত্তর পাবেন।`
                       }]);
                     }
                   }}
@@ -1280,6 +1316,15 @@ export const Header: React.FC<HeaderProps> = ({
                   </div>
                 </div>
               ))}
+              {aiThinking && (
+                <div className="flex justify-start" aria-label="Zid AI is typing">
+                  <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-none bg-[#202533] border border-[#2E3548] px-4 py-3">
+                    <span className="zid-ai-dot h-1.5 w-1.5 rounded-full bg-[#E6C587] animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="zid-ai-dot h-1.5 w-1.5 rounded-full bg-[#E6C587] animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="zid-ai-dot h-1.5 w-1.5 rounded-full bg-[#E6C587] animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="px-3 py-2 bg-[#1D212E] border-t border-[#2E3548]">
@@ -1313,10 +1358,11 @@ export const Header: React.FC<HeaderProps> = ({
                 />
                 <button
                   type="submit"
-                  className="bg-gradient-to-r from-[#BF953F] via-[#FCF6BA] to-[#B38728] hover:from-[#FCF6BA] hover:to-[#BF953F] text-slate-950 font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                  disabled={aiThinking || !aiPrompt.trim()}
+                  className="bg-gradient-to-r from-[#BF953F] via-[#FCF6BA] to-[#B38728] hover:from-[#FCF6BA] hover:to-[#BF953F] text-slate-950 font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-all active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Ask</span>
+                  <span>{aiThinking ? 'Thinking…' : 'Ask'}</span>
                 </button>
               </form>
             </div>
