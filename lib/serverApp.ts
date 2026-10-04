@@ -11370,6 +11370,338 @@ app.post('/api/customers', async (req, res) => {
   }
 });
 
+// ── Customer product reviews & return requests ────────────────────────────────
+//
+// The storefront's customer account page posts item-level reviews and return
+// requests here:
+//   • Reviews persist to `product_reviews` and refresh the product's rating.
+//   • Returns persist to `return_requests` AND flip the matching order into the
+//     'Processing reverse' state, which is how the merchant admin dashboard's
+//     reverse tabs learn that a customer asked for a return.
+// Both read/write routes ALWAYS answer 200 JSON (degrading to [] / an ack when
+// Mongo is unavailable) so a shopper never sees a network error mid-action.
+const PRODUCT_REVIEWS_COLLECTION = 'product_reviews';
+const RETURN_REQUESTS_COLLECTION = 'return_requests';
+const PRODUCTS_COLLECTION = 'products';
+
+/** Canonical, comparison-safe phone: keep only the trailing 10 digits. */
+function phoneDigits(raw: unknown): string {
+  return String(raw || '').replace(/\D/g, '').slice(-10);
+}
+
+/** Read a store reference from a GET query object, most-specific first. */
+function storeRefFromQuery(query: Record<string, any>): string {
+  return String(
+    query.store_slug || query.storeSlug || query.store_id || query.storeId ||
+    query.merchant_id || query.merchantId || query.storeRef || query.slug || ''
+  ).trim();
+}
+
+// GET /api/reviews — list reviews for a store / product / order / customer.
+app.get('/api/reviews', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    if (!MONGODB_URI) return res.status(200).json([]);
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.warn('[Server] GET /api/reviews DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json([]);
+    }
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return res.status(200).json([]);
+
+    const query = req.query as Record<string, any>;
+    const storeRef = storeRefFromQuery(query);
+    const productId = String(query.product_id || query.productId || '').trim();
+    const orderId = String(query.order_id || query.orderId || '').trim();
+    const customerPhone = String(query.customer_phone || query.customerPhone || '').trim();
+
+    const and: any[] = [];
+    if (storeRef) {
+      const storeQuery = await buildOrderQuery(storeRef);
+      if (storeQuery) and.push(storeQuery);
+    }
+    if (productId) and.push({ $or: [{ product_id: productId }, { productId }] });
+    if (orderId) and.push({ $or: [{ order_id: orderId }, { orderId }] });
+    if (customerPhone) {
+      const digits = phoneDigits(customerPhone);
+      and.push({ $or: [
+        { customer_phone: customerPhone },
+        { customerPhone },
+        { customer_phone_digits: digits },
+        { customer_phone_digits: customerPhone },
+      ] });
+    }
+
+    const filter = and.length === 0 ? {} : and.length === 1 ? and[0] : { $and: and };
+    const rows = await (mongoose.connection.db.collection(PRODUCT_REVIEWS_COLLECTION) as any)
+      .find(filter).sort({ created_at: -1 }).limit(500).toArray();
+    return res.status(200).json(Array.isArray(rows) ? rows : []);
+  } catch (err: any) {
+    console.error('[Server] GET /api/reviews error:', err);
+    return res.status(200).json([]);
+  }
+});
+// POST /api/reviews — save a customer's item-level review for a product.
+app.post('/api/reviews', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const rating = Number(body.rating);
+    const productId = String(body.productId ?? body.product_id ?? '').trim();
+    const productName = String(body.productName ?? body.product_name ?? '').trim();
+
+    if (!productId && !productName) {
+      return res.status(200).json({ ok: false, error: 'A product reference is required.' });
+    }
+    if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+      return res.status(200).json({ ok: false, error: 'A star rating between 1 and 5 is required.' });
+    }
+    if (!MONGODB_URI) {
+      return res.status(200).json({ ok: true, success: true, saved: false, message: 'Review accepted (database unavailable).' });
+    }
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.warn('[Server] POST /api/reviews DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json({ ok: true, success: true, saved: false, message: 'Review accepted (database unavailable).' });
+    }
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(200).json({ ok: true, success: true, saved: false });
+    }
+
+    // Resolve every store ref the payload carries to one { id, slug } pair so
+    // the review is findable by whichever identifier a reader holds.
+    const refs = [body.storeSlug, body.store_slug, body.storeId, body.store_id, body.merchantId, body.merchant_id]
+      .map((value) => String(value || '').trim()).filter(Boolean);
+    let identity: StoreIdentity = {};
+    for (const ref of refs) {
+      const resolved = await resolveStoreIdentity(ref);
+      identity = {
+        storeId: identity.storeId || resolved.storeId,
+        storeSlug: identity.storeSlug || resolved.storeSlug,
+        storeCode: identity.storeCode || resolved.storeCode,
+      };
+      if (identity.storeId && identity.storeSlug) break;
+    }
+    const explicitSlug = String(body.storeSlug || body.store_slug || '').split(':')[0].trim().toLowerCase();
+    const slug = explicitSlug || identity.storeSlug || 'bd';
+    const storeId = identity.storeId || String(body.storeId || body.store_id || '').trim() || slug;
+    const merchantId = String(body.merchantId || body.merchant_id || identity.storeId || '').trim();
+    const customerPhone = String(body.customerPhone ?? body.customer_phone ?? '').trim();
+
+    const record: any = {
+      id: String(body.id || `rev-${Date.now()}-${Math.floor(Math.random() * 1e4)}`),
+      product_id: productId, productId,
+      product_name: productName, productName,
+      order_id: String(body.orderId ?? body.order_id ?? ''), orderId: String(body.orderId ?? body.order_id ?? ''),
+      order_number: String(body.orderNumber ?? body.order_number ?? ''), orderNumber: String(body.orderNumber ?? body.order_number ?? ''),
+      rating,
+      comment: String(body.comment || '').trim(),
+      customer_name: String(body.customerName ?? body.customer_name ?? ''), customerName: String(body.customerName ?? body.customer_name ?? ''),
+      customer_phone: customerPhone, customerPhone,
+      customer_phone_digits: phoneDigits(customerPhone),
+      store_id: storeId, store_slug: slug, storeSlug: slug,
+      merchant_id: merchantId, merchantId,
+      created_at: new Date(), createdAt: new Date().toISOString(),
+    };
+
+    let saved = false;
+    try {
+      const db = await getMongoDb(ORDERS_DB_NAME);
+      if (db) {
+        await db.collection(PRODUCT_REVIEWS_COLLECTION).insertOne({ ...record });
+        saved = true;
+      }
+    } catch (insertErr: any) {
+      console.warn('[Server] POST /api/reviews insert warning:', insertErr?.message || insertErr);
+    }
+
+    // Best-effort rollup: keep the product document's rating/review count fresh.
+    if (saved && productId) {
+      try {
+        const db = await getMongoDb(ORDERS_DB_NAME);
+        if (db) {
+          const agg = await db.collection(PRODUCT_REVIEWS_COLLECTION).aggregate([
+            { $match: { product_id: productId } },
+            { $group: { _id: null, avg: { $avg: '$rating' }, count: { $sum: 1 } } },
+          ]).toArray();
+          const summary = Array.isArray(agg) ? agg[0] : null;
+          if (summary) {
+            await db.collection(PRODUCTS_COLLECTION).updateMany(
+              { id: productId },
+              { $set: {
+                rating: Math.round(Number(summary.avg) * 10) / 10,
+                reviews_count: Number(summary.count), reviewsCount: Number(summary.count),
+                updated_at: new Date(),
+              } }
+            );
+          }
+        }
+      } catch (rollupErr: any) {
+        console.warn('[Server] POST /api/reviews rollup warning:', rollupErr?.message || rollupErr);
+      }
+    }
+
+    return res.status(200).json({ ok: true, success: true, saved, review: record });
+  } catch (err: any) {
+    console.error('[Server] POST /api/reviews error:', err);
+    return res.status(200).json({ ok: false, success: false, error: err?.message || 'Could not save the review.' });
+  }
+});
+// GET /api/returns — list return requests for a store / order / customer.
+app.get('/api/returns', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    if (!MONGODB_URI) return res.status(200).json([]);
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.warn('[Server] GET /api/returns DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json([]);
+    }
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return res.status(200).json([]);
+
+    const query = req.query as Record<string, any>;
+    const storeRef = storeRefFromQuery(query);
+    const orderId = String(query.order_id || query.orderId || '').trim();
+    const customerPhone = String(query.customer_phone || query.customerPhone || '').trim();
+
+    const and: any[] = [];
+    if (storeRef) {
+      const storeQuery = await buildOrderQuery(storeRef);
+      if (storeQuery) and.push(storeQuery);
+    }
+    if (orderId) and.push({ $or: [{ order_id: orderId }, { orderId }] });
+    if (customerPhone) {
+      const digits = phoneDigits(customerPhone);
+      and.push({ $or: [
+        { customer_phone: customerPhone },
+        { customerPhone },
+        { customer_phone_digits: digits },
+        { customer_phone_digits: customerPhone },
+      ] });
+    }
+
+    const filter = and.length === 0 ? {} : and.length === 1 ? and[0] : { $and: and };
+    const rows = await (mongoose.connection.db.collection(RETURN_REQUESTS_COLLECTION) as any)
+      .find(filter).sort({ created_at: -1 }).limit(500).toArray();
+    return res.status(200).json(Array.isArray(rows) ? rows : []);
+  } catch (err: any) {
+    console.error('[Server] GET /api/returns error:', err);
+    return res.status(200).json([]);
+  }
+});
+// POST /api/returns — log a customer's return request AND notify the merchant
+// dashboard by moving the matching order into the reverse workflow.
+app.post('/api/returns', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const orderId = String(body.orderId ?? body.order_id ?? '').trim();
+    const orderNumber = String(body.orderNumber ?? body.order_number ?? '').trim();
+    const reason = String(body.reason || '').trim();
+
+    if (!orderId && !orderNumber) {
+      return res.status(200).json({ ok: false, error: 'An order reference is required.' });
+    }
+    if (!reason) {
+      return res.status(200).json({ ok: false, error: 'A return reason is required.' });
+    }
+    if (!MONGODB_URI) {
+      return res.status(200).json({ ok: true, success: true, saved: false, message: 'Return accepted (database unavailable).' });
+    }
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.warn('[Server] POST /api/returns DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json({ ok: true, success: true, saved: false, message: 'Return accepted (database unavailable).' });
+    }
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(200).json({ ok: true, success: true, saved: false });
+    }
+
+    const refs = [body.storeSlug, body.store_slug, body.storeId, body.store_id, body.merchantId, body.merchant_id]
+      .map((value) => String(value || '').trim()).filter(Boolean);
+    let identity: StoreIdentity = {};
+    for (const ref of refs) {
+      const resolved = await resolveStoreIdentity(ref);
+      identity = {
+        storeId: identity.storeId || resolved.storeId,
+        storeSlug: identity.storeSlug || resolved.storeSlug,
+        storeCode: identity.storeCode || resolved.storeCode,
+      };
+      if (identity.storeId && identity.storeSlug) break;
+    }
+    const explicitSlug = String(body.storeSlug || body.store_slug || '').split(':')[0].trim().toLowerCase();
+    const slug = explicitSlug || identity.storeSlug || 'bd';
+    const storeId = identity.storeId || String(body.storeId || body.store_id || '').trim() || slug;
+    const merchantId = String(body.merchantId || body.merchant_id || identity.storeId || '').trim();
+    const customerPhone = String(body.customerPhone ?? body.customer_phone ?? '').trim();
+    const productId = String(body.productId ?? body.product_id ?? '').trim();
+    const token = String(body.token || `RTK-${Math.floor(100000 + Math.random() * 900000)}`);
+
+    const record: any = {
+      id: String(body.id || `ret-${Date.now()}-${Math.floor(Math.random() * 1e4)}`),
+      order_id: orderId, orderId,
+      order_number: orderNumber, orderNumber,
+      product_id: productId, productId,
+      product_name: String(body.productName ?? body.product_name ?? ''), productName: String(body.productName ?? body.product_name ?? ''),
+      reason,
+      note: String(body.note || '').trim(),
+      image: String(body.image || '') || undefined,
+      status: 'Pending',
+      token,
+      customer_name: String(body.customerName ?? body.customer_name ?? ''), customerName: String(body.customerName ?? body.customer_name ?? ''),
+      customer_phone: customerPhone, customerPhone,
+      customer_phone_digits: phoneDigits(customerPhone),
+      store_id: storeId, store_slug: slug, storeSlug: slug,
+      merchant_id: merchantId, merchantId,
+      created_at: new Date(), createdAt: new Date().toISOString(),
+    };
+
+    let saved = false;
+    try {
+      const db = await getMongoDb(ORDERS_DB_NAME);
+      if (db) {
+        await db.collection(RETURN_REQUESTS_COLLECTION).insertOne({ ...record });
+        saved = true;
+      }
+    } catch (insertErr: any) {
+      console.warn('[Server] POST /api/returns insert warning:', insertErr?.message || insertErr);
+    }
+
+    // Notify the merchant admin dashboard: flip the order into the reverse flow
+    // (its status tabs read 'Processing reverse'). Best-effort — a failure here
+    // must never lose the customer's return request itself.
+    let orderUpdated = false;
+    if (orderId || orderNumber) {
+      try {
+        const result = await updateOrderFields(
+          orderId || orderNumber,
+          {
+            status: 'Processing reverse',
+            reverse_requested: true, reverseRequested: true,
+            reverse_reason: reason, reverseReason: reason,
+            reverse_token: token, reverseToken: token,
+            reverse_product_id: productId, reverseProductId: productId,
+            reverse_requested_at: new Date(), reverseRequestedAt: new Date(),
+          },
+          { store_slug: slug }
+        );
+        orderUpdated = Boolean(result.ok);
+      } catch (updateErr: any) {
+        console.warn('[Server] POST /api/returns order update warning:', updateErr?.message || updateErr);
+      }
+    }
+
+    return res.status(200).json({ ok: true, success: true, saved, orderUpdated, return: record });
+  } catch (err: any) {
+    console.error('[Server] POST /api/returns error:', err);
+    return res.status(200).json({ ok: false, success: false, error: err?.message || 'Could not save the return request.' });
+  }
+});
+
 // ── Data export (orders · products · customers) ───────────────────────────────
 // Pro/Enterprise only. `POST /api/export/generate` reads the filtered records
 // from MongoDB, serialises them to CSV/JSON, records an ExportHistory document

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig, CodConfig, Order, OrderItem, ThemeConfig } from '../types';
 import { buildCategoryDbPayload, buildProductDbPayload, maxCatalogId, packCatalogItem, toCatalogSlug, ensureCategory, mapApiProduct, mapApiCategory } from '../utils/catalogPayload';
 import { resolveDeliveryCharge, resolveProductDeliveryRates, toFee } from '../utils/deliveryCharges';
-import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play } from 'lucide-react';
+import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera } from 'lucide-react';
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
@@ -18,6 +18,16 @@ import {
   applyStoreFavicon,
   type StorefrontModules,
 } from '../lib/storeModulesApi';
+import { normalizeOrders, safeDate, safeAmount } from '../utils/orderUtils';
+import {
+  TRACKING_STEPS,
+  getOrderStatusBadge,
+  getTrackingStepIndex,
+  getPaymentBadge,
+  isReturnEligible,
+  isDelivered,
+  CUSTOMER_ORDERS_POLL_MS,
+} from '../lib/orderTracking';
 
 function mapSupabaseProduct(p: any): Product {
   const title = p.title || p.name || 'Untitled Product';
@@ -140,6 +150,8 @@ interface CustomerReturnRequest {
   id: string;
   orderId: string;
   orderNumber: string;
+  productId?: string;
+  productName?: string;
   reason: string;
   status: 'Pending' | 'Approved' | 'Completed' | 'Rejected';
   token: string;
@@ -150,12 +162,69 @@ interface CustomerReviewItem {
   id: string;
   orderId: string;
   orderNumber: string;
+  productId?: string;
   productTitle: string;
   productImage?: string;
   rating: number;
   comment: string;
   customerName?: string;
   createdAt: string;
+}
+
+/** Digits-only tail of a phone number, so +88017… / 017… / 88017… all match. */
+function normPhone(value: unknown): string {
+  return String(value || '').replace(/\D/g, '').slice(-10);
+}
+
+/** Map a server review document into the local card/list shape. */
+function mapServerReview(r: any): CustomerReviewItem {
+  return {
+    id: String(r?.id || r?._id || `rev-${Date.now()}`),
+    orderId: String(r?.orderId || r?.order_id || ''),
+    orderNumber: String(r?.orderNumber || r?.order_number || ''),
+    productId: String(r?.productId || r?.product_id || ''),
+    productTitle: String(r?.productTitle || r?.product_name || r?.productName || ''),
+    productImage: r?.productImage || r?.product_image || r?.image || undefined,
+    rating: Number(r?.rating ?? 0),
+    comment: String(r?.comment || ''),
+    customerName: r?.customerName || r?.customer_name || undefined,
+    createdAt: String(r?.createdAt || r?.created_at || ''),
+  };
+}
+
+/** Map a server return document into the local card/list shape. */
+function mapServerReturn(r: any): CustomerReturnRequest {
+  return {
+    id: String(r?.id || r?._id || `ret-${Date.now()}`),
+    orderId: String(r?.orderId || r?.order_id || ''),
+    orderNumber: String(r?.orderNumber || r?.order_number || ''),
+    productId: String(r?.productId || r?.product_id || ''),
+    productName: String(r?.productName || r?.product_name || ''),
+    reason: String(r?.reason || ''),
+    status: (r?.status || 'Pending') as CustomerReturnRequest['status'],
+    token: String(r?.token || ''),
+    createdAt: String(r?.createdAt || r?.created_at || ''),
+  };
+}
+
+/** Merge server reviews into the local cache, de-duplicated by id. */
+function mergeReviews(prev: CustomerReviewItem[], incoming: unknown[]): CustomerReviewItem[] {
+  const byId = new Map(prev.map((item) => [item.id, item]));
+  for (const raw of incoming) {
+    const mapped = mapServerReview(raw);
+    if (mapped.id && !byId.has(mapped.id)) byId.set(mapped.id, mapped);
+  }
+  return [...byId.values()];
+}
+
+/** Merge server returns into the local cache, de-duplicated by id. */
+function mergeReturns(prev: CustomerReturnRequest[], incoming: unknown[]): CustomerReturnRequest[] {
+  const byId = new Map(prev.map((item) => [item.id, item]));
+  for (const raw of incoming) {
+    const mapped = mapServerReturn(raw);
+    if (mapped.id && !byId.has(mapped.id)) byId.set(mapped.id, mapped);
+  }
+  return [...byId.values()];
 }
 
 export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
@@ -174,7 +243,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // The storefront may be mounted in another route/tab from the editor. Subscribe
   // directly to the shared store so products and published theme changes appear
   // immediately without remounting or refreshing the page.
-  const { t, setLanguage } = useLanguage();
+  const { t, setLanguage, lang } = useLanguage();
+  const isBn = lang === 'bn';
   // Effective store slug for cache keys — resolved from prop or the active merchant session.
   // Memoized so the data-load effects below don't re-run on every render (which would
   // otherwise start a new 3s poll + Supabase fetch cascade each time setLiveStoreData fires).
@@ -897,13 +967,19 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [showOrderDashboard, setShowOrderDashboard] = useState(false);
   const [customerReturns, setCustomerReturns] = useState<CustomerReturnRequest[]>([]);
   const [customerReviews, setCustomerReviews] = useState<CustomerReviewItem[]>([]);
-  const [returnOrderId, setReturnOrderId] = useState('');
-  const [returnReason, setReturnReason] = useState('');
-  const [returnNotice, setReturnNotice] = useState('');
-  const [reviewOrderId, setReviewOrderId] = useState('');
-  const [reviewRating, setReviewRating] = useState(0);
-  const [reviewComment, setReviewComment] = useState('');
-  const [reviewNotice, setReviewNotice] = useState('');
+  // Live orders fetched straight from MongoDB for this store, so the customer
+  // account page reflects real orders even when the parent route passes none.
+  const [storefrontOrders, setStorefrontOrders] = useState<Order[]>([]);
+  // In-card item action modals. Each holds the exact order + item being acted on.
+  const [reviewModal, setReviewModal] = useState<{ order: Order; item: OrderItem } | null>(null);
+  const [returnModal, setReturnModal] = useState<{ order: Order; item: OrderItem } | null>(null);
+  const [modalRating, setModalRating] = useState(0);
+  const [modalComment, setModalComment] = useState('');
+  const [modalReturnReason, setModalReturnReason] = useState('');
+  const [modalReturnNote, setModalReturnNote] = useState('');
+  const [modalReturnImage, setModalReturnImage] = useState('');
+  const [modalError, setModalError] = useState('');
+  const [isModalSubmitting, setIsModalSubmitting] = useState(false);
   const [customerSession, setCustomerSession] = useState<{ email: string; name: string; phone: string } | null>(() => {
     try {
       const session = localStorage.getItem('zid_customer_session');
@@ -940,6 +1016,67 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       safeSetItem(`zid_customer_reviews_${storeSlug}`, customerReviews);
     } catch (e) { /* ignore quota / privacy errors */ }
   }, [customerReviews, storeSlug]);
+
+  // Signed-in customers: pull this store's orders live from MongoDB so the
+  // account page is never empty just because the route didn't hand us orders.
+  // Polled at the shared customer-orders interval so a merchant's status change
+  // (Processing → Delivered) appears without a manual refresh.
+  useEffect(() => {
+    if (!customerSession) return;
+    const ref = String(effectiveStoreSlug || '').split(':')[0].trim();
+    const merchantRef = String((merchant as any)?.id || '').trim();
+    if (!ref && !merchantRef) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (ref) params.set('store_slug', ref);
+        if (merchantRef) params.set('merchant_id', merchantRef);
+        const res = await fetch(`/api/orders?${params.toString()}`);
+        const data = await res.json().catch(() => null);
+        if (!cancelled && Array.isArray(data)) setStorefrontOrders(normalizeOrders(data));
+      } catch (e: any) {
+        // Keep the last good list; a transient outage must not blank the page.
+        console.warn('[TenantStorefrontView] live orders load warning:', e?.message || e);
+      }
+    };
+    void load();
+    const timer = window.setInterval(load, CUSTOMER_ORDERS_POLL_MS);
+    return () => { cancelled = true; window.clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerSession, effectiveStoreSlug, (merchant as any)?.id]);
+
+  // Hydrate this customer's submitted reviews & returns from the server so the
+  // "Reviewed / Return requested" card states survive a device or cache change.
+  useEffect(() => {
+    if (!customerSession) return;
+    const ref = String(effectiveStoreSlug || '').split(':')[0].trim();
+    const phone = normPhone(customerSession.phone);
+    const params = new URLSearchParams();
+    if (ref) params.set('store_slug', ref);
+    if (phone) params.set('customer_phone', phone);
+    let cancelled = false;
+    const hydrate = async () => {
+      try {
+        const [reviewsRes, returnsRes] = await Promise.all([
+          fetch(`/api/reviews?${params.toString()}`).then((r) => r.json()).catch(() => []),
+          fetch(`/api/returns?${params.toString()}`).then((r) => r.json()).catch(() => []),
+        ]);
+        if (cancelled) return;
+        if (Array.isArray(reviewsRes) && reviewsRes.length > 0) {
+          setCustomerReviews((prev) => mergeReviews(prev, reviewsRes));
+        }
+        if (Array.isArray(returnsRes) && returnsRes.length > 0) {
+          setCustomerReturns((prev) => mergeReturns(prev, returnsRes));
+        }
+      } catch (e: any) {
+        console.warn('[TenantStorefrontView] review/return hydrate warning:', e?.message || e);
+      }
+    };
+    void hydrate();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerSession, effectiveStoreSlug]);
 
   // ── Merchant-configured checkout & gift options ──
   // These are owned by the merchant in Settings -> Checkout / Gift options and
@@ -1243,12 +1380,23 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     ? finalPayableMobile
     : baseTotalAmount;
 
-  const customerOrders = customerSession
-    ? (orders || []).filter((order) =>
-        order?.customerPhone === customerSession.phone ||
-        (order?.customerName || '').toLowerCase() === (customerSession.name || '').toLowerCase()
-      )
-    : [];
+  // The signed-in customer's orders: our live MongoDB fetch merged with any
+  // orders the parent passed in (preview/dashboard), de-duplicated by id and
+  // filtered by the session's phone (last 10 digits) OR exact name.
+  const customerOrders = useMemo<Order[]>(() => {
+    if (!customerSession) return [];
+    const byId = new Map<string, Order>();
+    for (const order of [...(orders || []), ...storefrontOrders]) {
+      if (order && order.id && !byId.has(order.id)) byId.set(order.id, order);
+    }
+    const sessionPhone = normPhone(customerSession.phone);
+    const sessionName = (customerSession.name || '').trim().toLowerCase();
+    return [...byId.values()].filter((order) => {
+      const phoneMatch = Boolean(sessionPhone) && normPhone(order.customerPhone) === sessionPhone;
+      const nameMatch = Boolean(sessionName) && (order.customerName || '').trim().toLowerCase() === sessionName;
+      return phoneMatch || nameMatch;
+    });
+  }, [orders, storefrontOrders, customerSession]);
 
   const handleCustomerSessionPersist = (session: { email: string; name: string; phone: string }) => {
     safeSetItem('zid_customer_session', session);
@@ -1571,77 +1719,158 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   };
 
   // ------------------------------------------------------------------
-  // Token / Return request handlers (customer mobile app)
+  // Item-level return & review modal handlers (customer order cards)
+  //
+  // Both actions POST to a real API route that persists to MongoDB, then update
+  // the local cache optimistically so the card's action button flips to its
+  // done-state immediately — even if the network round-trip is still in flight.
   // ------------------------------------------------------------------
-  const handleSubmitReturn = (e: React.FormEvent) => {
+  const returnWindowDays = Number(
+    (storefrontMerchant as any)?.returnWindowDays ?? (merchant as any)?.returnWindowDays ?? 7
+  ) || 7;
+
+  const openReviewModal = (order: Order, item: OrderItem) => {
+    setReviewModal({ order, item });
+    setModalRating(0);
+    setModalComment('');
+    setModalError('');
+  };
+
+  const openReturnModal = (order: Order, item: OrderItem) => {
+    setReturnModal({ order, item });
+    setModalReturnReason('');
+    setModalReturnNote('');
+    setModalReturnImage('');
+    setModalError('');
+  };
+
+  const closeItemModals = () => {
+    setReviewModal(null);
+    setReturnModal(null);
+    setModalError('');
+    setIsModalSubmitting(false);
+  };
+
+  const handleModalReturnImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setModalReturnImage(String(reader.result || ''));
+    reader.onerror = () => setModalError('Could not read the selected image.');
+    reader.readAsDataURL(file);
+  };
+
+  /** POST a review for a single ordered item to /api/reviews. */
+  const handleSubmitModalReview = async (e: React.FormEvent) => {
     e.preventDefault();
-    setReturnNotice('');
-    const order = (customerOrders || []).find((o) => o.id === returnOrderId);
-    if (!order) {
-      setReturnNotice(t('sf_select_order_first'));
+    if (!reviewModal) return;
+    setModalError('');
+    if (modalRating < 1 || modalRating > 5) {
+      setModalError(t('sf_review_required'));
       return;
     }
-    if (!returnReason.trim()) {
-      setReturnNotice(t('sf_return_reason_required'));
+    const { order, item } = reviewModal;
+    const slug = String(effectiveStoreSlug || '').split(':')[0].trim();
+    setIsModalSubmitting(true);
+    let saved = false;
+    try {
+      const res = await fetch('/api/reviews', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          productId: item.id,
+          productName: item.productName,
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          rating: modalRating,
+          comment: modalComment.trim(),
+          customerName: customerSession?.name || order.customerName,
+          customerPhone: customerSession?.phone || order.customerPhone,
+          storeSlug: slug,
+          storeId: order.storeId,
+          merchantId: (merchant as any)?.id || order.merchantId,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      saved = Boolean(res.ok && data?.ok !== false);
+    } catch (err: any) {
+      saved = false;
+    }
+    setIsModalSubmitting(false);
+
+    // Optimistic local record so the card shows "Reviewed" right away.
+    const newReview: CustomerReviewItem = {
+      id: `rev-${Date.now()}`,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      productId: item.id,
+      productTitle: item.productName,
+      productImage: item.image,
+      rating: modalRating,
+      comment: modalComment.trim(),
+      customerName: customerSession?.name || order.customerName,
+      createdAt: new Date().toLocaleString(),
+    };
+    setCustomerReviews((prev) => [newReview, ...prev]);
+    if (!saved) console.warn('[TenantStorefrontView] review saved locally; server sync pending');
+    closeItemModals();
+  };
+
+  /** POST a return request for a single ordered item to /api/returns. */
+  const handleSubmitModalReturn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!returnModal) return;
+    setModalError('');
+    if (!modalReturnReason.trim()) {
+      setModalError(t('sf_choose_reason'));
       return;
     }
+    const { order, item } = returnModal;
+    const slug = String(effectiveStoreSlug || '').split(':')[0].trim();
     const token = 'RTK-' + Math.floor(100000 + Math.random() * 900000);
+    setIsModalSubmitting(true);
+    let saved = false;
+    try {
+      const res = await fetch('/api/returns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          productId: item.id,
+          productName: item.productName,
+          reason: modalReturnReason,
+          note: modalReturnNote.trim(),
+          image: modalReturnImage || undefined,
+          token,
+          customerName: customerSession?.name || order.customerName,
+          customerPhone: customerSession?.phone || order.customerPhone,
+          storeSlug: slug,
+          storeId: order.storeId,
+          merchantId: (merchant as any)?.id || order.merchantId,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      saved = Boolean(res.ok && data?.ok !== false);
+    } catch (err: any) {
+      saved = false;
+    }
+    setIsModalSubmitting(false);
+
     const newReturn: CustomerReturnRequest = {
       id: `ret-${Date.now()}`,
       orderId: order.id,
       orderNumber: order.orderNumber,
-      reason: returnReason.trim(),
+      productId: item.id,
+      productName: item.productName,
+      reason: modalReturnReason,
       status: 'Pending',
       token,
       createdAt: new Date().toLocaleString(),
     };
     setCustomerReturns((prev) => [newReturn, ...prev]);
-    setReturnNotice(t('sf_return_submitted') + ' ' + token);
-    setReturnOrderId('');
-    setReturnReason('');
-  };
-
-  const handleSubmitReview = (e: React.FormEvent) => {
-    e.preventDefault();
-    setReviewNotice('');
-    const order = (customerOrders || []).find((o) => o.id === reviewOrderId);
-    if (!order) {
-      setReviewNotice(t('sf_select_order_first'));
-      return;
-    }
-    if (reviewRating < 1 || reviewRating > 5 || !reviewComment.trim()) {
-      setReviewNotice(t('sf_review_required'));
-      return;
-    }
-    const firstItem = order.items?.[0];
-    const newReview: CustomerReviewItem = {
-      id: `rev-${Date.now()}`,
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      productTitle: firstItem?.productName || order.orderNumber,
-      productImage: firstItem?.image,
-      rating: reviewRating,
-      comment: reviewComment.trim(),
-      customerName: customerSession?.name || order.customerName,
-      createdAt: new Date().toLocaleString(),
-    };
-    setCustomerReviews((prev) => [newReview, ...prev]);
-    setReviewNotice(t('sf_review_submitted'));
-    setReviewOrderId('');
-    setReviewRating(0);
-    setReviewComment('');
-  };
-
-  const handleShareReview = (review: CustomerReviewItem) => {
-    const stars = '⭐'.repeat(review.rating);
-    const text = `${stars} ${review.comment} — ${review.productTitle} (Order ${review.orderNumber})`;
-    const shareUrl = window.location.href;
-    const facebookUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}&quote=${encodeURIComponent(text)}`;
-    if (navigator.share) {
-      navigator.share({ title: review.productTitle, text, url: shareUrl }).catch(() => { /* user dismissed */ });
-    } else {
-      window.open(facebookUrl, '_blank', 'width=640,height=600');
-    }
+    if (!saved) console.warn('[TenantStorefrontView] return saved locally; server sync pending');
+    closeItemModals();
   };
 
   // Ensure all active created products render under Products section regardless of sub-category assignment
@@ -1690,6 +1919,153 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   if (resolvedLayout === 'fashion') {
     return <ElegantFashionMockup accentColor={primaryColor} />;
   }
+
+  // Shared customer order list used by BOTH the Orders tab and the Profile tab.
+  // Each order renders as a clean card: id / purchase date / total / payment
+  // badge, a live tracking bar, and item-level "Write Review" / "Request Return"
+  // action buttons (enabled only when the order is Delivered / in-window).
+  const renderCustomerOrderList = () => (
+    <section className="space-y-4">
+      <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
+        <PackageCheck className="w-5 h-5 text-[var(--primary-accent)]" />
+        {t('sf_my_orders')}
+      </h2>
+      {customerOrders.length === 0 ? (
+        <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center shadow-sm">
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100">
+            <ShoppingBag className="w-7 h-7 text-slate-300" />
+          </div>
+          <h3 className="text-lg font-black text-slate-900">{t('sf_empty_orders_title')}</h3>
+          <p className="mx-auto mt-1 max-w-sm text-sm text-slate-500">{t('sf_empty_orders_desc')}</p>
+          <button
+            onClick={() => { setCheckoutStep('catalog'); setMobileTab('home'); }}
+            className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[var(--primary-accent)] px-6 py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
+          >
+            <ShoppingBag className="w-4 h-4" /> {t('sf_continue_shopping')}
+          </button>
+        </div>
+      ) : (
+        customerOrders.map((order) => {
+          const statusBadge = getOrderStatusBadge(order);
+          const paymentBadge = getPaymentBadge(order);
+          const stepIndex = getTrackingStepIndex(order);
+          const delivered = isDelivered(order);
+          const returnable = isReturnEligible(order, returnWindowDays);
+          return (
+            <div key={order.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              {/* Header: order id · purchase date · total · payment status badge */}
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 bg-slate-50/70 p-4">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-black uppercase tracking-[0.15em] text-slate-400">{order.orderNumber}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                    <span className="inline-flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {t('sf_purchase_date')} {safeDate(order.createdAt)}</span>
+                    <span className="inline-flex items-center gap-1"><CreditCard className="w-3.5 h-3.5" /> {order.paymentMethod}</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-lg font-black text-slate-900">৳{safeAmount(order.totalBDT)}</div>
+                  <div className="mt-1 flex flex-wrap justify-end gap-1.5">
+                    <span className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-black ${statusBadge.className}`}>
+                      {isBn ? statusBadge.labelBn : statusBadge.label}
+                    </span>
+                    <span className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-black ${paymentBadge.className}`}>
+                      {isBn ? paymentBadge.labelBn : paymentBadge.label}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Live tracking bar: Order Placed → Processing → Out for Delivery → Delivered */}
+              <div className="px-4 pt-4">
+                {statusBadge.cancelled ? (
+                  <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700">
+                    {t('sf_order_cancelled')}
+                  </div>
+                ) : (
+                  <div className="flex items-start">
+                    {TRACKING_STEPS.map((step, i) => {
+                      const active = i <= stepIndex;
+                      const current = i === stepIndex;
+                      return (
+                        <React.Fragment key={step.key}>
+                          <div className="flex min-w-[54px] flex-col items-center gap-1">
+                            <div className={`flex h-7 w-7 items-center justify-center rounded-full border-2 transition ${active ? 'border-transparent bg-[var(--primary-accent)] text-slate-950' : 'border-slate-200 bg-white text-slate-300'}`}>
+                              {active ? <Check className="w-3.5 h-3.5" /> : <span className="text-[10px] font-black">{i + 1}</span>}
+                            </div>
+                            <span className={`text-center text-[9px] font-bold leading-tight ${current ? 'text-slate-900' : active ? 'text-slate-600' : 'text-slate-400'}`} style={{ maxWidth: 70 }}>
+                              {isBn ? step.labelBn : step.label}
+                            </span>
+                          </div>
+                          {i < TRACKING_STEPS.length - 1 && (
+                            <div className={`mt-3.5 h-0.5 flex-1 rounded-full ${i < stepIndex ? 'bg-[var(--primary-accent)]' : 'bg-slate-200'}`} />
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              {/* Items — each with its own Write Review / Request Return buttons */}
+              {order.items && order.items.length > 0 && (
+                <div className="mt-2 divide-y divide-slate-100">
+                  {order.items.map((item, idx) => {
+                    const reviewed = customerReviews.some((r) => r.orderId === order.id && (!r.productId || r.productId === item.id));
+                    const returned = customerReturns.some((r) => r.orderId === order.id && (!r.productId || r.productId === item.id));
+                    return (
+                      <div key={`${order.id}-${item.id || idx}`} className="flex flex-wrap items-center gap-3 p-4">
+                        {item.image ? (
+                          <SafeImage src={item.image} alt="" className="h-12 w-12 rounded-xl border border-slate-100 object-cover" />
+                        ) : (
+                          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-100">
+                            <ShoppingBag className="h-5 w-5 text-slate-300" />
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-bold text-slate-800">{item.productName}</div>
+                          <div className="mt-0.5 text-xs text-slate-500">
+                            {item.variant ? `${item.variant} · ` : ''}× {item.quantity}
+                          </div>
+                          <div className="mt-0.5 text-sm font-black text-slate-900">৳{safeAmount((item.unitPriceBDT || 0) * item.quantity)}</div>
+                        </div>
+                        <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+                          <button
+                            type="button"
+                            disabled={!delivered || reviewed}
+                            title={!delivered ? t('sf_review_after_delivery') : undefined}
+                            onClick={() => openReviewModal(order, item)}
+                            className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-black transition ${delivered && !reviewed ? 'cursor-pointer border-[var(--primary-accent)] bg-[var(--primary-accent)]/10 text-slate-900 hover:bg-[var(--primary-accent)]/20' : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400'}`}
+                          >
+                            <Star className={`h-3.5 w-3.5 ${delivered && !reviewed ? 'fill-amber-400 text-amber-400' : ''}`} />
+                            {reviewed ? t('sf_reviewed') : t('sf_write_review')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!returnable || returned}
+                            title={!returnable ? t('sf_return_not_eligible') : undefined}
+                            onClick={() => openReturnModal(order, item)}
+                            className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-black transition ${returnable && !returned ? 'cursor-pointer border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400'}`}
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            {returned ? t('sf_return_requested') : t('sf_request_return')}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {(order.trackingCode || order.courierName) && (
+                <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-4 py-2.5 text-[11px] text-slate-400">
+                  <span className="font-mono">{order.trackingCode || order.courierName}</span>
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </section>
+  );
 
   return (
     <div
@@ -2467,188 +2843,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       </div>
                     )}
 
-                    {/* Order List */}
-                    <section className="space-y-3">
-                      <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
-                        <PackageCheck className="w-5 h-5 text-[var(--primary-accent)]" />
-                        {t('sf_my_orders')}
-                      </h2>
-                      {customerOrders.length === 0 ? (
-                        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
-                          {t('sf_no_orders')}
-                        </div>
-                      ) : (
-                        customerOrders.map((order) => (
-                          <div key={order.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-400">{order.orderNumber}</div>
-                                <div className="mt-1 text-base font-black text-slate-900">{order.paymentMethod}</div>
-                              </div>
-                              <div className="text-right">
-                                <div className="text-base font-black text-[var(--primary-accent)]">৳{order.totalBDT.toLocaleString()}</div>
-                                <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-black ${order.fulfillmentStatus === 'Delivered' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                                  {order.fulfillmentStatus}
-                                </span>
-                              </div>
-                            </div>
-                            {order.items && order.items.length > 0 && (
-                              <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
-                                {order.items.slice(0, 3).map((item, idx) => (
-                                  <div key={idx} className="flex items-center gap-3 text-xs">
-                                    {item.image ? (
-                                      <SafeImage src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border border-slate-100" />
-                                    ) : (
-                                      <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
-                                        <ShoppingBag className="w-4 h-4 text-slate-300" />
-                                      </div>
-                                    )}
-                                    <span className="font-semibold text-slate-700 flex-1">{item.productName} × {item.quantity}</span>
-                                    <span className="font-bold text-slate-900">৳{(item.unitPriceBDT * item.quantity).toLocaleString()}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            <div className="mt-3 flex items-center justify-between text-[11px] text-slate-400">
-                              <span>{order.createdAt}</span>
-                              <span className="font-mono">{order.trackingCode || order.courierName || '—'}</span>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </section>
-                    {/*_CONT_RETURN_*/}
-
-                    {/* Token / Return system */}
-                    <section className="rounded-3xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm space-y-4">
-                      <div className="flex items-center gap-2">
-                        <RotateCcw className="w-5 h-5 text-amber-500" />
-                        <h2 className="text-lg font-black text-slate-900">{t('sf_token_return')}</h2>
-                      </div>
-                      <form onSubmit={handleSubmitReturn} className="space-y-3">
-                        <select
-                          value={returnOrderId}
-                          onChange={(e) => setReturnOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
-                        >
-                          <option value="">{t('sf_select_order')}</option>
-                          {customerOrders.map((o) => (
-                            <option key={o.id} value={o.id}>{o.orderNumber} — {o.fulfillmentStatus}</option>
-                          ))}
-                        </select>
-                        <textarea
-                          value={returnReason}
-                          onChange={(e) => setReturnReason(e.target.value)}
-                          placeholder={t('sf_return_reason_placeholder')}
-                          rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
-                        />
-                        <button
-                          type="submit"
-                          className="w-full rounded-xl bg-amber-500 py-3 text-sm font-black text-slate-950 hover:bg-amber-400 transition cursor-pointer"
-                        >
-                          {t('sf_submit_return')}
-                        </button>
-                      </form>
-                      {returnNotice && (
-                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">{returnNotice}</div>
-                      )}
-                      {customerReturns.length > 0 && (
-                        <div className="space-y-2">
-                          <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">{t('sf_return_history')}</h4>
-                          {customerReturns.map((r) => (
-                            <div key={r.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs">
-                              <div>
-                                <div className="font-black text-slate-900">{r.orderNumber}</div>
-                                <div className="text-slate-500">{t('sf_token')}: <span className="font-mono font-bold text-amber-600">{r.token}</span></div>
-                              </div>
-                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${r.status === 'Pending' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{r.status}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </section>
-                    {/* Product Reviews */}
-                    <section className="rounded-3xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm space-y-5">
-                      <div className="flex items-center gap-2">
-                        <MessageSquare className="w-5 h-5 text-[var(--primary-accent)]" />
-                        <h2 className="text-lg font-black text-slate-900">{t('sf_reviews')}</h2>
-                      </div>
-
-                      {customerReviews.length === 0 ? (
-                        <p className="text-sm text-slate-500">{t('sf_no_reviews')}</p>
-                      ) : (
-                        <div className="space-y-4">
-                          {customerReviews.map((rev) => (
-                            <div key={rev.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-1">
-                                  {[1, 2, 3, 4, 5].map((n) => (
-                                    <Star key={n} className={`w-4 h-4 ${n <= rev.rating ? 'text-amber-400 fill-amber-400' : 'text-slate-300'}`} />
-                                  ))}
-                                </div>
-                                <span className="text-[11px] text-slate-400">{rev.createdAt}</span>
-                              </div>
-                              <p className="mt-2 text-sm font-semibold text-slate-800">{rev.productTitle}</p>
-                              <p className="mt-1 text-sm text-slate-600 leading-relaxed">{rev.comment}</p>
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                <button
-                                  onClick={() => handleShareReview(rev)}
-                                  className="inline-flex items-center gap-1.5 rounded-full bg-[#1877F2] px-3 py-1.5 text-xs font-bold text-white hover:opacity-90 transition cursor-pointer"
-                                >
-                                  <Share2 className="w-3.5 h-3.5" /> {t('sf_share_facebook')}
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* New review form */}
-                      <form onSubmit={handleSubmitReview} className="space-y-3 border-t border-slate-100 pt-4">
-                        <h4 className="text-sm font-black text-slate-900">{t('sf_write_review')}</h4>
-                        <select
-                          value={reviewOrderId}
-                          onChange={(e) => setReviewOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
-                        >
-                          <option value="">{t('sf_select_order')}</option>
-                          {customerOrders.filter((o) => !customerReviews.some((r) => r.orderId === o.id)).map((o) => (
-                            <option key={o.id} value={o.id}>{o.orderNumber} — {o.fulfillmentStatus}</option>
-                          ))}
-                        </select>
-                        <div className="flex items-center gap-1">
-                          {[1, 2, 3, 4, 5].map((n) => (
-                            <button
-                              key={n}
-                              type="button"
-                              onClick={() => setReviewRating(n)}
-                              className="cursor-pointer transition"
-                              aria-label={`${n} star`}
-                            >
-                              <Star className={`w-8 h-8 ${n <= reviewRating ? 'text-amber-400 fill-amber-400' : 'text-slate-300'}`} />
-                            </button>
-                          ))}
-                          <span className="ml-2 text-sm font-bold text-slate-600">{reviewRating > 0 ? `${reviewRating}/5` : ''}</span>
-                        </div>
-                        <textarea
-                          value={reviewComment}
-                          onChange={(e) => setReviewComment(e.target.value)}
-                          placeholder={t('sf_review_placeholder')}
-                          rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
-                        />
-                        <button
-                          type="submit"
-                          className="w-full rounded-xl bg-[var(--primary-accent)] py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
-                        >
-                          {t('sf_submit_review')}
-                        </button>
-                        {reviewNotice && (
-                          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">{reviewNotice}</div>
-                        )}
-                      </form>
-                    </section>
+                    {renderCustomerOrderList()}
                   </>
                 )}
               </div>
@@ -2691,188 +2886,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       </div>
                     )}
 
-                    {/* Order List */ }
-                    <section className="space-y-3">
-                      <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
-                        <PackageCheck className="w-5 h-5 text-[var(--primary-accent)]" />
-                        {t('sf_my_orders')}
-                      </h2>
-                      {customerOrders.length === 0 ? (
-                        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-500">
-                          {t('sf_no_orders')}
-                        </div>
-                      ) : (
-                        customerOrders.map((order) => (
-                          <div key={order.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-400">{order.orderNumber}</div>
-                                <div className="mt-1 text-base font-black text-slate-900">{order.paymentMethod}</div>
-                              </div>
-                              <div className="text-right">
-                                <div className="text-base font-black text-[var(--primary-accent)]">৳{order.totalBDT.toLocaleString()}</div>
-                                <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-black ${order.fulfillmentStatus === 'Delivered' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                                  {order.fulfillmentStatus}
-                                </span>
-                              </div>
-                            </div>
-                            {order.items && order.items.length > 0 && (
-                              <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
-                                {order.items.slice(0, 3).map((item, idx) => (
-                                  <div key={idx} className="flex items-center gap-3 text-xs">
-                                    {item.image ? (
-                                      <SafeImage src={item.image} alt="" className="w-10 h-10 rounded-lg object-cover border border-slate-100" />
-                                    ) : (
-                                      <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
-                                        <ShoppingBag className="w-4 h-4 text-slate-300" />
-                                      </div>
-                                    )}
-                                    <span className="font-semibold text-slate-700 flex-1">{item.productName} × {item.quantity}</span>
-                                    <span className="font-bold text-slate-900">৳{(item.unitPriceBDT * item.quantity).toLocaleString()}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            <div className="mt-3 flex items-center justify-between text-[11px] text-slate-400">
-                              <span>{order.createdAt}</span>
-                              <span className="font-mono">{order.trackingCode || order.courierName || '—'}</span>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                                        </section>
-
-                    {/* Token / Return system */ }
-                    <section className="rounded-3xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm space-y-4">
-                      <div className="flex items-center gap-2">
-                        <RotateCcw className="w-5 h-5 text-amber-500" />
-                        <h2 className="text-lg font-black text-slate-900">{t('sf_token_return')}</h2>
-                      </div>
-                      <form onSubmit={handleSubmitReturn} className="space-y-3">
-                        <select
-                          value={returnOrderId}
-                          onChange={(e) => setReturnOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
-                        >
-                          <option value="">{t('sf_select_order')}</option>
-                          {customerOrders.map((o) => (
-                            <option key={o.id} value={o.id}>{o.orderNumber} — {o.fulfillmentStatus}</option>
-                          ))}
-                        </select>
-                        <textarea
-                          value={returnReason}
-                          onChange={(e) => setReturnReason(e.target.value)}
-                          placeholder={t('sf_return_reason_placeholder')}
-                          rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
-                        />
-                        <button
-                          type="submit"
-                          className="w-full rounded-xl bg-amber-500 py-3 text-sm font-black text-slate-950 hover:bg-amber-400 transition cursor-pointer"
-                        >
-                          {t('sf_submit_return')}
-                        </button>
-                      </form>
-                      {returnNotice && (
-                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">{returnNotice}</div>
-                      )}
-                      {customerReturns.length > 0 && (
-                        <div className="space-y-2">
-                          <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">{t('sf_return_history')}</h4>
-                          {customerReturns.map((r) => (
-                            <div key={r.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs">
-                              <div>
-                                <div className="font-black text-slate-900">{r.orderNumber}</div>
-                                <div className="text-slate-500">{t('sf_token')}: <span className="font-mono font-bold text-amber-600">{r.token}</span></div>
-                              </div>
-                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${r.status === 'Pending' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{r.status}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                                        </section>
-
-                    {/* Product Reviews */ }
-                    <section className="rounded-3xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm space-y-5">
-                      <div className="flex items-center gap-2">
-                        <MessageSquare className="w-5 h-5 text-[var(--primary-accent)]" />
-                        <h2 className="text-lg font-black text-slate-900">{t('sf_reviews')}</h2>
-                      </div>
-
-                      {customerReviews.length === 0 ? (
-                        <p className="text-sm text-slate-500">{t('sf_no_reviews')}</p>
-                      ) : (
-                        <div className="space-y-4">
-                          {customerReviews.map((rev) => (
-                            <div key={rev.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-1">
-                                  {[1, 2, 3, 4, 5].map((n) => (
-                                    <Star key={n} className={`w-4 h-4 ${n <= rev.rating ? 'text-amber-400 fill-amber-400' : 'text-slate-300'}`} />
-                                  ))}
-                                </div>
-                                <span className="text-[11px] text-slate-400">{rev.createdAt}</span>
-                              </div>
-                              <p className="mt-2 text-sm font-semibold text-slate-800">{rev.productTitle}</p>
-                              <p className="mt-1 text-sm text-slate-600 leading-relaxed">{rev.comment}</p>
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                <button
-                                  onClick={() => handleShareReview(rev)}
-                                  className="inline-flex items-center gap-1.5 rounded-full bg-[#1877F2] px-3 py-1.5 text-xs font-bold text-white hover:opacity-90 transition cursor-pointer"
-                                >
-                                  <Share2 className="w-3.5 h-3.5" /> {t('sf_share_facebook')}
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* New review form */ }
-                      <form onSubmit={handleSubmitReview} className="space-y-3 border-t border-slate-100 pt-4">
-                        <h4 className="text-sm font-black text-slate-900">{t('sf_write_review')}</h4>
-                        <select
-                          value={reviewOrderId}
-                          onChange={(e) => setReviewOrderId(e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
-                        >
-                          <option value="">{t('sf_select_order')}</option>
-                          {customerOrders.filter((o) => !customerReviews.some((r) => r.orderId === o.id)).map((o) => (
-                            <option key={o.id} value={o.id}>{o.orderNumber} — {o.fulfillmentStatus}</option>
-                          ))}
-                        </select>
-                        <div className="flex items-center gap-1">
-                          {[1, 2, 3, 4, 5].map((n) => (
-                            <button
-                              key={n}
-                              type="button"
-                              onClick={() => setReviewRating(n)}
-                              className="cursor-pointer transition"
-                              aria-label={`${n} star`}
-                            >
-                              <Star className={`w-8 h-8 ${n <= reviewRating ? 'text-amber-400 fill-amber-400' : 'text-slate-300'}`} />
-                            </button>
-                          ))}
-                          <span className="ml-2 text-sm font-bold text-slate-600">{reviewRating > 0 ? `${reviewRating}/5` : ''}</span>
-                        </div>
-                        <textarea
-                          value={reviewComment}
-                          onChange={(e) => setReviewComment(e.target.value)}
-                          placeholder={t('sf_review_placeholder')}
-                          rows={3}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
-                        />
-                        <button
-                          type="submit"
-                          className="w-full rounded-xl bg-[var(--primary-accent)] py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
-                        >
-                          {t('sf_submit_review')}
-                        </button>
-                        {reviewNotice && (
-                          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">{reviewNotice}</div>
-                        )}
-                      </form>
-                    </section>
+                    {renderCustomerOrderList()}
 
                     <div className="rounded-3xl border border-slate-200 bg-white divide-y divide-slate-100 shadow-sm overflow-hidden">
                       <div className="flex items-center justify-between p-4">
@@ -3736,6 +3750,152 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 ))
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Item-level Write Review Modal */}
+      {reviewModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/70 backdrop-blur-md p-0 sm:items-center sm:p-4"
+          onClick={closeItemModals}
+        >
+          <div
+            className="w-full max-w-md rounded-t-3xl border border-slate-200 bg-white shadow-2xl sm:rounded-3xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-5">
+              <div className="flex items-center gap-3">
+                {reviewModal.item.image ? (
+                  <SafeImage src={reviewModal.item.image} alt="" className="h-11 w-11 rounded-xl border border-slate-100 object-cover" />
+                ) : (
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100">
+                    <ShoppingBag className="h-5 w-5 text-slate-300" />
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <h3 className="text-base font-black text-slate-900">{t('sf_review_modal_title')}</h3>
+                  <p className="truncate text-xs text-slate-500">{t('sf_review_for')} {reviewModal.item.productName}</p>
+                </div>
+              </div>
+              <button onClick={closeItemModals} className="rounded-xl bg-slate-100 p-2 text-slate-500 hover:bg-slate-200 transition cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSubmitModalReview} className="space-y-4 p-5">
+              <div>
+                <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_review_comment_label')}</label>
+                <div className="flex items-center gap-1">
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button key={n} type="button" onClick={() => setModalRating(n)} className="cursor-pointer transition hover:scale-110" aria-label={`${n} star`}>
+                      <Star className={`h-9 w-9 ${n <= modalRating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'}`} />
+                    </button>
+                  ))}
+                  <span className="ml-2 text-sm font-bold text-slate-600">{modalRating > 0 ? `${modalRating}/5` : ''}</span>
+                </div>
+              </div>
+              <textarea
+                value={modalComment}
+                onChange={(e) => setModalComment(e.target.value)}
+                placeholder={t('sf_review_placeholder')}
+                rows={4}
+                className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+              />
+              {modalError && (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{modalError}</div>
+              )}
+              <div className="flex gap-2">
+                <button type="button" onClick={closeItemModals} className="flex-1 rounded-xl border border-slate-300 bg-white py-3 text-sm font-black text-slate-700 hover:bg-slate-50 transition cursor-pointer">
+                  {t('sf_cancel')}
+                </button>
+                <button type="submit" disabled={isModalSubmitting} className="flex-[2] inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--primary-accent)] py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer disabled:opacity-60">
+                  {isModalSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Star className="h-4 w-4" />}
+                  {isModalSubmitting ? t('sf_submitting') : t('sf_submit')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Item-level Request Return Modal */}
+      {returnModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/70 backdrop-blur-md p-0 sm:items-center sm:p-4"
+          onClick={closeItemModals}
+        >
+          <div
+            className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl border border-slate-200 bg-white shadow-2xl sm:rounded-3xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-5">
+              <div className="flex items-center gap-3">
+                {returnModal.item.image ? (
+                  <SafeImage src={returnModal.item.image} alt="" className="h-11 w-11 rounded-xl border border-slate-100 object-cover" />
+                ) : (
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100">
+                    <RotateCcw className="h-5 w-5 text-slate-300" />
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <h3 className="text-base font-black text-slate-900">{t('sf_return_modal_title')}</h3>
+                  <p className="truncate text-xs text-slate-500">{t('sf_return_for')} {returnModal.item.productName}</p>
+                </div>
+              </div>
+              <button onClick={closeItemModals} className="rounded-xl bg-slate-100 p-2 text-slate-500 hover:bg-slate-200 transition cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSubmitModalReturn} className="space-y-4 p-5">
+              <div>
+                <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_return_reason')}</label>
+                <select
+                  value={modalReturnReason}
+                  onChange={(e) => setModalReturnReason(e.target.value)}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)] cursor-pointer"
+                >
+                  <option value="">{t('sf_return_reason')}…</option>
+                  <option value="Wrong Size">{t('sf_reason_wrong_size')}</option>
+                  <option value="Damaged Item">{t('sf_reason_damaged')}</option>
+                  <option value="Defective Product">{t('sf_reason_defective')}</option>
+                  <option value="Wrong Item Delivered">{t('sf_reason_wrong_item')}</option>
+                  <option value="Not as Described">{t('sf_reason_not_described')}</option>
+                  <option value="Other">{t('sf_reason_other')}</option>
+                </select>
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_return_note')}</label>
+                <textarea
+                  value={modalReturnNote}
+                  onChange={(e) => setModalReturnNote(e.target.value)}
+                  placeholder={t('sf_return_note_ph')}
+                  rows={3}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_return_image')}</label>
+                <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3.5 py-3 text-xs font-semibold text-slate-500 hover:bg-slate-100 transition">
+                  <Camera className="h-4 w-4" />
+                  <span>{(modalReturnImage ? '✓ ' : '') + t('sf_return_image')}</span>
+                  <input type="file" accept="image/*" className="hidden" onChange={handleModalReturnImage} />
+                </label>
+                {modalReturnImage && (
+                  <img src={modalReturnImage} alt="" className="mt-2 h-20 w-20 rounded-xl border border-slate-200 object-cover" />
+                )}
+              </div>
+              {modalError && (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{modalError}</div>
+              )}
+              <div className="flex gap-2">
+                <button type="button" onClick={closeItemModals} className="flex-1 rounded-xl border border-slate-300 bg-white py-3 text-sm font-black text-slate-700 hover:bg-slate-50 transition cursor-pointer">
+                  {t('sf_cancel')}
+                </button>
+                <button type="submit" disabled={isModalSubmitting} className="flex-[2] inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 py-3 text-sm font-black text-slate-950 hover:bg-amber-400 transition cursor-pointer disabled:opacity-60">
+                  {isModalSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                  {isModalSubmitting ? t('sf_submitting') : t('sf_submit')}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
