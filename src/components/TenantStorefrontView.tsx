@@ -1487,6 +1487,143 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     setIsCartOpen(false);
   };
 
+  // ── Customer Profile (account configuration ONLY) ────────────────────────
+  //
+  // The Profile tab is deliberately free of orders: every order card, tracking
+  // stepper, review button and return button lives in the Orders tab only.
+  // What lives here is account configuration — identity, saved addresses,
+  // password and support.
+  const [profileModal, setProfileModal] = useState<'edit' | 'addresses' | 'password' | 'support' | null>(null);
+  const [profileNotice, setProfileNotice] = useState('');
+  const [profileError, setProfileError] = useState('');
+  // Edit Profile form — seeded from the session each time the modal opens.
+  const [profileForm, setProfileForm] = useState({ name: '', phone: '', email: '' });
+  // Change Password form.
+  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
+  const [newAddress, setNewAddress] = useState('');
+  // Saved delivery addresses, scoped per store so two shops don't share them.
+  const [savedAddresses, setSavedAddresses] = useState<string[]>([]);
+
+  // Merchant contact details for the Support / Help Center row.
+  const supportPhone = String(resolvedTheme.contactPhone || storefrontMerchant.supportPhone || '').replace(/\D/g, '');
+  const supportEmail = String(resolvedTheme.contactEmail || storefrontMerchant.supportEmail || '');
+  const supportAddress = String(resolvedTheme.dhakaAddress || '');
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`zid_customer_addresses_${storeSlug}`);
+      const parsed = raw ? JSON.parse(raw) : [];
+      setSavedAddresses(Array.isArray(parsed) ? parsed : []);
+    } catch (e) {
+      /* storage unavailable — start empty */
+    }
+  }, [storeSlug]);
+
+  useEffect(() => {
+    try {
+      safeSetItem(`zid_customer_addresses_${storeSlug}`, savedAddresses);
+    } catch (e) { /* ignore quota / privacy errors */ }
+  }, [savedAddresses, storeSlug]);
+
+  const openProfileModal = (kind: 'edit' | 'addresses' | 'password' | 'support') => {
+    setProfileNotice('');
+    setProfileError('');
+    if (kind === 'edit') {
+      setProfileForm({
+        name: customerSession?.name || '',
+        phone: customerSession?.phone || '',
+        email: customerSession?.email || '',
+      });
+    }
+    if (kind === 'password') setPasswordForm({ current: '', next: '', confirm: '' });
+    if (kind === 'addresses') setNewAddress('');
+    setProfileModal(kind);
+  };
+
+  const closeProfileModal = () => {
+    setProfileModal(null);
+    setProfileNotice('');
+    setProfileError('');
+  };
+
+  /** Read the locally-stored customer accounts list (never throws). */
+  const readCustomerAccounts = (): any[] => {
+    try {
+      const raw = localStorage.getItem('zid_customer_accounts');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      return [];
+    }
+  };
+
+  const handleSaveProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customerSession) return;
+    const name = profileForm.name.trim();
+    const phone = profileForm.phone.trim();
+    const email = profileForm.email.trim().toLowerCase();
+    if (!name || !phone || !email.includes('@')) {
+      setProfileError('Please enter a valid name, phone number and email address.');
+      return;
+    }
+
+    // Keep the stored credential record in sync, matched on the ORIGINAL email
+    // (which may itself be changing), so the next sign-in uses the new details.
+    const original = customerSession.email.trim().toLowerCase();
+    const next = readCustomerAccounts().map((account) => {
+      if (String(account?.email || '').toLowerCase() !== original) return account;
+      return { ...account, name, phone, email };
+    });
+    safeSetItem('zid_customer_accounts', next);
+
+    handleCustomerSessionPersist({ name, phone, email });
+    setProfileNotice(t('sf_profile_updated'));
+  };
+
+  const handleAddAddress = () => {
+    const value = newAddress.trim();
+    if (!value) return;
+    setSavedAddresses((prev) => (prev.includes(value) ? prev : [...prev, value]));
+    setNewAddress('');
+    setProfileNotice(t('sf_address_saved'));
+  };
+
+  const handleRemoveAddress = (value: string) => {
+    setSavedAddresses((prev) => prev.filter((address) => address !== value));
+  };
+
+  const handleChangePassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customerSession) return;
+    if (passwordForm.next !== passwordForm.confirm) {
+      setProfileError(t('sf_password_mismatch'));
+      return;
+    }
+    if (passwordForm.next.trim().length < 4) {
+      setProfileError('Please choose a password of at least 4 characters.');
+      return;
+    }
+
+    // Verify the current password before writing, so the change is a real
+    // security step rather than an unguarded overwrite.
+    const email = customerSession.email.trim().toLowerCase();
+    let matched = false;
+    const next = readCustomerAccounts().map((account) => {
+      if (String(account?.email || '').toLowerCase() !== email) return account;
+      if (String(account?.password || '') !== passwordForm.current) return account;
+      matched = true;
+      return { ...account, password: passwordForm.next };
+    });
+    if (!matched) {
+      setProfileError(t('sf_wrong_password'));
+      return;
+    }
+    safeSetItem('zid_customer_accounts', next);
+    setPasswordForm({ current: '', next: '', confirm: '' });
+    setProfileNotice(t('sf_password_updated'));
+  };
+
   /** Clamp a quantity to the merchant's configured min/max (max 0 = unlimited). */
   const clampQty = (qty: number) => {
     const floor = Math.max(1, minOrderQty);
@@ -1926,10 +2063,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     return <ElegantFashionMockup accentColor={primaryColor} />;
   }
 
-  // Shared customer order list used by BOTH the Orders tab and the Profile tab.
+  // Shared customer order list — rendered by the ORDERS TAB ONLY.
   // Each order renders as a clean card: id / purchase date / total / payment
   // badge, a live tracking bar, and item-level "Write Review" / "Request Return"
   // action buttons (enabled only when the order is Delivered / in-window).
+  // The Profile tab intentionally does NOT render this.
   const renderCustomerOrderList = () => (
     <section className="space-y-4">
       <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
@@ -2899,42 +3037,132 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   </div>
                 ) : (
                   <>
-                    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex items-center gap-4">
-                      <div className="w-16 h-16 rounded-2xl bg-[var(--primary-accent)] text-slate-950 font-black text-2xl flex items-center justify-center">
-                        {customerSession.name.charAt(0).toUpperCase()}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h2 className="text-xl font-black text-slate-900 truncate">{customerSession.name}</h2>
-                        <p className="text-sm text-slate-500 truncate">{customerSession.email} • {customerSession.phone}</p>
-                      </div>
-                                        </div>
-
-                    {/* Automatic Delivered banner */ }
-                    {customerOrders.some((o) => o.fulfillmentStatus === 'Delivered') && (
-                      <div className="rounded-3xl border border-emerald-300/70           bg-gradient-to-r from-emerald-50 to-[var(--primary-accent)]/10 p-5 shadow-sm flex items-start gap-3">
-                        <Sparkles className="w-6 h-6 text-emerald-500 shrink-0 mt-0.5" />
-                        <div>
-                          <h4 className="font-black text-emerald-800 text-sm">{t('sf_delivered_banner_title')}</h4>
-                          <p className="text-sm text-emerald-900/90 leading-relaxed mt-1">{t('sf_delivered_banner')}</p>
+                    {/* ── Profile Card ── avatar + identity (name / phone / email) */}
+                    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+                      <div className="flex items-center gap-4">
+                        <div className="w-16 h-16 shrink-0 rounded-2xl bg-[var(--primary-accent)] text-slate-950 font-black text-2xl flex items-center justify-center">
+                          {customerSession.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <h2 className="text-xl font-black text-slate-900 truncate">{customerSession.name}</h2>
+                          <p className="mt-0.5 flex items-center gap-1.5 text-sm text-slate-500 truncate">
+                            <Phone className="w-3.5 h-3.5 shrink-0" /> {customerSession.phone}
+                          </p>
+                          <p className="flex items-center gap-1.5 text-sm text-slate-500 truncate">
+                            <Globe className="w-3.5 h-3.5 shrink-0" /> {customerSession.email}
+                          </p>
                         </div>
                       </div>
-                    )}
-
-                    {renderCustomerOrderList()}
-
-                    <div className="rounded-3xl border border-slate-200 bg-white divide-y divide-slate-100 shadow-sm overflow-hidden">
-                      <div className="flex items-center justify-between p-4">
-                        <span className="text-sm font-bold text-slate-700">{t('sf_language')}</span>
-                        <LanguageToggle />
+                      <div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+                        <button
+                          onClick={() => openProfileModal('edit')}
+                          className="flex-1 min-w-[150px] inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--primary-accent)] px-4 py-2.5 text-xs font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
+                        >
+                          <User className="w-4 h-4" /> {t('sf_edit_profile')}
+                        </button>
+                        {/* Orders live in their OWN tab — this is just the shortcut. */}
+                        <button
+                          onClick={() => setMobileTab('orders')}
+                          className="flex-1 min-w-[150px] inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-black text-slate-700 hover:bg-slate-50 transition cursor-pointer"
+                        >
+                          <ShoppingBag className="w-4 h-4" /> {t('sf_my_orders')}
+                        </button>
                       </div>
-                      <button
-                        onClick={handleCustomerSignOut}
-                        className="w-full flex items-center gap-3 p-4 text-left hover:bg-red-50 transition cursor-pointer"
-                      >
-                        <LogOut className="w-5 h-5 text-red-500" />
-                        <span className="flex-1 font-bold text-red-600">{t('sf_sign_out')}</span>
-                      </button>
                     </div>
+                    {/* ── Account Settings ── */}
+                    <section className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                      <h3 className="px-5 pt-5 pb-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
+                        {t('sf_account_settings')}
+                      </h3>
+                      <div className="divide-y divide-slate-100">
+                        <button
+                          onClick={() => openProfileModal('edit')}
+                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-slate-50 transition cursor-pointer"
+                        >
+                          <div className="w-9 h-9 shrink-0 rounded-xl bg-slate-100 flex items-center justify-center">
+                            <User className="w-4 h-4 text-slate-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold text-slate-800">{t('sf_edit_profile')}</div>
+                            <div className="text-[11px] text-slate-500 truncate">{t('sf_edit_profile_desc')}</div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 shrink-0 text-slate-300" />
+                        </button>
+
+                        <button
+                          onClick={() => openProfileModal('addresses')}
+                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-slate-50 transition cursor-pointer"
+                        >
+                          <div className="w-9 h-9 shrink-0 rounded-xl bg-slate-100 flex items-center justify-center">
+                            <MapPin className="w-4 h-4 text-slate-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold text-slate-800">{t('sf_saved_addresses')}</div>
+                            <div className="text-[11px] text-slate-500 truncate">{t('sf_saved_addresses_desc')}</div>
+                          </div>
+                          <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-600">
+                            {savedAddresses.length}
+                          </span>
+                          <ChevronRight className="w-4 h-4 shrink-0 text-slate-300" />
+                        </button>
+
+                        <button
+                          onClick={() => openProfileModal('password')}
+                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-slate-50 transition cursor-pointer"
+                        >
+                          <div className="w-9 h-9 shrink-0 rounded-xl bg-slate-100 flex items-center justify-center">
+                            <Lock className="w-4 h-4 text-slate-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold text-slate-800">{t('sf_change_password')}</div>
+                            <div className="text-[11px] text-slate-500 truncate">{t('sf_change_password_desc')}</div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 shrink-0 text-slate-300" />
+                        </button>
+
+                        <div className="w-full flex items-center justify-between gap-3 p-4">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-9 h-9 shrink-0 rounded-xl bg-slate-100 flex items-center justify-center">
+                              <Globe className="w-4 h-4 text-slate-600" />
+                            </div>
+                            <span className="text-sm font-bold text-slate-800">{t('sf_language')}</span>
+                          </div>
+                          <LanguageToggle />
+                        </div>
+                      </div>
+                    </section>
+                    {/* ── Account Actions ── support + sign out */}
+                    <section className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+                      <h3 className="px-5 pt-5 pb-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
+                        {t('sf_account_actions')}
+                      </h3>
+                      <div className="divide-y divide-slate-100">
+                        <button
+                          onClick={() => openProfileModal('support')}
+                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-slate-50 transition cursor-pointer"
+                        >
+                          <div className="w-9 h-9 shrink-0 rounded-xl bg-slate-100 flex items-center justify-center">
+                            <MessageCircle className="w-4 h-4 text-slate-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-bold text-slate-800">{t('sf_support_center')}</div>
+                            <div className="text-[11px] text-slate-500 truncate">{t('sf_support_desc')}</div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 shrink-0 text-slate-300" />
+                        </button>
+
+                        <button
+                          onClick={handleCustomerSignOut}
+                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-red-50 transition cursor-pointer"
+                        >
+                          <div className="w-9 h-9 shrink-0 rounded-xl bg-red-50 flex items-center justify-center">
+                            <LogOut className="w-4 h-4 text-red-500" />
+                          </div>
+                          <span className="flex-1 text-sm font-bold text-red-600">{t('sf_sign_out')}</span>
+                          <ChevronRight className="w-4 h-4 shrink-0 text-red-300" />
+                        </button>
+                      </div>
+                    </section>
                   </>
                 )}
               </div>
@@ -3934,6 +4162,196 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         </div>
       )}
 
+{/* ── Profile settings modals ──────────────────────────────────────────
+          One shell swapped by `profileModal`: Edit Profile, Saved Addresses,
+          Change Password and Support. */}
+      {profileModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/70 backdrop-blur-md p-0 sm:items-center sm:p-4"
+          onClick={closeProfileModal}
+        >
+          <div
+            className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl border border-slate-200 bg-white shadow-2xl sm:rounded-3xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-5">
+              <h3 className="text-base font-black text-slate-900">
+                {profileModal === 'edit' && t('sf_edit_profile')}
+                {profileModal === 'addresses' && t('sf_saved_addresses')}
+                {profileModal === 'password' && t('sf_change_password')}
+                {profileModal === 'support' && t('sf_support_center')}
+              </h3>
+              <button
+                onClick={closeProfileModal}
+                className="rounded-xl bg-slate-100 p-2 text-slate-500 hover:bg-slate-200 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 p-5">
+              {profileModal === 'edit' && (
+                <form onSubmit={handleSaveProfile} className="space-y-3">
+                  <div>
+                    <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_full_name')}</label>
+                    <input
+                      value={profileForm.name}
+                      onChange={(e) => setProfileForm((f) => ({ ...f, name: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_phone')}</label>
+                    <input
+                      value={profileForm.phone}
+                      onChange={(e) => setProfileForm((f) => ({ ...f, phone: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_email')}</label>
+                    <input
+                      type="email"
+                      value={profileForm.email}
+                      onChange={(e) => setProfileForm((f) => ({ ...f, email: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--primary-accent)] py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" /> {t('sf_save_changes')}
+                  </button>
+                </form>
+              )}
+              {profileModal === 'addresses' && (
+                <div className="space-y-3">
+                  {savedAddresses.length === 0 ? (
+                    <p className="text-sm text-slate-500">{t('sf_no_saved_addresses')}</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {savedAddresses.map((address) => (
+                        <div key={address} className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                          <span className="flex items-start gap-2 text-xs text-slate-700 leading-relaxed">
+                            <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+                            {address}
+                          </span>
+                          <button
+                            onClick={() => handleRemoveAddress(address)}
+                            className="shrink-0 rounded-lg px-2 py-1 text-[10px] font-black text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                          >
+                            {t('sf_delete_address')}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <input
+                      value={newAddress}
+                      onChange={(e) => setNewAddress(e.target.value)}
+                      placeholder={t('sf_saved_addresses')}
+                      className="flex-1 rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                    />
+                    <button
+                      onClick={handleAddAddress}
+                      className="shrink-0 rounded-xl bg-[var(--primary-accent)] px-4 py-2.5 text-xs font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
+                    >
+                      {t('sf_add_address')}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {profileModal === 'password' && (
+                <form onSubmit={handleChangePassword} className="space-y-3">
+                  <div>
+                    <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_current_password')}</label>
+                    <input
+                      type="password"
+                      value={passwordForm.current}
+                      onChange={(e) => setPasswordForm((f) => ({ ...f, current: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_new_password')}</label>
+                    <input
+                      type="password"
+                      value={passwordForm.next}
+                      onChange={(e) => setPasswordForm((f) => ({ ...f, next: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_confirm_password')}</label>
+                    <input
+                      type="password"
+                      value={passwordForm.confirm}
+                      onChange={(e) => setPasswordForm((f) => ({ ...f, confirm: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-[var(--primary-accent)] py-3 text-sm font-black text-slate-950 hover:bg-[var(--primary-accent)]/90 transition cursor-pointer"
+                  >
+                    <Lock className="w-4 h-4" /> {t('sf_save_changes')}
+                  </button>
+                </form>
+              )}
+              {profileModal === 'support' && (
+                <div className="space-y-2">
+                  {(supportPhone || supportEmail || supportAddress) ? (
+                    <>
+                      {supportPhone && (
+                        <a
+                          href={`https://wa.me/${supportPhone}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-3 rounded-xl border border-slate-200 px-3.5 py-3 text-sm text-slate-700 hover:bg-slate-50 transition"
+                        >
+                          <Phone className="h-4 w-4 shrink-0 text-slate-400" />
+                          <span className="font-semibold">{supportPhone}</span>
+                        </a>
+                      )}
+                      {supportEmail && (
+                        <a
+                          href={`mailto:${supportEmail}`}
+                          className="flex items-center gap-3 rounded-xl border border-slate-200 px-3.5 py-3 text-sm text-slate-700 hover:bg-slate-50 transition"
+                        >
+                          <Globe className="h-4 w-4 shrink-0 text-slate-400" />
+                          <span className="truncate font-semibold">{supportEmail}</span>
+                        </a>
+                      )}
+                      {supportAddress && (
+                        <div className="flex items-center gap-3 rounded-xl border border-slate-200 px-3.5 py-3 text-sm text-slate-700">
+                          <MapPin className="h-4 w-4 shrink-0 text-slate-400" />
+                          <span className="leading-relaxed">{supportAddress}</span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-sm text-slate-500">{t('sf_support_desc')}</p>
+                  )}
+                </div>
+              )}
+
+              {profileError && (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">
+                  {profileError}
+                </div>
+              )}
+              {profileNotice && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">
+                  {profileNotice}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {/* Product Quick View Modal */}
       {quickViewProduct && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 animate-fade-in-up">
