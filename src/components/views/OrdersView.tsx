@@ -40,7 +40,8 @@ import {
   Layers,
   ShieldCheck,
   ShieldAlert,
-  Shield
+  Shield,
+  RotateCcw
 } from 'lucide-react';
 
 const getOrderToken = (ord: any) => {
@@ -89,9 +90,46 @@ interface OrdersViewProps {
   /** Active store slug — sent alongside merchantId so the server can match an
    *  order by store_slug even when the checkout only knew the slug. */
   storeSlug?: string;
+  /**
+   * Incremented by the header bell when a "New Return Request…" notification is
+   * clicked. The first value is ignored (it is the initial state); every bump
+   * opens the Returns Requests sub-menu without a full page reload.
+   */
+  openReturnsSignal?: number;
 }
 
-export type OrderSubMenu = 'all' | 'manual' | 'abandoned';
+export type OrderSubMenu = 'all' | 'manual' | 'abandoned' | 'returns';
+
+/**
+ * One customer return request, as served by GET /api/returns.
+ *
+ * Backs the dedicated "Returns Requests" tab: the row shows who asked for what
+ * and why, and the Approve / Reject buttons PATCH the status back so it lands
+ * on the customer's own tracking timeline (see PATCH /api/returns/:id).
+ */
+export interface ReturnRequest {
+  id: string;
+  orderId: string;
+  orderNumber: string;
+  productId: string;
+  productName: string;
+  reason: string;
+  note?: string;
+  image?: string;
+  status: 'Pending' | 'Approved' | 'Rejected' | 'Refunded';
+  token: string;
+  customerName: string;
+  customerPhone: string;
+  createdAt: string;
+}
+
+/** Return status → badge classes, kept semantic and shared by every row. */
+const RETURN_BADGE: Record<ReturnRequest['status'], string> = {
+  Pending: 'bg-amber-500/15 text-amber-300 border-amber-500/40',
+  Approved: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40',
+  Rejected: 'bg-rose-500/15 text-rose-300 border-rose-500/40',
+  Refunded: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40',
+};
 
 export type StatusTab =
   | 'All'
@@ -140,6 +178,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   onUpdateOrders,
   merchantId,
   storeSlug,
+  openReturnsSignal,
 }) => {
   const toast = useToast();
   const channelRef = useRef<any>(null);
@@ -241,6 +280,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   // Sub-menu state
   const [subMenu, setSubMenu] = useState<OrderSubMenu>('all');
 
+  // ── Return requests (drives the "Returns Requests" tab + its badge) ────────
+  // Fetched from Mongo via GET /api/returns and polled, so a request submitted
+  // by a customer lands here without the merchant refreshing the page.
+  const [returnRequests, setReturnRequests] = useState<ReturnRequest[]>([]);
+  // Return id → the decision in flight, so only that row's button spins.
+  const [returnDecisionBusy, setReturnDecisionBusy] = useState<Record<string, string>>({});
+  const pendingReturns = useMemo(
+    () => returnRequests.filter((r) => r.status === 'Pending').length,
+    [returnRequests]
+  );
+
   // Active Status Tab state
   const [statusTab, setStatusTab] = useState<StatusTab>('All');
 
@@ -292,6 +342,99 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     return () => clearInterval(timer);
   }, [merchantId, storeSlug]);
 
+  // Live poll for return requests. Runs regardless of the active sub-menu so the
+  // tab's PENDING badge stays accurate while the merchant works in another tab.
+  useEffect(() => {
+    if (!merchantId && !storeSlug) return;
+    let cancelled = false;
+    const fetchReturns = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (merchantId) params.set('merchant_id', merchantId);
+        if (storeSlug) params.set('store_slug', storeSlug);
+        const res = await fetch(`/api/returns?${params.toString()}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || !Array.isArray(data)) return;
+        setReturnRequests(data.map((r: any) => ({
+          id: String(r?.id || r?._id || ''),
+          orderId: String(r?.orderId || r?.order_id || ''),
+          orderNumber: String(r?.orderNumber || r?.order_number || ''),
+          productId: String(r?.productId || r?.product_id || ''),
+          productName: String(r?.productName || r?.product_name || ''),
+          reason: String(r?.reason || ''),
+          note: String(r?.note || ''),
+          image: String(r?.image || ''),
+          status: (['Pending', 'Approved', 'Rejected', 'Refunded'].includes(r?.status) ? r.status : 'Pending') as ReturnRequest['status'],
+          token: String(r?.token || ''),
+          customerName: String(r?.customerName || r?.customer_name || ''),
+          customerPhone: String(r?.customerPhone || r?.customer_phone || ''),
+          createdAt: String(r?.createdAt || r?.created_at || ''),
+        })));
+      } catch (err) {
+        console.warn('Error fetching return requests:', err);
+      }
+    };
+    fetchReturns();
+    const timer = setInterval(fetchReturns, 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [merchantId, storeSlug]);
+
+  // The header bell hands off a bump for EVERY click; the ref starts at 0 so a
+  // bell click that MOUNTS this view (it is unmounted while another tab is
+  // active) is still honoured, while later plain re-mounts are not.
+  const returnsSignalRef = useRef(0);
+  useEffect(() => {
+    const next = openReturnsSignal ?? 0;
+    if (next > returnsSignalRef.current) setSubMenu('returns');
+    returnsSignalRef.current = next;
+  }, [openReturnsSignal]);
+
+  /**
+   * Approve / reject one return request.
+   *
+   * The row paints the new status immediately (optimistic), then PATCHes Mongo.
+   * The PATCH updates BOTH the return document and the linked order, which is
+   * what makes the decision show up on the customer's tracking timeline on its
+   * next poll.
+   */
+  const handleReturnDecision = async (ret: ReturnRequest, nextStatus: 'Approved' | 'Rejected') => {
+    if (returnDecisionBusy[ret.id]) return;
+    const previous = returnRequests;
+    setReturnDecisionBusy((prev) => ({ ...prev, [ret.id]: nextStatus }));
+    setReturnRequests((list) => list.map((r) => (r.id === ret.id ? { ...r, status: nextStatus } : r)));
+
+    try {
+      const res = await fetch(`/api/returns/${encodeURIComponent(ret.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || 'Update failed');
+
+      // Mirror the server's authoritative document when it hands one back.
+      if (data?.return?.status) {
+        setReturnRequests((list) => list.map((r) => (r.id === ret.id ? { ...r, status: data.return.status } : r)));
+      }
+      toast.success(
+        nextStatus === 'Approved'
+          ? `Return approved for ${ret.orderNumber || ret.orderId}.`
+          : `Return rejected for ${ret.orderNumber || ret.orderId}.`
+      );
+    } catch (err: any) {
+      // Roll the optimistic paint back so the row never lies about Mongo's truth.
+      setReturnRequests(previous);
+      toast.error(`Could not ${nextStatus === 'Approved' ? 'approve' : 'reject'} that return. Please try again.`);
+    } finally {
+      setReturnDecisionBusy((prev) => {
+        const next = { ...prev };
+        delete next[ret.id];
+        return next;
+      });
+    }
+  };
+
   /**
    * Server-side result of the ACTIVE tab's Mongo query.
    *
@@ -305,7 +448,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [serverTabCount, setServerTabCount] = useState<number | null>(null);
   useEffect(() => {
     if (!merchantId && !storeSlug) return;
-    if (subMenu === 'abandoned') return;
+    if (subMenu === 'abandoned' || subMenu === 'returns') return;
 
     let cancelled = false;
     const run = async () => {
@@ -1460,6 +1603,126 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     return orders.filter(o => selectedOrderIds.includes(o.id));
   }, [orders, selectedOrderIds]);
 
+  // Returns / Requests sub-menu — the dedicated customer-return queue.
+  const renderReturnsPanel = () => (
+    <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-6 space-y-4 shadow-lg">
+      <div className="flex items-center justify-between border-b border-[#2E3548] pb-4">
+        <div>
+          <h3 className="text-base font-bold text-white flex items-center gap-2">
+            <RotateCcw className="w-5 h-5 text-amber-400" />
+            <span>Returns Requests</span>
+          </h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Customer return requests from your storefront. Approving or rejecting updates the order
+            and the customer&apos;s tracking timeline live.
+          </p>
+        </div>
+        <span
+          className={`text-xs font-bold px-3 py-1 rounded-full border shrink-0 ${
+            pendingReturns > 0
+              ? 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+              : 'text-slate-400 bg-slate-500/10 border-slate-500/30'
+          }`}
+        >
+          {pendingReturns} Pending
+        </span>
+      </div>
+
+      {returnRequests.length === 0 ? (
+        <div className="py-14 text-center">
+          <div className="mx-auto w-14 h-14 rounded-2xl bg-[#181B26] border border-[#2E3548] flex items-center justify-center">
+            <PackageCheck className="w-6 h-6 text-slate-500" />
+          </div>
+          <p className="mt-4 text-sm font-bold text-slate-300">No return requests yet</p>
+          <p className="mt-1 text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
+            When a customer requests a return from their account, it appears here with its order,
+            product and reason so you can approve or reject it.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {returnRequests.map((ret) => {
+            const busy = returnDecisionBusy[ret.id];
+            const resolved = ret.status !== 'Pending';
+            return (
+              <div key={ret.id} className="bg-[#181B26] p-4 rounded-xl border border-[#2E3548] space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-black uppercase tracking-[0.15em] text-slate-400 font-mono">
+                        #{ret.orderNumber || ret.orderId}
+                      </span>
+                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${RETURN_BADGE[ret.status]}`}>
+                        {ret.status}
+                      </span>
+                      {ret.token && (
+                        <span className="text-[10px] font-mono text-amber-400/90 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded-full">
+                          {ret.token}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs text-slate-400">
+                      <span className="truncate"><span className="text-slate-500">Customer:</span>{' '}<span className="font-semibold text-slate-200">{ret.customerName || 'Customer'}</span></span>
+                      <span className="truncate"><span className="text-slate-500">Phone:</span>{' '}<span className="font-semibold text-slate-200">{ret.customerPhone || '—'}</span></span>
+                      <span className="truncate"><span className="text-slate-500">Product:</span>{' '}<span className="font-semibold text-slate-200">{ret.productName || '—'}</span></span>
+                      <span className="truncate"><span className="text-slate-500">Placed:</span> {safeDate(ret.createdAt)}</span>
+                    </div>
+
+                    <div className="mt-2 text-xs">
+                      <span className="text-slate-500">Reason:</span>{' '}
+                      <span className="font-semibold text-amber-300">{ret.reason || '—'}</span>
+                      {ret.note && <span className="text-slate-400"> — {ret.note}</span>}
+                    </div>
+                  </div>
+
+                  {ret.image && (
+                    <img src={ret.image} alt="" className="w-16 h-16 rounded-lg object-cover border border-[#2E3548] shrink-0" />
+                  )}
+                </div>
+
+                {/* Actions — only meaningful while the request is still pending.
+                    A decided row shows its outcome instead of stale buttons. */}
+                <div className="flex items-center justify-end gap-2 border-t border-[#2E3548] pt-3">
+                  {resolved ? (
+                    <span className="text-xs font-bold text-slate-400 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      {ret.status === 'Approved' ? 'Return approved'
+                        : ret.status === 'Rejected' ? 'Return rejected'
+                        : 'Refunded'}
+                    </span>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => void handleReturnDecision(ret, 'Rejected')}
+                        disabled={Boolean(busy)}
+                        className="px-3.5 py-2 rounded-xl text-xs font-bold text-rose-300 bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {busy === 'Rejected' ? 'Rejecting…' : 'Reject Return'}
+                      </button>
+                      <button
+                        onClick={() => void handleReturnDecision(ret, 'Approved')}
+                        disabled={Boolean(busy)}
+                        className="px-3.5 py-2 rounded-xl text-xs font-bold text-emerald-950 bg-emerald-400 hover:bg-emerald-300 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                      >
+                        {busy === 'Approved' ? (
+                          <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Approving…</>
+                        ) : (
+                          'Approve Return'
+                        )}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+
   return (
     <div className="space-y-6 relative">
       {/* Click outside backdrop overlay for inline status dropdowns */}
@@ -1532,9 +1795,37 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           <span>Abandoned carts</span>
           <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-slate-950/20">0</span>
         </button>
+
+        {/* Dedicated Returns / Requests tab. The badge counts PENDING customer
+            return requests and highlights amber while any are outstanding, so
+            the merchant can see at a glance that something needs a decision. */}
+        <button
+          onClick={() => setSubMenu('returns')}
+          className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-2 ${
+            subMenu === 'returns'
+              ? 'bg-amber-500 text-slate-950 shadow-md'
+              : 'bg-[#202533] text-slate-300 border border-[#2E3548] hover:border-slate-500'
+          }`}
+        >
+          <RotateCcw className="w-4 h-4" />
+          <span>Returns Requests</span>
+          <span
+            className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${
+              pendingReturns > 0
+                ? subMenu === 'returns'
+                  ? 'bg-slate-950/30'
+                  : 'bg-amber-500 text-slate-950 font-black'
+                : 'bg-slate-950/20'
+            }`}
+          >
+            {pendingReturns}
+          </span>
+        </button>
       </div>
 
-      {subMenu !== 'abandoned' ? (
+      {subMenu === 'returns' ? (
+        renderReturnsPanel()
+      ) : subMenu !== 'abandoned' ? (
         <>
           {/* 2. Status Tabs Horizontal Scrollable Bar */}
           <div className="bg-[#202533] border border-[#2E3548] p-2 rounded-2xl overflow-x-auto scrollbar-thin">

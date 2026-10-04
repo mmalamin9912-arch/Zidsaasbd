@@ -24,6 +24,7 @@ import {
   getOrderStatusBadge,
   getTrackingStepIndex,
   getPaymentBadge,
+  getReturnStatusBadge,
   isReturnEligible,
   isDelivered,
   CUSTOMER_ORDERS_POLL_MS,
@@ -207,22 +208,24 @@ function mapServerReturn(r: any): CustomerReturnRequest {
   };
 }
 
-/** Merge server reviews into the local cache, de-duplicated by id. */
+/** Merge server reviews into the local cache. The server copy WINS for any id
+ *  it returns, so a later change is actually reflected instead of being
+ *  shadowed by the first snapshot we cached. */
 function mergeReviews(prev: CustomerReviewItem[], incoming: unknown[]): CustomerReviewItem[] {
   const byId = new Map(prev.map((item) => [item.id, item]));
   for (const raw of incoming) {
     const mapped = mapServerReview(raw);
-    if (mapped.id && !byId.has(mapped.id)) byId.set(mapped.id, mapped);
+    if (mapped.id) byId.set(mapped.id, mapped);
   }
   return [...byId.values()];
 }
 
-/** Merge server returns into the local cache, de-duplicated by id. */
+/** Merge server returns into the local cache; server state wins on conflict. */
 function mergeReturns(prev: CustomerReturnRequest[], incoming: unknown[]): CustomerReturnRequest[] {
   const byId = new Map(prev.map((item) => [item.id, item]));
   for (const raw of incoming) {
     const mapped = mapServerReturn(raw);
-    if (mapped.id && !byId.has(mapped.id)) byId.set(mapped.id, mapped);
+    if (mapped.id) byId.set(mapped.id, mapped);
   }
   return [...byId.values()];
 }
@@ -1074,7 +1077,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       }
     };
     void hydrate();
-    return () => { cancelled = true; };
+    // Poll so a merchant's Approve / Reject lands on this card without a manual
+    // refresh (mirrors the 15s orders poll above).
+    const timer = window.setInterval(hydrate, CUSTOMER_ORDERS_POLL_MS);
+    return () => { cancelled = true; window.clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerSession, effectiveStoreSlug]);
 
@@ -1951,6 +1957,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           const stepIndex = getTrackingStepIndex(order);
           const delivered = isDelivered(order);
           const returnable = isReturnEligible(order, returnWindowDays);
+          // Merchant's Approve / Reject / Refund decision, projected onto the
+          // customer's own tracking timeline (see PATCH /api/returns/:id).
+          const returnBadge = getReturnStatusBadge(order);
           return (
             <div key={order.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
               {/* Header: order id · purchase date · total · payment status badge */}
@@ -2005,12 +2014,37 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                   </div>
                 )}
               </div>
+              {/* Return-decision strip — sits directly on the tracking timeline
+                  so the customer sees the merchant's Approve / Reject outcome
+                  live (refreshes with the same 15s order poll as the steps). */}
+              {returnBadge && (
+                <div className={`mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3 py-2 ${returnBadge.className}`}>
+                  <span className="flex items-center gap-1.5 text-[11px] font-black tracking-wide">
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    {isBn ? returnBadge.labelBn : returnBadge.label}
+                  </span>
+                  <span className="text-[10px] font-semibold opacity-80">{t('sf_return_status')}</span>
+                </div>
+              )}
               {/* Items — each with its own Write Review / Request Return buttons */}
               {order.items && order.items.length > 0 && (
                 <div className="mt-2 divide-y divide-slate-100">
                   {order.items.map((item, idx) => {
                     const reviewed = customerReviews.some((r) => r.orderId === order.id && (!r.productId || r.productId === item.id));
-                    const returned = customerReturns.some((r) => r.orderId === order.id && (!r.productId || r.productId === item.id));
+                    // This customer's own return row for the item. Its status is
+                    // refreshed by the poll above, so the label reflects the
+                    // merchant's Approve / Reject decision live.
+                    const itemReturn = customerReturns.find((r) => r.orderId === order.id && (!r.productId || r.productId === item.id));
+                    const returned = Boolean(itemReturn);
+                    const returnLabel = !itemReturn
+                      ? t('sf_request_return')
+                      : itemReturn.status === 'Approved'
+                        ? t('sf_return_approved')
+                        : itemReturn.status === 'Rejected'
+                          ? t('sf_return_rejected')
+                          : itemReturn.status === 'Refunded'
+                            ? t('sf_return_refunded')
+                            : t('sf_return_requested');
                     return (
                       <div key={`${order.id}-${item.id || idx}`} className="flex flex-wrap items-center gap-3 p-4">
                         {item.image ? (
@@ -2046,7 +2080,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                             className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-black transition ${returnable && !returned ? 'cursor-pointer border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400'}`}
                           >
                             <RotateCcw className="h-3.5 w-3.5" />
-                            {returned ? t('sf_return_requested') : t('sf_request_return')}
+                            {returnLabel}
                           </button>
                         </div>
                       </div>

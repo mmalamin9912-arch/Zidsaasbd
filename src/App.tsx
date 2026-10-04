@@ -137,6 +137,19 @@ function isBareStorePath(path: string): boolean {
 export default function App() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
+  // Bumped by the notification bell when a "New Return Request…" row is clicked:
+  // OrdersView opens its Returns Requests sub-menu on any INCREASE, and the
+  // value is cleared back to 0 once consumed (see the effect below) so that a
+  // later plain click on "Orders" in the sidebar doesn't force it open again.
+  const [ordersReturnsSignal, setOrdersReturnsSignal] = useState(0);
+
+  // Clear the hand-off once OrdersView has had a commit to observe it, so the
+  // bump is a one-shot (re-landing on Orders later shouldn't reopen Returns).
+  React.useEffect(() => {
+    if (ordersReturnsSignal === 0) return;
+    const timer = window.setTimeout(() => setOrdersReturnsSignal(0), 500);
+    return () => window.clearTimeout(timer);
+  }, [ordersReturnsSignal]);
   const [productSubTab, setProductSubTab] = useState<ProductSubTab>('all_products');
   const [customerSubTab, setCustomerSubTab] = useState<CustomerSubTab>('all_customers');
   const [storeSubTab, setStoreSubTab] = useState<StoreSubTab>('themes');
@@ -2031,6 +2044,10 @@ onPlaceOrder={async (newOrder) => {
             onToggleCurrency={handleToggleCurrency}
             onLogout={handleLogout}
             onNavigateTab={setActiveTab}
+            onOpenReturns={() => {
+              setActiveTab('orders');
+              setOrdersReturnsSignal((n) => n + 1);
+            }}
             onQuickAddProduct={() => setActiveTab('products')}
             onToggleSidebarMobile={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
           />
@@ -2053,6 +2070,7 @@ onPlaceOrder={async (newOrder) => {
                 onUpdateOrders={handleUpdateOrders}
                 merchantId={merchant?.id}
                 storeSlug={merchant?.storeSlug}
+                openReturnsSignal={ordersReturnsSignal}
               />
             )}
 

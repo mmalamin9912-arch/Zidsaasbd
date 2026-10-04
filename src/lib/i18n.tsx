@@ -106,6 +106,10 @@ export const translations: Record<Language, Record<string, string>> = {
     'sf_order_cancelled': 'This order was cancelled.',
     'sf_review_after_delivery': 'Available after delivery',
     'sf_return_not_eligible': 'Outside the return window',
+    'sf_return_status': 'Return status',
+    'sf_return_approved': 'Return approved',
+    'sf_return_rejected': 'Return rejected',
+    'sf_return_refunded': 'Refunded',
 
     // ---------- Landing / Pricing ----------
     'land_launch_badge': 'Launch Your Dream Store Today',
@@ -243,6 +247,10 @@ bn: {
     'sf_order_cancelled': 'এই অর্ডারটি বাতিল করা হয়েছে।',
     'sf_review_after_delivery': 'ডেলিভারির পরে দেখতে পাবেন',
     'sf_return_not_eligible': 'রিটার্ন সময়সীমার বাইরে',
+    'sf_return_status': 'রিটার্নের অবস্থা',
+    'sf_return_approved': 'রিটার্ন অনুমোদিত',
+    'sf_return_rejected': 'রিটার্ন প্রত্যাখ্যাত',
+    'sf_return_refunded': 'ফেরত দেওয়া হয়েছে',
 
     // ---------- Landing / Pricing ----------
     'land_launch_badge': 'আজই আপনার স্বপ্নের স্টোর চালু করুন',

@@ -11695,12 +11695,142 @@ app.post('/api/returns', async (req, res) => {
       }
     }
 
-    return res.status(200).json({ ok: true, success: true, saved, orderUpdated, return: record });
+    // Instant bell alert: tell the merchant's dashboard that a customer just
+    // asked for a return, with an action link that opens the Returns tab. This
+    // is what lights the 🔔 up within one poll interval of the customer hitting
+    // submit on their account page.
+    let notified = false;
+    if (saved) {
+      try {
+        const aliases = await notificationAliasesFor(slug || merchantId || storeId);
+        const orderLabel = String(orderNumber || orderId || '').replace(/^#/, '');
+        const fanout = await createNotification({
+          targetAudience: 'specific',
+          merchantId: merchantId || storeId || slug,
+          merchantAliases: aliases,
+          title: `New Return Request for Order #${orderLabel}`,
+          message: `${record.customer_name || 'A customer'} requested a return of "${record.product_name || 'an item'}".\nReason: ${reason}\nToken: ${token}`,
+          type: 'warning',
+          // Internal path — the bell navigates in-app instead of opening a tab.
+          actionUrl: '/dashboard/mystore?orders=returns',
+          meta: { returnId: record.id, orderId, orderNumber, reason, token, productId },
+        });
+        notified = Boolean(fanout.ok);
+      } catch (notifyErr: any) {
+        console.warn('[Server] POST /api/returns notification warning:', notifyErr?.message || notifyErr);
+      }
+    }
+
+    return res.status(200).json({ ok: true, success: true, saved, orderUpdated, notified, return: record });
   } catch (err: any) {
     console.error('[Server] POST /api/returns error:', err);
     return res.status(200).json({ ok: false, success: false, error: err?.message || 'Could not save the return request.' });
   }
 });
+
+// Return decisions the merchant can make from the Returns Requests tab.
+const RETURN_STATUSES = ['Pending', 'Approved', 'Rejected', 'Refunded'];
+
+/**
+ * Return decision → the order status the merchant dashboard's tabs read.
+ *
+ * A rejected return puts the order back to 'Completed' (the delivery stands),
+ * an approved one keeps it in the reverse workflow, and a refunded one closes
+ * it as fully reversed. The customer's OWN timeline reads `return_status` for
+ * the strip under the tracking bar, so it stays truthful either way.
+ */
+const RETURN_ORDER_STATUS: Record<string, string> = {
+  Pending: 'Processing reverse',
+  Approved: 'Processing reverse',
+  Rejected: 'Completed',
+  Refunded: 'Reversed',
+};
+
+// PATCH /api/returns/:id — merchant approves / rejects / marks a return refunded.
+//
+// Two writes, both best-effort-but-reported:
+//   1. the `return_requests` document's status (drives the Returns tab badge), and
+//   2. the linked order's `status` + `return_status` in MongoDB, so the customer's
+//      own tracking timeline reflects the decision on its next poll.
+// Never throws a 5xx — a failure is reported in the JSON body instead.
+app.patch('/api/returns/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const status = String(body.status || '').trim();
+
+    if (!id) return res.status(200).json({ ok: false, error: 'A return id is required.' });
+    if (!RETURN_STATUSES.includes(status)) {
+      return res.status(200).json({ ok: false, error: 'A valid return status is required.' });
+    }
+    if (!MONGODB_URI) return res.status(200).json({ ok: false, error: 'Database unavailable.' });
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      return res.status(200).json({ ok: false, error: 'Database unavailable.' });
+    }
+    const db = await getMongoDb(ORDERS_DB_NAME);
+    if (!db || mongoose.connection.readyState !== 1) {
+      return res.status(200).json({ ok: false, error: 'Database unavailable.' });
+    }
+
+    // Match on `id` first, then fall back to a Mongo `_id` when the caller
+    // passed the raw ObjectId (the list can render either spelling).
+    const idFilter: any = { $or: [{ id }] };
+    if (/^[a-f0-9]{24}$/i.test(id)) {
+      try {
+        const { ObjectId } = await import('mongodb');
+        idFilter.$or.unshift({ _id: new ObjectId(id) });
+      } catch {
+        // mongodb types unavailable — the string probe still covers it.
+      }
+    }
+
+    const existing = await db.collection(RETURN_REQUESTS_COLLECTION).findOne(idFilter);
+    if (!existing) return res.status(200).json({ ok: false, error: 'Return request not found.' });
+
+    const decidedAt = new Date();
+    const update: Record<string, any> = { status, updated_at: decidedAt };
+    if (status !== 'Pending') {
+      update.decided_at = decidedAt;
+      update.decided_at_iso = decidedAt.toISOString();
+    }
+    await db.collection(RETURN_REQUESTS_COLLECTION).updateOne({ _id: existing._id }, { $set: update });
+    const fresh = await db.collection(RETURN_REQUESTS_COLLECTION).findOne({ _id: existing._id });
+
+    // Reflect the decision on the order itself so the customer's tracking
+    // timeline and the merchant status tabs read the same truth.
+    const orderId = String(
+      existing.orderId || existing.order_id || existing.orderNumber || existing.order_number || ''
+    ).trim();
+    const storeScope = String(existing.store_slug || existing.storeSlug || existing.store_id || '');
+    let orderUpdated = false;
+    if (orderId) {
+      try {
+        const result = await updateOrderFields(orderId, {
+          status: RETURN_ORDER_STATUS[status] || 'Processing reverse',
+          return_status: status,
+          returnStatus: status,
+          return_id: id,
+          returnId: id,
+          return_reason: existing.reason,
+          returnReason: existing.reason,
+          decided_at: decidedAt,
+        }, { store_slug: storeScope });
+        orderUpdated = Boolean(result.ok);
+      } catch (updateErr: any) {
+        console.warn('[Server] PATCH /api/returns order update warning:', updateErr?.message || updateErr);
+      }
+    }
+
+    return res.status(200).json({ ok: true, success: true, orderUpdated, return: fresh });
+  } catch (err: any) {
+    console.error('[Server] PATCH /api/returns error:', err);
+    return res.status(200).json({ ok: false, success: false, error: err?.message || 'Could not update the return request.' });
+  }
+});
+
 
 // ── Data export (orders · products · customers) ───────────────────────────────
 // Pro/Enterprise only. `POST /api/export/generate` reads the filtered records

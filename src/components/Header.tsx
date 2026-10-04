@@ -41,6 +41,40 @@ const NOTIFICATION_ACCENT: Record<MerchantNotification['type'], string> = {
   success: '#00D68F',
   info: '#D4AF37',
 };
+
+/**
+ * Play a short, subtle two-tone chime when a NEW notification arrives.
+ *
+ * Uses the Web Audio API so no audio asset has to ship with the bundle. Browsers
+ * may block sound before the first user gesture, so everything is wrapped in a
+ * try/catch — a blocked autoplay simply stays silent instead of throwing.
+ */
+function playNotificationChime(): void {
+  try {
+    const Ctx: typeof AudioContext | undefined =
+      (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const now = ctx.currentTime;
+    [880, 1318.5].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const start = now + i * 0.12;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.1, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.25);
+    });
+    window.setTimeout(() => { try { void ctx.close(); } catch { /* already closed */ } }, 700);
+  } catch {
+    /* audio unavailable or blocked — stay silent */
+  }
+}
 import { getPlanDisplayName, getPlanDurationInDays, isPaidSubscriptionActive, toUtcMs, TRIAL_DURATION_DAYS } from '../utils/subscriptionUtils';
 import { supabase } from '../lib/supabase';
 import { subscribeToSubscriptionStatus } from '../lib/subscriptionStatusCache';
@@ -90,6 +124,8 @@ interface HeaderProps {
   onToggleCurrency: () => void;
   onLogout: () => void;
   onNavigateTab?: (tab: any) => void;
+  /** Open the Orders page's "Returns Requests" sub-menu (return bell alerts). */
+  onOpenReturns?: () => void;
   onQuickAddProduct?: () => void;
   onToggleSidebarMobile?: () => void;
 }
@@ -108,6 +144,7 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleCurrency,
   onLogout,
   onNavigateTab,
+  onOpenReturns,
   onQuickAddProduct,
   onToggleSidebarMobile,
 }) => {
@@ -591,6 +628,25 @@ export const Header: React.FC<HeaderProps> = ({
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [loadNotifications, storeRef]);
+
+  // ── New-notification feedback: badge highlight + subtle chime ──────────────
+  //
+  // Fires only when the unread count actually GROWS. The first observation just
+  // seeds the ref, so loading an existing feed on mount never plays a sound, and
+  // the dip caused by "Mark all read" is ignored.
+  const prevUnreadRef = useRef<number | null>(null);
+  const [bellHighlight, setBellHighlight] = useState(false);
+
+  useEffect(() => {
+    const prev = prevUnreadRef.current;
+    prevUnreadRef.current = unreadCount;
+    if (prev === null || unreadCount <= prev) return;
+
+    setBellHighlight(true);
+    playNotificationChime();
+    const timer = window.setTimeout(() => setBellHighlight(false), 1800);
+    return () => window.clearTimeout(timer);
+  }, [unreadCount]);
 
   const handleMarkRead = useCallback(async (id: string) => {
     const target = notifications.find((n) => n.id === id);
@@ -1077,14 +1133,16 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="relative">
             <button
               onClick={() => setShowNotifications(!showNotifications)}
-              className="p-2 text-slate-300 hover:text-white bg-[#252B3B] hover:bg-[#2E3548] rounded-xl border border-[#3A435E] relative transition cursor-pointer"
+              className={`p-2 text-slate-300 hover:text-white bg-[#252B3B] hover:bg-[#2E3548] rounded-xl border border-[#3A435E] relative transition cursor-pointer ${
+                bellHighlight ? 'ring-2 ring-amber-400/70 shadow-[0_0_0_4px_rgba(251,191,36,0.15)]' : ''
+              }`}
               title={unreadCount > 0 ? `${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}` : 'Notifications'}
             >
               <Bell className={`w-4 h-4 ${notificationsLoading ? 'animate-pulse' : ''}`} />
               {/* The badge is driven by the unread count, not a permanent dot:
                   it now appears only when there is genuinely something unread. */}
               {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 bg-[#D4AF37] text-slate-950 rounded-full border-2 border-[#1D212E] text-[9px] font-black leading-[0.85rem] text-center">
+                <span className={`absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 bg-[#D4AF37] text-slate-950 rounded-full border-2 border-[#1D212E] text-[9px] font-black leading-[0.85rem] text-center ${bellHighlight ? 'animate-bounce' : ''}`}>
                   {unreadCount > 99 ? '99+' : unreadCount}
                 </span>
               )}
@@ -1135,7 +1193,17 @@ export const Header: React.FC<HeaderProps> = ({
                         <button
                           key={n.id}
                           type="button"
-                          onClick={() => void handleMarkRead(n.id)}
+                          onClick={() => {
+                            void handleMarkRead(n.id);
+                            // Internal routes (e.g. '/dashboard/mystore?orders=returns')
+                            // are followed IN-APP rather than spawning a new tab. This is
+                            // how "New Return Request…" lands the merchant straight on the
+                            // Returns Requests tab.
+                            if (n.actionUrl && n.actionUrl.startsWith('/')) {
+                              setShowNotifications(false);
+                              if (n.actionUrl.includes('orders=returns')) onOpenReturns?.();
+                            }
+                          }}
                           title={n.isRead ? 'Read' : 'Mark as read'}
                           className={`w-full p-2 rounded-xl border text-left transition cursor-pointer ${
                             n.isRead
@@ -1164,13 +1232,19 @@ export const Header: React.FC<HeaderProps> = ({
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                window.open(n.actionUrl, '_blank', 'noopener,noreferrer');
+                                if (n.actionUrl!.startsWith('/')) {
+                                  // Same internal hand-off as the row itself.
+                                  setShowNotifications(false);
+                                  if (n.actionUrl!.includes('orders=returns')) onOpenReturns?.();
+                                } else {
+                                  window.open(n.actionUrl, '_blank', 'noopener,noreferrer');
+                                }
                               }}
                               className="mt-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
-                              title="Open link"
+                              title={n.actionUrl.startsWith('/') ? 'Open in dashboard' : 'Open link'}
                             >
                               <ExternalLink className="w-3.5 h-3.5" />
-                              <span>View Details / Open Link</span>
+                              <span>{n.actionUrl.startsWith('/') ? 'Go to Returns' : 'View Details / Open Link'}</span>
                             </button>
                           )}
                         </button>

@@ -155,3 +155,55 @@ export function isDelivered(order: any): boolean {
  * storefront and the admin badge read the same shape.
  */
 export const CUSTOMER_ORDERS_POLL_MS = 15000;
+
+/** The customer-facing tone for a return decision on the tracking timeline. */
+export interface ReturnStatusBadge {
+  label: string;
+  labelBn: string;
+  className: string;
+}
+
+/**
+ * Return-decision badge for the customer's order tracking timeline.
+ *
+ * The merchant's Approve / Reject / Refund decision is written back onto the
+ * order as `return_status` by `PATCH /api/returns/:id`; this projects it for the
+ * strip rendered directly under the four-step tracking bar, so the timeline
+ * reflects the decision on the customer's next poll. Returns `null` when the
+ * order has never had a return requested (no strip is drawn).
+ */
+export function getReturnStatusBadge(order: any): ReturnStatusBadge | null {
+  const raw = String(
+    order?.return_status ?? order?.returnStatus ?? order?.reverse_status ?? ''
+  )
+    .toLowerCase()
+    .trim();
+  if (!raw) return null;
+
+  if (raw.includes('reject')) {
+    return {
+      label: 'Return Rejected',
+      labelBn: 'রিটার্ন প্রত্যাখ্যাত',
+      className: 'bg-rose-100 text-rose-700 border-rose-200',
+    };
+  }
+  if (raw.includes('refund') || raw.includes('revers')) {
+    return {
+      label: 'Refunded',
+      labelBn: 'ফেরত দেওয়া হয়েছে',
+      className: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+    };
+  }
+  if (raw.includes('approv')) {
+    return {
+      label: 'Return Approved',
+      labelBn: 'রিটার্ন অনুমোদিত',
+      className: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+    };
+  }
+  return {
+    label: 'Return Requested',
+    labelBn: 'রিটার্নের অনুরোধ হয়েছে',
+    className: 'bg-amber-100 text-amber-700 border-amber-200',
+  };
+}
