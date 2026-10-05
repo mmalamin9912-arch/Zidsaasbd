@@ -1111,8 +1111,13 @@ export default function App() {
     primeEntitlements({
       planId: merchant?.subscriptionPlan ?? null,
       plans: platformPlans,
+      // The authoritative session/MongoDB status. A merchant whose local profile
+      // still says `free_trial` but whose subscription is ACTIVE (admin approval)
+      // resolves to the fully-unlocked entitlement set, so their Pro AI tools are
+      // never locked behind a paywall they have already paid for.
+      subscriptionStatus: dbSubscriptionStatus ?? null,
     });
-  }, [merchant?.subscriptionPlan, platformPlans]);
+  }, [merchant?.subscriptionPlan, platformPlans, dbSubscriptionStatus]);
 
   // ── One-time cleanup of removed mock data ───────────────────
   // Earlier builds shipped mock support tickets (Dhaka Gadget Hub, Chittagong

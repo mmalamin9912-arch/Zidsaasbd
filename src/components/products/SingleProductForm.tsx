@@ -712,27 +712,66 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     setSku(generateSku());
   };
 
-  // Device File Upload Handlers
+  // Which gallery slot the last file-picker click was filling. `main` writes the
+  // single hero image (`productForm.images.mainImage` / `image`), `additional`
+  // appends to the gallery (`productForm.images.gallery` / `additionalImages`).
+  // The picker is a single shared <input>, so without this the "Add Image" button
+  // overwrote the main image instead of appending to the gallery, and the
+  // "Main Image" button dropped the upload into the gallery instead of the hero.
+  const pendingUploadTargetRef = useRef<'main' | 'additional'>('main');
+
+  /**
+   * Device file upload handler for BOTH the Main Image and Add Image buttons.
+   *
+   * Each File is read + downscaled to a `data:` URL (base64) and written straight
+   * into form state on resolve, so the right-hand Live Storefront Card re-renders
+   * the moment the bytes are ready. State updates use the functional form and a
+   * small sequential loop instead of a bare `for` over a stale `image` closure:
+   *
+   *   • the previous code decided main-vs-gallery from the `image` value captured
+   *     at render time, so a multi-select where the hero was empty sent EVERY
+   *     file to `setImage` and only the last survived;
+   *   • it also ignored which button opened the picker.
+   */
   const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files: File[] = Array.prototype.slice.call(fileList);
+    // Allow the same file to be re-picked (which would otherwise be a no-op).
     e.target.value = '';
 
-    for (let i = 0; i < files.length; i++) {
-      const file: File = files[i];
-      // Downscale at upload time. Previously the raw FileReader output was
-      // stored, so a phone photo landed in the payload at full size — the
-      // cause of the 413 on save. The Magic Enhance button used to be the only
-      // path that optimized, which is why a plain upload still failed.
-      void readAndDownscaleImage(file).then((result) => {
-        if (!result) return;
-        if (!image) {
-          setImage(result);
-        } else {
-          setAdditionalImages((prev) => [...prev, result]);
-        }
-      });
-    }
+    const target = pendingUploadTargetRef.current;
+
+    void (async () => {
+      const uploaded: string[] = [];
+      for (const file of files) {
+        // Downscale at upload time. Previously the raw FileReader output was
+        // stored, so a phone photo landed in the payload at full size — the
+        // cause of the 413 on save.
+        const result = await readAndDownscaleImage(file);
+        if (result) uploaded.push(result);
+      }
+      if (uploaded.length === 0) return;
+
+      if (target === 'main') {
+        // The FIRST file becomes the hero; any extras join the gallery.
+        const [first, ...rest] = uploaded;
+        setImage(first);
+        if (rest.length > 0) setAdditionalImages((prev) => [...prev, ...rest]);
+      } else {
+        setAdditionalImages((prev) => [...prev, ...uploaded]);
+      }
+    })();
+  };
+
+  /**
+   * Open the shared device file picker for a specific gallery slot.
+   * Everything that used to call `imageInputRef.current?.click()` directly goes
+   * through here so the intent is recorded before the OS dialog appears.
+   */
+  const openDeviceImagePicker = (target: 'main' | 'additional' = imageModalTarget) => {
+    pendingUploadTargetRef.current = target;
+    imageInputRef.current?.click();
   };
 
 
@@ -1036,6 +1075,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                 type="button"
                 onClick={() => {
                   setImageModalTarget('additional');
+                  pendingUploadTargetRef.current = 'additional';
                   setShowImageModal(true);
                 }}
                 className="px-3 py-1.5 bg-[#282E3F] hover:bg-[#32394E] text-[#00D68F] font-bold text-xs rounded-xl transition flex items-center gap-1.5 cursor-pointer border border-[#00D68F]/30"
@@ -1080,6 +1120,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                   <div
                     onClick={() => {
                       setImageModalTarget('main');
+                      pendingUploadTargetRef.current = 'main';
                       setShowImageModal(true);
                     }}
                     className="space-y-1 cursor-pointer py-3 w-full"
@@ -1109,6 +1150,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                 type="button"
                 onClick={() => {
                   setImageModalTarget('additional');
+                  pendingUploadTargetRef.current = 'additional';
                   setShowImageModal(true);
                 }}
                 className="border border-dashed border-[#2E3548] hover:border-slate-400 rounded-xl p-3 bg-[#181B26] flex flex-col items-center justify-center min-h-[110px] text-slate-400 hover:text-white transition cursor-pointer"
@@ -2602,7 +2644,7 @@ onClick={suggestPricing}
                   <button
                     type="button"
                     onClick={() => {
-                      imageInputRef.current?.click();
+                      openDeviceImagePicker(imageModalTarget);
                       setShowImageModal(false);
                     }}
                     className="px-4 py-2 bg-[#282E3F] hover:bg-[#32394E] text-white font-bold text-xs rounded-xl transition border border-[#2E3548]"
