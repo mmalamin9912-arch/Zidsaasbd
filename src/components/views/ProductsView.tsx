@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Product, ProductSubTab, ProductType, MerchantProfile } from '../../types';
 import { buildProductDbPayload, mapApiProduct, postCatalogJson, upsertProductToSupabase } from '../../utils/catalogPayload';
 import { resolveActiveStoreSlug } from '../../lib/activeStore';
+import { downscaleImage } from '../../utils/imageUtils';
 import SafeImage from '../SafeImage';
 import {
   Boxes,
@@ -31,7 +32,11 @@ import {
   FolderTree
 } from 'lucide-react';
 
-const PRODUCT_SAVE_TIMEOUT_MS = 2500;
+// Server-side product writes touch MongoDB + the file payload + a Supabase
+// mirror; a multi-MB image payload cannot complete in 2.5s, so the old abort
+// fired mid-request and the save surfaced as a "timed out" failure even though
+// the server kept working. 15s matches the server's own IO budget.
+const PRODUCT_SAVE_TIMEOUT_MS = 15000;
 
 import { ProductTypeModal } from '../products/ProductTypeModal';
 import { SingleProductForm } from '../products/SingleProductForm';
@@ -221,6 +226,34 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         store_slug: activeStoreSlug,
         storeSlug: activeStoreSlug,
       };
+
+      // 1b. Client-side image compression right before submission.
+      //
+      // Uploads are already downscaled at the file input (readAndDownscaleImage),
+      // but a product LOADED from an old record can still carry a full-size
+      // `data:` URL. Re-running the pass here guarantees every inline image in
+      // the payload is within budget, so /api/products never receives a payload
+      // heavy enough to trip the body parser (HTTP 413) or the DB limits.
+      // Remote `https://` URLs pass through untouched.
+      const compressInline = async (value: unknown): Promise<unknown> =>
+        typeof value === 'string' && value ? downscaleImage(value) : value;
+
+      await Promise.all(
+        ['image', 'imageUrl', 'image_url'].map(async (field) => {
+          if (payload[field]) payload[field] = await compressInline(payload[field]);
+        })
+      );
+      if (Array.isArray(payload.additionalImages)) {
+        payload.additionalImages = await Promise.all(payload.additionalImages.map(compressInline));
+      }
+      if (payload.colorImages && typeof payload.colorImages === 'object' && !Array.isArray(payload.colorImages)) {
+        const entries = await Promise.all(
+          Object.entries(payload.colorImages as Record<string, unknown>).map(
+            async ([color, img]) => [color, await compressInline(img)] as const
+          )
+        );
+        payload.colorImages = Object.fromEntries(entries);
+      }
 
       // 2. Persist via Express API (MongoDB + file payload)
       let apiErrorMsg: string | null = null;

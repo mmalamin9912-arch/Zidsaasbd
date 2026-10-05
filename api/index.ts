@@ -21,6 +21,14 @@
  * ---------------------------------------------------------------------------
  */
 
+// Vercel serverless duration ceiling (seconds). The AI routes
+// (/api/ai/generate-text, /api/zid-ai) chain multiple provider attempts; without
+// this export the platform default (10s on Hobby) cut the function off
+// mid-request and returned an opaque 504 to the client. The routes themselves
+// enforce a tighter 15s provider budget and answer with a smart fallback payload
+// long before this ceiling is ever reached.
+export const maxDuration = 30;
+
 import mongoose from 'mongoose';
 import app from '../lib/serverApp.js';
 import { describeMongoError } from '../lib/db.js';

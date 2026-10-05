@@ -238,6 +238,44 @@ process.on('warning', (warning: any) => {
 
 const app = express();
 
+// ── CORS & preflight ─────────────────────────────────────────────────────────
+//
+// The API is consumed both same-origin (dashboard → /api) and cross-origin
+// (embedded storefronts / custom domains → /api). A POST/PUT with
+// `Content-Type: application/json` triggers a browser OPTIONS preflight; without
+// an explicit handler Express fell through to the JSON 404 fallback and the
+// browser then blocked the real request with a CORS error BEFORE any route
+// ran — which looked exactly like "/api/products rejects my payload".
+//
+// Every non-OPTIONS request also gets the CORS response headers, and OPTIONS is
+// answered here (204) rather than inside a route, so preflight never depends on
+// a specific endpoint existing. api/index.ts answers preflight too (before the
+// Express app is invoked on Vercel); both paths set the same headers.
+const CORS_ALLOWED_METHODS = 'GET,POST,PUT,PATCH,DELETE,OPTIONS';
+const CORS_ALLOWED_HEADERS =
+  'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization';
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    // Reflect the caller's origin so credentialed requests stay valid.
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', CORS_ALLOWED_METHODS);
+  res.setHeader('Access-Control-Allow-Headers', CORS_ALLOWED_HEADERS);
+  res.setHeader('Access-Control-Max-Age', '86400');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+
 // ── Request body limits ───────────────────────────────────────────────────────
 //
 // Express defaults `express.json()` to **100kb**. The dashboard legitimately
@@ -2272,16 +2310,28 @@ app.post('/api/ai/generate-faq', async (req, res) => {
 const GEMINI_MODEL_CANDIDATES = ['gemini-2.5-flash', 'gemini-1.5-flash'] as const;
 
 /**
+ * Hard per-request provider budget (ms) for the interactive AI routes.
+ *
+ * Every outbound AI fetch (/api/ai/generate-text, /api/zid-ai) is aborted when
+ * THIS deadline passes rather than after a fresh 20s per attempt — chained
+ * attempts could otherwise stack past the function's own 30s `maxDuration` and
+ * the request died with an opaque 504. On expiry the routes answer 200 with the
+ * smart-fallback payload, so the merchant always gets an answer within 15s.
+ */
+const AI_PROVIDER_TIMEOUT_MS = 15000;
+
+/**
  * Calls OpenAI's Chat Completions API. Returns the assistant text on success, or
  * null when the provider rejects/fails so the caller can try Gemini or fall back.
  */
 async function callOpenAi(
   apiKey: string,
   prompt: string,
-  systemInstruction: string
+  systemInstruction: string,
+  timeoutMs: number = AI_PROVIDER_TIMEOUT_MS
 ): Promise<{ text: string } | { error: string; message?: string }> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -2320,7 +2370,9 @@ async function callOpenAi(
   } catch (err: any) {
     return {
       error: 'server_error',
-      message: err?.name === 'AbortError' ? 'OpenAI did not respond within 20s.' : (err?.message || 'OpenAI request failed.'),
+      message: err?.name === 'AbortError'
+        ? `OpenAI did not respond within ${Math.round(timeoutMs / 1000)}s.`
+        : (err?.message || 'OpenAI request failed.'),
     };
   } finally {
     clearTimeout(timeoutId);
@@ -2369,9 +2421,15 @@ app.post('/api/ai/generate-text', async (req, res) => {
         ...(extra || {}),
       });
 
+    // One shared deadline covers EVERY provider attempt below (OpenAI plus the
+    // whole Gemini candidate chain): 15s total, then the smart fallback answers
+    // so the merchant never waits on a hung provider.
+    const deadlineAt = Date.now() + AI_PROVIDER_TIMEOUT_MS;
+    const remainingMs = () => Math.max(500, deadlineAt - Date.now());
+
     // ── 1. OpenAI (preferred when configured) ──────────────────────────────
     if (openAiKey) {
-      const result = await callOpenAi(openAiKey, prompt, fullSystemInstruction);
+      const result = await callOpenAi(openAiKey, prompt, fullSystemInstruction, remainingMs());
       if ('text' in result) {
         return res.status(200).json({ text: result.text, model: OPENAI_CHAT_MODEL, provider: 'openai' });
       }
@@ -2391,7 +2449,9 @@ app.post('/api/ai/generate-text', async (req, res) => {
 
     const payload: Record<string, unknown> = {
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.8, maxOutputTokens: 1024 },
+      // Lower output-token ceiling keeps Gemini in the sub-5s range for typical
+      // dashboard answers; 768 tokens is still several paragraphs of reply.
+      generationConfig: { temperature: 0.8, maxOutputTokens: 768 },
       systemInstruction: { parts: [{ text: fullSystemInstruction }] },
     };
 
@@ -2408,10 +2468,17 @@ app.post('/api/ai/generate-text', async (req, res) => {
     let lastProviderMessage = '';
 
     for (const model of candidates) {
+      // The shared 15s budget is spent → stop trying models and fall through
+      // to the clean fallback payload below instead of hanging the request.
+      if (Date.now() >= deadlineAt) {
+        lastProviderStatus = 0;
+        lastProviderMessage = `the provider did not respond within ${Math.round(AI_PROVIDER_TIMEOUT_MS / 1000)}s`;
+        break;
+      }
       // Providers occasionally accept the socket and then never answer. Without
       // a deadline the request (and the merchant's spinner) hangs forever.
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      const timeoutId = setTimeout(() => controller.abort(), remainingMs());
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`;
         const providerRes = await fetch(url, {
@@ -2461,7 +2528,7 @@ app.post('/api/ai/generate-text', async (req, res) => {
         // Abort/timeout and transport errors both fall through to the next model.
         lastProviderStatus = 0;
         lastProviderMessage = providerErr?.name === 'AbortError'
-          ? 'the provider did not respond within 20s'
+          ? `the provider did not respond within ${Math.round(AI_PROVIDER_TIMEOUT_MS / 1000)}s`
           : (providerErr?.message || 'provider request failed');
         console.warn(`[Server] AI model "${model}" error: ${lastProviderMessage}`);
       } finally {
@@ -2469,13 +2536,18 @@ app.post('/api/ai/generate-text', async (req, res) => {
       }
     }
 
-    // Every provider/model failed → answer with the smart fallback engine.
-    const reason = invalidKeyMessage ? 'invalid_api_key' : rateLimited ? 'rate_limited' : 'server_error';
+    // Every provider/model failed (or the 15s budget ran out) → answer with the
+    // smart fallback engine. A timeout is reported as its own reason so the
+    // client can tell "slow provider" apart from "broken provider".
+    const timedOut = Date.now() >= deadlineAt;
+    const reason = invalidKeyMessage ? 'invalid_api_key' : rateLimited ? 'rate_limited' : timedOut ? 'timeout' : 'server_error';
     const message = invalidKeyMessage
       ? `The configured AI key is invalid or lacks access: ${invalidKeyMessage}`
       : rateLimited
         ? 'AI request limit reached. Please try again in a moment.'
-        : `AI provider error${lastProviderStatus ? ` (${lastProviderStatus})` : ''}: ${lastProviderMessage || 'all configured models failed'}`;
+        : timedOut
+          ? `The AI provider did not respond within ${Math.round(AI_PROVIDER_TIMEOUT_MS / 1000)}s. Please try again.`
+          : `AI provider error${lastProviderStatus ? ` (${lastProviderStatus})` : ''}: ${lastProviderMessage || 'all configured models failed'}`;
     console.warn(`[Server] /api/ai/generate-text falling back: ${message}`);
     return smartFallback(reason, { message });
   } catch (err: any) {
@@ -2545,10 +2617,14 @@ const handleZidAiChat = async (req: any, res: any) => {
         ...(extra || {}),
       });
 
+    // One shared deadline covers OpenAI plus the whole Gemini candidate chain.
+    const deadlineAt = Date.now() + AI_PROVIDER_TIMEOUT_MS;
+    const remainingMs = () => Math.max(500, deadlineAt - Date.now());
+
     // ── 1. OpenAI (preferred) ──────────────────────────────────────────────
     if (openAiKey) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      const timeoutId = setTimeout(() => controller.abort(), remainingMs());
       try {
         const apiRes = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
@@ -2585,8 +2661,11 @@ const handleZidAiChat = async (req: any, res: any) => {
     }));
 
     for (const model of GEMINI_MODEL_CANDIDATES) {
+      // Shared 15s budget spent → skip the remaining candidates and fall
+      // through to the clean fallback payload below.
+      if (Date.now() >= deadlineAt) break;
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      const timeoutId = setTimeout(() => controller.abort(), remainingMs());
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`;
         const apiRes = await fetch(url, {
@@ -2594,7 +2673,9 @@ const handleZidAiChat = async (req: any, res: any) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: geminiContents,
-            generationConfig: { temperature: 0.8, maxOutputTokens: 1024 },
+            // Lower output-token ceiling keeps chat replies inside the sub-5s
+            // generation window while still ample for a conversational answer.
+            generationConfig: { temperature: 0.8, maxOutputTokens: 768 },
             systemInstruction: { parts: [{ text: ZID_AI_SYSTEM_INSTRUCTION }] },
           }),
           signal: controller.signal,
@@ -2615,6 +2696,12 @@ const handleZidAiChat = async (req: any, res: any) => {
       }
     }
 
+    // Budget exhausted without a reply → clean fallback payload, never a hang.
+    if (Date.now() >= deadlineAt) {
+      return smartFallback('timeout', {
+        message: `The AI provider did not respond within ${Math.round(AI_PROVIDER_TIMEOUT_MS / 1000)}s. Please try again.`,
+      });
+    }
     return smartFallback('provider_error');
   } catch (err: any) {
     console.error('[Server] Zid AI chat error:', err?.message || err);
@@ -3804,13 +3891,30 @@ async function markStoreHasProducts(
   }
 }
 
-app.post('/api/products', async (req, res) => {
+/**
+ * POST/PUT /api/products — create or update a product.
+ *
+ * Registered for BOTH methods so callers can upsert with either verb; the
+ * handler is method-agnostic (it keys off `body.id`). The payload is sanitised
+ * FIRST: oversized inline base64 images are stripped before any persistence, so
+ * a heavy photo cannot 413 the body parser, exceed Mongo's 16MB document
+ * ceiling, or 400 the Supabase mirror — the three failures that all read like
+ * an opaque "payload failure" to the merchant. Small images pass through
+ * byte-for-byte.
+ */
+const handleProductUpsert = async (req: any, res: any) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const body = req.body || {};
-    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    const rawBody = req.body || {};
+    if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
       return res.status(400).json({ ok: false, error: 'Product payload object required' });
     }
+
+    const sanitized = sanitizeImagePayload(rawBody);
+    if (sanitized.changed) {
+      console.warn('[Server] /api/products stripped oversized inline images:', sanitized.notice);
+    }
+    const body = sanitized.value as any;
 
     const rawSlug = String(body.store_slug || body.storeSlug || req.query.store_slug || 'bd');
     const store_slug = String(rawSlug || 'bd').split(':')[0].trim().toLowerCase() || 'bd';
@@ -3984,7 +4088,12 @@ app.post('/api/products', async (req, res) => {
     console.error('[Server] POST /api/products error:', err);
     return res.status(400).json({ ok: false, error: err?.message || 'Invalid product request' });
   }
-});
+};
+
+// Upsert semantics — registered for both verbs so a client PUT (structured
+// payload, CORS preflight exercised) lands on exactly the same code path.
+app.post('/api/products', handleProductUpsert);
+app.put('/api/products', handleProductUpsert);
 
 app.delete('/api/products/:id', async (req, res) => {
   const prodId = req.params.id;
