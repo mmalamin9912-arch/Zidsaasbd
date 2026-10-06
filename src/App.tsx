@@ -2073,6 +2073,9 @@ onPlaceOrder={async (newOrder) => {
               <OrdersView
                 orders={orders}
                 onUpdateOrders={handleUpdateOrders}
+                // Background polls sync state ONLY — never POST the list back
+                // (see OrdersViewProps.onSyncOrders for the loop this breaks).
+                onSyncOrders={setOrders}
                 merchantId={merchant?.id}
                 storeSlug={merchant?.storeSlug}
                 openReturnsSignal={ordersReturnsSignal}

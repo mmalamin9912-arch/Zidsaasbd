@@ -96,6 +96,21 @@ interface OrdersViewProps {
    * opens the Returns Requests sub-menu without a full page reload.
    */
   openReturnsSignal?: number;
+  /**
+   * Pure state sync used by the BACKGROUND POLLS (orders + returns ticks).
+   *
+   * `onUpdateOrders` is App's `handleUpdateOrders`, which not only sets state
+   * but POSTs the WHOLE list back to /api/orders. Routing the poll through it
+   * created an infinite API loop: every GET wrote the same rows back, the
+   * write changed the server payload, and the next GET saw "new" data —
+   * GET → POST → GET forever, several times a minute, with no user action.
+   *
+   * The poll must therefore be READ-ONLY: it receives `setOrders` here and
+   * never persists. Merchant-initiated changes keep using `onUpdateOrders`
+   * (which persists on demand). Falls back to `onUpdateOrders` when omitted so
+   * callers that don't pass it behave exactly as before.
+   */
+  onSyncOrders?: (orders: Order[]) => void;
 }
 
 export type OrderSubMenu = 'all' | 'manual' | 'abandoned' | 'returns';
@@ -130,6 +145,21 @@ const RETURN_BADGE: Record<ReturnRequest['status'], string> = {
   Rejected: 'bg-rose-500/15 text-rose-300 border-rose-500/40',
   Refunded: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40',
 };
+
+/**
+ * Background poll cadence for the Orders page (ms).
+ *
+ * The old 4s (orders) / 5s (returns) ticks were far below the 15–30s floor for
+ * dashboard polling: every tick re-fetched BOTH endpoints regardless of change,
+ * and — because the orders poll used to WRITE the fetched list straight back
+ * through `onUpdateOrders` (see `onSyncOrders` below) — it produced a
+ * GET → POST → GET ping-pong several times a minute even when nothing happened.
+ * Explicit merchant actions (status changes, courier booking, bulk edits) and
+ * the tab-count probe still refresh immediately; these timers only cover the
+ * "another device / storefront placed an order" case.
+ */
+const ORDERS_POLL_MS = 20000;
+const RETURNS_POLL_MS = 20000;
 
 export type StatusTab =
   | 'All'
@@ -179,6 +209,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   merchantId,
   storeSlug,
   openReturnsSignal,
+  onSyncOrders,
 }) => {
   const toast = useToast();
   const channelRef = useRef<any>(null);
@@ -233,7 +264,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   /**
    * Merge a polled server list while preserving any locally-painted rows that
    * still have a write in flight.
+   *
+   * READ-ONLY sync: polls call `syncOrders`, which is `onSyncOrders` (a bare
+   * state setter — no network side effect). `onUpdateOrders` persists the list
+   * and is reserved for explicit merchant actions; using it for poll merges is
+   * what produced the endless GET → POST loop.
    */
+  const syncOrders = onSyncOrders || onUpdateOrders;
   const mergeServerOrders = (serverOrders: Order[]) => {
     const pending = pendingWritesRef.current;
     const rejected = failedWritesRef.current;
@@ -242,7 +279,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
     // Fast path: nothing in flight and nothing to revert.
     if (!hasPending && !hasRejected) {
-      onUpdateOrders(serverOrders);
+      syncOrders(serverOrders);
       return;
     }
 
@@ -267,7 +304,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       o => !serverIds.has(o.id) && pending[o.id]
     );
 
-    onUpdateOrders(localOnly.length ? [...localOnly, ...merged] : merged);
+    syncOrders(localOnly.length ? [...localOnly, ...merged] : merged);
   };
 
   // ── Filter / view state ─────────────────────────────────────────────────────
@@ -310,6 +347,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   // slug) is still matched for this merchant's dashboard.
   useEffect(() => {
     if (!merchantId && !storeSlug) return;
+    // Signature of the last server list we applied. A tick that brings nothing
+    // new must NOT touch state: re-setting `orders` (fresh array identity) used
+    // to re-fire every `[orders]` effect — the fraud-check probe, the counts,
+    // the filter memos — on every tick, which is what made the page look like
+    // it was fetching endlessly even when the database had not changed.
+    let lastSyncedSignature = '';
     const fetchLiveOrders = async () => {
       try {
         const params = new URLSearchParams();
@@ -326,20 +369,37 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           return;
         }
         const data = await res.json();
+        if (!Array.isArray(data)) return;
+
+        const signature = JSON.stringify(data);
+        // Reconcile on every tick while a write is in flight or a previous
+        // write failed: the merge keeps optimistically painted rows and lets
+        // server truth revert the failed ones. Identical payloads with no
+        // writes pending are skipped entirely — no setState, no re-render,
+        // no dependent effect re-runs.
+        const writesInFlight =
+          Object.keys(pendingWritesRef.current).length > 0 ||
+          Object.keys(failedWritesRef.current).length > 0;
+        if (signature === lastSyncedSignature && !writesInFlight) return;
+        lastSyncedSignature = signature;
+
         // Apply the authoritative server list even when empty, so a deleted or
         // reassigned order does not linger in the dashboard view. Normalize
         // raw Mongo rows into the UI `Order` shape first — otherwise the table
         // renders `undefined.toLocaleString()` and blanks the whole app.
-        if (Array.isArray(data)) {
-          mergeServerOrders(normalizeOrders(data));
-        }
+        // The merge is a READ-ONLY sync (onSyncOrders) — the poll never writes
+        // the list back to the server.
+        mergeServerOrders(normalizeOrders(data));
       } catch (err) {
         console.warn('Error fetching live orders:', err);
       }
     };
-    fetchLiveOrders();
-    const timer = setInterval(fetchLiveOrders, 4000);
+    void fetchLiveOrders();
+    // 20s cadence (within the 15–30s floor for dashboard polling). Explicit
+    // merchant actions and the tab-count probe still refresh immediately.
+    const timer = setInterval(fetchLiveOrders, ORDERS_POLL_MS);
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [merchantId, storeSlug]);
 
   // Live poll for return requests. Runs regardless of the active sub-menu so the
@@ -347,6 +407,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   useEffect(() => {
     if (!merchantId && !storeSlug) return;
     let cancelled = false;
+    // Signature of the last mapped list we stored — identical payloads skip
+    // the setState so a quiet 20s tick doesn't re-render the whole view.
+    let lastReturnsSignature = '';
     const fetchReturns = async () => {
       try {
         const params = new URLSearchParams();
@@ -356,7 +419,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         if (!res.ok) return;
         const data = await res.json();
         if (cancelled || !Array.isArray(data)) return;
-        setReturnRequests(data.map((r: any) => ({
+        const mapped = data.map((r: any) => ({
           id: String(r?.id || r?._id || ''),
           orderId: String(r?.orderId || r?.order_id || ''),
           orderNumber: String(r?.orderNumber || r?.order_number || ''),
@@ -370,14 +433,20 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           customerName: String(r?.customerName || r?.customer_name || ''),
           customerPhone: String(r?.customerPhone || r?.customer_phone || ''),
           createdAt: String(r?.createdAt || r?.created_at || ''),
-        })));
+        }));
+        const signature = JSON.stringify(mapped);
+        if (signature === lastReturnsSignature) return;
+        lastReturnsSignature = signature;
+        setReturnRequests(mapped);
       } catch (err) {
         console.warn('Error fetching return requests:', err);
       }
     };
-    fetchReturns();
-    const timer = setInterval(fetchReturns, 5000);
+    void fetchReturns();
+    // 20s cadence — same 15–30s polling floor as the orders tick above.
+    const timer = setInterval(fetchReturns, RETURNS_POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [merchantId, storeSlug]);
 
   // The header bell hands off a bump for EVERY click; the ref starts at 0 so a
@@ -704,13 +773,23 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     }
   };
 
+  // Keyed on the SET OF PHONES, never on the `orders` array identity: the poll
+  // hands down a fresh array on every sync, so `[orders]` re-fired a fraud-check
+  // POST for every row on EVERY tick — an endless background fetch storm even
+  // though no phone had changed. The string key only changes when the actual
+  // customer-phone set changes (a new order arrived / an order was removed).
+  const fraudCheckPhoneKey = useMemo(
+    () => orders.map((o) => o.customerPhone || '').filter(Boolean).join('|'),
+    [orders]
+  );
   useEffect(() => {
     orders.forEach(o => {
       if (o.customerPhone) {
         fetchFraudCheck(o.customerPhone);
       }
     });
-  }, [orders]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fraudCheckPhoneKey]);
 
   const renderFraudBadge = (phone: string) => {
     const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
