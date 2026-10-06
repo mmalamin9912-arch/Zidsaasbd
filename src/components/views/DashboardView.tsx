@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { MerchantProfile, Order, Product } from '../../types';
 import SafeImage from '../SafeImage';
 import { fetchOnboardingStatus, completeOnboardingStep } from '../../lib/onboardingApi';
@@ -92,11 +92,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [tempInput, setTempInput] = useState('');
 
   /**
-   * Auto-check the onboarding status on dashboard load.
+   * Auto-check the onboarding status ONCE per dashboard mount (or when the
+   * store slug uniquely changes).
    *
-   * Re-runs whenever the product count or the store slug changes, so adding a
-   * product (which updates `products` upstream) immediately recomputes the
-   * percentage and flips "Add product" to a green check.
+   * The old dependency list included `products.length`, so every upstream
+   * products refresh re-fired GET /api/onboarding/check-status in the
+   * background — and App re-loads the product list whenever its identity
+   * effect re-runs, so the endpoint was hammered repeatedly with no user
+   * action. The product step needs no server round-trip anyway: `step1Complete`
+   * below derives from the local `products` list, and every dashboard remount
+   * (e.g. returning after adding a product) re-checks via the mount guard.
+   * The fetched `onboarding` state is the response cache — nothing re-reads
+   * the endpoint until the slug changes or the merchant saves a step.
    */
   const refreshOnboarding = useCallback(async (signal?: AbortSignal) => {
     if (!storeSlug) return;
@@ -110,11 +117,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   }, [storeSlug]);
 
+  // Slug this mount already checked. A remount (switching back to the
+  // dashboard tab, or StrictMode's double-invoked effects in dev) creates a
+  // fresh run, but the guard skips it when the SAME slug was already checked —
+  // so each dashboard visit issues exactly one GET, and only a genuine
+  // store change legitimately re-checks.
+  const checkedOnboardingSlugRef = useRef<string>('');
   useEffect(() => {
+    if (!storeSlug || checkedOnboardingSlugRef.current === storeSlug) return;
+    checkedOnboardingSlugRef.current = storeSlug;
     const controller = new AbortController();
     void refreshOnboarding(controller.signal);
     return () => controller.abort();
-  }, [refreshOnboarding, products.length]);
+  }, [storeSlug, refreshOnboarding]);
 
   /**
    * Persist a step's value, then apply the recomputed status the server returns
