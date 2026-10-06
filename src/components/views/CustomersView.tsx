@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Customer, CustomerSubTab } from '../../types';
 import { 
   Users, 
@@ -111,28 +111,64 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
 
   // Steadfast Fraud Check Cache for Customers
   const [fraudCheckCache, setFraudCheckCache] = useState<{ [phone: string]: any }>({});
+  // ATTEMPTED (success or failure) and IN-FLIGHT phones, as refs.
+  //
+  // The old effect keyed on the raw `customers` array identity and guarded with
+  // `!fraudCheckCache[cleanPhone]` read from a stale closure. Because the cache
+  // was only written when `data.success === true`, every failed check (bad
+  // credentials, outage) stayed "uncached" — and since App hands down a FRESH
+  // customers array whenever its identity effect re-runs, each such change
+  // re-fired a POST to /api/courier/steadfast/fraud-check for every uncached
+  // phone. Endless loop, no user action involved. Marking a phone attempted in
+  // `finally` — regardless of outcome — makes this strictly ONCE per phone.
+  const fraudAttemptedRef = useRef<Set<string>>(new Set());
+  const fraudPendingRef = useRef<Set<string>>(new Set());
 
-  useEffect(() => {
-    customers.forEach(c => {
-      if (c.phone) {
-        const cleanPhone = c.phone.replace(/[^0-9]/g, '');
-        if (cleanPhone && !fraudCheckCache[cleanPhone]) {
-          fetch('/api/courier/steadfast/fraud-check', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: cleanPhone })
-          })
-          .then(res => res.json())
-          .then(data => {
-            if (data.success) {
-              setFraudCheckCache(prev => ({ ...prev, [cleanPhone]: data }));
-            }
-          })
-          .catch(() => {});
-        }
+  /**
+   * One fraud-check request for one phone. Stable identity (useCallback with
+   * no reactive deps) so the effect below can list it as a dependency without
+   * re-running. Deduplicates via the pending/attempted refs above, so repeated
+   * effect runs or duplicate phone numbers in the list can never queue a
+   * second request for the same phone.
+   */
+  const fetchFraudCheck = useCallback(async (phone: string) => {
+    const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
+    if (!cleanPhone) return;
+    if (fraudPendingRef.current.has(cleanPhone) || fraudAttemptedRef.current.has(cleanPhone)) return;
+    fraudPendingRef.current.add(cleanPhone);
+    try {
+      const res = await fetch('/api/courier/steadfast/fraud-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: cleanPhone })
+      });
+      const data = await res.json();
+      if (data?.success) {
+        setFraudCheckCache(prev => ({ ...prev, [cleanPhone]: data }));
       }
+    } catch {
+      // Transient failure — still marked attempted below so it can never
+      // become a background retry loop. A merchant can remount to retry.
+    } finally {
+      fraudPendingRef.current.delete(cleanPhone);
+      fraudAttemptedRef.current.add(cleanPhone);
+    }
+  }, []);
+
+  // Signature of the SET OF (normalized) PHONES, never the `customers` array
+  // identity: a fresh-but-identical array from the parent must not re-trigger
+  // anything. Only a genuinely new/removed phone changes this key, and each key
+  // change fetches only phones not yet attempted.
+  const fraudCheckPhoneKey = useMemo(
+    () => customers.map((c) => (c.phone || '').replace(/[^0-9]/g, '')).filter(Boolean).join('|'),
+    [customers]
+  );
+  useEffect(() => {
+    if (!fraudCheckPhoneKey) return;
+    fraudCheckPhoneKey.split('|').forEach((phone) => {
+      void fetchFraudCheck(phone);
     });
-  }, [customers]);
+  }, [fraudCheckPhoneKey, fetchFraudCheck]);
 
   // Status Filter Tabs ('All', 'Active', 'Banned')
   const [statusTab, setStatusTab] = useState<'All' | 'Active' | 'Banned'>('All');

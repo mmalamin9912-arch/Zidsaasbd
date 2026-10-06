@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { Order, OrderItem } from '../../types';
 import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canonicalStatusOf, isManualOrder } from '../../utils/orderUtils';
 import SafeImage from '../SafeImage';
@@ -743,12 +743,39 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   // Steadfast Fraud Check State & Logic
   const [fraudCheckCache, setFraudCheckCache] = useState<{ [phone: string]: any }>({});
   const [loadingFraudCheck, setLoadingFraudCheck] = useState<{ [phone: string]: boolean }>({});
+  // Phones already queried (success OR failure) and phones currently in flight.
+  //
+  // Refs, not state: the guards must be readable synchronously inside
+  // `fetchFraudCheck` without re-creating the callback, and marking a phone
+  // ATTEMPTED — not just successfully cached — is what guarantees ONE request
+  // per phone. The old state-based guard only recorded `data.success === true`
+  // responses, so every failed/credential-less check was re-fired the next time
+  // the effect ran: an endless POST storm on /api/courier/steadfast/fraud-check.
+  const fraudAttemptedRef = useRef<Set<string>>(new Set());
+  const fraudPendingRef = useRef<Set<string>>(new Set());
 
-  const fetchFraudCheck = async (phone: string) => {
+  /**
+   * Query Steadfast's fraud API for ONE phone. Stable identity (useCallback
+   * with no reactive deps — everything it touches is a ref or a functional
+   * setState), so effects may list it as a dependency without re-running.
+   *
+   * Strictly once per phone per mount unless `force` is set: the automatic
+   * effect never forces, the manual "Check Reliability" button does, so a
+   * merchant retry is an explicit user action rather than a render-cycle side
+   * effect.
+   */
+  const fetchFraudCheck = useCallback(async (phone: string, opts?: { force?: boolean }) => {
     if (!phone) return;
     const cleanPhone = phone.replace(/[^0-9]/g, '');
-    if (!cleanPhone || fraudCheckCache[cleanPhone] || loadingFraudCheck[cleanPhone]) return;
-
+    if (!cleanPhone) return;
+    // In flight — never double-fetch, even on a forced click mid-request.
+    if (fraudPendingRef.current.has(cleanPhone)) return;
+    if (opts?.force) {
+      fraudAttemptedRef.current.delete(cleanPhone);
+    } else if (fraudAttemptedRef.current.has(cleanPhone)) {
+      return;
+    }
+    fraudPendingRef.current.add(cleanPhone);
     setLoadingFraudCheck(prev => ({ ...prev, [cleanPhone]: true }));
     try {
       let merchantSettings: any = {};
@@ -769,27 +796,32 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     } catch (err) {
       console.warn('Fraud check fetch error:', err);
     } finally {
+      // Success, failure or network error — the phone has been TRIED. Marking
+      // it here (outside the `if (data.success)` branch) is what stops a
+      // failing endpoint from being polled again on the next effect run.
+      fraudPendingRef.current.delete(cleanPhone);
+      fraudAttemptedRef.current.add(cleanPhone);
       setLoadingFraudCheck(prev => ({ ...prev, [cleanPhone]: false }));
     }
-  };
+  }, []);
 
   // Keyed on the SET OF PHONES, never on the `orders` array identity: the poll
   // hands down a fresh array on every sync, so `[orders]` re-fired a fraud-check
   // POST for every row on EVERY tick — an endless background fetch storm even
   // though no phone had changed. The string key only changes when the actual
   // customer-phone set changes (a new order arrived / an order was removed).
+  // Duplicates collapse via the pending/attempted refs above, so one key change
+  // issues at most one request per distinct phone.
   const fraudCheckPhoneKey = useMemo(
     () => orders.map((o) => o.customerPhone || '').filter(Boolean).join('|'),
     [orders]
   );
   useEffect(() => {
-    orders.forEach(o => {
-      if (o.customerPhone) {
-        fetchFraudCheck(o.customerPhone);
-      }
+    if (!fraudCheckPhoneKey) return;
+    fraudCheckPhoneKey.split('|').forEach((phone) => {
+      void fetchFraudCheck(phone);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fraudCheckPhoneKey]);
+  }, [fraudCheckPhoneKey, fetchFraudCheck]);
 
   const renderFraudBadge = (phone: string) => {
     const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
@@ -807,7 +839,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     if (!data) {
       return (
         <button
-          onClick={(e) => { e.stopPropagation(); fetchFraudCheck(phone); }}
+          onClick={(e) => { e.stopPropagation(); void fetchFraudCheck(phone, { force: true }); }}
           className="inline-flex items-center gap-1 text-[9px] text-slate-400 hover:text-emerald-400 bg-slate-800/60 hover:bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 transition cursor-pointer mt-0.5"
           title="Check delivery success rate with Steadfast"
         >
