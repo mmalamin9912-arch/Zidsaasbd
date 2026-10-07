@@ -25,6 +25,14 @@ export interface SubscriptionSyncOptions {
    * mapping is used.
    */
   durationDays?: number;
+  /**
+   * Amount the merchant actually paid (BDT). Forwarded to
+   * `/api/subscription/update` so the admin queue records the real plan
+   * price instead of defaulting to ৳0 BDT.
+   */
+  amountBDT?: number;
+  /** Human-readable plan name shown on the admin approval row. */
+  planName?: string;
 }
 
 /**
@@ -222,7 +230,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
 export async function syncMerchantSubscription(
   options: SubscriptionSyncOptions
 ): Promise<{ success: boolean; updatedProfile: MerchantProfile }> {
-  const { merchant, planId, startDate = new Date(), transactionId, paymentMethod, status = 'active', durationDays: explicitDurationDays } = options;
+  const { merchant, planId, startDate = new Date(), transactionId, paymentMethod, status = 'active', durationDays: explicitDurationDays, amountBDT, planName } = options;
 
   // An explicit term (from the merchant's Monthly/Yearly choice) outranks the
   // legacy plan-id mapping, otherwise a yearly payment on `starter_3m` would
@@ -314,6 +322,18 @@ export async function syncMerchantSubscription(
         storeSlug: cleanSlug,
         email: cleanEmail,
         planId,
+        planName: planName || undefined,
+        // The charged amount travels under every alias the server reads so a
+        // single missing key can never render the row as ৳0 BDT.
+        amountBDT: amountBDT ?? undefined,
+        amount_bdt: amountBDT ?? undefined,
+        amount: amountBDT ?? undefined,
+        planPrice: amountBDT ?? undefined,
+        plan_price: amountBDT ?? undefined,
+        price: amountBDT ?? undefined,
+        priceBDT: amountBDT ?? undefined,
+        price_bdt: amountBDT ?? undefined,
+        total: amountBDT ?? undefined,
         expiryDate,
         plan_started_at,
         expires_at,

@@ -106,11 +106,50 @@ function pick(row: Row, keys: string[]): any {
 function toNumber(value: any, fallback = 0): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
-    const parsed = Number(value.replace(/[^0-9.-]/g, ""));
+    // Accept numeric strings incl. "1,500", "৳ 1500 BDT", "1500.00".
+    // Guard against empty/placeholder strings mapping to 0 via Number("").
+    const cleaned = value.replace(/[^0-9.\-]/g, "");
+    if (cleaned === "" || cleaned === "-" || cleaned === "." || cleaned === "-.") return fallback;
+    const parsed = Number(cleaned);
     if (Number.isFinite(parsed)) return parsed;
   }
+  if (typeof value === "boolean") return value ? 1 : 0;
   return fallback;
 }
+
+/**
+ * Every known spelling of "how much was paid" across modern camelCase writes,
+ * legacy snake_case seeds, plan-catalogue mirrors and invoice/checkout
+ * payloads. Checked in order — the first defined, non-empty value wins, so a
+ * real 0 (free tier) is kept while a MISSING field falls through to the next
+ * alias instead of defaulting to 0 BDT.
+ */
+const AMOUNT_KEYS = [
+  "amountBDT",
+  "amount_bdt",
+  "amount",
+  "planPrice",
+  "plan_price",
+  "planAmount",
+  "plan_amount",
+  "priceBDT",
+  "price_bdt",
+  "price",
+  "totalBDT",
+  "total_bdt",
+  "total",
+  "totalAmount",
+  "total_amount",
+  "payable",
+  "payableAmount",
+  "payable_amount",
+  "grandTotal",
+  "grand_total",
+  "paidAmount",
+  "paid_amount",
+  "netAmount",
+  "net_amount",
+];
 
 function toIso(value: any): string {
   if (!value) return "";
@@ -183,9 +222,9 @@ function normalizeSubscriptionRequest(row: Row): AdminSubscriptionRequest {
     email: String(pick(row, ["email", "merchant_email", "owner_email"]) || ""),
     planId,
     planName: String(pick(row, ["planName", "plan_name", "planLabel"]) || humanizePlanId(planId)),
-    amountBDT: toNumber(pick(row, ["amountBDT", "amount_bdt", "amount", "price", "total"]), 0),
+    amountBDT: toNumber(pick(row, AMOUNT_KEYS), 0),
     paymentMethod: String(pick(row, ["paymentMethod", "payment_method", "method", "gateway"]) || "Admin").replace(/_admin$/, ""),
-    transactionId: String(pick(row, ["transactionId", "transaction_id", "trxId", "trx_id"]) || "-"),
+    transactionId: String(pick(row, ["transactionId", "transaction_id", "trxId", "trx_id", "trxID", "txnId", "txn_id"]) || "-"),
     requestedAt: toIso(pick(row, ["requestedAt", "requested_at", "created_at", "createdAt", "submittedAt", "submitted_at"])),
     status: normalizeRequestStatus("subscription", pick(row, ["status"])) as AdminSubscriptionRequest["status"],
   };
@@ -201,9 +240,9 @@ function normalizeThemeRequest(row: Row): AdminThemeRequest {
     email: String(pick(row, ["email", "merchant_email", "owner_email"]) || ""),
     themeId: String(pick(row, ["themeId", "theme_id", "template_id"]) || ""),
     themeName: String(pick(row, ["themeName", "theme_name", "template_name", "name"]) || "Theme"),
-    amountBDT: toNumber(pick(row, ["amountBDT", "amount_bdt", "amount", "price", "total"]), 0),
+    amountBDT: toNumber(pick(row, AMOUNT_KEYS), 0),
     paymentMethod: String(pick(row, ["paymentMethod", "payment_method", "method", "gateway"]) || "Admin").replace(/_admin$/, ""),
-    transactionId: String(pick(row, ["transactionId", "transaction_id", "trxId", "trx_id"]) || "-"),
+    transactionId: String(pick(row, ["transactionId", "transaction_id", "trxId", "trx_id", "trxID", "txnId", "txn_id"]) || "-"),
     requestedAt: toIso(pick(row, ["requestedAt", "requested_at", "created_at", "createdAt", "submittedAt", "submitted_at"])),
     status: normalizeRequestStatus("theme", pick(row, ["status"])) as AdminThemeRequest["status"],
   };
@@ -444,8 +483,18 @@ export async function writeSubscriptionRequest(
       plan_id: planId,
       planName: String(input.planName || humanizePlanId(planId)),
       plan_name: String(input.planName || humanizePlanId(planId)),
-      amountBDT: toNumber(input.amountBDT, 0),
-      amount_bdt: toNumber(input.amountBDT, 0),
+      // Persist the amount under EVERY spelling the normaliser reads
+      // (amount / planPrice / price / total …). A row that only carries one
+      // alias renders ৳0 BDT the moment the admin reads a different key.
+      amountBDT: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      amount_bdt: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      amount: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      planPrice: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      plan_price: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      price: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      priceBDT: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      price_bdt: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      total: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
       paymentMethod: String(input.paymentMethod || ""),
       payment_method: String(input.paymentMethod || ""),
       transactionId: String(input.transactionId || ""),
@@ -523,8 +572,17 @@ export async function writeThemeRequest(
       theme_id: themeId,
       themeName: String(input.themeName || themeId),
       theme_name: String(input.themeName || themeId),
-      amountBDT: toNumber(input.amountBDT, 0),
-      amount_bdt: toNumber(input.amountBDT, 0),
+      // Same multi-alias amount persistence as subscription requests — the
+      // admin table must never fall back to ৳0 BDT.
+      amountBDT: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      amount_bdt: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      amount: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      planPrice: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      plan_price: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      price: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      priceBDT: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      price_bdt: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
+      total: toNumber(pick(input as Row, AMOUNT_KEYS), 0),
       paymentMethod: String(input.paymentMethod || ""),
       payment_method: String(input.paymentMethod || ""),
       transactionId: String(input.transactionId || ""),
@@ -560,6 +618,132 @@ export async function writeThemeRequest(
     console.error("[adminRequests] writeThemeRequest error:", err);
     return { ok: false, collections, error: err?.message || "The theme request could not be saved." };
   }
+}
+
+export interface AdminRequestStatusResult {
+  ok: boolean;
+  generatedAt: string;
+  database: string;
+  kind: RequestKind;
+  id: string;
+  status: string;
+  matched: number;
+  modified: number;
+  error?: string;
+  dbError?: MongoFailure | null;
+}
+
+function toObjectIdIfPossible(value: string): any | null {
+  try {
+    // Lazy import shape — mongoose is an optional peer here; fall back to a
+    // 24-hex check so the helper still works when mongoose is absent.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const req: any = (Function("return typeof require !== 'undefined' ? require : null;") as any)();
+    const mongoose = req ? req("mongoose") : null;
+    const ObjectId = mongoose?.Types?.ObjectId || mongoose?.Schema?.Types?.ObjectId;
+    if (ObjectId && typeof value === "string" && /^[0-9a-fA-F]{24}$/.test(value)) {
+      try { return new ObjectId(value); } catch { return null; }
+    }
+  } catch { /* ignore — string match below still applies */ }
+  return null;
+}
+
+/**
+ * Mark a request row approved / rejected in MongoDB.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The admin APPROVE buttons previously only rewrote in-memory / localStorage
+ * state (`pendingRequests`, `ZID_PENDING_REQUESTS`) and — for subscriptions —
+ * called `/api/subscription/approve` with a client-generated `req-…` id that
+ * matches NO document in `subscription_requests`. The DB row therefore stayed
+ * `pending_approval` forever and the approval never persisted.
+ *
+ * Matching is deliberately tolerant: the same request may be stored under
+ * `id`, `requestId`, `request_id` or the Mongo `_id` (ObjectId or string), and
+ * the frontend may hand back the normalised id, the raw ObjectId hex, or the
+ * transaction id. Every spelling is tried across all collections for the kind.
+ */
+export async function updateAdminRequestStatus(
+  kind: RequestKind,
+  ref: string,
+  status: "approved" | "rejected",
+  opts: { dbName?: string } = {}
+): Promise<AdminRequestStatusResult> {
+  const base: AdminRequestStatusResult = {
+    ok: false,
+    generatedAt: new Date().toISOString(),
+    database: opts.dbName || DB_NAME,
+    kind,
+    id: String(ref || ""),
+    status,
+    matched: 0,
+    modified: 0,
+  };
+  const raw = String(ref || "").trim();
+  if (!raw) return { ...base, error: "A request id or transaction id is required." };
+
+  const { db, failure } = await getDb(opts.dbName || DB_NAME);
+  if (!db) return { ...base, error: failure?.message || "MongoDB is not configured or unavailable.", dbError: failure };
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const setDoc: Row = {
+    status,
+    updated_at: nowIso,
+    updatedAt: nowIso,
+  };
+  if (status === "approved") {
+    setDoc.approved_at = nowIso;
+    setDoc.approvedAt = nowIso;
+  } else {
+    setDoc.rejected_at = nowIso;
+    setDoc.rejectedAt = nowIso;
+  }
+
+  const objectId = toObjectIdIfPossible(raw);
+  const or: Record<string, any>[] = [
+    { id: raw },
+    { requestId: raw },
+    { request_id: raw },
+    { _id: raw },
+    { transactionId: raw },
+    { transaction_id: raw },
+    { trxId: raw },
+    { trx_id: raw },
+  ];
+  if (objectId) or.push({ _id: objectId });
+
+  let matched = 0;
+  let modified = 0;
+  const errors: string[] = [];
+  for (const collectionName of COLLECTIONS[kind]) {
+    try {
+      const r: any = await db.collection(collectionName).updateMany({ $or: or }, { $set: setDoc });
+      const m = Number(r?.matchedCount ?? r?.matched ?? r?.n ?? 0) || 0;
+      const mod = Number(r?.modifiedCount ?? r?.modified ?? r?.nModified ?? 0) || 0;
+      matched += m;
+      // Count a matched-but-identical row as updated so the admin sees success
+      // even when the row already carried the target status.
+      modified += mod > 0 ? mod : m;
+    } catch (err: any) {
+      if (!isMissingCollection(err)) {
+        errors.push(`${collectionName}: ${err?.message || err}`);
+      }
+    }
+  }
+
+  if (matched === 0) {
+    return {
+      ...base,
+      matched,
+      modified,
+      error: errors.length > 0
+        ? errors.join("; ")
+        : `No ${kind} request found for "${raw}" (checked id, requestId and transaction id).`,
+    };
+  }
+  return { ...base, ok: true, matched, modified };
 }
 
 /**

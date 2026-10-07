@@ -44,6 +44,7 @@ import {
   listSubscriptionRequests,
   listThemeRequests,
   purgeTestTransactionsAndReload,
+  updateAdminRequestStatus,
   writeSubscriptionRequest,
   writeThemeRequest,
 } from './adminRequests.js';
@@ -5643,7 +5644,15 @@ app.post('/api/subscription/update', async (req, res) => {
     const isAdminApproval = req.body?.approved === true || requestedStatus === 'active';
     const subscriptionStatus = isAdminApproval ? 'active' : 'pending_approval';
 
-    // 1. Always record the request so the admin queue reflects it.
+    // 1. Always record the request so the admin queue reflects it. The amount
+    //    walks every known spelling (amount / planPrice / price / total) so a
+    //    client that posts `price` while the admin reads `amountBDT` can never
+    //    render ৳0 BDT.
+    const rawAmount = req.body?.amountBDT ?? req.body?.amount_bdt ?? req.body?.amount
+      ?? req.body?.planPrice ?? req.body?.plan_price ?? req.body?.planAmount ?? req.body?.plan_amount
+      ?? req.body?.priceBDT ?? req.body?.price_bdt ?? req.body?.price
+      ?? req.body?.totalBDT ?? req.body?.total_bdt ?? req.body?.total
+      ?? req.body?.totalAmount ?? req.body?.total_amount ?? req.body?.payable ?? req.body?.grandTotal ?? 0;
     const requestWrite = await writeSubscriptionRequest({
       storeName,
       storeSlug,
@@ -5651,7 +5660,7 @@ app.post('/api/subscription/update', async (req, res) => {
       email,
       planId,
       planName: req.body?.planName || req.body?.plan_name,
-      amountBDT: req.body?.amountBDT ?? req.body?.amount_bdt ?? req.body?.amount,
+      amountBDT: rawAmount,
       paymentMethod,
       transactionId,
       status: subscriptionStatus,
@@ -5968,6 +5977,125 @@ app.post('/api/subscription/approve', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] POST /api/subscription/approve error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Could not record the subscription approval.' });
+  }
+});
+
+/**
+ * POST /api/admin/requests/status — flip a request row approved / rejected.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The Super Admin APPROVE buttons used to only rewrite localStorage state (and
+ * call `/api/subscription/approve` with a client-side `req-…` id that matches
+ * no Mongo document), so the DB row stayed pending forever. This route is the
+ * missing persistence half: it marks the request row itself in MongoDB using
+ * the tolerant `updateAdminRequestStatus` matcher (id / requestId / _id /
+ * transaction id), so the status survives refresh and the merchant sees it.
+ *
+ * Body: { kind: 'subscription' | 'theme', id | requestId | transactionId,
+ *         status: 'approved' | 'rejected' }
+ */
+app.post('/api/admin/requests/status', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const kind = String(body.kind || body.type || 'subscription').toLowerCase().startsWith('theme')
+      ? 'theme'
+      : 'subscription';
+    const ref = String(body.id || body.requestId || body.request_id || body.transactionId || body.transaction_id || body.trxId || body.trx_id || '').trim();
+    const status = String(body.status || body.action || 'approved').toLowerCase();
+    const target = status.startsWith('reject') ? 'rejected' : 'approved';
+    if (!ref) {
+      return res.status(200).json({ ok: false, error: 'A request id or transaction id is required.' });
+    }
+    const result = await updateAdminRequestStatus(kind, ref, target);
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/requests/status error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not update the request status.' });
+  }
+});
+
+/**
+ * POST /api/theme/approve — record a theme-purchase approval in MongoDB.
+ *
+ * The subscription flow has `/api/subscription/approve`; themes had NO
+ * equivalent, so the theme APPROVE button could only flip local state.
+ * This mirrors the subscription route: mark the request row approved and
+ * unlock the theme on the merchant store.
+ */
+app.post('/api/theme/approve', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const requestId = String(body.requestId || body.id || body.request_id || '').trim();
+    const transactionId = String(body.transactionId || body.transaction_id || body.trxId || body.trx_id || '').trim();
+    const themeId = String(body.themeId || body.theme_id || '').trim();
+    const ref = requestId || transactionId;
+    if (!ref && !themeId) {
+      return res.status(200).json({ ok: false, error: 'A request id or transaction id is required.' });
+    }
+
+    // 1. Mark the request row itself approved (tolerant id/transaction match).
+    let statusResult: any = null;
+    if (ref) {
+      statusResult = await updateAdminRequestStatus('theme', ref, 'approved');
+    }
+
+    // 2. Unlock the theme on the merchant store when we know who/which.
+    const emailRaw = String(
+      body.email || body.merchant_email || body.merchantEmail || ''
+    ).trim();
+    const slugRaw = String(body.storeSlug || body.store_slug || body.slug || '').trim();
+    const cleanEmail = sanitizeSubscriptionFilter(emailRaw).toLowerCase();
+    const cleanSlug = sanitizeSubscriptionFilter(slugRaw).toLowerCase();
+    let unlocked = false;
+    if (themeId && (cleanEmail || cleanSlug)) {
+      try {
+        const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+        if (db) {
+          for (const collectionName of ['stores', 'merchants']) {
+            try {
+              const or: Record<string, any>[] = [];
+              if (cleanEmail) or.push({ email: cleanEmail }, { merchant_email: cleanEmail });
+              if (cleanSlug) or.push({ store_slug: cleanSlug }, { storeSlug: cleanSlug }, { slug: cleanSlug });
+              if (or.length === 0) continue;
+              const r: any = await db.collection(collectionName).updateMany(
+                { $or: or },
+                {
+                  // $addToSet keeps the unlock idempotent across double-clicks.
+                  $addToSet: {
+                    unlockedThemeIds: themeId,
+                    unlocked_theme_ids: themeId,
+                    unlockedThemes: themeId,
+                  } as any,
+                  $set: { updated_at: new Date().toISOString() } as any,
+                }
+              );
+              if (Number(r?.matchedCount ?? r?.matched ?? 0) > 0) unlocked = true;
+            } catch (err: any) {
+              console.warn(`[Server] theme approve unlock ${collectionName} warning:`, err?.message || err);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Server] theme approve unlock warning:', err?.message || err);
+      }
+    }
+
+    if (ref && statusResult && !statusResult.ok && !unlocked) {
+      return res.status(200).json({ ok: false, error: statusResult.error || 'No theme request matched this approval.' });
+    }
+    return res.status(200).json({
+      ok: true,
+      requestId: ref || undefined,
+      themeId: themeId || undefined,
+      unlocked,
+      matched: statusResult?.matched ?? 0,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/theme/approve error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not record the theme approval.' });
   }
 });
 

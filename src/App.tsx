@@ -1644,7 +1644,11 @@ export default function App() {
         durationDays,
         transactionId: txId,
         paymentMethod,
-        status: 'pending'
+        status: 'pending',
+        // Forward the exact quoted figure so the server records the real plan
+        // price on the request row (never ৳0 BDT).
+        amountBDT: pricing?.price ?? plan?.price ?? 0,
+        planName: plan?.name || '',
       });
       setMerchant(updatedProfile);
     } catch (e) {

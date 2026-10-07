@@ -709,6 +709,16 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const [isLoadingRequests, setIsLoadingRequests] = useState(false);
   const [requestsError, setRequestsError] = useState<string | null>(null);
   const [isPurgingTestData, setIsPurgingTestData] = useState(false);
+  /** Request ids currently being approved/rejected — drives per-row spinners. */
+  const [approvingIds, setApprovingIds] = useState<Set<string>>(new Set());
+  const markApproving = (id: string, on: boolean) => {
+    setApprovingIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
 
   // Fetch both request tables for the current filter. Runs on mount and every
   // time the ALL / PENDING / APPROVED / REJECTED button changes.
@@ -1280,9 +1290,20 @@ const newPlan: SubscriptionPlan = {
     setTimeout(() => setGatewaySavedMessage(false), 3000);
   };
 
-  const handleApproveRequest = (reqId: string) => {
-    const req = pendingRequests.find(r => r.id === reqId);
-    if (!req) return;
+  const handleApproveRequest = async (reqId: string) => {
+    // Resolve from BOTH sources: MongoDB-backed rows (normal path) and the
+    // localStorage fallback (offline path). The old code only looked at
+    // `pendingRequests`, so approving a DB row silently did nothing (req ===
+    // undefined) — the button appeared dead.
+    const req =
+      filteredSubscriptionRequests.find(r => String(r.id) === String(reqId)) ||
+      pendingRequests.find(r => r.id === reqId);
+    if (!req) {
+      toast.error('Request not found. Please refresh the list and try again.');
+      return;
+    }
+    const approvingKey = `sub:${reqId}`;
+    markApproving(approvingKey, true);
 
     // Validity starts TODAY and lasts the TERM THE MERCHANT PAID FOR. The request
     // carries its own `durationDays`; `calculateSubscriptionExpiry` is only the
@@ -1438,60 +1459,141 @@ if (m.storeSlug) {
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '');
 
-    void (async () => {
-      try {
-        const res = await fetch('/api/subscription/approve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            requestId: req.id,
-            email: req.email,
-            storeSlug: storeSlugForSync,
-            storeName: req.storeName,
-            planId: req.planId,
-            transactionId: (req as any).transactionId || (req as any).trxId,
-            paymentMethod: (req as any).paymentMethod,
-            plan_started_at,
-            expires_at,
-            expiryDate,
-            duration_days: durationDays,
-          }),
-        });
-        const data = await safeJson<any>(res);
-        if (data && data.ok === false) {
-          console.warn('Subscription approval MongoDB sync notice:', data.error);
-          setSaveSuccess(
-            `Approved locally, but the store record could not be updated: ${data.error} The merchant may still see the old status until this is retried.`
-          );
-          setTimeout(() => setSaveSuccess(null), 6000);
-        } else {
-          console.log('[Admin] Subscription approval synced to MongoDB:', data?.sources);
-        }
-      } catch (err: any) {
-        console.warn('Subscription approval MongoDB sync failed:', err?.message || err);
-        setSaveSuccess(
-          'Approved locally, but the database could not be reached. The merchant may still see the previous status until this is retried.'
-        );
-        setTimeout(() => setSaveSuccess(null), 6000);
+    let backendNotice: string | null = null;
+    try {
+      // Await (don't fire-and-forget): the success toast below must reflect
+      // the real outcome, and the row-status + refetch must happen before the
+      // spinner clears — otherwise the button looks dead on slow networks.
+      const res = await fetch('/api/subscription/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestId: req.id,
+          email: req.email,
+          storeSlug: storeSlugForSync,
+          storeName: req.storeName,
+          planId: req.planId,
+          transactionId: (req as any).transactionId || (req as any).trxId,
+          paymentMethod: (req as any).paymentMethod,
+          plan_started_at,
+          expires_at,
+          expiryDate,
+          duration_days: durationDays,
+        }),
+      });
+      const data = await safeJson<any>(res);
+      if (data && data.ok === false) {
+        console.warn('Subscription approval MongoDB sync notice:', data.error);
+        backendNotice =
+          `Approved locally, but the store record could not be updated: ${data.error} The merchant may still see the old status until this is retried.`;
+      } else {
+        console.log('[Admin] Subscription approval synced to MongoDB:', data?.sources);
       }
-    })();
+    } catch (err: any) {
+      console.warn('Subscription approval MongoDB sync failed:', err?.message || err);
+      backendNotice =
+        'Approved locally, but the database could not be reached. The merchant may still see the previous status until this is retried.';
+    }
+
+    // ── Persist the request row itself ─────────────────────────────────────
+    // `/api/subscription/approve` keys on email/slug and never touches the
+    // `subscription_requests` row, so without this the table flips back to
+    // Pending on refresh. Pass BOTH id and transaction id — the row may be
+    // stored under either.
+    try {
+      const res = await fetch('/api/admin/requests/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'subscription',
+          id: req.id,
+          requestId: req.id,
+          transactionId: (req as any).transactionId || (req as any).trxId,
+          status: 'approved',
+        }),
+      });
+      const data = await safeJson<any>(res);
+      if (!data || data.ok !== true) {
+        console.warn('Subscription request row-status sync notice:', data?.error);
+        backendNotice = backendNotice ||
+          `Store activated, but the request row could not be marked approved: ${data?.error || 'unknown error'}. It may still show Pending after refresh.`;
+      }
+    } catch (err: any) {
+      console.warn('Subscription request row-status sync failed:', err?.message || err);
+      backendNotice = backendNotice ||
+        'Store activated, but the request row could not be marked approved (network error). It may still show Pending after refresh.';
+    } finally {
+      // Re-pull the Mongo-backed list so the table shows Approved (and the
+      // badge counts update) instead of the stale pre-click snapshot.
+      await fetchRequests();
+      markApproving(approvingKey, false);
+    }
+
+    if (backendNotice) {
+      setSaveSuccess(backendNotice);
+      setTimeout(() => setSaveSuccess(null), 6000);
+      return;
+    }
 
     setSaveSuccess(`Subscription for "${req?.storeName || 'Store'}" approved! Active plan: ${planName} (${durationDays} Days from today, valid until ${expiryDate}). Remaining free trial days cleared.`);
     setTimeout(() => setSaveSuccess(null), 4000);
   };
 
-  const handleRejectRequest = (reqId: string) => {
-    const req = pendingRequests.find(r => r.id === reqId);
-    if (!req) return;
+  const handleRejectRequest = async (reqId: string) => {
+    const req =
+      filteredSubscriptionRequests.find(r => String(r.id) === String(reqId)) ||
+      pendingRequests.find(r => r.id === reqId);
+    if (!req) {
+      toast.error('Request not found. Please refresh the list and try again.');
+      return;
+    }
+    const approvingKey = `sub:${reqId}`;
+    markApproving(approvingKey, true);
 
     onUpdatePendingRequests(prev => prev.map(r => r.id === reqId ? { ...r, status: 'rejected' } : r));
+    try {
+      const res = await fetch('/api/admin/requests/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'subscription',
+          id: req.id,
+          requestId: req.id,
+          transactionId: (req as any).transactionId || (req as any).trxId,
+          status: 'rejected',
+        }),
+      });
+      const data = await safeJson<any>(res);
+      if (!data || data.ok !== true) {
+        toast.warning('Rejected locally — row sync warning', {
+          description: data?.error || 'The request row may still show Pending after refresh.',
+        });
+      }
+    } catch (err: any) {
+      toast.warning('Rejected locally — database unreachable', {
+        description: 'The request row may still show Pending after refresh.',
+      });
+    } finally {
+      await fetchRequests();
+      markApproving(approvingKey, false);
+    }
     setSaveSuccess(`Subscription for "${req?.storeName || 'Store'}" rejected.`);
     setTimeout(() => setSaveSuccess(null), 3000);
   };
 
-  const handleApproveThemePurchase = (reqId: string) => {
-    const req = themePurchaseRequests.find(r => r.id === reqId);
-    if (!req) return;
+  const handleApproveThemePurchase = async (reqId: string) => {
+    // Same dual-source resolution as subscriptions: MongoDB rows first, the
+    // localStorage fallback second. Previously only the fallback list was
+    // searched, so every DB-backed row silently returned here.
+    const req =
+      filteredThemeRequests.find(r => String(r.id) === String(reqId)) ||
+      (themePurchaseRequests || []).find(r => r.id === reqId);
+    if (!req) {
+      toast.error('Theme request not found. Please refresh the list and try again.');
+      return;
+    }
+    const approvingKey = `theme:${reqId}`;
+    markApproving(approvingKey, true);
 
     if (onUpdateThemePurchaseRequests) {
       onUpdateThemePurchaseRequests(prev => prev.map(r => r.id === reqId ? { ...r, status: 'approved' } : r));
@@ -1528,12 +1630,107 @@ if (m.storeSlug) {
       });
     }
 
+    // ── Persist in MongoDB ───────────────────────────────────────────────
+    // Previously NOTHING was written server-side, so the theme table flipped
+    // back to Pending on refresh. `/api/theme/approve` marks the row approved
+    // and unlocks the theme on the store; the generic status route is the
+    // fallback when only the transaction id is known.
+    let themeNotice: string | null = null;
+    try {
+      const res = await fetch('/api/theme/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestId: req.id,
+          id: req.id,
+          themeId: (req as any).themeId,
+          themeName: (req as any).themeName,
+          email: (req as any).email,
+          storeSlug: (req as any).storeSlug,
+          storeName: (req as any).storeName,
+          transactionId: (req as any).transactionId,
+          paymentMethod: (req as any).paymentMethod,
+        }),
+      });
+      const data = await safeJson<any>(res);
+      if (!data || data.ok !== true) {
+        console.warn('Theme approval MongoDB sync notice:', data?.error);
+        themeNotice =
+          `Theme unlocked locally, but the database could not be updated: ${data?.error || 'unknown error'}. It may still show Pending after refresh.`;
+      }
+    } catch (err: any) {
+      console.warn('Theme approval MongoDB sync failed:', err?.message || err);
+      themeNotice =
+        'Theme unlocked locally, but the database could not be reached. It may still show Pending after refresh.';
+    }
+    try {
+      const res = await fetch('/api/admin/requests/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'theme',
+          id: req.id,
+          requestId: req.id,
+          transactionId: (req as any).transactionId,
+          status: 'approved',
+        }),
+      });
+      const data = await safeJson<any>(res);
+      if (!data || data.ok !== true) {
+        console.warn('Theme request row-status sync notice:', data?.error);
+        themeNotice = themeNotice ||
+          `Theme unlocked, but the request row could not be marked approved: ${data?.error || 'unknown error'}.`;
+      }
+    } catch (err: any) {
+      console.warn('Theme request row-status sync failed:', err?.message || err);
+      themeNotice = themeNotice ||
+        'Theme unlocked, but the request row could not be marked approved (network error).';
+    } finally {
+      await fetchRequests();
+      markApproving(approvingKey, false);
+    }
+
+    if (themeNotice) {
+      toast.warning('Approved with a sync warning', { description: themeNotice });
+      return;
+    }
     toast.success(`Theme purchase request approved!`, { description: `Theme "${req.themeName}" is now unlocked for merchant "${req?.storeName || 'Store'}".` });
   };
 
-  const handleRejectThemePurchase = (reqId: string) => {
+  const handleRejectThemePurchase = async (reqId: string) => {
+    const req =
+      filteredThemeRequests.find(r => String(r.id) === String(reqId)) ||
+      (themePurchaseRequests || []).find(r => r.id === reqId);
+    const approvingKey = `theme:${reqId}`;
+    markApproving(approvingKey, true);
     if (onUpdateThemePurchaseRequests) {
       onUpdateThemePurchaseRequests(prev => prev.map(r => r.id === reqId ? { ...r, status: 'rejected' } : r));
+    }
+    try {
+      const res = await fetch('/api/admin/requests/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'theme',
+          id: reqId,
+          requestId: reqId,
+          transactionId: (req as any)?.transactionId,
+          status: 'rejected',
+        }),
+      });
+      const data = await safeJson<any>(res);
+      if (!data || data.ok !== true) {
+        toast.warning('Rejected locally — row sync warning', {
+          description: data?.error || 'The request row may still show Pending after refresh.',
+        });
+      }
+    } catch {
+      toast.warning('Rejected locally — database unreachable', {
+        description: 'The request row may still show Pending after refresh.',
+      });
+    } finally {
+      await fetchRequests();
+      markApproving(approvingKey, false);
     }
     toast.warning('Theme purchase request rejected.');
   };
@@ -2303,7 +2500,7 @@ onUpdateMerchant(updatedCurrent);
                       </td>
                       <td className="p-3.5">
                         <div className="font-bold text-white">{req.planName}</div>
-                        <div className="text-[11px] text-[#D4AF37] font-bold">৳{req.amountBDT.toLocaleString()} BDT</div>
+                        <div className="text-[11px] text-[#D4AF37] font-bold">৳{Number((req as any).amountBDT ?? (req as any).amount ?? (req as any).planPrice ?? (req as any).price ?? 0).toLocaleString()} BDT</div>
                       </td>
                       <td className="p-3.5 font-semibold text-slate-200 capitalize">
                         {req.paymentMethod.replace('_admin', '')}
@@ -2344,9 +2541,10 @@ onUpdateMerchant(updatedCurrent);
                         {req.status === 'pending' && (
                           <button
                             onClick={() => handleApproveRequest(req.id)}
-                            className="bg-[#D4AF37] hover:bg-[#FCF6BA] text-slate-950 font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition cursor-pointer shadow-lg shadow-amber-500/20"
+                            disabled={approvingIds.has(`sub:${req.id}`)}
+                            className="bg-[#D4AF37] hover:bg-[#FCF6BA] text-slate-950 font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-60 disabled:cursor-wait"
                           >
-                            Approve
+                            {approvingIds.has(`sub:${req.id}`) ? 'Approving…' : 'Approve'}
                           </button>
                         )}
                       </td>
@@ -2410,7 +2608,7 @@ onUpdateMerchant(updatedCurrent);
                           <div className="text-[10px] text-slate-400 font-mono uppercase">ID: {req.themeId}</div>
                         </td>
                         <td className="p-3.5 font-bold text-[#D4AF37]">
-                          ৳{req.amountBDT.toLocaleString()} BDT
+                          ৳{Number((req as any).amountBDT ?? (req as any).amount ?? (req as any).planPrice ?? (req as any).price ?? 0).toLocaleString()} BDT
                         </td>
                         <td className="p-3.5 font-semibold text-slate-200 capitalize">
                           {req.paymentMethod}
@@ -2450,9 +2648,10 @@ onUpdateMerchant(updatedCurrent);
                           {req.status === 'pending_approval' && (
                             <button
                               onClick={() => handleApproveThemePurchase(req.id)}
-                              className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition cursor-pointer shadow-lg shadow-emerald-600/20"
+                              disabled={approvingIds.has(`theme:${req.id}`)}
+                              className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition cursor-pointer shadow-lg shadow-emerald-600/20 disabled:opacity-60 disabled:cursor-wait"
                             >
-                              Approve
+                              {approvingIds.has(`theme:${req.id}`) ? 'Approving…' : 'Approve'}
                             </button>
                           )}
                         </td>
@@ -5544,7 +5743,7 @@ onUpdateMerchant(updatedCurrent);
                 <div className="space-y-4">
                   <div>
                     <label className="text-[10px] uppercase font-black text-slate-500 block mb-1">Amount to Verify</label>
-                    <div className="text-2xl font-black text-[#D4AF37]">৳{selectedApprovalRequest.amountBDT.toLocaleString()}</div>
+                    <div className="text-2xl font-black text-[#D4AF37]">৳{Number(selectedApprovalRequest.amountBDT ?? selectedApprovalRequest.amount ?? selectedApprovalRequest.planPrice ?? selectedApprovalRequest.price ?? 0).toLocaleString()}</div>
                     <div className="text-[10px] text-slate-500 uppercase font-black">Bangladesh Taka</div>
                   </div>
                   <div>
@@ -5629,17 +5828,28 @@ onUpdateMerchant(updatedCurrent);
                     Reject Request
                   </button>
                   <button
-                    onClick={() => {
-                      if (selectedApprovalRequest.type === 'subscription') {
-                        handleApproveRequest(selectedApprovalRequest.id);
-                      } else {
-                        handleApproveThemePurchase(selectedApprovalRequest.id);
+                    onClick={async () => {
+                      const id = selectedApprovalRequest.id;
+                      const kind = selectedApprovalRequest.type;
+                      // Keep the modal open with a spinner while the approval
+                      // persists — closing it eagerly is what made APPROVE
+                      // look like it did nothing.
+                      markApproving(`${kind === 'subscription' ? 'sub' : 'theme'}:${id}`, true);
+                      try {
+                        if (kind === 'subscription') {
+                          await handleApproveRequest(id);
+                        } else {
+                          await handleApproveThemePurchase(id);
+                        }
+                      } finally {
+                        markApproving(`${kind === 'subscription' ? 'sub' : 'theme'}:${id}`, false);
+                        setIsApprovalDetailsModalOpen(false);
                       }
-                      setIsApprovalDetailsModalOpen(false);
                     }}
-                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-black py-4 rounded-2xl text-[10px] uppercase tracking-widest transition-all shadow-xl shadow-indigo-600/20 cursor-pointer active:scale-95"
+                    disabled={approvingIds.has(`${selectedApprovalRequest.type === 'subscription' ? 'sub' : 'theme'}:${selectedApprovalRequest.id}`)}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-black py-4 rounded-2xl text-[10px] uppercase tracking-widest transition-all shadow-xl shadow-indigo-600/20 cursor-pointer active:scale-95 disabled:opacity-60 disabled:cursor-wait"
                   >
-                    Approve & Activate
+                    {approvingIds.has(`${selectedApprovalRequest.type === 'subscription' ? 'sub' : 'theme'}:${selectedApprovalRequest.id}`) ? 'Approving…' : 'Approve & Activate'}
                   </button>
                 </div>
               ) : (
