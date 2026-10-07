@@ -1104,6 +1104,116 @@ app.delete('/api/admin/themes/:id', async (req, res) => {
   }
 });
 
+// ── Merchant Theme Settings (theme section editor save/publish) ─────────────
+// POST /api/themes/settings — save the full themeConfig JSON for a store+theme
+// PUT  /api/themes/settings — same as POST (both verbs accepted so the editor
+//        can use PUT or POST without a 404/405)
+//
+// WHY THIS EXISTS: the editor had NO dedicated endpoint that durable-stores
+// its full themeConfig JSON per store+theme, and the UI cleared "Unsaved
+// changes pending" before any write completed. This upserts one
+// `theme_settings` doc per (store_slug, theme_id) in MongoDB (mirrored onto
+// the `stores` record's theme_config) and NEVER throws a 5xx.
+async function handleThemeSettingsWrite(req: any, res: any) {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeSlugRaw = String(body.storeSlug || body.store_slug || body.slug || '').trim();
+    const storeSlug = storeSlugRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const email = String(body.email || body.merchant_email || '').trim().toLowerCase();
+    const themeId = String(body.themeId || body.theme_id || body.themeName || body.theme_name || 'default').trim() || 'default';
+    const themeConfig = (body.themeConfig && typeof body.themeConfig === 'object' ? body.themeConfig : null)
+      || (body.theme_config && typeof body.theme_config === 'object' ? body.theme_config : null);
+    if (!storeSlug && !email) {
+      return res.status(200).json({ ok: false, error: 'A store slug or email is required.' });
+    }
+    if (!themeConfig) {
+      return res.status(200).json({ ok: false, error: 'A themeConfig object is required.' });
+    }
+    const nowIso = new Date().toISOString();
+    const key = storeSlug || email;
+    const doc: Record<string, any> = {
+      store_slug: key, storeSlug: key, email: email || undefined,
+      theme_id: themeId, themeId,
+      theme_name: String(body.themeName || body.theme_name || themeId),
+      theme_version: String(body.themeVersion || body.theme_version || ''),
+      theme_config: themeConfig, themeConfig,
+      updated_at: nowIso, updatedAt: nowIso,
+    };
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) return res.status(200).json({ ok: false, error: 'MongoDB is not configured or unavailable.' });
+    try {
+      await db.collection('theme_settings').updateOne(
+        { store_slug: key, theme_id: themeId },
+        { $set: doc, $setOnInsert: { created_at: nowIso, createdAt: nowIso } },
+        { upsert: true }
+      );
+    } catch (err: any) {
+      console.warn('[Server] /api/themes/settings write warning:', err?.message || err);
+      return res.status(200).json({ ok: false, error: err?.message || 'Could not save theme settings.' });
+    }
+    try {
+      const or: Record<string, any>[] = [];
+      if (storeSlug) or.push({ store_slug: storeSlug }, { storeSlug }, { slug: storeSlug });
+      if (email) or.push({ email }, { merchant_email: email });
+      if (or.length > 0) {
+        await db.collection('stores').updateMany(
+          { $or: or },
+          { $set: { theme_config: themeConfig, themeConfig, updated_at: nowIso, updatedAt: nowIso } }
+        );
+      }
+    } catch (err: any) {
+      console.warn('[Server] /api/themes/settings mirror warning:', err?.message || err);
+    }
+    return res.status(200).json({ ok: true, store_slug: key, theme_id: themeId, updatedAt: nowIso });
+  } catch (err: any) {
+    console.error('[Server] /api/themes/settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not save theme settings.' });
+  }
+}
+app.post('/api/themes/settings', handleThemeSettingsWrite);
+app.put('/api/themes/settings', handleThemeSettingsWrite);
+app.get('/api/themes/settings', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeSlug = String((req.query as any)?.store_slug || (req.query as any)?.storeSlug || (req.query as any)?.slug || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const email = String((req.query as any)?.email || '').trim().toLowerCase();
+    const themeId = String((req.query as any)?.themeId || (req.query as any)?.theme_id || '').trim();
+    if (!storeSlug && !email) {
+      return res.status(200).json({ ok: false, error: 'A store slug or email is required.', themeConfig: null });
+    }
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) return res.status(200).json({ ok: false, error: 'MongoDB unavailable.', themeConfig: null });
+    const or: Record<string, any>[] = [];
+    if (storeSlug) or.push({ store_slug: storeSlug }, { storeSlug }, { slug: storeSlug });
+    if (email) or.push({ email }, { merchant_email: email });
+    const query: Record<string, any> = { $or: or };
+    if (themeId) query.theme_id = themeId;
+    let doc: any = null;
+    try { doc = await db.collection('theme_settings').findOne(query); } catch (e: any) {
+      console.warn('[Server] GET /api/themes/settings lookup warning:', e?.message || e);
+    }
+    if (!doc) {
+      try {
+        const store: any = await db.collection('stores').findOne({ $or: or });
+        const cfg = store?.theme_config || store?.themeConfig || null;
+        return res.status(200).json({ ok: true, store_slug: storeSlug || email, theme_id: themeId || null, themeConfig: cfg, source: 'stores' });
+      } catch (e: any) {
+        console.warn('[Server] GET /api/themes/settings fallback warning:', e?.message || e);
+      }
+    }
+    return res.status(200).json({
+      ok: true, store_slug: doc?.store_slug || storeSlug || email,
+      theme_id: doc?.theme_id || themeId || null,
+      themeConfig: doc?.theme_config || doc?.themeConfig || null,
+      updatedAt: doc?.updated_at || doc?.updatedAt || null, source: 'theme_settings',
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/themes/settings error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load theme settings.', themeConfig: null });
+  }
+});
+
 // ── Admin Platform Configuration (Supabase-first, MongoDB fallback) ────────
 // Persists the Super Admin portal's payment gateways, platform settings and AI
 // controls. One document under config_key='platform' in BOTH providers.

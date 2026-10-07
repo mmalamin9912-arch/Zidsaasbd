@@ -89,8 +89,30 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   // Device Preview View Mode: 'desktop' | 'mobile' | 'tablet'
   const [deviceMode, setDeviceMode] = useState<'desktop' | 'mobile' | 'tablet'>('mobile');
 
+  // Publishing lifecycle: spinner on the Publish buttons + a real error path.
+  // Previously the "Unsaved changes pending" badge was cleared BEFORE any
+  // write completed (and every write was fire-and-forget), so a failed save
+  // still looked published.
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+
+  // Premium gating for the section editor. The `isPremiumPlan` prop is the
+  // live plan derivation from App (paid tier or ACTIVE subscription) — but a
+  // Pro/Growth merchant whose catalogue row is still loading must NOT see
+  // locked controls. Fall back to the merchant's own plan id so Growth/Pro
+  // ("growth_plan", "pro", "enterprise", legacy "pro_6m" …) always unlocks.
+  const merchantPlanId = String(
+    (merchant as any)?.subscriptionPlan || (merchant as any)?.subscription_plan || ''
+  ).trim().toLowerCase();
+  const isProOrGrowthPlan = (id: string): boolean => {
+    const v = String(id || '').trim().toLowerCase();
+    if (!v) return false;
+    return ['growth_plan', 'growth', 'pro', 'enterprise', 'enterprise_12m', 'pro_6m'].includes(v);
+  };
+  const editorUnlocked = Boolean(isPremiumPlan) || isProOrGrowthPlan(merchantPlanId);
+
   const PremiumLockedWrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    if (isPremiumPlan) return <>{children}</>;
+    if (editorUnlocked) return <>{children}</>;
     return (
       <div className="relative group">
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-[#181B26]/80 backdrop-blur-sm rounded-xl">
@@ -730,8 +752,8 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
 
   const performPublish = async () => {
     setShowPublishConfirmModal(false);
-    setHasUnsavedChanges(false);
-    setHistoryLogs((prev) => [`Published theme customization at ${new Date().toLocaleTimeString()}`, ...prev]);
+    setIsPublishing(true);
+    setPublishError(null);
 
     // Build the updated merchant profile + theme config (always, so persistence works)
     const themeConfig: Record<string, unknown> = {
@@ -772,8 +794,13 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     // configured earlier. Previously publish only touched Supabase + the local
     // shared store, so a reload on a fresh device (or the real /store/:slug URL)
     // lost every section — the editor's "sections disappear on save" bug.
+    //
+    // The "Unsaved changes pending" badge is cleared ONLY after this call (and
+    // the dedicated theme-settings route below) both return ok — a failed save
+    // must keep the badge and surface the error instead of claiming success.
+    const failures: string[] = [];
     try {
-      await fetch('/api/stores/update', {
+      const res = await fetch('/api/stores/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -793,8 +820,46 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
           themeConfig,
         }),
       });
-    } catch (e) {
+      const text = await res.text().catch(() => '');
+      let data: any = null;
+      try { data = text && !text.trimStart().startsWith('<') ? JSON.parse(text) : null; } catch { data = null; }
+      if (!res.ok || (data && data.ok === false)) {
+        failures.push(data?.error || `Store update failed (HTTP ${res.status}).`);
+      }
+    } catch (e: any) {
       console.warn('[ThemeCustomizer] Database theme save failed:', e);
+      failures.push(e?.message || 'Store update request failed.');
+    }
+
+    // Dedicated theme-settings write: the full themeConfig JSON for this
+    // store + theme. `/api/themes/settings` always answers JSON (never throws
+    // a 5xx), so a failure here is reported, not swallowed.
+    try {
+      const slugForSettings = (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
+        .toLowerCase().replace(/[^a-z0-9]/g, '');
+      const res = await fetch('/api/themes/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storeSlug: slugForSettings,
+          store_slug: slugForSettings,
+          email: updatedMerchant.email || merchant?.email || '',
+          themeId: updatedMerchant.activeThemeId || (themeName || ''),
+          themeName,
+          themeVersion,
+          themeConfig,
+          theme_config: themeConfig,
+        }),
+      });
+      const text = await res.text().catch(() => '');
+      let data: any = null;
+      try { data = text && !text.trimStart().startsWith('<') ? JSON.parse(text) : null; } catch { data = null; }
+      if (!res.ok || (data && data.ok === false)) {
+        failures.push(data?.error || `Theme settings save failed (HTTP ${res.status}).`);
+      }
+    } catch (e: any) {
+      console.warn('[ThemeCustomizer] Theme settings save failed:', e);
+      failures.push(e?.message || 'Theme settings request failed.');
     }
 
     // Persist the published theme to the slug-scoped shared store so the live
@@ -839,6 +904,21 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       console.warn('[ThemeCustomizer] Supabase theme save exception:', e);
     }
 
+    // ── Outcome ──────────────────────────────────────────────────────────
+    // Badge + history + success toast ONLY on full success. On ANY failure the
+    // badge stays ("Unsaved changes pending") and the error is shown, so the
+    // merchant knows to retry instead of losing edits.
+    setIsPublishing(false);
+    if (failures.length > 0) {
+      const message = failures.join(' ');
+      setPublishError(message);
+      setHistoryLogs((prev) => [`Publish FAILED at ${new Date().toLocaleTimeString()}: ${message}`, ...prev]);
+      triggerToast(`Publish failed: ${message}`);
+      return;
+    }
+    setPublishError(null);
+    setHasUnsavedChanges(false);
+    setHistoryLogs((prev) => [`Published theme customization at ${new Date().toLocaleTimeString()}`, ...prev]);
     triggerToast('Theme changes published live to storefront successfully!');
   };
 
@@ -1224,10 +1304,11 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
           </button>
           <button
             onClick={handlePublish}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-1.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-600/20 transition"
+            disabled={isPublishing}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-1.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-600/20 transition disabled:opacity-60 disabled:cursor-wait"
           >
             <Save className="w-3.5 h-3.5" />
-            <span>Publish Changes</span>
+            <span>{isPublishing ? 'Publishing…' : 'Publish Changes'}</span>
           </button>
         </div>
       </header>
@@ -1237,13 +1318,29 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
         <div className="bg-[#D4AF37]/10 border-b border-[#D4AF37]/20 px-4 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2 text-[#D4AF37] text-xs font-bold">
             <Clock className="w-3.5 h-3.5" />
-            <span>Unsaved changes pending</span>
+            <span>{isPublishing ? 'Publishing…' : 'Unsaved changes pending'}</span>
           </div>
           <button
             onClick={handlePublish}
-            className="bg-[#D4AF37] text-slate-950 font-bold px-3 py-1 rounded-lg text-xs hover:bg-[#FCF6BA] cursor-pointer transition"
+            disabled={isPublishing}
+            className="bg-[#D4AF37] text-slate-950 font-bold px-3 py-1 rounded-lg text-xs hover:bg-[#FCF6BA] cursor-pointer transition disabled:opacity-60 disabled:cursor-wait"
           >
-            Publish Changes
+            {isPublishing ? 'Publishing…' : 'Publish Changes'}
+          </button>
+        </div>
+      )}
+
+      {/* PUBLISH ERROR BAR — badge stays until a 200 OK clears it */}
+      {publishError && !isPublishing && (
+        <div className="bg-red-500/10 border-b border-red-500/20 px-4 py-2 flex items-center justify-between gap-3">
+          <div className="text-red-300 text-xs font-bold truncate" title={publishError}>
+            Publish failed: {publishError}
+          </div>
+          <button
+            onClick={handlePublish}
+            className="bg-red-500 hover:bg-red-600 text-white font-bold px-3 py-1 rounded-lg text-xs cursor-pointer transition shrink-0"
+          >
+            Retry Publish
           </button>
         </div>
       )}
@@ -4848,15 +4945,16 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
               <PremiumLockedWrapper>
                 <button
                   type="button"
-                  onClick={() => {
-                    performPublish();
+                  disabled={isPublishing}
+                  onClick={async () => {
+                    await performPublish();
                     setShowExitConfirmModal(false);
                     onClose();
                   }}
                   className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-md flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Sparkles className="w-3.5 h-3.5 fill-white" />
-                  <span>Publish & Exit</span>
+                  <span>{isPublishing ? 'Publishing…' : 'Publish & Exit'}</span>
                 </button>
               </PremiumLockedWrapper>
 
@@ -4926,11 +5024,11 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={performPublish}
+                onClick={performPublish} disabled={isPublishing}
                 className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-600/20 transition cursor-pointer flex items-center gap-1.5"
               >
                 <Check className="w-3.5 h-3.5" />
-                <span>Publish Now</span>
+                <span>{isPublishing ? 'Publishing…' : 'Publish Now'}</span>
               </button>
             </div>
           </div>

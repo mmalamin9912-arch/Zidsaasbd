@@ -158,7 +158,12 @@ export default function App() {
   // its own default sub-tab.
   const [settingsSubTab, setSettingsSubTab] = useState<SettingsSubTab>('settings_general');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
-  const [isPremiumPlan, setIsPremiumPlan] = useState<boolean>(false); // Placeholder for testing premium features
+  // Premium editor unlock — DERIVED from the live plan, never a placeholder.
+  // A Pro/Growth merchant (paid plan id, ACTIVE Mongo status, or an ACTIVE
+  // snapshot carrying a plan) unlocks every "Premium Feature" control in the
+  // theme section editor (Header Background Color, custom styles, …).
+  // `setIsPremiumPlan` is kept only for tests/storybook overrides.
+  const [isPremiumPlanOverride, setIsPremiumPlan] = useState<boolean | null>(null);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('zid_theme_mode');
@@ -413,6 +418,18 @@ export default function App() {
   const localPlanId = merchant?.subscriptionPlan;
   const hasPaidPlanId = !!localPlanId && localPlanId !== 'free_trial' && localPlanId !== 'trial';
   const isPaidPlan = dbReportsActive || hasPaidPlanId;
+  // Premium theme-editor unlock: any paid tier counts, and Pro/Growth is
+  // explicit — a `growth_plan`/`pro`/`enterprise` id (current or legacy) or an
+  // ACTIVE subscription snapshot unlocks even when the local plan id is stale.
+  const snapshotPlanId = String(dbSubscriptionSnapshot?.planId || '').trim().toLowerCase();
+  const snapshotActive = (dbSubscriptionSnapshot?.status || '').toUpperCase() === 'ACTIVE';
+  const planIdLooksProOrGrowth = (id?: string | null): boolean => {
+    const v = String(id || '').trim().toLowerCase();
+    return ['growth_plan', 'growth', 'pro', 'pro_6m', 'enterprise', 'enterprise_12m'].includes(v);
+  };
+  const isPremiumPlan = isPremiumPlanOverride !== null
+    ? isPremiumPlanOverride
+    : (planIdLooksProOrGrowth(localPlanId) || planIdLooksProOrGrowth(snapshotPlanId) || isPaidPlan || (snapshotActive && snapshotPlanId !== ''));
   const trialEndsAtDate = merchant?.trialEndsAt ? new Date(merchant.trialEndsAt) : null;
   const now = new Date();
   const trialDaysRemaining = trialEndsAtDate
