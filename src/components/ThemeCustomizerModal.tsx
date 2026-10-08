@@ -1994,8 +1994,8 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                           list behind the "Welcome to Our Store" hero. The
                           storefront auto-rotates through it every 4s. Add,
                           replace (URL or upload) and remove here. Each row is
-                          labelled Welcome Section Background 1 / 2 / … and the
-                          whole list is persisted as `themeConfig.heroImages`. */}
+                          labelled "Welcome Background Image 1 / 2 / …" and the
+                          list is persisted as `themeConfig.heroImages`. */}
                       <div className="space-y-2 pt-2 border-t border-[#2E3548]">
                         <div className="flex justify-between items-center">
                           <label className="text-slate-300 font-semibold block">Welcome Section Backgrounds ({heroBackgroundList.length})</label>
@@ -2010,9 +2010,9 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                             <div key={`${idx}-${bgUrl.slice(0, 24)}`} className="space-y-1">
                               <span
                                 className="block text-[10px] font-black uppercase tracking-wider text-[#D4AF37]"
-                                title={`Welcome Section Background ${idx + 1}`}
+                                title={`Welcome Background Image ${idx + 1}`}
                               >
-                                Welcome Section Background {idx + 1}
+                                Welcome Background Image {idx + 1}
                               </span>
                               <div className="flex items-center gap-1.5">
                                 <div className="w-10 h-10 rounded-lg overflow-hidden border border-[#2E3548] bg-[#131620] shrink-0">
@@ -2020,7 +2020,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 </div>
                                 <input
                                   type="text"
-                                  placeholder="Welcome background image URL..."
+                                  placeholder={`Welcome Background Image ${idx + 1} URL...`}
                                   value={bgUrl}
                                   onChange={(e) => updateHeroBackgroundAt(idx, e.target.value)}
                                   className="flex-1 bg-[#131620] border border-[#2E3548] text-white p-1.5 rounded text-xs"
