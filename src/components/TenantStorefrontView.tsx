@@ -63,15 +63,15 @@ function resolveProductImage(p: any): string {
       ? String(value.find((x) => typeof x === 'string' && String(x).trim()) || '').trim()
       : '';
   const candidate =
-    p.image ||
     firstOf(p.images) ||
     p.thumbnail ||
+    p.thumbnailUrl ||
+    p.thumbnail_url ||
     p.imageUrl ||
+    p.image ||
     p.image_url ||
     firstOf(p.additionalImages) ||
     firstOf(p.additional_images) ||
-    p.thumbnailUrl ||
-    p.thumbnail_url ||
     '';
   return String(candidate || '').trim();
 }
@@ -2915,11 +2915,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       </div>
 
                       {/* Image Container with Hover Effects.
-                          `max-h-64` caps the square so a wide desktop column
-                          can never blow the photo up to ~500px tall; the img
-                          stays `object-cover` so it crops instead of scaling. */}
+                          `grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4`
+                          on the parent keeps columns responsive; `aspect-square w-full`
+                          + `max-h-64` + `object-cover` on the img caps the square so
+                          a wide desktop column can never blow the photo up — it crops
+                          instead of scaling. */}
                       <div
-                        className={`relative aspect-square max-h-64 bg-slate-950/80 overflow-hidden cursor-pointer ${
+                        className={`relative aspect-square w-full max-h-64 bg-slate-950/80 overflow-hidden cursor-pointer ${
                           resolvedTheme.productsLayout === 'List' ? 'w-28 shrink-0 self-stretch' : ''
                         }`}
                         onClick={() => setQuickViewProduct(p)}

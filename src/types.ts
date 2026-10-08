@@ -121,6 +121,12 @@ export interface Product {
   storeSlug?: string;
   store_slug?: string;
   image: string;
+  /** Alternate keys used by the API / Supabase mirror / Products Management form. */
+  images?: string[];
+  thumbnail?: string;
+  imageUrl?: string;
+  image_url?: string;
+  thumbnailUrl?: string;
   additionalImages?: string[];
   youtubeUrl?: string;
   videoUrl?: string;

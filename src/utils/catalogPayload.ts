@@ -54,7 +54,16 @@ export function mapApiProduct(raw: any): any {
     compareAtPriceBDT: raw.compareAtPriceBDT != null ? Number(raw.compareAtPriceBDT) : (raw.compare_at_price != null ? Number(raw.compare_at_price) : undefined),
     stock: Number(raw.stock ?? 0),
     status: raw.status || 'Active',
-    image: raw.image || raw.image_url || (Array.isArray(raw.images) ? raw.images[0] : '') || '',
+    image:
+      (Array.isArray(raw.images) ? String(raw.images.find((x: unknown) => typeof x === 'string' && String(x).trim()) || '').trim() : '') ||
+      String(raw.image || '').trim() ||
+      String(raw.thumbnail || raw.thumbnailUrl || raw.thumbnail_url || '').trim() ||
+      String(raw.imageUrl || raw.image_url || '').trim() ||
+      '',
+    images: Array.isArray(raw.images) ? raw.images : [],
+    thumbnail: raw.thumbnail || raw.thumbnailUrl || raw.thumbnail_url || '',
+    imageUrl: raw.imageUrl || raw.image_url || '',
+    image_url: raw.image_url || raw.imageUrl || '',
     additionalImages: raw.additionalImages || raw.additional_images || [],
     merchantId,
     merchant_id: raw.merchant_id || merchantId,
@@ -151,7 +160,23 @@ export function buildProductDbPayload(product: any, merchant?: { id?: string; st
   const storeSlug = product.storeSlug || product.store_slug || merchant?.storeSlug || merchantId || 'bd';
   const price = Number(product.priceBDT ?? product.price ?? product.price_bdt ?? 0);
   const stock = Number(product.stock ?? product.stock_quantity ?? product.quantity ?? 0);
-  const image = String(product.image || product.imageUrl || product.image_url || '');
+  // Persist EVERY image key Products Management may have set — `images[0]`,
+  // `thumbnail`, `imageUrl` — so the storefront resolver can find the real
+  // database URL instead of falling back to a placeholder.
+  const firstArrayImage = (value: unknown): string =>
+    Array.isArray(value)
+      ? String(value.find((x) => typeof x === 'string' && String(x).trim()) || '').trim()
+      : '';
+  const image = String(
+    firstArrayImage(product.images) ||
+    product.image ||
+    product.thumbnail ||
+    product.thumbnailUrl ||
+    product.thumbnail_url ||
+    product.imageUrl ||
+    product.image_url ||
+    ''
+  ).trim();
   const storeId = product.storeId || product.store_id || merchant?.id || merchant?.storeId || '';
   const storeCode = product.storeCode || product.store_code || merchant?.storeCode || merchant?.store_code || '';
 
@@ -180,6 +205,9 @@ export function buildProductDbPayload(product: any, merchant?: { id?: string; st
     stock,
     stock_quantity: stock,
     image,
+    images: Array.isArray(product.images) && product.images.length > 0 ? product.images : (image ? [image] : []),
+    thumbnail: product.thumbnail || product.thumbnailUrl || product.thumbnail_url || image,
+    imageUrl: product.imageUrl || image,
     image_url: image,
     additionalImages: product.additionalImages || product.additional_images || [],
     description: product.description || product.descriptionEn || '',
