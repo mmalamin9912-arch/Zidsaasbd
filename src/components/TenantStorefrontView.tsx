@@ -30,6 +30,41 @@ import {
   CUSTOMER_ORDERS_POLL_MS,
 } from '../lib/orderTracking';
 
+/**
+ * Resolve a product's display image from ANY of the shapes the different feeds
+ * hand back.
+ *
+ * `/api/products` returns the raw MongoDB row — and Products Management may
+ * have persisted the picture as `image`, `image_url`, `imageUrl`, an `images[]`
+ * array or a `thumbnail`. The Supabase mirror and the slug-scoped shared store
+ * each pick their own key. Reading only `image_url || image` (what this file
+ * used to do) meant a product saved under any other key arrived at the grid
+ * with an empty `image`, so the card silently fell back to the built-in demo
+ * photo instead of the merchant's real picture.
+ *
+ * Returns '' when nothing usable exists, letting `<SafeImage>` apply its local
+ * in-origin placeholder rather than a remote demo image.
+ */
+function resolveProductImage(p: any): string {
+  if (!p || typeof p !== 'object') return '';
+  const firstOf = (value: unknown): string =>
+    Array.isArray(value)
+      ? String(value.find((x) => typeof x === 'string' && String(x).trim()) || '').trim()
+      : '';
+  const candidate =
+    p.image ||
+    firstOf(p.images) ||
+    p.thumbnail ||
+    p.imageUrl ||
+    p.image_url ||
+    firstOf(p.additionalImages) ||
+    firstOf(p.additional_images) ||
+    p.thumbnailUrl ||
+    p.thumbnail_url ||
+    '';
+  return String(candidate || '').trim();
+}
+
 function mapSupabaseProduct(p: any): Product {
   const title = p.title || p.name || 'Untitled Product';
   return {
@@ -37,7 +72,7 @@ function mapSupabaseProduct(p: any): Product {
     title,
     priceBDT: Number(p.price ?? p.priceBDT ?? 0),
     compareAtPriceBDT: p.compare_at_price != null ? Number(p.compare_at_price) : (p.compareAtPriceBDT != null ? Number(p.compareAtPriceBDT) : undefined),
-    image: p.image_url || p.image || '',
+    image: resolveProductImage(p),
     additionalImages: Array.isArray(p.additional_images) ? p.additional_images : (Array.isArray(p.additionalImages) ? p.additionalImages : []),
     category: p.category || p.category_name || 'General',
     categoryId: String(p.category_id || p.categoryId || ''),
@@ -2809,12 +2844,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                       ? "flex flex-col gap-3"
                       : resolvedTheme.productsLayout === 'Carousel'
                         ? "flex gap-3 overflow-x-auto pb-2 scrollbar-none snap-x"
-                        : "grid grid-cols-2 gap-3"
+                        : "grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"
                   }
                   style={resolvedTheme.productsLayout === 'Carousel' ? undefined : undefined}
                 >
                   {displayProducts.length === 0 ? (
-                    <div className={`${resolvedTheme.productsLayout === 'List' ? '' : 'col-span-2'} rounded-2xl border border-dashed border-slate-800 bg-slate-900/50 px-4 py-12 text-center space-y-2`}>
+                    <div className={`${resolvedTheme.productsLayout === 'List' ? '' : 'col-span-2 md:col-span-3 lg:col-span-4'} rounded-2xl border border-dashed border-slate-800 bg-slate-900/50 px-4 py-12 text-center space-y-2`}>
                       <ShoppingBag className="mx-auto h-10 w-10 text-slate-600" />
                       <h3 className="text-sm font-black text-slate-200">{isLoadingSupabase ? t('sf_loading_storefront') : t('sf_no_products')}</h3>
                       <p className="text-xs text-slate-500">
@@ -2864,13 +2899,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                         )}
                       </div>
 
-                      {/* Image Container with Hover Effects */}
+                      {/* Image Container with Hover Effects.
+                          `max-h-64` caps the square so a wide desktop column
+                          can never blow the photo up to ~500px tall; the img
+                          stays `object-cover` so it crops instead of scaling. */}
                       <div
-                        className="relative aspect-square bg-slate-950/80 overflow-hidden cursor-pointer"
+                        className={`relative aspect-square max-h-64 bg-slate-950/80 overflow-hidden cursor-pointer ${
+                          resolvedTheme.productsLayout === 'List' ? 'w-28 shrink-0 self-stretch' : ''
+                        }`}
                         onClick={() => setQuickViewProduct(p)}
                       >
                         <SafeImage
-                          src={p.image || "https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=600&q=80"}
+                          src={resolveProductImage(p)}
                           alt={p.title}
                           className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500 ease-out opacity-90 group-hover:opacity-100"
                         />
