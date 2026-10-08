@@ -32,6 +32,22 @@ export const IMAGE_QUALITY = 0.85;
 export const SOFT_SIZE_LIMIT = 1_200_000; // ~1.2MB of base64
 
 /**
+ * Longest edge, in pixels, for LOGO uploads (Header "Desktop Logo" /
+ * "Mobile Logo", favicon, brand marks).
+ *
+ * Logos are rendered inside fixed ~150-200px slots (the Header Logo panel is
+ * literally labelled "200x80px" / "150x60px"), so re-encoding them at
+ * MAX_IMAGE_EDGE (1200) stored a base64 string roughly 6x larger than the
+ * pixel data the storefront ever displays — and that blob is embedded in every
+ * single `theme_config` write on the way to MongoDB.
+ *
+ * 400px still gives a crisp 2x-retina render while shrinking the persisted
+ * string to a few KB. Transparency survives because `downscaleImage` encodes
+ * WebP first, which supports alpha.
+ */
+export const LOGO_MAX_EDGE = 400;
+
+/**
  * Downscale + re-encode an image for storage.
  *
  * @param source a `data:`/`blob:` URL, or any other string (returned untouched)
@@ -147,6 +163,7 @@ export default {
   readAndDownscaleImage,
   dataUrlSize,
   MAX_IMAGE_EDGE,
+  LOGO_MAX_EDGE,
   IMAGE_QUALITY,
   SOFT_SIZE_LIMIT,
 };

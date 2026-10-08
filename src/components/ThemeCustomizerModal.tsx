@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { GalleryImage, MerchantProfile, Product, ThemeConfig } from '../types';
 import { TenantStorefrontView } from './TenantStorefrontView';
 import { readZidStoreData, writeZidStoreData } from '../lib/storeData';
-import { readAndDownscaleImage } from '../utils/imageUtils';
+import { readAndDownscaleImage, LOGO_MAX_EDGE, MAX_IMAGE_EDGE } from '../utils/imageUtils';
 import SafeImage from './SafeImage';
 import { supabase } from '../lib/supabase';
 import {
@@ -320,15 +320,20 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
    * up inside `theme_config`, which is persisted through /api/stores/update. A
    * raw FileReader result is several MB, which is what produced the 413 there and
    * the Supabase mirror's 400.
+   *
+   * `maxEdge` lets a fixed-size control (the Header logo slots are 200x80 /
+   * 150x60) ask for a much smaller re-encode than the default 1200px, so a
+   * logo costs a few KB of base64 instead of hundreds.
    */
   const pickImage = async (
     e: React.ChangeEvent<HTMLInputElement>,
-    apply: (dataUrl: string) => void
+    apply: (dataUrl: string) => void,
+    maxEdge: number = MAX_IMAGE_EDGE
   ) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    const dataUrl = await readAndDownscaleImage(file);
+    const dataUrl = await readAndDownscaleImage(file, maxEdge);
     if (dataUrl) apply(dataUrl);
   };
 
@@ -1531,7 +1536,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                               type="file"
                               accept="image/*"
                               className="hidden"
-                              onChange={(e) => pickImage(e, setDesktopLogoUrl)}
+                              onChange={(e) => pickImage(e, setDesktopLogoUrl, LOGO_MAX_EDGE)}
                             />
                           </label>
                         </div>
@@ -1569,7 +1574,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                               type="file"
                               accept="image/*"
                               className="hidden"
-                              onChange={(e) => pickImage(e, setMobileLogoUrl)}
+                              onChange={(e) => pickImage(e, setMobileLogoUrl, LOGO_MAX_EDGE)}
                             />
                           </label>
                         </div>

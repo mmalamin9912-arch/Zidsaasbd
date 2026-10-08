@@ -159,6 +159,16 @@ interface TenantStorefrontViewProps {
    * storefront never sets it, so its "DB/cache wins" precedence is untouched.
    */
   previewMode?: boolean;
+  /**
+   * Device the current preview is emulating — set from the customizer's
+   * desktop / mobile / tablet toggle.
+   *
+   * The Header Logo panel exposes TWO fields, Desktop Logo (200x80) and Mobile
+   * Logo (150x60), and this flag decides which one the top navigation header
+   * renders, so flipping device mode re-renders the matching brand mark.
+   * The public storefront never sets it and falls back to the desktop logo.
+   */
+  isMobile?: boolean;
 }
 
 interface CustomerReturnRequest {
@@ -305,6 +315,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   compact = false,
   layout,
   previewMode = false,
+  isMobile = false,
 }) => {
   // The storefront may be mounted in another route/tab from the editor. Subscribe
   // directly to the shared store so products and published theme changes appear
@@ -590,6 +601,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
       ? (merchantThemeConfig.announcementItems as string[])
       : [storefrontMerchant.announcementText || 'Welcome to SlateBD Luxury Store'],
     headerBgColor: (typeof merchantThemeConfig.headerBgColor === 'string' && merchantThemeConfig.headerBgColor) || '#0f172a',
+    // Brand marks — the Header Logo panel's Desktop / Mobile uploads. Kept as
+    // their own fields (rather than only folded into `logoUrl`) so the header
+    // can pick whichever matches the device currently being previewed.
+    desktopLogoUrl: (typeof merchantThemeConfig.desktopLogoUrl === 'string' && merchantThemeConfig.desktopLogoUrl) || '',
+    mobileLogoUrl: (typeof merchantThemeConfig.mobileLogoUrl === 'string' && merchantThemeConfig.mobileLogoUrl) || '',
+    logoHeight: typeof merchantThemeConfig.logoHeight === 'number' ? merchantThemeConfig.logoHeight : 28,
     showHeroBanner: merchantThemeConfig.showHeroBanner !== false,
     heroTitle: (typeof merchantThemeConfig.heroTitle === 'string' && merchantThemeConfig.heroTitle) || storefrontMerchant.heroTitle || '',
     heroSubtitle: (typeof merchantThemeConfig.heroSubtitle === 'string' && merchantThemeConfig.heroSubtitle) || storefrontMerchant.heroSubtitle || '',
@@ -661,6 +678,25 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // readable foreground/accent/hover set that is applied to the header in BOTH
   // the live preview and the published storefront.
   const headerPalette = resolveHeaderPalette(resolvedTheme.headerBgColor);
+
+  // Which brand mark the top navigation header shows. The merchant's uploaded
+  // logo wins; the built-in ZID wordmark only renders when nothing was ever
+  // uploaded. This is fed straight from `merchant.themeConfig`, so in
+  // previewMode a picked file or a typed URL re-renders the header in the same
+  // frame — no publish, refetch or refresh in between.
+  const headerLogoSrc = (
+    isMobile
+      ? (resolvedTheme.mobileLogoUrl || resolvedTheme.desktopLogoUrl)
+      : (resolvedTheme.desktopLogoUrl || resolvedTheme.mobileLogoUrl)
+  ) || storefrontMerchant.logoUrl || '';
+  // A stale/expired URL must degrade to the wordmark rather than leave a
+  // broken-image glyph in the nav; reset whenever a new src is supplied.
+  const [headerLogoFailed, setHeaderLogoFailed] = useState(false);
+  useEffect(() => { setHeaderLogoFailed(false); }, [headerLogoSrc]);
+  const showHeaderLogo = Boolean(headerLogoSrc) && !headerLogoFailed;
+  // Clamp to the editor's own 20-60px range so a stray value cannot blow out
+  // the header height.
+  const headerLogoHeight = Math.min(60, Math.max(20, Number(resolvedTheme.logoHeight) || 28));
   const activeHeroSlide = resolvedTheme.slides.length > 0
     ? resolvedTheme.slides[Math.min(resolvedTheme.activeSlideIndex, resolvedTheme.slides.length - 1)]
     : null;
@@ -2428,9 +2464,21 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 <Menu className="w-5 h-5" />
               </button>
 
-              {/* Stacked Branding Hierarchy */}
+              {/* Stacked Branding Hierarchy — the merchant's Desktop/Mobile
+                  logo when one is set (live-synced from the Section Editor),
+                  falling back to the built-in ZID wordmark. */}
               <div className="flex flex-col min-w-0">
-                <BrandLogo size="sm" showSubtitle={false} isDarkMode={true} />
+                {showHeaderLogo ? (
+                  <img
+                    src={headerLogoSrc}
+                    alt={storefrontMerchant.storeName || 'Store logo'}
+                    style={{ height: `${headerLogoHeight}px` }}
+                    className="max-w-[170px] object-contain object-left"
+                    onError={() => setHeaderLogoFailed(true)}
+                  />
+                ) : (
+                  <BrandLogo size="sm" showSubtitle={false} isDarkMode={true} />
+                )}
                 <h1 className="text-xs font-black tracking-wider text-amber-400 truncate max-w-[170px] mt-0.5 uppercase">
                   {storefrontMerchant.storeName === 'My Zid Store' ? 'SlateBD' : storefrontMerchant.storeName || 'SlateBD'}
                 </h1>
