@@ -222,9 +222,10 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const [heroSubtitle, setHeroSubtitle] = useState(merchant?.heroSubtitle || (merchant?.themeConfig?.slides?.[0]?.subtitle ?? 'Shop our premium organic food, traditional boutique, and authentic gadgets.'));
   const [heroCtaText, setHeroCtaText] = useState(merchant?.themeConfig?.heroCtaText ?? (merchant?.themeConfig?.slides?.[0]?.ctaText ?? 'Shop Now'));
   const [heroImage, setHeroImage] = useState(merchant?.heroImage || (merchant?.themeConfig?.slides?.[0]?.image ?? 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=1600&q=80'));
-  // Merchant-managed list of hero BACKGROUND photos — the canonical array the
-  // storefront rotates through every 4.5s. Add / replace / remove from the
-  // Image Carousel panel below. Only non-empty URLs are ever persisted.
+  // Merchant-managed list of WELCOME SECTION background photos — the canonical
+  // array the storefront rotates through every 4s behind the "Welcome to Our
+  // Store" hero. Add / replace / remove from the Image Carousel panel below.
+  // Only non-empty URLs are ever persisted.
   //
   // Seeded empty here and hydrated from the merchant record in the mount effect
   // below. A useMemo initialiser would be a trap: the modal stays mounted across
@@ -1989,60 +1990,63 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                         </button>
                       </div>
 
-                      {/* Hero Background Photos — the merchant-managed list the
-                          storefront auto-rotates through every 4.5s. Add,
+                      {/* WELCOME SECTION BACKGROUNDS — the merchant-managed
+                          list behind the "Welcome to Our Store" hero. The
+                          storefront auto-rotates through it every 4s. Add,
                           replace (URL or upload) and remove here. Each row is
-                          labelled Hero Image 1 / Hero Image 2 / … and the whole
-                          list is persisted as `themeConfig.heroImages`. */}
+                          labelled Welcome Section Background 1 / 2 / … and the
+                          whole list is persisted as `themeConfig.heroImages`. */}
                       <div className="space-y-2 pt-2 border-t border-[#2E3548]">
                         <div className="flex justify-between items-center">
-                          <label className="text-slate-300 font-semibold block">Hero Background Photos ({heroBackgroundList.length})</label>
-                          <span className="text-[10px] text-[#D4AF37] font-mono">Auto 4.5s</span>
+                          <label className="text-slate-300 font-semibold block">Welcome Section Backgrounds ({heroBackgroundList.length})</label>
+                          <span className="text-[10px] text-[#D4AF37] font-mono">Auto 4s</span>
                         </div>
                         <p className="text-[10px] text-slate-500 leading-relaxed">
-                          These background images fade automatically every 4.5 seconds on the storefront.
+                          These background images fade automatically every 4 seconds on the storefront.
                         </p>
 
                         <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                           {heroBackgroundList.map((bgUrl, idx) => (
-                            <div key={`${idx}-${bgUrl.slice(0, 24)}`} className="flex items-center gap-1.5">
+                            <div key={`${idx}-${bgUrl.slice(0, 24)}`} className="space-y-1">
                               <span
-                                className="text-[9px] font-black uppercase tracking-wider text-[#D4AF37] w-11 shrink-0 leading-tight"
-                                title={`Hero Image ${idx + 1}`}
+                                className="block text-[10px] font-black uppercase tracking-wider text-[#D4AF37]"
+                                title={`Welcome Section Background ${idx + 1}`}
                               >
-                                Hero Image {idx + 1}
+                                Welcome Section Background {idx + 1}
                               </span>
-                              <div className="w-10 h-10 rounded-lg overflow-hidden border border-[#2E3548] bg-[#131620] shrink-0">
-                                <SafeImage src={bgUrl} alt={`Hero background ${idx + 1}`} className="w-full h-full object-cover" />
-                              </div>
-                              <input
-                                type="text"
-                                placeholder="Hero background image URL..."
-                                value={bgUrl}
-                                onChange={(e) => updateHeroBackgroundAt(idx, e.target.value)}
-                                className="flex-1 bg-[#131620] border border-[#2E3548] text-white p-1.5 rounded text-xs"
-                              />
-                              <label className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 text-[10px] font-bold px-2 py-1.5 rounded cursor-pointer shrink-0 flex items-center gap-1 border border-[#3A435E]" title="Replace image">
-                                <Upload className="w-3 h-3 text-[#D4AF37]" />
+                              <div className="flex items-center gap-1.5">
+                                <div className="w-10 h-10 rounded-lg overflow-hidden border border-[#2E3548] bg-[#131620] shrink-0">
+                                  <SafeImage src={bgUrl} alt={`Welcome background ${idx + 1}`} className="w-full h-full object-cover" />
+                                </div>
                                 <input
-                                  type="file"
-                                  accept="image/*"
-                                  className="hidden"
-                                  onChange={(e) => pickImage(e, (newImg) => updateHeroBackgroundAt(idx, newImg))}
+                                  type="text"
+                                  placeholder="Welcome background image URL..."
+                                  value={bgUrl}
+                                  onChange={(e) => updateHeroBackgroundAt(idx, e.target.value)}
+                                  className="flex-1 bg-[#131620] border border-[#2E3548] text-white p-1.5 rounded text-xs"
                                 />
-                              </label>
-                              <button
-                                type="button"
-                                onClick={() => removeHeroBackgroundAt(idx)}
-                                className="text-red-400 hover:text-red-300 p-1 cursor-pointer shrink-0"
-                                title="Remove background image"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                                <label className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 text-[10px] font-bold px-2 py-1.5 rounded cursor-pointer shrink-0 flex items-center gap-1 border border-[#3A435E]" title="Replace image">
+                                  <Upload className="w-3 h-3 text-[#D4AF37]" />
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={(e) => pickImage(e, (newImg) => updateHeroBackgroundAt(idx, newImg))}
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => removeHeroBackgroundAt(idx)}
+                                  className="text-red-400 hover:text-red-300 p-1 cursor-pointer shrink-0"
+                                  title="Remove background image"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
                           ))}
                           {heroBackgroundList.length === 0 && (
-                            <p className="text-[10px] text-slate-500 italic py-1">No hero background photos yet — add one below.</p>
+                            <p className="text-[10px] text-slate-500 italic py-1">No welcome section backgrounds yet — add one below.</p>
                           )}
                         </div>
 
@@ -2052,11 +2056,11 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                           className="w-full bg-[#202533] hover:bg-[#282E3F] border border-dashed border-[#3A435E] hover:border-[#D4AF37] text-slate-200 text-xs font-bold p-2.5 rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
                         >
                           <Plus className="w-3.5 h-3.5 text-[#D4AF37]" />
-                          <span>+ Add Hero Background</span>
+                          <span>+ Add Welcome Background</span>
                         </button>
                         <label className="w-full bg-[#202533] hover:bg-[#282E3F] border border-[#3A435E] hover:border-[#D4AF37] text-slate-200 text-xs font-bold p-2.5 rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer">
                           <Upload className="w-3 h-3 text-[#D4AF37]" />
-                          <span>Upload Hero Background</span>
+                          <span>Upload Welcome Background</span>
                           <input
                             type="file"
                             accept="image/*"

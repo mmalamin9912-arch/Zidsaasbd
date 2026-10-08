@@ -33,12 +33,13 @@ import {
 /**
  * Delay between hero background slides, in milliseconds.
  *
- * The merchant's "Hero Background Photos" list is an auto-looping fade
- * carousel; 4.5s is deliberately inside the 4-5s band — fast enough to read as
- * a live carousel, slow enough that the headline, subtitle and CTA on top of it
- * can actually be read before the backdrop changes.
+ * The "Welcome to Our Store" hero — the merchant's `heroTitle`/`heroSubtitle`
+ * rendered over an auto-looping fade carousel of `heroImages` — advances every
+ * 4s: fast enough to read as a live slider, slow enough that the headline,
+ * subtitle and CTA on top of it can actually be read before the backdrop
+ * changes.
  */
-const HERO_ROTATION_MS = 4500;
+const HERO_ROTATION_MS = 4000;
 
 /**
  * Resolve a product's display image from ANY of the shapes the different feeds
@@ -795,9 +796,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [supabaseProducts, setSupabaseProducts] = useState<Product[]>([]);
   const [supabaseCategories, setSupabaseCategories] = useState<any[]>([]);
   const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
-  // Hero carousel auto-rotation — fades through the merchant's configured hero
-  // background photos in order. 4.5s sits inside the intended 4-5s window: long
-  // enough to read the headline and CTA, short enough to still feel live.
+  // Welcome-section hero auto-rotation — fades through the merchant's
+  // configured background photos (`heroImages`) in order, every 4 seconds.
   const heroImageList: string[] = resolvedTheme.heroImages.length > 0
     ? resolvedTheme.heroImages
     : (resolvedTheme.heroBackgrounds.length > 0
