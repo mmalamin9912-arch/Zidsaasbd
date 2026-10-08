@@ -679,11 +679,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // the live preview and the published storefront.
   const headerPalette = resolveHeaderPalette(resolvedTheme.headerBgColor);
 
-  // Which brand mark the top navigation header shows. The merchant's uploaded
-  // logo wins; the built-in ZID wordmark only renders when nothing was ever
-  // uploaded. This is fed straight from `merchant.themeConfig`, so in
-  // previewMode a picked file or a typed URL re-renders the header in the same
-  // frame — no publish, refetch or refresh in between.
+  // The MERCHANT's own store logo for the top navigation bar. It is a SEPARATE
+  // element from the ZID SaaS BD platform wordmark, which always stays in its
+  // original slot on the left — so customising the Desktop / Mobile logo only
+  // ever moves the merchant's mark and can never overwrite the platform brand.
+  // This is fed straight from `merchant.themeConfig`, so in previewMode a
+  // picked file or a typed URL re-renders the header in the same frame — no
+  // publish, refetch or refresh in between.
   const headerLogoSrc = (
     isMobile
       ? (resolvedTheme.mobileLogoUrl || resolvedTheme.desktopLogoUrl)
@@ -2464,26 +2466,34 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 <Menu className="w-5 h-5" />
               </button>
 
-              {/* Stacked Branding Hierarchy — the merchant's Desktop/Mobile
-                  logo when one is set (live-synced from the Section Editor),
-                  falling back to the built-in ZID wordmark. */}
+              {/* PLATFORM BRANDING — the ZID SaaS BD wordmark. Rendered
+                  unconditionally in its ORIGINAL stacked position: a
+                  merchant's custom store logo must never replace, hide or
+                  overwrite the SaaS platform mark. */}
               <div className="flex flex-col min-w-0">
-                {showHeaderLogo ? (
-                  <img
-                    src={headerLogoSrc}
-                    alt={storefrontMerchant.storeName || 'Store logo'}
-                    style={{ height: `${headerLogoHeight}px` }}
-                    className="max-w-[170px] object-contain object-left"
-                    onError={() => setHeaderLogoFailed(true)}
-                  />
-                ) : (
-                  <BrandLogo size="sm" showSubtitle={false} isDarkMode={true} />
-                )}
+                <BrandLogo size="sm" showSubtitle={false} isDarkMode={true} />
                 <h1 className="text-xs font-black tracking-wider text-amber-400 truncate max-w-[170px] mt-0.5 uppercase">
                   {storefrontMerchant.storeName === 'My Zid Store' ? 'SlateBD' : storefrontMerchant.storeName || 'SlateBD'}
                 </h1>
               </div>
             </div>
+
+            {/* MERCHANT STORE LOGO — the Desktop / Mobile logo from the Header
+                Logo panel, centred in the navbar and completely independent of
+                the platform branding on the left. Rendered ONLY when the
+                merchant has actually set one, so an unset logo leaves the
+                default layout exactly as it was. */}
+            {showHeaderLogo && (
+              <div className="flex-1 min-w-0 flex justify-center px-2">
+                <img
+                  src={headerLogoSrc}
+                  alt={storefrontMerchant.storeName || 'Store logo'}
+                  style={{ height: `${headerLogoHeight}px` }}
+                  className="max-w-full object-contain object-center"
+                  onError={() => setHeaderLogoFailed(true)}
+                />
+              </div>
+            )}
 
             <div className="flex items-center gap-1.5 shrink-0">
               <button
