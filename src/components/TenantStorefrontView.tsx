@@ -796,8 +796,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [supabaseProducts, setSupabaseProducts] = useState<Product[]>([]);
   const [supabaseCategories, setSupabaseCategories] = useState<any[]>([]);
   const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
-  // Welcome-section hero auto-rotation — fades through the merchant's
-  // configured background photos (`heroImages`) in order, every 4 seconds.
+  // Welcome-section hero auto-slider — the merchant configures exactly two
+  // photos ("Welcome Background Image 1" / "Image 2") in the Theme Editor, and
+  // this cross-fades between them every 4 seconds. When only one photo is set
+  // the banner renders it statically.
   const heroImageList: string[] = resolvedTheme.heroImages.length > 0
     ? resolvedTheme.heroImages
     : (resolvedTheme.heroBackgrounds.length > 0
@@ -811,10 +813,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     }, HERO_ROTATION_MS);
     return () => clearInterval(interval);
   }, [resolvedTheme.showHeroBanner, heroImageList.length]);
-  // Reset index when image list changes
+  // Re-start from the FIRST photo whenever the configured pair changes, so a
+  // freshly uploaded Image 1 is the one the merchant sees on the next paint.
+  const heroImageKey = heroImageList.join('|');
   useEffect(() => {
     setActiveHeroIndex(0);
-  }, [heroImageList.join(',')]);
+  }, [heroImageKey]);
 
   // Apply the merchant's SEO metadata + favicon to the document head.
   // The storefront is a client-rendered SPA, so this is what fills the <title>,

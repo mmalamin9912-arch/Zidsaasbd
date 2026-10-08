@@ -493,36 +493,62 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const heroBackgroundList: string[] = mergeHeroBackgrounds(heroBackgrounds, heroImages);
 
   /**
-   * Replace the entire background photo list (add / replace / remove).
+   * Number of background photos in the Welcome section's auto-slider.
+   *
+   * The storefront banner cross-fades between EXACTLY these two slots —
+   * "Welcome Background Image 1" and "Welcome Background Image 2" — flipping
+   * every 4 seconds. Adding more slots would slow the visible flip to
+   * `count * 4s`, so the editor is deliberately pinned to a pair.
+   */
+  const HERO_BACKGROUND_SLOTS = 2;
+
+  /**
+   * Replace the entire background photo list.
    *
    * Writes `heroBackgrounds` AND `heroImages` from the same array, plus the
    * matching `heroImage`, so both key names carry identical data. Previously
    * `heroImages` was derived from `slides`, so the customizer persisted one list
    * while the storefront rendered another — the hero images "disappeared".
+   *
+   * Empty slots are preserved during editing (so slot 2 can be filled while
+   * slot 1 is still blank) but blank entries are trimmed away for PERSISTENCE
+   * below; otherwise an empty slot would render as a black frame mid-rotation.
    */
   const setHeroBackgroundList = (list: string[]) => {
-    const cleaned = mergeHeroBackgrounds(list);
-    setHeroBackgrounds(cleaned);
-    setHeroImages(cleaned);
-    setHeroImage(cleaned[0] || '');
+    const trimmed = list.slice(0, HERO_BACKGROUND_SLOTS).map((v) => (typeof v === 'string' ? v : ''));
+    setHeroBackgrounds(trimmed);
+    const persisted = mergeHeroBackgrounds(trimmed);
+    setHeroImages(persisted);
+    setHeroImage(persisted[0] || '');
     markDirty();
   };
 
-  /** Append another photo to the rotation. */
-  const addHeroBackground = (url?: string) => {
-    const value = (url || '').trim();
-    if (!value) return;
-    setHeroBackgroundList([...heroBackgroundList, value]);
-  };
+  /**
+   * View-model for the two editor rows: always exactly two slots, seeded from
+   * the persisted list, so both labelled inputs are visible even before the
+   * merchant has added anything.
+   */
+  const heroBackgroundSlots: string[] = Array.from(
+    { length: HERO_BACKGROUND_SLOTS },
+    (_, i) => heroBackgroundList[i] ?? ''
+  );
 
-  /** Swap the photo at `index`. */
+  /** Write the photo in slot `index`, leaving the sibling slot untouched. */
   const updateHeroBackgroundAt = (index: number, url: string) => {
-    setHeroBackgroundList(heroBackgroundList.map((img, i) => (i === index ? url : img)));
+    if (index < 0 || index >= HERO_BACKGROUND_SLOTS) return;
+    const next = [...heroBackgroundSlots];
+    next[index] = url;
+    setHeroBackgroundList(next);
   };
 
-  /** Remove the photo at `index`. */
-  const removeHeroBackgroundAt = (index: number) => {
-    setHeroBackgroundList(heroBackgroundList.filter((_, i) => i !== index));
+  /** Clear slot `index` ("Image 2" then falls back to "Image 1" alone). */
+  const clearHeroBackgroundAt = (index: number) => {
+    if (index < 0 || index >= HERO_BACKGROUND_SLOTS) return;
+    const next = [...heroBackgroundSlots];
+    next[index] = '';
+    // Collapse a trailing empty slot so the single-image fallback kicks in.
+    const collapsed = index === 0 ? [next[1] || ''] : next;
+    setHeroBackgroundList(collapsed);
   };
 
   // ---------------- DRAG AND DROP REORDER STATES & HANDLERS ----------------
@@ -1990,30 +2016,43 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                         </button>
                       </div>
 
-                      {/* WELCOME SECTION BACKGROUNDS — the merchant-managed
-                          list behind the "Welcome to Our Store" hero. The
-                          storefront auto-rotates through it every 4s. Add,
-                          replace (URL or upload) and remove here. Each row is
-                          labelled "Welcome Background Image 1 / 2 / …" and the
-                          list is persisted as `themeConfig.heroImages`. */}
+                      {/* WELCOME BACKGROUND AUTO-SLIDER — two merchant-managed
+                          photos behind the "Welcome to Our Store" hero. The
+                          storefront cross-fades between Image 1 and Image 2
+                          every 4s. Both rows are ALWAYS rendered, so the
+                          merchant can add, edit (URL) or upload each one
+                          individually at any time. Persisted as
+                          `themeConfig.heroImages` (and the `heroBackgrounds`
+                          alias) — blank slots are trimmed on save. */}
                       <div className="space-y-2 pt-2 border-t border-[#2E3548]">
                         <div className="flex justify-between items-center">
-                          <label className="text-slate-300 font-semibold block">Welcome Section Backgrounds ({heroBackgroundList.length})</label>
+                          <label className="text-slate-300 font-semibold block">Welcome Background Auto-Slider</label>
                           <span className="text-[10px] text-[#D4AF37] font-mono">Auto 4s</span>
                         </div>
                         <p className="text-[10px] text-slate-500 leading-relaxed">
-                          These background images fade automatically every 4 seconds on the storefront.
+                          Image 1 and Image 2 fade into each other automatically every 4 seconds on the storefront.
                         </p>
 
-                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                          {heroBackgroundList.map((bgUrl, idx) => (
-                            <div key={`${idx}-${bgUrl.slice(0, 24)}`} className="space-y-1">
-                              <span
-                                className="block text-[10px] font-black uppercase tracking-wider text-[#D4AF37]"
-                                title={`Welcome Background Image ${idx + 1}`}
-                              >
-                                Welcome Background Image {idx + 1}
-                              </span>
+                        <div className="space-y-3">
+                          {heroBackgroundSlots.map((bgUrl, idx) => (
+                            <div key={`welcome-bg-${idx}`} className="space-y-1">
+                              <div className="flex items-center justify-between">
+                                <span
+                                  className="block text-[10px] font-black uppercase tracking-wider text-[#D4AF37]"
+                                  title={`Welcome Background Image ${idx + 1}`}
+                                >
+                                  Welcome Background Image {idx + 1}
+                                </span>
+                                {bgUrl && (
+                                  <button
+                                    type="button"
+                                    onClick={() => clearHeroBackgroundAt(idx)}
+                                    className="text-red-400 hover:text-red-300 text-[10px] font-bold cursor-pointer"
+                                  >
+                                    Clear
+                                  </button>
+                                )}
+                              </div>
                               <div className="flex items-center gap-1.5">
                                 <div className="w-10 h-10 rounded-lg overflow-hidden border border-[#2E3548] bg-[#131620] shrink-0">
                                   <SafeImage src={bgUrl} alt={`Welcome background ${idx + 1}`} className="w-full h-full object-cover" />
@@ -2025,7 +2064,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                   onChange={(e) => updateHeroBackgroundAt(idx, e.target.value)}
                                   className="flex-1 bg-[#131620] border border-[#2E3548] text-white p-1.5 rounded text-xs"
                                 />
-                                <label className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 text-[10px] font-bold px-2 py-1.5 rounded cursor-pointer shrink-0 flex items-center gap-1 border border-[#3A435E]" title="Replace image">
+                                <label className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 text-[10px] font-bold px-2 py-1.5 rounded cursor-pointer shrink-0 flex items-center gap-1 border border-[#3A435E]" title={`Upload Welcome Background Image ${idx + 1}`}>
                                   <Upload className="w-3 h-3 text-[#D4AF37]" />
                                   <input
                                     type="file"
@@ -2036,38 +2075,16 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 </label>
                                 <button
                                   type="button"
-                                  onClick={() => removeHeroBackgroundAt(idx)}
+                                  onClick={() => clearHeroBackgroundAt(idx)}
                                   className="text-red-400 hover:text-red-300 p-1 cursor-pointer shrink-0"
-                                  title="Remove background image"
+                                  title={`Clear Welcome Background Image ${idx + 1}`}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                               </div>
                             </div>
                           ))}
-                          {heroBackgroundList.length === 0 && (
-                            <p className="text-[10px] text-slate-500 italic py-1">No welcome section backgrounds yet — add one below.</p>
-                          )}
                         </div>
-
-                        <button
-                          type="button"
-                          onClick={() => addHeroBackground('')}
-                          className="w-full bg-[#202533] hover:bg-[#282E3F] border border-dashed border-[#3A435E] hover:border-[#D4AF37] text-slate-200 text-xs font-bold p-2.5 rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                          <Plus className="w-3.5 h-3.5 text-[#D4AF37]" />
-                          <span>+ Add Welcome Background</span>
-                        </button>
-                        <label className="w-full bg-[#202533] hover:bg-[#282E3F] border border-[#3A435E] hover:border-[#D4AF37] text-slate-200 text-xs font-bold p-2.5 rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer">
-                          <Upload className="w-3 h-3 text-[#D4AF37]" />
-                          <span>Upload Welcome Background</span>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            className="hidden"
-                            onChange={(e) => pickImage(e, (newImg) => addHeroBackground(newImg))}
-                          />
-                        </label>
                       </div>
                     </div>
                   </div>
