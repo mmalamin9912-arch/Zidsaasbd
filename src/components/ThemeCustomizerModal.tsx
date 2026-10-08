@@ -223,7 +223,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const [heroCtaText, setHeroCtaText] = useState(merchant?.themeConfig?.heroCtaText ?? (merchant?.themeConfig?.slides?.[0]?.ctaText ?? 'Shop Now'));
   const [heroImage, setHeroImage] = useState(merchant?.heroImage || (merchant?.themeConfig?.slides?.[0]?.image ?? 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=1600&q=80'));
   // Merchant-managed list of hero BACKGROUND photos — the canonical array the
-  // storefront rotates through every 1000ms. Add / replace / remove from the
+  // storefront rotates through every 4.5s. Add / replace / remove from the
   // Image Carousel panel below. Only non-empty URLs are ever persisted.
   //
   // Seeded empty here and hydrated from the merchant record in the mount effect
@@ -1990,20 +1990,28 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                       </div>
 
                       {/* Hero Background Photos — the merchant-managed list the
-                          storefront auto-rotates through every 1000ms. Add,
-                          replace (URL or upload) and remove here. */}
+                          storefront auto-rotates through every 4.5s. Add,
+                          replace (URL or upload) and remove here. Each row is
+                          labelled Hero Image 1 / Hero Image 2 / … and the whole
+                          list is persisted as `themeConfig.heroImages`. */}
                       <div className="space-y-2 pt-2 border-t border-[#2E3548]">
                         <div className="flex justify-between items-center">
                           <label className="text-slate-300 font-semibold block">Hero Background Photos ({heroBackgroundList.length})</label>
-                          <span className="text-[10px] text-[#D4AF37] font-mono">Auto 1s</span>
+                          <span className="text-[10px] text-[#D4AF37] font-mono">Auto 4.5s</span>
                         </div>
                         <p className="text-[10px] text-slate-500 leading-relaxed">
-                          These background images fade automatically every 1 second on the storefront.
+                          These background images fade automatically every 4.5 seconds on the storefront.
                         </p>
 
                         <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                           {heroBackgroundList.map((bgUrl, idx) => (
                             <div key={`${idx}-${bgUrl.slice(0, 24)}`} className="flex items-center gap-1.5">
+                              <span
+                                className="text-[9px] font-black uppercase tracking-wider text-[#D4AF37] w-11 shrink-0 leading-tight"
+                                title={`Hero Image ${idx + 1}`}
+                              >
+                                Hero Image {idx + 1}
+                              </span>
                               <div className="w-10 h-10 rounded-lg overflow-hidden border border-[#2E3548] bg-[#131620] shrink-0">
                                 <SafeImage src={bgUrl} alt={`Hero background ${idx + 1}`} className="w-full h-full object-cover" />
                               </div>

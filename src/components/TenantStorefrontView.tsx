@@ -31,6 +31,16 @@ import {
 } from '../lib/orderTracking';
 
 /**
+ * Delay between hero background slides, in milliseconds.
+ *
+ * The merchant's "Hero Background Photos" list is an auto-looping fade
+ * carousel; 4.5s is deliberately inside the 4-5s band — fast enough to read as
+ * a live carousel, slow enough that the headline, subtitle and CTA on top of it
+ * can actually be read before the backdrop changes.
+ */
+const HERO_ROTATION_MS = 4500;
+
+/**
  * Resolve a product's display image from ANY of the shapes the different feeds
  * hand back.
  *
@@ -785,8 +795,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [supabaseProducts, setSupabaseProducts] = useState<Product[]>([]);
   const [supabaseCategories, setSupabaseCategories] = useState<any[]>([]);
   const [isLoadingSupabase, setIsLoadingSupabase] = useState<boolean>(true);
-  // Hero carousel auto-rotation state (2s interval — fades through the
-  // merchant's configured hero background photos in order).
+  // Hero carousel auto-rotation — fades through the merchant's configured hero
+  // background photos in order. 4.5s sits inside the intended 4-5s window: long
+  // enough to read the headline and CTA, short enough to still feel live.
   const heroImageList: string[] = resolvedTheme.heroImages.length > 0
     ? resolvedTheme.heroImages
     : (resolvedTheme.heroBackgrounds.length > 0
@@ -797,7 +808,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     if (!resolvedTheme.showHeroBanner || heroImageList.length <= 1) return;
     const interval = setInterval(() => {
       setActiveHeroIndex((prev) => (prev + 1) % heroImageList.length);
-    }, 2000);
+    }, HERO_ROTATION_MS);
     return () => clearInterval(interval);
   }, [resolvedTheme.showHeroBanner, heroImageList.length]);
   // Reset index when image list changes
@@ -2684,7 +2695,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 ))
               ) : (
                 <SafeImage
-                  src={activeHeroSlide?.image || resolvedTheme.heroImage || "https://images.unsplash.com/photo-1445205170230-053b83016050?auto=format&fit=crop&w=800&q=80"}
+                  src={heroImageList[0] || activeHeroSlide?.image || resolvedTheme.heroImage || "https://images.unsplash.com/photo-1445205170230-053b83016050?auto=format&fit=crop&w=800&q=80"}
                   alt="Hero Banner"
                   className="w-full h-full object-cover opacity-50 scale-105 transition-transform duration-700 hover:scale-100"
                 />
