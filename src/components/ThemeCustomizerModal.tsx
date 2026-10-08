@@ -4468,6 +4468,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                   bankAccounts={[]}
                   mobileBanking={[]}
                   themes={previewThemes}
+                  previewMode
                   isMobile={deviceMode === 'mobile'}
                   onPlaceOrder={(order) => {
                     console.log('Order placed in live customizer preview:', order);

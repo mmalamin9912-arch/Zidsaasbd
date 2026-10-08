@@ -145,6 +145,20 @@ interface TenantStorefrontViewProps {
    * When omitted, it is derived from `previewThemeId` / the active theme.
    */
   layout?: 'classic' | 'supermarket' | 'fashion';
+  /**
+   * Live-preview mode, set ONLY by the Section Editor's inline preview.
+   *
+   * The editor passes its CURRENT, not-yet-published `merchant.themeConfig`
+   * down as `merchant`. The `/api/storefront/:slug` snapshot (and the
+   * slug-scoped shared store) still carry the LAST PUBLISHED config, and
+   * `storefrontMerchant` merged that on top of the prop — which shadowed every
+   * in-progress edit, so a colour pick only appeared after publish + refetch.
+   *
+   * With this flag the editor's prop wins for the cosmetic fields the editor
+   * owns, so changes render in the same frame as the input. The public
+   * storefront never sets it, so its "DB/cache wins" precedence is untouched.
+   */
+  previewMode?: boolean;
 }
 
 interface CustomerReturnRequest {
@@ -230,6 +244,54 @@ function mergeReturns(prev: CustomerReturnRequest[], incoming: unknown[]): Custo
   return [...byId.values()];
 }
 
+/**
+ * Readable header palette for a merchant-chosen `headerBgColor`.
+ *
+ * The header bar shipped hard-coded for the dark default (`bg-[#0f172a]/90`
+ * with slate icons and an amber store name). Now that the Section Editor's
+ * colour picker writes ANY colour into `themeConfig.headerBgColor`, a light
+ * pick (white, cream, …) would leave light-on-light, unreadable text — both in
+ * the live preview and on the published storefront.
+ *
+ * So the chosen background resolves ONE set of foreground / accent / hover
+ * colours from its relative luminance. Unparseable values (a typo in the hex
+ * text field) fall back to the dark palette, which matches the header's own
+ * `bg-[#0f172a]/90` fallback class that the browser then uses.
+ */
+function resolveHeaderPalette(bg?: string) {
+  const raw = String(bg || '').trim();
+  let r = 15, g = 23, b = 42, alpha = 1; // default #0f172a
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw);
+  const rgb = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(raw);
+  if (hex) {
+    let h = hex[1];
+    if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+    r = parseInt(h.slice(0, 2), 16);
+    g = parseInt(h.slice(2, 4), 16);
+    b = parseInt(h.slice(4, 6), 16);
+  } else if (rgb) {
+    r = Math.min(255, Math.max(0, Number(rgb[1])));
+    g = Math.min(255, Math.max(0, Number(rgb[2])));
+    b = Math.min(255, Math.max(0, Number(rgb[3])));
+    const a = /rgba\([^)]*,\s*([\d.]+)\s*\)/i.exec(raw);
+    if (a) alpha = Math.min(1, Math.max(0, Number(a[1])));
+  }
+  const lin = (v: number) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const luminance = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  // A translucent pick sits over the white viewport, so blend before judging.
+  const effective = alpha >= 1 ? luminance : luminance * alpha + 1 * (1 - alpha);
+  const isLight = effective > 0.45;
+  return {
+    background: raw || '#0f172a',
+    isLight,
+    fg: isLight ? '#0f172a' : '#e2e8f0',
+    accent: isLight ? '#b45309' : '#fbbf24', // amber-700 (light) / amber-400 (dark)
+    // Hover chip: subtle dark tint on a light bar, the original slate chip on dark.
+    chip: isLight ? 'hover:bg-slate-900/10 hover:border-slate-900/15' : 'hover:bg-slate-800/80 hover:border-slate-700/60',
+    restingChip: isLight ? 'bg-slate-900/10 border-slate-900/15' : 'bg-slate-800/80 border-slate-700/80',
+  };
+}
+
 export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   storeSlug,
   merchant,
@@ -242,6 +304,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   previewThemeId,
   compact = false,
   layout,
+  previewMode = false,
 }) => {
   // The storefront may be mounted in another route/tab from the editor. Subscribe
   // directly to the shared store so products and published theme changes appear
@@ -459,6 +522,29 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     heroImage: themeCustomization.heroImage || liveStoreData.merchant?.heroImage || merchant.heroImage,
     announcementText: themeCustomization.announcementText || liveStoreData.merchant?.announcementText || merchant.announcementText,
   };
+  // LIVE-PREVIEW PRECEDENCE (customizer): when `previewMode` is set, the
+  // `merchant` prop holds the editor's CURRENT in-memory state (the theme
+  // config is edited in the same component, and the store has not been
+  // re-fetched), so those values must win over the cached/DB copy that the
+  // merges above would otherwise shadow. The public storefront path never
+  // passes previewMode, so its DB-wins precedence is untouched.
+  const cachedStorefrontMerchant = liveStoreData.merchant || {};
+  if (previewMode) {
+    Object.assign(storefrontMerchant, {
+      themeConfig: merchant.themeConfig || cachedStorefrontMerchant.themeConfig,
+      storeName: merchant.storeName || cachedStorefrontMerchant.storeName,
+      storeSlug: merchant.storeSlug || cachedStorefrontMerchant.storeSlug,
+      storeUrl: merchant.storeUrl || cachedStorefrontMerchant.storeUrl,
+      email: merchant.email || cachedStorefrontMerchant.email,
+      ownerName: merchant.ownerName || cachedStorefrontMerchant.ownerName,
+      mobile: merchant.mobile || cachedStorefrontMerchant.mobile,
+      logoUrl: merchant.logoUrl || cachedStorefrontMerchant.logoUrl,
+      heroTitle: merchant.heroTitle || cachedStorefrontMerchant.heroTitle,
+      heroSubtitle: merchant.heroSubtitle || cachedStorefrontMerchant.heroSubtitle,
+      heroImage: merchant.heroImage || cachedStorefrontMerchant.heroImage,
+      announcementText: merchant.announcementText || cachedStorefrontMerchant.announcementText,
+    });
+  }
 
   // Store balance comes ONLY from the database-backed merchant record.
   // No hardcoded 0.00 default is rendered — the value shown is whatever the
@@ -503,6 +589,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     announcementItems: Array.isArray(merchantThemeConfig.announcementItems) && merchantThemeConfig.announcementItems.length > 0
       ? (merchantThemeConfig.announcementItems as string[])
       : [storefrontMerchant.announcementText || 'Welcome to SlateBD Luxury Store'],
+    headerBgColor: (typeof merchantThemeConfig.headerBgColor === 'string' && merchantThemeConfig.headerBgColor) || '#0f172a',
     showHeroBanner: merchantThemeConfig.showHeroBanner !== false,
     heroTitle: (typeof merchantThemeConfig.heroTitle === 'string' && merchantThemeConfig.heroTitle) || storefrontMerchant.heroTitle || '',
     heroSubtitle: (typeof merchantThemeConfig.heroSubtitle === 'string' && merchantThemeConfig.heroSubtitle) || storefrontMerchant.heroSubtitle || '',
@@ -568,6 +655,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     contactEmail: (typeof merchantThemeConfig.contactEmail === 'string' && merchantThemeConfig.contactEmail) || '',
     dhakaAddress: (typeof merchantThemeConfig.dhakaAddress === 'string' && merchantThemeConfig.dhakaAddress) || ''
   };
+  // Header bar colour lives in `headerBgColor` (writer's own pick) instead of
+  // the hard-coded `#0f172a`. The picker's text field accepts ANY valid CSS
+  // colour (hex, rgb(), ...), so `resolveHeaderPalette` derives a single
+  // readable foreground/accent/hover set that is applied to the header in BOTH
+  // the live preview and the published storefront.
+  const headerPalette = resolveHeaderPalette(resolvedTheme.headerBgColor);
   const activeHeroSlide = resolvedTheme.slides.length > 0
     ? resolvedTheme.slides[Math.min(resolvedTheme.activeSlideIndex, resolvedTheme.slides.length - 1)]
     : null;
@@ -2296,12 +2389,17 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         `}</style>
 
         {/* Top Header Bar (Luxury Dark Glassmorphism) */}
-        <header className={`${resolvedTheme.headerSticky ? 'sticky top-0' : ''} z-40 bg-[#0f172a]/90 backdrop-blur-xl border-b border-slate-800/80 shadow-2xl`}>
+        <header
+          className={`${resolvedTheme.headerSticky ? 'sticky top-0' : ''} z-40 ${
+            headerPalette.isLight ? 'text-[#0f172a]' : 'text-[#e2e8f0]'
+          } bg-[#0f172a]/90 backdrop-blur-xl border-b border-slate-800/80 shadow-2xl`}
+          style={{ backgroundColor: headerPalette.background }}
+        >
           {/* Top Announcement Bar — themed from Theme Editor settings */}
           {resolvedTheme.showAnnouncement && (
           <div
             className="py-1.5 px-3 overflow-hidden whitespace-nowrap relative text-[11px] font-black uppercase tracking-wider shadow-md"
-            style={{ backgroundColor: resolvedTheme.announcementBg, color: '#0f172a' }}
+            style={{ backgroundColor: resolvedTheme.announcementBg, color: headerPalette.fg }}
           >
             <div
               className="zid-marquee-track inline-flex items-center"
