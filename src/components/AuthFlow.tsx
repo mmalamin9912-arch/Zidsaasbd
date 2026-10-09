@@ -878,19 +878,24 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     setForgotPasswordError('');
     setIsSendingResetOtp(true);
     try {
-      const result = await sendEmailOtp(cleanEmail, false);
-      if (result.success) {
-        setResetOtpSentNotice('Verification code dispatched to your email.');
-        toast.success('Verification code dispatched to your email.');
+      const res = await fetch('/api/auth/password-reset/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ email: cleanEmail }),
+      });
+      const data = await safeParseJson(res, null);
+      if (data?.ok || data?.success) {
+        setResetOtpSentNotice('6-digit OTP code sent to your email! (Valid for 10 minutes)');
+        toast.success('6-digit OTP code sent to your email!');
       } else {
-        setForgotPasswordError(
-          result.isRateLimited
-            ? 'Too many requests. Please wait a moment and try again.'
-            : 'Could not send verification code. You may proceed with direct reset.'
-        );
+        const errorMsg = data?.error || 'Could not send verification code. Please try again.';
+        setForgotPasswordError(errorMsg);
+        toast.error(errorMsg);
       }
-    } catch {
-      setForgotPasswordError('Could not send verification code. You may proceed with direct reset.');
+    } catch (err: any) {
+      const errorMsg = err?.message || 'Could not send verification code. Please try again.';
+      setForgotPasswordError(errorMsg);
+      toast.error(errorMsg);
     } finally {
       setIsSendingResetOtp(false);
     }
@@ -903,6 +908,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const cleanEmail = forgotPasswordEmail.trim().toLowerCase();
     if (!cleanEmail || !isValidEmail(cleanEmail)) {
       setForgotPasswordError('Please enter a valid email address.');
+      return;
+    }
+
+    const cleanOtp = forgotPasswordOtp.trim();
+    if (!cleanOtp || cleanOtp.length !== 6) {
+      setForgotPasswordError('Please enter the 6-digit OTP code sent to your email.');
       return;
     }
 
@@ -923,20 +934,26 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     setForgotPasswordStatus('sending');
 
     try {
-      // 1. Direct MongoDB update via dedicated auth reset endpoint
-      try {
-        await fetch('/api/auth/reset-password', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify({
-            email: cleanEmail,
-            newPassword: cleanNewPassword,
-            password: cleanNewPassword,
-            otp: forgotPasswordOtp.trim(),
-          }),
-        });
-      } catch (backendErr) {
-        console.warn('Backend reset password call warning:', backendErr);
+      // 1. Verify OTP against MongoDB and update hashed password via backend auth reset endpoint
+      const resetRes = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail,
+          otp: cleanOtp,
+          newPassword: cleanNewPassword,
+          password: cleanNewPassword,
+        }),
+      });
+
+      const resetData = await safeParseJson(resetRes, null);
+
+      if (!resetRes.ok || !resetData?.ok) {
+        setForgotPasswordStatus('idle');
+        const errMessage = resetData?.error || 'Invalid OTP code or password reset failed.';
+        setForgotPasswordError(errMessage);
+        toast.error(errMessage);
+        return;
       }
 
       // 2. Also call /api/stores/update for guaranteed Mongo & Supabase redundancy
@@ -956,13 +973,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       // 3. Supabase Auth update if session/client is present
       if (supabase) {
         try {
-          if (forgotPasswordOtp.trim()) {
-            await supabase.auth.verifyOtp({
-              email: cleanEmail,
-              token: forgotPasswordOtp.trim(),
-              type: 'email',
-            }).catch(() => {});
-          }
           await supabase.auth.updateUser({
             password: cleanNewPassword,
           }).catch(() => {});
@@ -989,13 +999,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       }
       safeSetItem('zid_registered_users', registeredList);
 
-      // 5. Success notification and return to Sign-In screen
-      const successMessage = 'Password changed successfully! Please log in with your new password';
+      // 5. Success toast: "Password updated successfully! You can now log in."
+      const successMessage = 'Password updated successfully! You can now log in.';
       toast.success(successMessage);
       setToastMsg(successMessage);
-      setInfoNotice(successMessage);
 
-      // Close modal and return directly to Sign-In screen
+      // 6. Close modal and redirect to Sign-In
       setIsForgotPasswordOpen(false);
       setForgotPasswordStatus('idle');
       setForgotPasswordOtp('');
@@ -2254,7 +2263,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block text-xs font-semibold text-slate-300">
-                    Verification Code / OTP <span className="text-[10px] text-slate-400 font-normal">(optional for direct reset)</span>
+                    6-Digit Verification Code (OTP) *
                   </label>
                   <button
                     type="button"
@@ -2262,17 +2271,19 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                     disabled={isSendingResetOtp}
                     className="text-[11px] font-semibold text-[#D4AF37] hover:text-[#FCF6BA] hover:underline transition cursor-pointer disabled:opacity-50"
                   >
-                    {isSendingResetOtp ? 'Sending code...' : 'Get Code via Email'}
+                    {isSendingResetOtp ? 'Sending code...' : resetOtpSentNotice ? 'Resend OTP' : 'Send OTP Code'}
                   </button>
                 </div>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
                   <input
                     type="text"
+                    required
+                    maxLength={6}
                     value={forgotPasswordOtp}
-                    onChange={(e) => setForgotPasswordOtp(e.target.value)}
-                    placeholder="Enter 6-digit OTP code (if received)"
-                    className="w-full bg-[#202533] border border-[#3A435E] focus:border-[#D4AF37] rounded-xl pl-10 pr-3.5 py-2.5 text-xs text-white placeholder-slate-500 transition outline-none"
+                    onChange={(e) => setForgotPasswordOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="Enter 6-digit OTP code (e.g. 482915)"
+                    className="w-full bg-[#202533] border border-[#3A435E] focus:border-[#D4AF37] rounded-xl pl-10 pr-3.5 py-2.5 text-xs text-white placeholder-slate-500 transition outline-none tracking-wider font-mono"
                   />
                 </div>
                 {resetOtpSentNotice && (

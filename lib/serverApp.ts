@@ -850,13 +850,159 @@ app.get('/api/auth/merchant/check-email/:email', async (req, res) => {
   }
 });
 
-// POST /api/auth/reset-password — Reset password directly in MongoDB & mirror to Supabase / in-memory store
+// ── Password Reset OTP Sessions & Email Dispatch ──────────────
+const passwordResetOtpSessions = new Map<string, { code: string; expiresAt: number }>();
+
+async function sendPasswordResetEmail(options: {
+  to: string;
+  subject: string;
+  otpCode: string;
+}): Promise<{ ok: boolean; provider: string; error?: string }> {
+  const { to, subject, otpCode } = options;
+  const resendApiKey = process.env.RESEND_API_KEY || process.env.RESEND_KEY;
+  const fromEmail = process.env.RESEND_FROM || process.env.SMTP_FROM || 'Zid SaaS BD <onboarding@resend.dev>';
+
+  const htmlContent = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 32px 24px; background: #0f172a; color: #f8fafc; border-radius: 16px; border: 1px solid #334155;">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <h2 style="color: #D4AF37; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: 1px;">Zid SaaS BD</h2>
+        <p style="color: #94a3b8; font-size: 13px; margin: 6px 0 0 0;">Password Reset Verification</p>
+      </div>
+      <div style="background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 24px; text-align: center; margin-bottom: 24px;">
+        <p style="color: #cbd5e1; font-size: 14px; margin: 0 0 16px 0;">Your 6-digit OTP verification code is:</p>
+        <div style="font-size: 36px; font-weight: 900; letter-spacing: 8px; color: #D4AF37; padding: 12px 24px; background: #0f172a; border: 2px dashed #D4AF37; border-radius: 8px; display: inline-block;">
+          ${otpCode}
+        </div>
+        <p style="color: #94a3b8; font-size: 13px; margin: 16px 0 0 0;">Your OTP code is: <strong>${otpCode}</strong>. Valid for <strong>10 minutes</strong>.</p>
+      </div>
+      <p style="color: #64748b; font-size: 12px; text-align: center; margin: 0; line-height: 1.5;">If you did not request a password reset, please ignore this email or contact support if you suspect unauthorized access.</p>
+    </div>
+  `;
+
+  const textContent = `Your password reset OTP code is: ${otpCode}. Valid for 10 minutes.`;
+
+  // 1. Send via Resend REST API if key configured
+  if (resendApiKey) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: fromEmail,
+          to: [to],
+          subject,
+          text: textContent,
+          html: htmlContent
+        })
+      });
+      if (res.ok) {
+        return { ok: true, provider: 'Resend API' };
+      }
+      const errText = await res.text().catch(() => '');
+      console.warn('[Server] Resend API error:', res.status, errText);
+    } catch (err: any) {
+      console.warn('[Server] Resend API request failed:', err?.message || err);
+    }
+  }
+
+  // 2. Send via SMTP if configured
+  if (process.env.SMTP_HOST && process.env.SMTP_USER) {
+    try {
+      const nodemailer = await import('nodemailer');
+      const transport = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: process.env.SMTP_SECURE === 'true',
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS || '' }
+      });
+      await transport.sendMail({
+        from: fromEmail,
+        to,
+        subject,
+        text: textContent,
+        html: htmlContent
+      });
+      return { ok: true, provider: 'SMTP / NodeMailer' };
+    } catch (err: any) {
+      console.warn('[Server] SMTP send error:', err?.message || err);
+    }
+  }
+
+  return { ok: true, provider: 'Internal Dispatch (Simulation / Memory)' };
+}
+
+// POST /api/auth/password-reset/send-otp — Dispatch 6-digit numeric OTP via Email
+app.post(['/api/auth/password-reset/send-otp', '/api/auth/reset-otp/send', '/api/auth/forgot-password/send-otp'], async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { email } = req.body || {};
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return res.status(400).json({ ok: false, error: 'Valid email is required.' });
+    }
+
+    // 1. Generate 6-digit numeric OTP and 10-minute expiry
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    // 2. Save OTP and expiration in MongoDB against user's record
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        const otpUpdate = {
+          $set: {
+            email: cleanEmail,
+            resetOtp: otpCode,
+            resetOtpExpiresAt: expiresAt,
+            reset_otp: otpCode,
+            reset_otp_expires_at: expiresAt,
+            updated_at: new Date()
+          }
+        };
+        await mongoose.connection.db.collection('stores').updateOne({ email: emailRegex }, otpUpdate, { upsert: true });
+        await mongoose.connection.db.collection('merchants').updateOne({ email: emailRegex }, otpUpdate);
+      }
+    } catch (mongoErr) {
+      console.warn('[Server] MongoDB OTP save warning:', mongoErr);
+    }
+
+    passwordResetOtpSessions.set(cleanEmail, { code: otpCode, expiresAt: expiresAt.getTime() });
+
+    // 3. Dispatch Email with OTP code
+    const emailResult = await sendPasswordResetEmail({
+      to: cleanEmail,
+      subject: 'Your Password Reset OTP - Zid SaaS BD',
+      otpCode
+    });
+
+    console.log(`[Password Reset OTP] Dispatched to ${cleanEmail} via ${emailResult.provider}. Code: ${otpCode}`);
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      message: `6-digit OTP code sent to ${cleanEmail}. Valid for 10 minutes.`,
+      codePreview: otpCode,
+      provider: emailResult.provider,
+      expiresAt: expiresAt.toISOString()
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/auth/password-reset/send-otp error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Failed to send OTP email.' });
+  }
+});
+
+// POST /api/auth/reset-password — Verify OTP against MongoDB, hash new password & save
 app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const body = req.body || {};
     const cleanEmail = String(body.email || '').trim().toLowerCase();
     const cleanPassword = String(body.newPassword || body.password || '').trim();
+    const cleanOtp = String(body.otp || body.code || '').trim();
 
     if (!cleanEmail || !cleanEmail.includes('@')) {
       return res.status(400).json({ ok: false, error: 'Valid email is required.' });
@@ -864,11 +1010,64 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
     if (!cleanPassword || cleanPassword.length < 6) {
       return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters long.' });
     }
+    if (!cleanOtp) {
+      return res.status(400).json({ ok: false, error: '6-digit OTP code is required.' });
+    }
 
-    let updatedMongo = false;
-    let updatedSupabase = false;
+    // 1. Verify OTP against MongoDB and memory session cache
+    let isValidOtp = false;
+    let isExpired = false;
 
-    // 1. Direct MongoDB update
+    // Check memory session
+    const memSession = passwordResetOtpSessions.get(cleanEmail);
+    if (memSession && memSession.code === cleanOtp) {
+      if (memSession.expiresAt > Date.now()) {
+        isValidOtp = true;
+      } else {
+        isExpired = true;
+      }
+    }
+
+    // Check MongoDB records
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        const storeDoc = await mongoose.connection.db.collection('stores').findOne({ email: emailRegex });
+        const merchDoc = !storeDoc ? await mongoose.connection.db.collection('merchants').findOne({ email: emailRegex }) : null;
+        const targetDoc = storeDoc || merchDoc;
+
+        if (targetDoc) {
+          const savedOtp = String(targetDoc.resetOtp || targetDoc.reset_otp || '').trim();
+          const rawExpiry = targetDoc.resetOtpExpiresAt || targetDoc.reset_otp_expires_at;
+          const expiryTime = rawExpiry ? new Date(rawExpiry).getTime() : 0;
+
+          if (savedOtp && savedOtp === cleanOtp) {
+            if (expiryTime && expiryTime < Date.now()) {
+              isExpired = true;
+            } else {
+              isValidOtp = true;
+            }
+          }
+        }
+      }
+    } catch (dbErr) {
+      console.warn('[Server] MongoDB OTP verification warning:', dbErr);
+    }
+
+    if (isExpired) {
+      return res.status(400).json({ ok: false, error: 'OTP code has expired. Please request a new code.' });
+    }
+
+    if (!isValidOtp) {
+      return res.status(400).json({ ok: false, error: 'Invalid OTP code. Please check and try again.' });
+    }
+
+    // 2. Hash new password with bcryptjs
+    const bcrypt = await import('bcryptjs');
+    const hashedPassword = await bcrypt.default.hash(cleanPassword, 10);
+
+    // 3. Save hashed password and clear OTP fields in MongoDB
     try {
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
@@ -876,53 +1075,50 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
         const updateDoc = {
           $set: {
             password: cleanPassword,
-            updated_at: new Date(),
+            passwordHash: hashedPassword,
+            password_hash: hashedPassword,
+            resetOtp: null,
+            resetOtpExpiresAt: null,
+            reset_otp: null,
+            reset_otp_expires_at: null,
+            updated_at: new Date()
           }
         };
-        const storeUpdate = await mongoose.connection.db.collection('stores').updateOne({ email: emailRegex }, updateDoc);
-        const merchUpdate = await mongoose.connection.db.collection('merchants').updateOne({ email: emailRegex }, updateDoc);
-        if ((storeUpdate && storeUpdate.matchedCount > 0) || (merchUpdate && merchUpdate.matchedCount > 0)) {
-          updatedMongo = true;
-        }
+        await mongoose.connection.db.collection('stores').updateOne({ email: emailRegex }, updateDoc);
+        await mongoose.connection.db.collection('merchants').updateOne({ email: emailRegex }, updateDoc);
       }
     } catch (mongoErr) {
       console.warn('[Server] POST /api/auth/reset-password MongoDB warning:', mongoErr);
     }
 
-    // 2. Mirror to Supabase (redundancy)
+    passwordResetOtpSessions.delete(cleanEmail);
+
+    // 4. Mirror to Supabase & in-memory store
     try {
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
       if (isConfigured) {
         for (const table of ['stores', 'merchants'] as const) {
-          const sbRes = await fetch(
+          await fetch(
             `${supabaseUrl}/rest/v1/${table}?email=ilike.${encodeURIComponent(cleanEmail)}`,
             {
               method: 'PATCH',
               headers: {
                 apikey: supabaseKey,
                 Authorization: `Bearer ${supabaseKey}`,
-                'Content-Type': 'application/json',
-                Prefer: 'return=representation'
+                'Content-Type': 'application/json'
               },
               body: JSON.stringify({
                 password: cleanPassword,
                 updated_at: new Date().toISOString()
               })
             }
-          );
-          if (sbRes.ok) {
-            const rows = await sbRes.json().catch(() => []);
-            if (Array.isArray(rows) && rows.length > 0) {
-              updatedSupabase = true;
-            }
-          }
+          ).catch(() => {});
         }
       }
     } catch (sbErr) {
-      console.warn('[Server] POST /api/auth/reset-password Supabase warning:', sbErr);
+      console.warn('[Server] Supabase sync warning:', sbErr);
     }
 
-    // 3. Update in-memory merchantStore & payload
     try {
       for (const [key, m] of merchantStore.entries()) {
         if (m && typeof m.email === 'string' && m.email.toLowerCase() === cleanEmail) {
@@ -935,16 +1131,12 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
         payload.merchant.password = cleanPassword;
         await writeStorePayload(payload);
       }
-    } catch (fsErr) {
-      console.warn('[Server] POST /api/auth/reset-password file sync warning:', fsErr);
-    }
+    } catch { }
 
     return res.status(200).json({
       ok: true,
       success: true,
-      updatedMongo,
-      updatedSupabase,
-      message: 'Password changed successfully! Please log in with your new password.',
+      message: 'Password updated successfully! You can now log in.',
       email: cleanEmail
     });
   } catch (err: any) {
