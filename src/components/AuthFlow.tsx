@@ -113,6 +113,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const [isGoogleModalOpen, setIsGoogleModalOpen] = useState(false);
   const [googleInputEmail, setGoogleInputEmail] = useState('');
 
+  // Forgot Password / Password Recovery state (login password step)
+  const [isForgotPasswordOpen, setIsForgotPasswordOpen] = useState(false);
+  const [forgotPasswordEmail, setForgotPasswordEmail] = useState('');
+  const [forgotPasswordStatus, setForgotPasswordStatus] = useState<'idle' | 'sending' | 'sent'>('idle');
+  const [forgotPasswordError, setForgotPasswordError] = useState('');
+
   // Timers & UI Feedback
   const [resendTimer, setResendTimer] = useState(60);
   const [canResend, setCanResend] = useState(false);
@@ -834,6 +840,54 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   };
 
   // ==========================================
+  // FORGOT PASSWORD / PASSWORD RECOVERY (LOGIN STEP)
+  // ==========================================
+
+  // Open the recovery modal, pre-filling the email currently used on the login
+  // screen so the user only needs to confirm / resend.
+  const handleOpenForgotPassword = () => {
+    setErrorMsg('');
+    setInfoNotice(null);
+    setForgotPasswordError('');
+    setForgotPasswordStatus('idle');
+    setForgotPasswordEmail(email.trim().toLowerCase());
+    setIsForgotPasswordOpen(true);
+  };
+
+  const handleForgotPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (forgotPasswordStatus === 'sending') return;
+
+    const cleanEmail = forgotPasswordEmail.trim().toLowerCase();
+    if (!cleanEmail || !isValidEmail(cleanEmail)) {
+      setForgotPasswordError('Please enter a valid email address.');
+      return;
+    }
+
+    setForgotPasswordError('');
+    setForgotPasswordStatus('sending');
+    try {
+      // isSignUp = false → the existing backend email endpoint sends a
+      // recovery/magic link to an EXISTING account only; it never provisions a
+      // new merchant. We reuse the live `sendEmailOtp` function untouched.
+      const result = await sendEmailOtp(cleanEmail, false);
+      if (result.success) {
+        setForgotPasswordStatus('sent');
+      } else {
+        setForgotPasswordStatus('idle');
+        setForgotPasswordError(
+          result.isRateLimited
+            ? 'Too many requests. Please wait a moment and try again.'
+            : 'Could not send the recovery link. Please try again.'
+        );
+      }
+    } catch {
+      setForgotPasswordStatus('idle');
+      setForgotPasswordError('Could not send the recovery link. Please try again.');
+    }
+  };
+
+  // ==========================================
   // MODE 2: NEW USER REGISTRATION (SIGN UP WITH OTP / MAGIC LINK)
   // ==========================================
 
@@ -1525,6 +1579,16 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                       autoFocus
                     />
                   </div>
+                  <div className="flex justify-end mt-1.5">
+                    <button
+                      type="button"
+                      onClick={handleOpenForgotPassword}
+                      disabled={isLoading}
+                      className="text-[11px] font-semibold text-[#D4AF37] hover:text-[#FCF6BA] hover:underline transition cursor-pointer disabled:opacity-50"
+                    >
+                      Forgot Password?
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex gap-3">
@@ -1551,44 +1615,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                         <ArrowRight className="w-4 h-4 stroke-[2.5]" />
                       </>
                     )}
-                  </button>
-                </div>
-
-                <div className="pt-2 text-center">
-                  <button
-                    type="button"
-                    disabled={isLoading}
-                    onClick={async () => {
-                      setErrorMsg('');
-                      setInfoNotice(null);
-                      const cleanEmail = email.trim().toLowerCase();
-                      if (!cleanEmail || !cleanEmail.includes('@')) {
-                        setErrorMsg('Please enter your email address first.');
-                        setLoginStep('email');
-                        return;
-                      }
-                      const registeredList = getRegisteredUsers();
-                      const existingUser = registeredList.find((u) => u.email.toLowerCase() === cleanEmail);
-                      if (existingUser) {
-                        const userProfile: MerchantProfile = {
-                          ...defaultMerchant,
-                          email: existingUser.email,
-                          ownerName: existingUser.ownerName || 'Merchant Owner',
-                          storeName: existingUser.storeName || 'My Store',
-                          phone: existingUser.phone || '',
-                          storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : 'mystore',
-                          logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
-                        };
-                        await finishLogin(userProfile);
-                      } else {
-                        setMode('signup');
-                        setSignupStep('register');
-                      }
-                    }}
-                    className="text-xs text-slate-400 hover:text-[#D4AF37] font-medium transition cursor-pointer flex items-center justify-center gap-1.5 mx-auto"
-                  >
-                    <Mail className="w-3.5 h-3.5" />
-                    <span>{t('auth_signin_with_email')}</span>
                   </button>
                 </div>
               </form>
@@ -2050,6 +2076,113 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Forgot Password / Password Recovery Modal */}
+      {isForgotPasswordOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#181B26] border border-[#2E3548] p-6 rounded-2xl max-w-sm w-full space-y-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
+            <button
+              type="button"
+              onClick={() => setIsForgotPasswordOpen(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white cursor-pointer"
+            >
+              ✕
+            </button>
+
+            {forgotPasswordStatus === 'sent' ? (
+              /* Success state */
+              <div className="space-y-5 text-center">
+                <div className="mx-auto w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Password reset link sent</h3>
+                  <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                    A password reset / sign-in link has been sent to{' '}
+                    <span className="text-white font-semibold break-all">{forgotPasswordEmail}</span>.
+                    Please check your inbox and follow the link to reset your password.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsForgotPasswordOpen(false);
+                    setLoginStep('email');
+                    setLoginPassword('');
+                  }}
+                  className="w-full py-3 bg-[#D4AF37] hover:bg-[#FCF6BA] text-slate-950 font-extrabold rounded-xl text-xs transition shadow-lg shadow-[#D4AF37]/25 cursor-pointer"
+                >
+                  Back to Sign In
+                </button>
+              </div>
+            ) : (
+              /* Request state */
+              <>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#D4AF37]/20 border border-[#D4AF37]/40 flex items-center justify-center text-[#D4AF37]">
+                    <KeyRound className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Forgot Password?</h3>
+                    <p className="text-[11px] text-slate-400">Enter your email to receive a reset link.</p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleForgotPasswordSubmit} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                      Registered Email Address
+                    </label>
+                    <div className="relative">
+                      <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+                      <input
+                        type="email"
+                        required
+                        value={forgotPasswordEmail}
+                        onChange={(e) => setForgotPasswordEmail(e.target.value)}
+                        placeholder="e.g. owner@yourstore.com"
+                        className="w-full bg-[#202533] border border-[#3A435E] focus:border-[#D4AF37] rounded-xl pl-10 pr-3.5 py-2.5 text-xs text-white placeholder-slate-500 transition outline-none"
+                        autoFocus
+                      />
+                    </div>
+                  </div>
+
+                  {forgotPasswordError && (
+                    <div className="flex items-start gap-2 bg-red-500/20 border border-red-500/40 text-red-400 p-2.5 rounded-xl text-[11px] font-bold">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{forgotPasswordError}</span>
+                    </div>
+                  )}
+
+                  <div className="flex gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setIsForgotPasswordOpen(false)}
+                      className="flex-1 bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold py-2.5 rounded-xl text-xs transition border border-[#3A435E] cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={forgotPasswordStatus === 'sending'}
+                      className="flex-1 bg-[#D4AF37] hover:bg-[#FCF6BA] disabled:opacity-50 text-slate-950 font-extrabold py-2.5 rounded-xl text-xs transition shadow-md cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      {forgotPasswordStatus === 'sending' ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Sending...</span>
+                        </>
+                      ) : (
+                        <span>Send Reset Link</span>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
           </div>
         </div>
       )}
