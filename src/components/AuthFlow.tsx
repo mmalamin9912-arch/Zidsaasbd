@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { MerchantProfile } from '../types';
 import { supabase } from '../lib/supabase';
 import AuthLayout from './AuthLayout';
@@ -41,6 +41,8 @@ import { safeParseJson } from '../lib/safeFetch';
 import { generateStoreCode, resolveStoreRef, withPermanentStoreId } from '../lib/storeId';
 import { fetchStoreByRef } from '../lib/storeApi';
 import { readAndDownscaleImage } from '../utils/imageUtils';
+import { isValidEmail } from '../utils/validation';
+import { toast } from './ToastProvider';
 
 interface AuthFlowProps {
   onLoginSuccess: (userProfile: MerchantProfile) => void;
@@ -62,6 +64,32 @@ interface RegisteredUser {
 
 export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerchant, onAdminAccess, initialMode = 'login' }) => {
   const { t } = useLanguage();
+
+  /**
+   * Translate `key` and fill {placeholders} from `vars`. Server-provided raw
+   * messages (non-keys) pass through `t` unchanged, so mixed key/message
+   * state values render correctly — and stored keys re-translate instantly
+   * when the user flips the language toggle.
+   */
+  const fmt = (key: string, vars?: Record<string, string | number>): string => {
+    let out = t(key);
+    if (vars) {
+      for (const [name, value] of Object.entries(vars)) {
+        out = out.split(`{${name}}`).join(String(value));
+      }
+    }
+    return out;
+  };
+
+  /**
+   * Render a feedback message (error/info/toast). Stored values may be i18n
+   * keys — which re-translate instantly on language toggle — or raw
+   * server-provided text, which `t()` passes through unchanged. {email},
+   * {phone} and {seconds} placeholders are filled from live component state.
+   */
+  const renderMsg = (msg: string): string =>
+    fmt(msg, { email, phone: twoFactorPhone || phone, seconds: resendTimer });
+
   // Top level auth mode: 'login' (Sign In with password), 'signup' (Sign Up with
   // OTP) or '2fa' (second-factor challenge after a correct password).
   const [mode, setMode] = useState<'login' | 'signup' | '2fa'>(initialMode);
@@ -94,6 +122,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const [canResend, setCanResend] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  // Inline error shown directly beneath the email field (RFC format failures).
+  const [emailError, setEmailError] = useState('');
+  // Synchronous re-entrancy lock: React state updates are async, so a fast
+  // double-click can fire a second auth request before `isLoading` re-renders
+  // the button as disabled. This ref blocks the duplicate immediately.
+  const inFlightRef = useRef(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [infoNotice, setInfoNotice] = useState<string | null>(null);
 
@@ -106,19 +140,27 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
   const handleLogoFile = async (file: File) => {
     if (file.size > 2 * 1024 * 1024) {
-      setErrorMsg('Logo file size must be less than 2MB.');
+      setErrorMsg('auth_err_logo_size');
+      toast.error(t('auth_err_logo_size'));
       return;
     }
     // Downscale before storing: the logo is saved on the store record and
     // mirrored to Supabase, so a raw 2MB upload is ~2.7MB of base64 in the
     // /api/stores/update body — over the parser limit and over the Supabase
     // per-request limit.
-    const dataUrl = await readAndDownscaleImage(file, 512);
-    if (!dataUrl) {
-      setErrorMsg('Failed to read the logo file.');
-      return;
+    try {
+      const dataUrl = await readAndDownscaleImage(file, 512);
+      if (!dataUrl) {
+        setErrorMsg('auth_err_logo_read');
+        toast.error(t('auth_err_logo_read'));
+        return;
+      }
+      setStoreLogo(dataUrl);
+    } catch (err) {
+      console.error('Logo processing failed:', err);
+      setErrorMsg('auth_err_logo_read');
+      toast.error(t('auth_err_logo_read'));
     }
-    setStoreLogo(dataUrl);
   };
   const [streetAddress, setStreetAddress] = useState('');
   const [district, setDistrict] = useState('Dhaka');
@@ -140,38 +182,56 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     setErrorMsg('');
     setInfoNotice(null);
     if (!phone || phone.trim().length < 9) {
-      setErrorMsg('Please enter a valid phone number before requesting WhatsApp OTP.');
+      setErrorMsg('auth_err_phone_required');
+      toast.error(t('auth_err_phone_required'));
       return;
     }
     setIsSendingWhatsappOtp(true);
-    const res = await sendWhatsAppOtp(phone, 'merchant');
-    setIsSendingWhatsappOtp(false);
-    if (res.success) {
-      setIsWhatsappOtpSent(true);
-      setInfoNotice(res.message);
-      setToastMsg('WhatsApp verification code sent!');
-    } else {
-      setErrorMsg(res.message);
+    try {
+      const res = await sendWhatsAppOtp(phone, 'merchant');
+      if (res.success) {
+        setIsWhatsappOtpSent(true);
+        setInfoNotice(res.message);
+        setToastMsg('auth_toast_whatsapp_sent');
+      } else {
+        setErrorMsg(res.message);
+        toast.error(res.message);
+      }
+    } catch (err) {
+      console.error('WhatsApp OTP dispatch failed:', err);
+      setErrorMsg('auth_err_server');
+      toast.error(t('auth_err_server'));
+    } finally {
+      setIsSendingWhatsappOtp(false);
     }
   };
 
   const handleVerifyMerchantWhatsappOtp = async () => {
     setErrorMsg('');
     if (!whatsappOtpInput || whatsappOtpInput.trim().length !== 6) {
-      setErrorMsg('Please enter the 6-digit WhatsApp verification code.');
+      setErrorMsg('auth_err_whatsapp_code');
+      toast.error(t('auth_err_whatsapp_code'));
       return;
     }
     setIsVerifyingWhatsappOtp(true);
-    const res = await verifyWhatsAppOtp(phone, whatsappOtpInput);
-    setIsVerifyingWhatsappOtp(false);
-    if (res.success && res.verified) {
-      setIsWhatsappPhoneVerified(true);
-      setVerifiedWhatsappPhone(phone);
-      setIsWhatsappOtpSent(false);
-      setToastMsg('Phone verified successfully via WhatsApp!');
-      setInfoNotice('Phone number verified via Supabase WhatsApp OTP ✓');
-    } else {
-      setErrorMsg(res.message || 'Verification failed. Please check the OTP code.');
+    try {
+      const res = await verifyWhatsAppOtp(phone, whatsappOtpInput);
+      if (res.success && res.verified) {
+        setIsWhatsappPhoneVerified(true);
+        setVerifiedWhatsappPhone(phone);
+        setIsWhatsappOtpSent(false);
+        setToastMsg('auth_toast_phone_verified');
+        setInfoNotice('auth_info_phone_verified');
+      } else {
+        setErrorMsg(res.message || 'auth_err_whatsapp_verify_failed');
+        toast.error(res.message || t('auth_err_whatsapp_verify_failed'));
+      }
+    } catch (err) {
+      console.error('WhatsApp OTP verification failed:', err);
+      setErrorMsg('auth_err_server');
+      toast.error(t('auth_err_server'));
+    } finally {
+      setIsVerifyingWhatsappOtp(false);
     }
   };
 
@@ -228,7 +288,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           // New User Setup
           setMode('signup');
           setSignupStep('register');
-          setToastMsg('Email verified. Please complete your profile.');
+          setToastMsg('auth_toast_email_verified');
         }
       }
     });
@@ -416,7 +476,8 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       phone = record.whatsappNumber || record.phone || record.whatsapp_number || '';
     }
     if (!phone) {
-      setErrorMsg('Two-factor authentication is enabled but no WhatsApp number is on file. Please contact support to recover your account.');
+      setErrorMsg('auth_err_2fa_no_phone');
+      toast.error(t('auth_err_2fa_no_phone'));
       setIsLoading(false);
       return;
     }
@@ -434,10 +495,10 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone, userType: 'merchant' }),
       });
-      setInfoNotice(`A 6-digit verification code was sent to ${phone} on WhatsApp.`);
+      setInfoNotice(fmt('auth_info_2fa_sent', { phone }));
     } catch (err) {
       console.warn('2FA OTP dispatch warning:', err);
-      setInfoNotice(`Enter the 6-digit code sent to ${phone} on WhatsApp.`);
+      setInfoNotice(fmt('auth_info_2fa_enter', { phone }));
     } finally {
       setIsLoading(false);
     }
@@ -447,16 +508,19 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const handleTwoFactorVerify = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
+    if (inFlightRef.current) return;
 
     if (!pendingTwoFactor) {
       setMode('login');
       return;
     }
     if (twoFactorCode.trim().length < 6) {
-      setErrorMsg('Please enter the complete 6-digit code.');
+      setErrorMsg('auth_err_otp_required');
+      toast.error(t('auth_err_otp_required'));
       return;
     }
 
+    inFlightRef.current = true;
     setIsLoading(true);
     try {
       const res = await fetch('/api/auth/whatsapp-otp/verify', {
@@ -470,16 +534,19 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         const profile = pendingTwoFactor;
         setPendingTwoFactor(null);
         setTwoFactorCode('');
-        setIsLoading(false);
         completeLogin(profile);
         return;
       }
 
-      setIsLoading(false);
-      setErrorMsg(data?.error || 'Invalid or expired code. Please try again.');
+      setErrorMsg(data?.error || 'auth_err_2fa_invalid');
+      toast.error(data?.error || t('auth_err_2fa_invalid'));
     } catch (err: any) {
+      console.error('2FA verification failed:', err);
+      setErrorMsg(err?.message || 'auth_err_2fa_verify');
+      toast.error(err?.message || t('auth_err_2fa_verify'));
+    } finally {
+      inFlightRef.current = false;
       setIsLoading(false);
-      setErrorMsg(err?.message || 'Could not verify the code. Please try again.');
     }
   };
 
@@ -487,15 +554,20 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const handleTwoFactorResend = async () => {
     setErrorMsg('');
     setInfoNotice(null);
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       await fetch('/api/auth/whatsapp-otp/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: twoFactorPhone, userType: 'merchant' }),
       });
-      setInfoNotice(`A new code was sent to ${twoFactorPhone} on WhatsApp.`);
+      setInfoNotice(fmt('auth_info_2fa_resent', { phone: twoFactorPhone }));
     } catch {
-      setErrorMsg('Could not resend the code. Please try again.');
+      setErrorMsg('auth_err_resend');
+      toast.error(t('auth_err_resend'));
+    } finally {
+      inFlightRef.current = false;
     }
   };
 
@@ -503,12 +575,18 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const handleSwitchMode = (newMode: 'login' | 'signup') => {
     setMode(newMode);
     setErrorMsg('');
+    setEmailError('');
     setInfoNotice(null);
     setPendingTwoFactor(null);
     setTwoFactorCode('');
     if (newMode === 'signup') {
       setSignupStep('email');
       setOtp('');
+    } else {
+      // Returning to Sign In must start at the email step, never resume a
+      // half-finished password screen from an earlier attempt.
+      setLoginStep('email');
+      setLoginPassword('');
     }
   };
 
@@ -523,19 +601,27 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = loginPassword.trim();
 
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setErrorMsg('Please enter a valid email address.');
+    if (!isValidEmail(cleanEmail)) {
+      setErrorMsg('auth_err_invalid_email');
+      setEmailError('auth_err_invalid_email');
       return;
     }
 
     if (!cleanPassword) {
-      setErrorMsg('Please enter your account password.');
+      setErrorMsg('auth_err_enter_password');
+      toast.error(t('auth_err_enter_password'));
       return;
     }
 
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
     setIsLoading(true);
 
-    // 1. Database Check Before Account Creation: Perform immediate backend query to check if merchant exists in Supabase
+    // 1. Database Check Before Account Creation: Perform immediate backend query to check if merchant exists in Supabase.
+    // Wrapped in try/finally so a failed request can never leave the button
+    // stuck in its loading state (and releases the in-flight lock).
+    try {
     let existingProfile: any = null;
     try {
       const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
@@ -619,44 +705,75 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         await finishLogin(userProfile);
         return;
       } else {
+        inFlightRef.current = false;
         setIsLoading(false);
-        setErrorMsg('Invalid password. Please enter the correct password for your account.');
+        setErrorMsg('auth_err_invalid_password');
+        toast.error(t('auth_err_invalid_password'));
         return;
       }
     }
 
+    inFlightRef.current = false;
     setIsLoading(false);
-    setErrorMsg('No account found with this email. Please click "Create account" to sign up.');
+    setErrorMsg('auth_err_no_account');
+    toast.error(t('auth_err_no_account'));
+    } catch (err) {
+      console.error('Login failed:', err);
+      setErrorMsg('auth_err_server');
+      toast.error(t('auth_err_server'));
+    } finally {
+      inFlightRef.current = false;
+      setIsLoading(false);
+    }
   };
 
   const handleGoogleSignIn = async () => {
+    if (inFlightRef.current) return;
     setErrorMsg('');
     if (!supabase) {
-      setErrorMsg('Supabase is not configured. Please check your environment variables.');
+      setErrorMsg('auth_err_supabase_missing');
+      toast.error(t('auth_err_supabase_missing'));
       return;
     }
 
+    inFlightRef.current = true;
     setIsLoading(true);
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: window.location.origin
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+      if (error) {
+        setErrorMsg(error.message || 'auth_err_google_failed');
+        toast.error(error.message || t('auth_err_google_failed'));
       }
-    });
-    if (error) {
+      // On success Supabase navigates the browser to the OAuth URL, so the
+      // component unmounts and the loading state below is never seen.
+    } catch (err: any) {
+      console.error('Google sign-in error:', err);
+      setErrorMsg('auth_err_google_failed');
+      toast.error(t('auth_err_google_failed'));
+    } finally {
+      inFlightRef.current = false;
       setIsLoading(false);
-      setErrorMsg(error.message || 'Google sign-in failed. Please try again.');
     }
   };
 
   const handleGoogleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (inFlightRef.current) return;
     const cleanEmail = googleInputEmail.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setErrorMsg('Please enter a valid Gmail address.');
+    if (!isValidEmail(cleanEmail)) {
+      setErrorMsg('auth_err_invalid_gmail');
+      setEmailError('auth_err_invalid_gmail');
+      toast.error(t('auth_err_invalid_gmail'));
       return;
     }
+    setEmailError('');
     setIsGoogleModalOpen(false);
+    inFlightRef.current = true;
     setIsLoading(true);
 
     // Database Check Before Account Creation: Check if merchant already exists in Supabase
@@ -708,7 +825,16 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           subscriptionPlan: 'free_trial',
         });
 
-    await finishLogin(userProfile);
+    try {
+      await finishLogin(userProfile);
+    } catch (err) {
+      console.error('Google auth login failed:', err);
+      setErrorMsg('auth_err_server');
+      toast.error(t('auth_err_server'));
+    } finally {
+      inFlightRef.current = false;
+      setIsLoading(false);
+    }
   };
 
   const handleAdminGatewaySubmit = (e: React.FormEvent) => {
@@ -737,7 +863,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const cleanEmail = targetEmail.trim().toLowerCase();
 
     if (!supabase) {
-      setErrorMsg('Supabase is not configured. Please check your environment variables.');
+      setErrorMsg('auth_err_supabase_missing');
       return { success: false };
     }
 
@@ -769,12 +895,13 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
               },
             });
             if (!fallbackResult.error) {
-              setInfoNotice('ভেরিফিকেশন কোড আপনার ইমেইলে পাঠানো হয়েছে। আপনার ইনবক্স চেক করুন।');
-              setToastMsg("Verification code sent to your email");
+              setInfoNotice('auth_info_otp_sent');
+              setToastMsg('auth_toast_otp_sent');
               return { success: true };
             }
           }
-          setErrorMsg('This email is not registered. Please allow signups in Supabase or use an existing account.');
+          setErrorMsg('auth_err_not_registered');
+          toast.error(t('auth_err_not_registered'));
           return { success: false };
         }
 
@@ -784,16 +911,17 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           errMsg.includes('invalid login credentials') ||
           errMsg.includes('email not confirmed')
         ) {
-          setErrorMsg('This email is not registered. Please allow signups in Supabase or use an existing account.');
+          setErrorMsg('auth_err_not_registered');
+          toast.error(t('auth_err_not_registered'));
           return { success: false };
         }
 
-        setErrorMsg(error.message || 'সার্ভার সংযোগে ত্রুটি। অনুগ্রহ করে আবার চেষ্টা করুন।');
+        setErrorMsg(error.message || 'auth_err_server');
         return { success: false };
       }
 
-      setInfoNotice('ভেরিফিকেশন কোড আপনার ইমেইলে পাঠানো হয়েছে। অনুগ্রহ করে চেক করুন।');
-      setToastMsg("OTP code sent to your email");
+      setInfoNotice('auth_info_otp_sent');
+      setToastMsg('auth_toast_otp_sent');
       return { success: true };
     } catch (err: any) {
       console.error('Supabase OTP send exception:', err);
@@ -804,9 +932,11 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         errMsg.includes('signup is disabled') ||
         errMsg.includes('signups are disabled')
       ) {
-        setErrorMsg('This email is not registered. Please allow signups in Supabase or use an existing account.');
+        setErrorMsg('auth_err_not_registered');
+        toast.error(t('auth_err_not_registered'));
       } else {
-        setErrorMsg(err?.message || 'সার্ভার সংযোগে ত্রুটি। অনুগ্রহ করে আবার চেষ্টা করুন।');
+        setErrorMsg(err?.message || 'auth_err_server');
+        toast.error(err?.message || t('auth_err_server'));
       }
       return { success: false };
     }
@@ -815,16 +945,20 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   // Handle Email Submit in Sign Up - Check database before creating new account
   const handleSignupEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (inFlightRef.current) return;
     setErrorMsg('');
     setInfoNotice(null);
 
     const cleanedEmail = email.trim().toLowerCase();
 
-    if (!cleanedEmail || !cleanedEmail.includes('@')) {
-      setErrorMsg('Please enter a valid email address');
+    if (!isValidEmail(cleanedEmail)) {
+      setEmailError('auth_err_invalid_email');
+      setErrorMsg('auth_err_invalid_email');
       return;
     }
+    setEmailError('');
 
+    inFlightRef.current = true;
     setIsLoading(true);
 
     // Database Check: Check if merchant account already exists in Supabase or backend
@@ -851,49 +985,62 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const registeredList = getRegisteredUsers();
     const existingUser = registeredList.find((u) => u.email.toLowerCase() === cleanedEmail);
 
+    inFlightRef.current = false;
     setIsLoading(false);
 
     if (existingProfile || existingUser) {
       // Existing merchant detected! Do NOT trigger new onboarding or new trial creation
       handleSwitchMode('login');
       setEmail(cleanedEmail);
-      setInfoNotice(`An existing store account was found for ${cleanedEmail}. Please enter your password to access your dashboard.`);
-      setToastMsg('Existing account found. Please sign in.');
+      setLoginStep('password');
+      setInfoNotice(fmt('auth_info_existing_account', { email: cleanedEmail }));
+      setToastMsg('auth_toast_existing_account');
       return;
     }
 
     // Advance directly to Step 3 (Profile Setup) for new merchants
     setSignupStep('register');
-    setToastMsg('Email confirmed. Please complete your profile details.');
+    setToastMsg('auth_toast_email_confirmed');
   };
 
   // Resend OTP Code
   const handleResendOtp = async () => {
+    if (inFlightRef.current || isLoading) return;
     setResendTimer(60);
     setCanResend(false);
     setErrorMsg('');
+    inFlightRef.current = true;
     setIsLoading(true);
-    await sendEmailOtp(email, mode === 'signup');
-    setIsLoading(false);
+    try {
+      await sendEmailOtp(email, mode === 'signup');
+    } finally {
+      inFlightRef.current = false;
+      setIsLoading(false);
+    }
   };
 
   // Step 2: Verify OTP Code via Supabase / Local Fallback
   const handleOtpVerifySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (inFlightRef.current) return;
     setErrorMsg('');
 
     const cleanEmail = email.trim().toLowerCase();
     const cleanOtp = otp.trim();
 
     if (!cleanOtp || cleanOtp.length < 6) {
-      setErrorMsg('অনুগ্রহ করে ৬-ডিজিটের ভেরিফিকেশন কোডটি প্রদান করুন।');
+      setErrorMsg('auth_err_otp_required');
+      toast.error(t('auth_err_otp_required'));
       return;
     }
 
+    inFlightRef.current = true;
     setIsLoading(true);
 
     if (!supabase) {
-      setErrorMsg('Supabase is not configured.');
+      setErrorMsg('auth_err_supabase_missing');
+      toast.error(t('auth_err_supabase_missing'));
+      inFlightRef.current = false;
       setIsLoading(false);
       return;
     }
@@ -905,14 +1052,15 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         type: 'email',
       });
 
-      setIsLoading(false);
+
 
       if (error) {
-        setErrorMsg(error.message || 'ভেরিফিকেশন কোডটি সঠিক নয়। অনুগ্রহ করে আবার চেষ্টা করুন।');
+        setErrorMsg(error.message || 'auth_err_otp_wrong');
+        toast.error(error.message || t('auth_err_otp_wrong'));
         return;
       }
 
-      setToastMsg('ভেরিফিকেশন সফল হয়েছে!');
+      setToastMsg('auth_toast_verified_success');
 
       // Check if already registered
       const registeredList = getRegisteredUsers();
@@ -935,39 +1083,48 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         setSignupStep('register');
       }
     } catch (err: any) {
-      setIsLoading(false);
       console.error('OTP verification exception:', err);
-      setErrorMsg('সার্ভার সংযোগে ত্রুটি। অনুগ্রহ করে আবার চেষ্টা করুন।');
+      setErrorMsg('auth_err_server');
+      toast.error(t('auth_err_server'));
+    } finally {
+      inFlightRef.current = false;
+      setIsLoading(false);
     }
   };
 
     // Step 3: Registration / Store Profile Setup Submit (Find-or-Create)
   const handleRegisterProfileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (inFlightRef.current) return;
     setErrorMsg('');
 
     if (!firstName || !lastName || !storeName || !phone || !streetAddress || !district || !cityUpazila || !postCode || !nidNumber || !password) {
-      setErrorMsg('Please fill in all required profile setup and business location fields.');
+      setErrorMsg('auth_err_fill_all');
+      toast.error(t('auth_err_fill_all'));
       return;
     }
 
     if (!isWhatsappPhoneVerified || verifiedWhatsappPhone !== phone) {
-      setErrorMsg('Please verify your phone number via WhatsApp before completing registration.');
+      setErrorMsg('auth_err_verify_phone');
+      toast.error(t('auth_err_verify_phone'));
       return;
     }
 
     if (nidNumber.trim().length < 10) {
-      setErrorMsg('Please enter a valid National ID (NID) / Smart Card Number (at least 10 digits).');
+      setErrorMsg('auth_err_nid');
+      toast.error(t('auth_err_nid'));
       return;
     }
 
     if (password.length < 6) {
-      setErrorMsg('Password must be at least 6 characters long.');
+      setErrorMsg('auth_err_password_length');
+      toast.error(t('auth_err_password_length'));
       return;
     }
 
     if (password !== confirmPassword) {
-      setErrorMsg('Passwords do not match. Please enter matching passwords.');
+      setErrorMsg('auth_err_password_mismatch');
+      toast.error(t('auth_err_password_mismatch'));
       return;
     }
 
@@ -978,6 +1135,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = password.trim();
 
+    inFlightRef.current = true;
     setIsLoading(true);
 
     // Call backend find-or-create registration endpoint
@@ -1000,17 +1158,23 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
       const regData = await safeParseJson(regRes, null);
       if (regData?.ok && regData?.merchant) {
+        inFlightRef.current = false;
         setIsLoading(false);
         const serverMerchant = regData.merchant;
         const userProfile: MerchantProfile = normalizeMerchantRecord(serverMerchant, cleanEmail);
 
         if (regData.isExisting) {
-          setToastMsg('Welcome back! Logged into your existing store.');
+          setToastMsg('auth_toast_welcome_back');
         } else {
-          setToastMsg('Store account created successfully!');
+          setToastMsg('auth_toast_store_created');
         }
 
-        await finishLogin(userProfile);
+        try {
+          await finishLogin(userProfile);
+        } finally {
+          inFlightRef.current = false;
+          setIsLoading(false);
+        }
         return;
       }
     } catch (regErr) {
@@ -1082,8 +1246,16 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     ];
     safeSetItem('zid_registered_users', updatedUsers);
 
-    setIsLoading(false);
-    await finishLogin(newUserProfile);
+    try {
+      await finishLogin(newUserProfile);
+    } catch (err) {
+      console.error('Registration login failed:', err);
+      setErrorMsg('auth_err_server');
+      toast.error(t('auth_err_server'));
+    } finally {
+      inFlightRef.current = false;
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -1092,7 +1264,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       {toastMsg && (
         <div className="fixed top-5 z-50 bg-[#D4AF37] text-slate-950 font-extrabold px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-2 text-xs animate-bounce border border-emerald-400">
           <Send className="w-4 h-4" />
-          <span>{toastMsg}</span>
+          <span>{renderMsg(toastMsg)}</span>
         </div>
       )}
 
@@ -1172,7 +1344,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           <div className="bg-red-500/10 border border-red-500/30 text-red-400 p-3 rounded-xl text-xs font-semibold flex items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
             <div className="space-y-1 w-full">
-              <p>{errorMsg}</p>
+              <p>{renderMsg(errorMsg)}</p>
             </div>
           </div>
         )}
@@ -1181,7 +1353,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         {infoNotice && !errorMsg && (
           <div className="bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 p-3 rounded-xl text-xs flex items-start gap-2">
             <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
-            <span>{infoNotice}</span>
+            <span>{renderMsg(infoNotice)}</span>
           </div>
         )}
 
