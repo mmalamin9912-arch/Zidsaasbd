@@ -47,7 +47,6 @@ import { toast } from './ToastProvider';
 interface AuthFlowProps {
   onLoginSuccess: (userProfile: MerchantProfile) => void;
   defaultMerchant: MerchantProfile;
-  onAdminAccess?: () => void;
   initialMode?: 'login' | 'signup';
 }
 
@@ -62,7 +61,7 @@ interface RegisteredUser {
   logoUrl?: string;
 }
 
-export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerchant, onAdminAccess, initialMode = 'login' }) => {
+export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerchant, initialMode = 'login' }) => {
   const { t } = useLanguage();
 
   /**
@@ -109,13 +108,10 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const [otp, setOtp] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
 
-  // Zid Login & Admin Gateway States
+  // Zid Login States
   const [loginStep, setLoginStep] = useState<'email' | 'password'>('email');
   const [isGoogleModalOpen, setIsGoogleModalOpen] = useState(false);
   const [googleInputEmail, setGoogleInputEmail] = useState('');
-  const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
-  const [adminPasswordInput, setAdminPasswordInput] = useState('');
-  const [adminLoginError, setAdminLoginError] = useState('');
 
   // Timers & UI Feedback
   const [resendTimer, setResendTimer] = useState(60);
@@ -837,20 +833,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     }
   };
 
-  const handleAdminGatewaySubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (adminPasswordInput === '3565') {
-      setIsAdminModalOpen(false);
-      setAdminPasswordInput('');
-      setAdminLoginError('');
-      if (onAdminAccess) {
-        onAdminAccess();
-      }
-    } else {
-      setAdminLoginError('Invalid Master Passcode.');
-    }
-  };
-
   // ==========================================
   // MODE 2: NEW USER REGISTRATION (SIGN UP WITH OTP / MAGIC LINK)
   // ==========================================
@@ -1503,10 +1485,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                       Create account
                     </button>
                   </div>
-                  <p
-                    className="text-[10px] text-slate-500 hover:text-slate-400 cursor-pointer select-none leading-relaxed px-2"
-                    onClick={() => setIsAdminModalOpen(true)}
-                  >
+                  <p className="text-[10px] text-slate-500 leading-relaxed px-2 select-none">
                     By continuing, you agree to Zid BD Terms of Service and Privacy Policy.
                   </p>
                 </div>
@@ -2011,12 +1990,9 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
       </div>
 
-      {/* Footer with Secret Admin Entrance */}
-      <div
-        onClick={() => setIsAdminModalOpen(true)}
-        className="mt-6 text-center text-[11px] text-slate-500 cursor-pointer select-none hover:text-slate-400 transition"
-      >
-        Powered by ZID SAAS E-Commerce Operating System <span onDoubleClick={(e) => { e.stopPropagation(); setIsAdminModalOpen(true); }} className="cursor-pointer">•</span> Bangladesh
+      {/* Footer branding — static text, no hidden triggers */}
+      <div className="mt-6 text-center text-[11px] text-slate-500 select-none leading-relaxed">
+        Powered by ZID SAAS E-Commerce Operating System • Bangladesh
       </div>
 
       {/* Google Sign-In Modal */}
@@ -2078,68 +2054,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         </div>
       )}
 
-      {/* Secret Admin Passcode Modal */}
-      {isAdminModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-[#181B26] border border-[#2E3548] p-6 rounded-2xl max-w-sm w-full space-y-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-200">
-            <button
-              onClick={() => setIsAdminModalOpen(false)}
-              className="absolute top-4 right-4 text-slate-400 hover:text-white cursor-pointer"
-            >
-              ✕
-            </button>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-red-500/20 border border-red-500/40 flex items-center justify-center text-red-400">
-                <ShieldAlert className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-white">System Core Verification</h3>
-                <p className="text-[11px] text-slate-400">Enter authorization passcode to proceed.</p>
-              </div>
-            </div>
-
-            <form onSubmit={handleAdminGatewaySubmit} className="space-y-4">
-              <div>
-                <label className="flex justify-between items-center text-xs font-semibold text-slate-300 mb-1.5">
-                  <span>Master Passcode / PIN</span>
-                  <span className="text-[10px] text-slate-500 font-normal">Default PIN: 3565</span>
-                </label>
-                <input
-                  type="password"
-                  required
-                  value={adminPasswordInput}
-                  onChange={(e) => setAdminPasswordInput(e.target.value)}
-                  placeholder="Enter passcode..."
-                  className="w-full bg-[#202533] border border-[#3A435E] rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-red-500"
-                  autoFocus
-                />
-              </div>
-
-              {adminLoginError && (
-                <div className="bg-red-500/20 border border-red-500/40 text-red-400 p-2.5 rounded-xl text-[11px] font-bold">
-                  {adminLoginError}
-                </div>
-              )}
-
-              <div className="flex gap-3 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setIsAdminModalOpen(false)}
-                  className="flex-1 bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold py-2.5 rounded-xl text-xs transition border border-[#3A435E] cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-2.5 rounded-xl text-xs transition shadow-lg shadow-red-600/30 cursor-pointer"
-                >
-                  Unlock Portal
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </AuthLayout>
   );
 };

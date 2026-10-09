@@ -134,6 +134,19 @@ function isBareStorePath(path: string): boolean {
   return !RESERVED_ROOT_SEGMENTS.has(segment.toLowerCase());
 }
 
+/**
+ * Super Admin master passcode — read exclusively from the environment variable
+ * `VITE_SUPER_ADMIN_PASSCODE`. There is intentionally NO hardcoded default and
+ * no `3565` fallback: if the variable is unset the gate fails CLOSED and no
+ * passcode can authenticate. Set it in your deployment environment (never in
+ * source control).
+ */
+const SUPER_ADMIN_PASSCODE = String(
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPER_ADMIN_PASSCODE) ||
+  (typeof process !== 'undefined' && process.env?.VITE_SUPER_ADMIN_PASSCODE) ||
+  ''
+).trim();
+
 export default function App() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
@@ -1790,7 +1803,9 @@ onPlaceOrder={async (newOrder) => {
 
             <form onSubmit={(e) => {
               e.preventDefault();
-              if (adminPasswordInput === '3565') {
+              if (!SUPER_ADMIN_PASSCODE) {
+                setAdminLoginError('Super Admin access is not configured for this environment.');
+              } else if (adminPasswordInput === SUPER_ADMIN_PASSCODE) {
                 setIsAdminAuthenticated(true);
                 sessionStorage.setItem('zid_super_admin_auth', 'true');
                 setAdminLoginError('');
@@ -1801,7 +1816,6 @@ onPlaceOrder={async (newOrder) => {
               <div>
                 <label className="flex justify-between items-center text-xs font-semibold text-slate-300 mb-1.5">
                   <span>Master Password / PIN</span>
-                  <span className="text-[10px] text-slate-500 font-normal">Default PIN: 3565</span>
                 </label>
                 <input
                   type="password"
@@ -1960,10 +1974,6 @@ onPlaceOrder={async (newOrder) => {
       <AuthFlow
         onLoginSuccess={handleLoginSuccess}
         defaultMerchant={initialMerchant}
-        onAdminAccess={() => {
-          setIsAdminAuthenticated(true);
-          setActiveTab('super_admin_portal');
-        }}
         initialMode={authMode}
       />
     );
@@ -2260,7 +2270,9 @@ onPlaceOrder={async (newOrder) => {
 
             <form onSubmit={(e) => {
               e.preventDefault();
-              if (adminPasswordInput === '3565') {
+              if (!SUPER_ADMIN_PASSCODE) {
+                setAdminLoginError('Super Admin access is not configured for this environment.');
+              } else if (adminPasswordInput === SUPER_ADMIN_PASSCODE) {
                 setIsAdminAuthenticated(true);
                 setIsAdminLoginModalOpen(false);
                 setAdminLoginError('');
@@ -2272,7 +2284,6 @@ onPlaceOrder={async (newOrder) => {
               <div>
                 <label className="flex justify-between items-center text-xs font-semibold text-slate-300 mb-1.5">
                   <span>Master Password / PIN</span>
-                  <span className="text-[10px] text-slate-500 font-normal">Default PIN: 3565</span>
                 </label>
                 <input
                   type="password"
