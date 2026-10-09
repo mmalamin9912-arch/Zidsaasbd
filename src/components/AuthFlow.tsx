@@ -884,18 +884,17 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         body: JSON.stringify({ email: cleanEmail }),
       });
       const data = await safeParseJson(res, null);
-      if (data?.ok || data?.success) {
+      if (res.ok && data?.ok && data?.delivered !== false) {
         setResetOtpSentNotice('6-digit OTP code sent to your email! (Valid for 10 minutes)');
         toast.success('6-digit OTP code sent to your email!');
       } else {
-        const errorMsg = data?.error || 'Could not send verification code. Please try again.';
+        const errorMsg = data?.error || 'Failed to send OTP email. Please try again.';
         setForgotPasswordError(errorMsg);
-        toast.error(errorMsg);
+        toast.error('Failed to send OTP email. Please try again.');
       }
     } catch (err: any) {
-      const errorMsg = err?.message || 'Could not send verification code. Please try again.';
-      setForgotPasswordError(errorMsg);
-      toast.error(errorMsg);
+      setForgotPasswordError('Failed to send OTP email. Please try again.');
+      toast.error('Failed to send OTP email. Please try again.');
     } finally {
       setIsSendingResetOtp(false);
     }
