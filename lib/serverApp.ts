@@ -822,6 +822,75 @@ app.post('/api/auth/merchant/login', async (req, res) => {
   }
 });
 
+// POST /api/auth/merchant/verify-password — strict bcrypt password verification
+// This is the ONLY path allowed for password-based login. There is NO fallback.
+// Returns 200 + merchant on success, 401 on wrong password, 404 if no account.
+app.post('/api/auth/merchant/verify-password', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { email, password } = req.body || {};
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const cleanPassword = String(password || '');
+
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return res.status(400).json({ ok: false, error: 'Valid email is required.' });
+    }
+    if (!cleanPassword) {
+      return res.status(400).json({ ok: false, error: 'Password is required.' });
+    }
+
+    const db = await connectToMongoDB();
+    const storesCol = db.collection('stores');
+    const record = await storesCol.findOne({
+      $or: [{ email: cleanEmail }, { email: cleanEmail.toLowerCase() }],
+    });
+
+    if (!record) {
+      return res.status(404).json({ ok: false, error: 'No account found with this email.' });
+    }
+
+    // Prefer bcrypt hash comparison; fall back to plaintext only for legacy accounts
+    const storedHash: string | undefined = record.passwordHash || record.password_hash;
+    const storedPlain: string | undefined = record.password;
+
+    let passwordMatches = false;
+    if (storedHash) {
+      passwordMatches = await bcrypt.compare(cleanPassword, storedHash);
+    } else if (storedPlain) {
+      // Legacy plaintext — compare directly and opportunistically upgrade to hash
+      passwordMatches = storedPlain === cleanPassword;
+      if (passwordMatches) {
+        // Upgrade to bcrypt hash silently
+        const newHash = await bcrypt.hash(cleanPassword, 12);
+        await storesCol.updateOne(
+          { _id: record._id },
+          { $set: { passwordHash: newHash }, $unset: { password: '' } }
+        );
+      }
+    }
+
+    if (!passwordMatches) {
+      return res.status(401).json({
+        ok: false,
+        error: 'Incorrect password. Please try again or click Forgot Password.',
+      });
+    }
+
+    // Password correct — return merchant profile (sanitized)
+    const merchant = await authenticateMerchant({ email: cleanEmail });
+    const sanitized = merchant ? sanitizeServerMerchant(merchant) : {};
+    return res.status(200).json({
+      ok: true,
+      merchant: merchant
+        ? { ...sanitized, id: merchant.id, storeId: merchant.storeId, storeSlug: merchant.storeSlug, storeCode: merchant.storeCode }
+        : { email: cleanEmail },
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/auth/merchant/verify-password error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Password verification failed.' });
+  }
+});
+
 // GET /api/auth/merchant/check-email/:email — checks Supabase first, then MongoDB
 // to enforce one-store-per-email across all devices. Returns whether a store
 // already exists for the given email and which provider(s) confirmed it.

@@ -687,47 +687,62 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       }
     }
 
-    // Fallback: Check stored registered users list
-    const registeredList = getRegisteredUsers();
-    const existingUser = registeredList.find((u) => u.email.toLowerCase() === cleanEmail);
+    // ── Strict backend password verification (bcrypt against MongoDB) ──────────
+    // There is NO client-side fallback. Wrong password = hard 401.
+    let verifyResult: any = null;
+    try {
+      const verifyRes = await fetch('/api/auth/merchant/verify-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ email: cleanEmail, password: cleanPassword }),
+      });
+      verifyResult = await safeParseJson(verifyRes, null);
 
-    if (existingProfile || existingUser) {
-      const isPasswordValid = existingUser?.password
-        ? (existingUser.password === cleanPassword || cleanPassword.length >= 6)
-        : (cleanPassword === 'password123' || cleanPassword === '123456' || cleanPassword.length >= 6);
-
-      if (isPasswordValid) {
-        setIsLoading(false);
-        const derivedName = (cleanEmail.split('@')[0] || 'My Store').replace(/[^a-zA-Z0-9]/g, ' ');
-        const derivedSlug = (cleanEmail.split('@')[0] || 'store').replace(/[^a-z0-9]/g, '');
-        const userProfile: MerchantProfile = existingProfile
-          ? normalizeMerchantRecord(existingProfile, cleanEmail)
-          : resolveMerchantSubscription({
-              ...defaultMerchant,
-              email: cleanEmail,
-              ownerName: existingUser?.ownerName || cleanEmail.split('@')[0] || 'Store Owner',
-              storeName: existingUser?.storeName || `${derivedName} Store`,
-              phone: existingUser?.phone || defaultMerchant.phone || '',
-              storeSlug: existingUser?.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : derivedSlug,
-              subscriptionPlan: 'free_trial',
-              logoUrl: existingUser?.logoUrl || defaultMerchant.logoUrl || '',
-            });
-
-        await finishLogin(userProfile);
-        return;
-      } else {
+      if (!verifyRes.ok || !verifyResult?.ok) {
         inFlightRef.current = false;
         setIsLoading(false);
-        setErrorMsg('auth_err_invalid_password');
-        toast.error(t('auth_err_invalid_password'));
+        if (verifyRes.status === 404) {
+          setErrorMsg('auth_err_no_account');
+          toast.error(t('auth_err_no_account'));
+        } else {
+          const errMsg = verifyResult?.error || t('auth_err_invalid_password');
+          setErrorMsg(errMsg);
+          toast.error(errMsg);
+        }
         return;
       }
+    } catch (fetchErr) {
+      console.error('verify-password fetch failed:', fetchErr);
+      inFlightRef.current = false;
+      setIsLoading(false);
+      setErrorMsg('auth_err_server');
+      toast.error(t('auth_err_server'));
+      return;
     }
 
-    inFlightRef.current = false;
+    // Password verified — build user profile from verified merchant data
     setIsLoading(false);
-    setErrorMsg('auth_err_no_account');
-    toast.error(t('auth_err_no_account'));
+    const verifiedMerchant = verifyResult?.merchant;
+    const derivedName = (cleanEmail.split('@')[0] || 'My Store').replace(/[^a-zA-Z0-9]/g, ' ');
+    const derivedSlug = (cleanEmail.split('@')[0] || 'store').replace(/[^a-z0-9]/g, '');
+    const userProfile: MerchantProfile = existingProfile
+      ? normalizeMerchantRecord(existingProfile, cleanEmail)
+      : verifiedMerchant
+      ? normalizeMerchantRecord(verifiedMerchant, cleanEmail)
+      : resolveMerchantSubscription({
+          ...defaultMerchant,
+          email: cleanEmail,
+          ownerName: cleanEmail.split('@')[0] || 'Store Owner',
+          storeName: `${derivedName} Store`,
+          phone: defaultMerchant.phone || '',
+          storeSlug: derivedSlug,
+          subscriptionPlan: 'free_trial',
+          logoUrl: defaultMerchant.logoUrl || '',
+        });
+
+    await finishLogin(userProfile);
+    return;
+
     } catch (err) {
       console.error('Login failed:', err);
       setErrorMsg('auth_err_server');
