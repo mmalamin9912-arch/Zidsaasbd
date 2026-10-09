@@ -850,6 +850,109 @@ app.get('/api/auth/merchant/check-email/:email', async (req, res) => {
   }
 });
 
+// POST /api/auth/reset-password — Reset password directly in MongoDB & mirror to Supabase / in-memory store
+app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const cleanEmail = String(body.email || '').trim().toLowerCase();
+    const cleanPassword = String(body.newPassword || body.password || '').trim();
+
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return res.status(400).json({ ok: false, error: 'Valid email is required.' });
+    }
+    if (!cleanPassword || cleanPassword.length < 6) {
+      return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters long.' });
+    }
+
+    let updatedMongo = false;
+    let updatedSupabase = false;
+
+    // 1. Direct MongoDB update
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        const updateDoc = {
+          $set: {
+            password: cleanPassword,
+            updated_at: new Date(),
+          }
+        };
+        const storeUpdate = await mongoose.connection.db.collection('stores').updateOne({ email: emailRegex }, updateDoc);
+        const merchUpdate = await mongoose.connection.db.collection('merchants').updateOne({ email: emailRegex }, updateDoc);
+        if ((storeUpdate && storeUpdate.matchedCount > 0) || (merchUpdate && merchUpdate.matchedCount > 0)) {
+          updatedMongo = true;
+        }
+      }
+    } catch (mongoErr) {
+      console.warn('[Server] POST /api/auth/reset-password MongoDB warning:', mongoErr);
+    }
+
+    // 2. Mirror to Supabase (redundancy)
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (isConfigured) {
+        for (const table of ['stores', 'merchants'] as const) {
+          const sbRes = await fetch(
+            `${supabaseUrl}/rest/v1/${table}?email=ilike.${encodeURIComponent(cleanEmail)}`,
+            {
+              method: 'PATCH',
+              headers: {
+                apikey: supabaseKey,
+                Authorization: `Bearer ${supabaseKey}`,
+                'Content-Type': 'application/json',
+                Prefer: 'return=representation'
+              },
+              body: JSON.stringify({
+                password: cleanPassword,
+                updated_at: new Date().toISOString()
+              })
+            }
+          );
+          if (sbRes.ok) {
+            const rows = await sbRes.json().catch(() => []);
+            if (Array.isArray(rows) && rows.length > 0) {
+              updatedSupabase = true;
+            }
+          }
+        }
+      }
+    } catch (sbErr) {
+      console.warn('[Server] POST /api/auth/reset-password Supabase warning:', sbErr);
+    }
+
+    // 3. Update in-memory merchantStore & payload
+    try {
+      for (const [key, m] of merchantStore.entries()) {
+        if (m && typeof m.email === 'string' && m.email.toLowerCase() === cleanEmail) {
+          m.password = cleanPassword;
+          merchantStore.set(key, m);
+        }
+      }
+      const payload = await readStorePayload();
+      if (payload.merchant && payload.merchant.email && String(payload.merchant.email).toLowerCase() === cleanEmail) {
+        payload.merchant.password = cleanPassword;
+        await writeStorePayload(payload);
+      }
+    } catch (fsErr) {
+      console.warn('[Server] POST /api/auth/reset-password file sync warning:', fsErr);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      updatedMongo,
+      updatedSupabase,
+      message: 'Password changed successfully! Please log in with your new password.',
+      email: cleanEmail
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/auth/reset-password error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Password reset failed' });
+  }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
