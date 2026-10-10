@@ -928,6 +928,99 @@ app.get('/api/auth/merchant/check-email/:email', async (req, res) => {
 // ── Password Reset OTP Sessions & Email Dispatch ──────────────
 const passwordResetOtpSessions = new Map<string, { hashedOtp: string; expiresAt: number }>();
 
+/**
+ * Deliver a 6-digit verification code to an email address, trying Resend first
+ * and SMTP/NodeMailer second. Used as the Gmail fallback when WhatsApp dispatch
+ * fails, times out, or is not configured. Never throws — the caller decides what
+ * a delivery failure means.
+ */
+async function sendOtpEmail(options: {
+  to: string;
+  otpCode: string;
+  purpose?: 'verification' | 'password-reset';
+}): Promise<{ ok: boolean; delivered: boolean; provider?: string; error?: string }> {
+  const { to, otpCode, purpose = 'verification' } = options;
+  const cleanTo = String(to || '').trim().toLowerCase();
+  if (!cleanTo || !cleanTo.includes('@')) {
+    return { ok: false, delivered: false, error: 'A valid recipient email is required.' };
+  }
+
+  const resendApiKey = process.env.RESEND_API_KEY || process.env.RESEND_KEY || process.env.VITE_RESEND_API_KEY;
+  const fromEmail = process.env.RESEND_FROM || process.env.SMTP_FROM || 'Zid SaaS BD <onboarding@resend.dev>';
+  const heading = purpose === 'password-reset' ? 'Password Reset Verification' : 'Account Verification';
+
+  const htmlContent = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #0b0f19; color: #ffffff; border-radius: 12px; border: 1px solid #1e293b;">
+      <div style="text-align: center; margin-bottom: 20px;">
+        <h1 style="color: #D4AF37; font-size: 26px; font-weight: 800; margin: 0 0 8px 0; letter-spacing: 1px;">Zid SaaS BD</h1>
+        <p style="color: #94a3b8; font-size: 13px; margin: 0;">${heading}</p>
+      </div>
+      <div style="background: #151b2b; border: 2px solid #D4AF37; border-radius: 10px; padding: 20px; text-align: center; margin-bottom: 20px;">
+        <p style="color: #94a3b8; font-size: 12px; text-transform: uppercase; margin: 0 0 10px 0; letter-spacing: 1px; font-weight: 600;">Your 6-Digit Verification Code</p>
+        <div style="font-size: 42px; font-weight: 900; letter-spacing: 10px; color: #D4AF37; margin: 10px 0;">
+          <strong>${otpCode}</strong>
+        </div>
+        <p style="color: #cbd5e1; font-size: 14px; margin: 14px 0 0 0;">
+          Your code is: <strong style="color: #ffffff; font-size: 16px;">${otpCode}</strong>. Valid for <strong>10 minutes</strong>.
+        </p>
+      </div>
+      <p style="color: #64748b; font-size: 12px; text-align: center; margin: 0; line-height: 1.5;">
+        This code was sent because a verification was requested for your account. If you did not request it, you can safely ignore this email.
+      </p>
+    </div>
+  `;
+  const textContent = `Zid SaaS BD - ${heading}\n\nYour 6-digit code is: ${otpCode}. Valid for 10 minutes.`;
+  const subject = purpose === 'password-reset'
+    ? 'Zid SaaS BD — Your Password Reset Code'
+    : 'Zid SaaS BD — Your Verification Code';
+
+  // 1. Resend HTTP API (preferred — no SMTP setup needed).
+  if (resendApiKey) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from: fromEmail, to: [cleanTo], subject, html: htmlContent, text: textContent }),
+        signal: AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined,
+      });
+      if (res.ok) {
+        const data: any = await res.json().catch(() => ({}));
+        return { ok: true, delivered: true, provider: 'Resend', ...(data?.id ? { provider: `Resend (${data.id})` } : {}) };
+      }
+      const errText = await res.text().catch(() => '');
+      console.warn('[Server] Resend OTP dispatch failed:', res.status, errText.slice(0, 200));
+    } catch (err: any) {
+      console.warn('[Server] Resend OTP exception:', err?.message || err);
+    }
+  }
+
+  // 2. SMTP / NodeMailer fallback.
+  if (process.env.SMTP_HOST) {
+    try {
+      const nodemailer = await import('nodemailer');
+      const transport = nodemailer.default.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT) || 587,
+        secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
+        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS || '' },
+      });
+      await transport.sendMail({ from: fromEmail, to: cleanTo, subject, text: textContent, html: htmlContent });
+      return { ok: true, delivered: true, provider: 'SMTP / NodeMailer' };
+    } catch (err: any) {
+      console.warn('[Server] SMTP OTP dispatch error:', err?.message || err);
+    }
+  }
+
+  return {
+    ok: false,
+    delivered: false,
+    error: 'No email provider (Resend/SMTP) is configured or delivery failed.',
+  };
+}
+
 async function sendPasswordResetEmail(options: {
   to: string;
   subject: string;
@@ -7169,15 +7262,191 @@ async function dispatchLiveWhatsAppMessage(phone: string, code: string, userType
 
 const whatsappOtpSessions = new Map<string, { code: string; expiresAt: number; status: 'pending' | 'verified'; userType: string }>();
 
+// ── Dual-channel verification OTP (WhatsApp primary, Gmail fallback) ──────────
+//
+// ONE cryptographically-random 6-digit code is generated per request, bcrypt
+// hashed, and stored in MongoDB with a strict 10-minute expiry. That same code
+// is delivered over WhatsApp first; if WhatsApp is unconfigured, fails, or
+// times out, the identical code is emailed via Resend/SMTP. No dummy/testing
+// codes exist on any path.
+type DualChannelOtp = {
+  hashedOtp: string;
+  expiresAt: number;
+  phone: string;
+  email: string;
+  userType: string;
+  status: 'pending' | 'verified';
+  attempts: number;
+};
+const dualChannelOtpSessions = new Map<string, DualChannelOtp>();
+
+function otpSessionKey(phone: string, email: string): string {
+  return (phone && phone.trim()) || (email && email.trim().toLowerCase()) || '';
+}
+
+app.post(['/api/auth/send-otp', '/api/auth/otp/send'], async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { phone, email, userType, countryCode } = req.body || {};
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const cleanPhone = phone ? normalizeServerPhone(String(phone), countryCode) : '';
+    const resolvedUserType = userType || 'merchant';
+
+    if (!cleanPhone && (!cleanEmail || !cleanEmail.includes('@'))) {
+      return res.status(400).json({ ok: false, error: 'A phone number or email address is required.' });
+    }
+
+    // 1. Cryptographic 6-digit OTP — never a fixed/dummy value.
+    const cryptoModule = await import('crypto');
+    const otpCode = cryptoModule.randomInt(100000, 1000000).toString();
+    const expiresAt = Date.now() + 10 * 60 * 1000; // strict 10-minute window
+
+    // 2. bcrypt hash before it ever touches storage or logs.
+    const bcrypt = await import('bcryptjs');
+    const hashedOtp = await bcrypt.default.hash(otpCode, 10);
+
+    const key = otpSessionKey(cleanPhone, cleanEmail);
+    dualChannelOtpSessions.set(key, {
+      hashedOtp,
+      expiresAt,
+      phone: cleanPhone,
+      email: cleanEmail,
+      userType: resolvedUserType,
+      status: 'pending',
+      attempts: 0,
+    });
+
+    // 3. Persist the HASH (never the plaintext) to MongoDB with the expiry.
+    let persisted = false;
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const doc = {
+          phone: cleanPhone,
+          email: cleanEmail,
+          user_type: resolvedUserType,
+          otpHash: hashedOtp,
+          otp_hash: hashedOtp,
+          status: 'pending',
+          attempts: 0,
+          expires_at: new Date(expiresAt),
+          createdAt: new Date(),
+        };
+        const emailFilter = cleanEmail
+          ? { $or: [{ email: cleanEmail }, { emailLower: cleanEmail }] }
+          : null;
+        const phoneFilter = cleanPhone ? { phone: cleanPhone } : null;
+        const filter = phoneFilter && emailFilter ? { $or: [phoneFilter, emailFilter] } : phoneFilter || emailFilter;
+        if (filter) {
+          await mongoose.connection.db.collection('otp_verifications').updateOne(filter, { $set: doc }, { upsert: true });
+          persisted = true;
+        }
+      }
+    } catch (mongoErr: any) {
+      console.warn('[Server] OTP MongoDB persist warning:', mongoErr?.message || mongoErr);
+    }
+
+    // 4. WhatsApp FIRST.
+    let whatsappSent = false;
+    let whatsappProvider = '';
+    let whatsappError = '';
+    let directLink: string | undefined;
+    if (cleanPhone) {
+      try {
+        const dispatch = await dispatchLiveWhatsAppMessage(cleanPhone, otpCode, resolvedUserType);
+        whatsappSent = Boolean(dispatch.sent);
+        whatsappProvider = dispatch.provider || '';
+        directLink = dispatch.directLink;
+        if (!whatsappSent) whatsappError = 'WhatsApp dispatch did not confirm delivery.';
+      } catch (err: any) {
+        whatsappError = err?.message || 'WhatsApp dispatch threw an exception.';
+        console.warn('[Server] WhatsApp OTP dispatch exception, falling back to email:', whatsappError);
+      }
+    } else {
+      whatsappError = 'No phone number supplied.';
+    }
+
+    // 5. Gmail fallback — the SAME code, whenever WhatsApp did not succeed.
+    let emailSent = false;
+    let emailProvider = '';
+    let emailError = '';
+    if (!whatsappSent && cleanEmail) {
+      try {
+        const mail = await sendOtpEmail({ to: cleanEmail, otpCode, purpose: 'verification' });
+        emailSent = Boolean(mail.ok && mail.delivered);
+        emailProvider = mail.provider || '';
+        if (!emailSent) emailError = mail.error || 'Email dispatch failed.';
+      } catch (err: any) {
+        emailError = err?.message || 'Email dispatch threw an exception.';
+        console.warn('[Server] Email OTP fallback exception:', emailError);
+      }
+    }
+
+    const channel = whatsappSent ? 'whatsapp' : emailSent ? 'email' : 'none';
+    const delivered = whatsappSent || emailSent;
+
+    if (!delivered) {
+      // Nothing got out — do NOT leak the code; surface the real reason.
+      return res.status(502).json({
+        ok: false,
+        delivered: false,
+        channel: 'none',
+        error:
+          whatsappError && emailError
+            ? `Could not deliver the verification code. WhatsApp: ${whatsappError} Email: ${emailError}`
+            : 'Could not deliver the verification code via WhatsApp or email.',
+        whatsappError: whatsappError || undefined,
+        emailError: emailError || undefined,
+        expiresAt: new Date(expiresAt).toISOString(),
+      });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      delivered: true,
+      channel,
+      provider: whatsappSent ? whatsappProvider : emailProvider,
+      whatsappSent,
+      emailSent,
+      persisted,
+      expiresAt: new Date(expiresAt).toISOString(),
+      directLink,
+      // Human-facing status string, e.g. "Sending verification code to your WhatsApp..."
+      statusMessage: whatsappSent
+        ? 'Sending verification code to your WhatsApp...'
+        : 'WhatsApp was unavailable — we sent your verification code to your Gmail instead.',
+      message: whatsappSent
+        ? `Verification code sent to your WhatsApp (${cleanPhone}).`
+        : `Verification code sent to ${cleanEmail}.`,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/auth/send-otp error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Failed to send verification code.' });
+  }
+});
+
 app.post('/api/auth/whatsapp-otp/send', async (req, res) => {
   try {
-    const { phone, code, userType, expiresAt, countryCode } = req.body || {};
+    const { phone, code, userType, expiresAt, countryCode, email } = req.body || {};
     if (!phone || typeof phone !== 'string') {
       return res.status(400).json({ ok: false, error: 'Phone number is required.' });
     }
     const cleanPhone = normalizeServerPhone(phone, countryCode);
-    const otpCode = code || Math.floor(100000 + Math.random() * 900000).toString();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    // Cryptographic OTP by default. A caller-supplied `code` is accepted only
+    // when it is itself a valid 6-digit string (the client generates one and
+    // must be able to verify the same value); anything else is regenerated.
+    let otpCode: string;
+    if (typeof code === 'string' && /^\d{6}$/.test(code.trim())) {
+      otpCode = code.trim();
+    } else {
+      const cryptoModule = await import('crypto');
+      otpCode = cryptoModule.randomInt(100000, 1000000).toString();
+    }
     const expiryTime = expiresAt ? new Date(expiresAt).getTime() : Date.now() + 10 * 60 * 1000;
+
+    const bcrypt = await import('bcryptjs');
+    const hashedOtp = await bcrypt.default.hash(otpCode, 10);
 
     whatsappOtpSessions.set(cleanPhone, {
       code: otpCode,
@@ -7186,50 +7455,74 @@ app.post('/api/auth/whatsapp-otp/send', async (req, res) => {
       userType: userType || 'customer'
     });
 
-    // Attempt to sync with Supabase REST API if configured
-    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-
-    if (isConfigured) {
-      try {
-        await fetch(`${supabaseUrl}/rest/v1/whatsapp_otps`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`,
-            'Prefer': 'resolution=merge-duplicates'
+    // Persist the HASH to MongoDB with the 10-minute expiry (never plaintext).
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        await mongoose.connection.db.collection('otp_verifications').updateOne(
+          { phone: cleanPhone },
+          {
+            $set: {
+              phone: cleanPhone,
+              ...(cleanEmail ? { email: cleanEmail, emailLower: cleanEmail } : {}),
+              otpHash: hashedOtp,
+              otp_hash: hashedOtp,
+              status: 'pending',
+              expires_at: new Date(expiryTime),
+              createdAt: new Date()
+            }
           },
-          body: JSON.stringify({
-            phone: cleanPhone,
-            code: otpCode,
-            status: 'pending',
-            user_type: userType || 'customer',
-            expires_at: new Date(expiryTime).toISOString()
-          })
-        });
-      } catch (sbErr) {
-        console.warn('Supabase REST sync warning:', sbErr);
+          { upsert: true }
+        );
       }
+    } catch (mongoErr: any) {
+      console.warn('[Server] WhatsApp OTP MongoDB persist warning:', mongoErr?.message || mongoErr);
     }
 
     // Call live multi-provider WhatsApp dispatch
     const dispatchResult = await dispatchLiveWhatsAppMessage(cleanPhone, otpCode, userType || 'customer');
 
-    console.log(`[WhatsApp OTP Dispatch] Phone: ${cleanPhone} | Provider: ${dispatchResult.provider} | Sent: ${dispatchResult.sent} | Code: ${otpCode}`);
+    // Gmail fallback with the SAME code when WhatsApp could not deliver.
+    let emailSent = false;
+    let emailProvider = '';
+    if (!dispatchResult.sent && cleanEmail) {
+      try {
+        const mail = await sendOtpEmail({ to: cleanEmail, otpCode, purpose: 'verification' });
+        emailSent = Boolean(mail.ok && mail.delivered);
+        emailProvider = mail.provider || '';
+      } catch (mailErr: any) {
+        console.warn('[Server] WhatsApp-route email fallback warning:', mailErr?.message || mailErr);
+      }
+    }
+
+    // Log the outcome WITHOUT the code — no plaintext OTP in server logs.
+    console.log(`[OTP Dispatch] Phone: ${cleanPhone} | WhatsApp: ${dispatchResult.sent} (${dispatchResult.provider}) | Email: ${emailSent} (${emailProvider || 'n/a'})`);
+
+    // The plaintext code is NEVER returned to the client in a production build.
+    // It is echoed back only in development, where there is no delivery
+    // channel, so the flow can still be exercised locally.
+    const isProduction = process.env.NODE_ENV === 'production';
+    const delivered = Boolean(dispatchResult.sent || emailSent);
+    const channel = dispatchResult.sent ? 'whatsapp' : emailSent ? 'email' : 'none';
 
     res.setHeader('Content-Type', 'application/json');
     return res.status(200).json({
       ok: true,
       phone: cleanPhone,
-      codePreview: otpCode,
-      provider: dispatchResult.provider,
+      channel,
       sent: dispatchResult.sent,
+      emailSent,
+      provider: dispatchResult.sent ? dispatchResult.provider : emailProvider,
       details: dispatchResult.details,
       directLink: dispatchResult.directLink,
       expiresAt: new Date(expiryTime).toISOString(),
+      ...(isProduction ? {} : { codePreview: otpCode }),
       message: dispatchResult.sent
-        ? `WhatsApp OTP sent successfully to ${cleanPhone} via ${dispatchResult.provider}.`
-        : `WhatsApp OTP generated for ${cleanPhone}. Please check WhatsApp or use the test code.`
+        ? 'Sending verification code to your WhatsApp...'
+        : emailSent
+        ? 'WhatsApp was unavailable — we sent your verification code to your Gmail instead.'
+        : 'A verification code was generated, but no delivery channel was available.',
+      delivered
     });
   } catch (err: any) {
     console.error('WhatsApp OTP send endpoint error:', err);

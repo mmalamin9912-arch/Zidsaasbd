@@ -2159,10 +2159,11 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                     }
                   }}
                   userType="merchant"
-                  label="Phone Number (হোয়াটসঅ্যাপ নম্বর) - BD & Saudi Arabia Supported"
+                  label="Phone Number (হোয়াটসঅ্যাপ নম্বর) - BD, Saudi Arabia & Oman Supported"
                   required={true}
                   defaultCountryCode="+880"
                   darkMode={true}
+                  fallbackEmail={email.trim().toLowerCase()}
                 />
 
                 <div>

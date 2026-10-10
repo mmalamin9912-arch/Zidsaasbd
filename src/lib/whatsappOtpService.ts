@@ -29,6 +29,15 @@ export const SUPPORTED_COUNTRIES: CountryCodeOption[] = [
     placeholder: '500000000',
     example: '0512345678',
     digitsLength: 9
+  },
+  {
+    code: '+968',
+    country: 'Oman',
+    iso: 'OM',
+    flag: '🇴🇲',
+    placeholder: '90000000',
+    example: '09000000',
+    digitsLength: 8
   }
 ];
 
@@ -39,9 +48,14 @@ export interface OtpResult {
   isRateLimited?: boolean;
   provider?: string;
   sent?: boolean;
+  /** true when the code was delivered to the merchant's email as the fallback. */
+  emailSent?: boolean;
   details?: string;
   directLink?: string;
+  /** Present only in local/dev responses — never returned by a production build. */
   codePreview?: string;
+  /** 'whatsapp' | 'email' | 'none' — which channel actually carried the code. */
+  channel?: string;
 }
 
 export interface VerifyResult {
@@ -57,7 +71,7 @@ const clientOtpSessions = new Map<string, { code: string; expiresAt: number; sta
 /**
  * Builds direct WhatsApp click-to-chat URL with pre-filled OTP message
  */
-export function buildWhatsAppDirectLink(phone: string, otpCode: string, countryIso?: 'BD' | 'SA' | 'OTHER'): string {
+export function buildWhatsAppDirectLink(phone: string, otpCode: string, countryIso?: 'BD' | 'SA' | 'OM' | 'OTHER'): string {
   const digitsOnly = phone.replace(/[^\d]/g, '');
   let messageText = `*Zid E-Commerce Platform Verification*\n\nYour 6-digit WhatsApp OTP verification code is:\n*${otpCode}*\n\n`;
   if (countryIso === 'SA' || phone.startsWith('+966')) {
@@ -98,12 +112,26 @@ export function formatFullPhoneNumber(rawPhone: string, defaultCountryCode: stri
     return `+966${rest}`;
   }
 
+  // If already starts with +968 or 968
+  if (cleaned.startsWith('+968')) {
+    const rest = cleaned.slice(4).replace(/^0+/, '');
+    return `+968${rest}`;
+  }
+  if (cleaned.startsWith('968')) {
+    const rest = cleaned.slice(3).replace(/^0+/, '');
+    return `+968${rest}`;
+  }
+
   // If starts with standard local prefixes
   if (cleaned.startsWith('01') && cleaned.length === 11) {
     return `+880${cleaned.slice(1)}`;
   }
   if (cleaned.startsWith('05') && cleaned.length === 10) {
     return `+966${cleaned.slice(1)}`;
+  }
+  // Oman mobile: 8 digits starting with 7 or 9 (e.g. 09XXXXXX -> +9689XXXXXXX)
+  if (cleaned.startsWith('0') && cleaned.length === 9 && /^0[79]/.test(cleaned)) {
+    return `+968${cleaned.slice(1)}`;
   }
 
   // Strip leading 0 and any leading +
@@ -116,10 +144,10 @@ export function formatFullPhoneNumber(rawPhone: string, defaultCountryCode: stri
 /**
  * Validates whether the formatted phone is valid for supported countries
  */
-export function isValidPhoneNumber(formattedPhone: string): { 
-  valid: boolean; 
-  formatted: string; 
-  country?: 'BD' | 'SA' | 'OTHER'; 
+export function isValidPhoneNumber(formattedPhone: string): {
+  valid: boolean;
+  formatted: string;
+  country?: 'BD' | 'SA' | 'OM' | 'OTHER';
   error?: string;
 } {
   const formatted = formatFullPhoneNumber(formattedPhone);
@@ -133,11 +161,11 @@ export function isValidPhoneNumber(formattedPhone: string): {
     if (/^1[3-9]\d{8}$/.test(digits) || (digits.length === 10 && digits.startsWith('1'))) {
       return { valid: true, formatted, country: 'BD' };
     }
-    return { 
-      valid: false, 
-      formatted, 
-      country: 'BD', 
-      error: 'Please enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX or +88017XXXXXXXX).' 
+    return {
+      valid: false,
+      formatted,
+      country: 'BD',
+      error: 'Please enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX or +88017XXXXXXXX).'
     };
   }
 
@@ -147,11 +175,25 @@ export function isValidPhoneNumber(formattedPhone: string): {
     if (/^5\d{8}$/.test(digits) || (digits.length === 9 && digits.startsWith('5'))) {
       return { valid: true, formatted, country: 'SA' };
     }
-    return { 
-      valid: false, 
-      formatted, 
-      country: 'SA', 
-      error: 'Please enter a valid Saudi Arabia mobile number (e.g. 05XXXXXXXX or +9665XXXXXXXX).' 
+    return {
+      valid: false,
+      formatted,
+      country: 'SA',
+      error: 'Please enter a valid Saudi Arabia mobile number (e.g. 05XXXXXXXX or +9665XXXXXXXX).'
+    };
+  }
+
+  if (formatted.startsWith('+968')) {
+    const digits = formatted.slice(4);
+    // Oman mobile numbers: 8 digits starting with 7 or 9 (e.g. 9XXXXXXX).
+    if (/^[79]\d{7}$/.test(digits)) {
+      return { valid: true, formatted, country: 'OM' };
+    }
+    return {
+      valid: false,
+      formatted,
+      country: 'OM',
+      error: 'Please enter a valid Oman mobile number (e.g. 09XXXXXX or +9689XXXXXXX).'
     };
   }
 
@@ -170,13 +212,18 @@ export function normalizePhone(rawPhone: string, defaultCountryCode: string = '+
 }
 
 /**
- * Sends a real Supabase-backed WhatsApp OTP supporting both BD (+880) and KSA (+966)
- * with guaranteed dev fallback for instant testing.
+ * Sends a verification code over WhatsApp (primary), falling back to the
+ * merchant's email when WhatsApp cannot deliver. Supports BD (+880), KSA (+966)
+ * and Oman (+968). No dummy/test codes exist on any path.
+ *
+ * `email` is where the fallback code is sent; when omitted, WhatsApp is the
+ * only channel and a failed dispatch is reported as a failure.
  */
 export async function sendWhatsAppOtp(
   phone: string,
   userType: 'merchant' | 'customer' = 'customer',
-  countryCode: string = '+880'
+  countryCode: string = '+880',
+  email?: string
 ): Promise<OtpResult> {
   const normalized = normalizePhone(phone, countryCode);
   const validation = isValidPhoneNumber(normalized);
@@ -230,8 +277,10 @@ export async function sendWhatsAppOtp(
       }
     }
 
-    // 5. Trigger backend server proxy endpoint for WhatsApp dispatch & Supabase sync
+    // 5. Trigger the backend dual-channel route: WhatsApp first, then Gmail
+    //    fallback with the SAME code. The backend owns delivery + storage.
     let data: any = null;
+    let backendReachable = false;
     try {
       const res = await fetch('/api/auth/whatsapp-otp/send', {
         method: 'POST',
@@ -241,47 +290,52 @@ export async function sendWhatsAppOtp(
           code: otpCode,
           userType,
           expiresAt,
-          countryCode: validation.country === 'SA' ? '+966' : '+880'
+          email,
+          countryCode:
+            validation.country === 'SA' ? '+966' : validation.country === 'OM' ? '+968' : '+880'
         })
       });
-
-      data = await safeParseJson(res, { ok: true, sent: false });
+      data = await safeParseJson(res, null);
+      backendReachable = Boolean(data && data.ok);
     } catch (e: any) {
-      console.warn('Backend proxy fetch exception, using client fallback:', e);
-      data = { ok: true, provider: 'Direct WhatsApp Link & Dev Fallback', sent: false };
+      console.warn('Backend OTP dispatch unreachable:', e);
     }
 
-    const wasSent = Boolean(data?.sent);
-    const finalProvider = data?.provider || 'Direct WhatsApp Link & Supabase DB';
+    // When the backend could not be reached at all, we still have a locally
+    // generated code and a direct WhatsApp link, so the flow stays usable —
+    // but we never fabricate a code and never claim a delivery that did not
+    // happen.
+    const sentViaWhatsApp = Boolean(data?.sent);
+    const sentViaEmail = Boolean(data?.emailSent);
+    const wasSent = sentViaWhatsApp || sentViaEmail;
+    const finalProvider = data?.provider || (backendReachable ? 'none' : 'Direct WhatsApp Link');
     const finalLink = data?.directLink || directLink;
 
     return {
       success: true,
-      message: wasSent
-        ? `WhatsApp OTP sent successfully to ${normalized} via ${finalProvider}.`
-        : `WhatsApp OTP generated: ${otpCode}. Click "Open WhatsApp App" or use the code below.`,
+      message: sentViaWhatsApp
+        ? `Verification code sent to your WhatsApp (${normalized}).`
+        : sentViaEmail
+        ? `WhatsApp was unavailable — your verification code was sent to your Gmail instead.`
+        : `Open WhatsApp to receive your verification code on ${normalized}.`,
       expiresAt: data?.expiresAt || expiresAt,
       provider: finalProvider,
       sent: wasSent,
-      details: data?.details || `Live 6-digit OTP ${otpCode} generated for ${normalized}.`,
+      emailSent: sentViaEmail,
+      details: data?.details || `6-digit code generated for ${normalized}.`,
       directLink: finalLink,
-      codePreview: otpCode
+      // Echoed for the local dev flow only; the backend never returns it in production.
+      codePreview: data?.codePreview
     };
   } catch (err: any) {
+    // No hardcoded/dummy codes — an unexpected failure is reported as a
+    // failure so the caller can surface a real error instead of a fake code.
     console.error('Error sending WhatsApp OTP:', err);
-    // Even if an unexpected error occurs, provide a working test code
-    const fallbackOtp = '123456';
-    const fallbackExpiry = Date.now() + 10 * 60 * 1000;
-    clientOtpSessions.set(normalized, { code: fallbackOtp, expiresAt: fallbackExpiry, status: 'pending' });
-    const directLink = buildWhatsAppDirectLink(normalized, fallbackOtp, validation.country);
-
     return {
-      success: true,
-      message: `Test WhatsApp OTP: ${fallbackOtp}. Please enter this code or open WhatsApp.`,
-      codePreview: fallbackOtp,
-      directLink,
+      success: false,
+      message: err?.message || 'Could not send the verification code. Please try again.',
       sent: false,
-      provider: 'Dev Fallback OTP'
+      provider: 'none'
     };
   }
 }

@@ -20,8 +20,13 @@ export interface PhoneVerificationInputProps {
   required?: boolean;
   disabled?: boolean;
   className?: string;
-  defaultCountryCode?: string; // '+880' | '+966'
+  defaultCountryCode?: string; // '+880' | '+966' | '+968'
   darkMode?: boolean;
+  /**
+   * Where to send the SAME code if WhatsApp dispatch fails. Without this the
+   * merchant has no fallback channel when WhatsApp is unavailable.
+   */
+  fallbackEmail?: string;
 }
 
 export const PhoneVerificationInput: React.FC<PhoneVerificationInputProps> = ({
@@ -37,6 +42,7 @@ export const PhoneVerificationInput: React.FC<PhoneVerificationInputProps> = ({
   className = '',
   defaultCountryCode = '+880',
   darkMode = true,
+  fallbackEmail,
 }) => {
   // Determine initial country code from existing value if any
   const detectCountry = (val: string): CountryCodeOption => {
@@ -107,7 +113,7 @@ export const PhoneVerificationInput: React.FC<PhoneVerificationInputProps> = ({
   const handleCountrySelect = (country: CountryCodeOption) => {
     setSelectedCountry(country);
     setDropdownOpen(false);
-    
+
     // Invalidate verification if country code changed
     if (isVerified && onVerifiedChange) {
       onVerifiedChange(false);
@@ -154,7 +160,7 @@ export const PhoneVerificationInput: React.FC<PhoneVerificationInputProps> = ({
 
     setIsSending(true);
     const role: 'merchant' | 'customer' = userType === 'customer' ? 'customer' : 'merchant';
-    const result = await sendWhatsAppOtp(fullPhone, role, selectedCountry.code);
+    const result = await sendWhatsAppOtp(fullPhone, role, selectedCountry.code, fallbackEmail);
     setIsSending(false);
 
     if (result.success) {
