@@ -5332,6 +5332,70 @@ app.get('/api/stores/by-slug', async (req, res) => {
 // `:ref = "slug"` and return `merchant: null` instead of ever reaching their
 // real handler. That exact mis-ordering is what produced the production 404s.
 
+// STRICT email existence check: /api/stores/check-email/:email.
+//
+// Returns a flat, unambiguous contract — `{ ok: true, exists: boolean }` — where
+// `exists` is true ONLY when a fully-created account document is actually found
+// for this exact email. Callers must never infer existence from the truthiness
+// of the response object (an unknown email previously came back as a truthy
+// `{ ok: true, merchant: null }`, which wrongly flagged brand-new signups as
+// "account already exists").
+app.get('/api/stores/check-email/:email', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const email = String(req.params.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      return res.status(200).json({ ok: false, exists: false, error: 'Valid email is required.' });
+    }
+
+    // 1. MongoDB — exact email match on `stores`, then `merchants`.
+    //    Case-insensitive anchored regex so `User@X.com` matches `user@x.com`
+    //    WITHOUT ever matching a different address by substring.
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        for (const collectionName of ['stores', 'merchants', 'users']) {
+          const doc = await mongoose.connection.db.collection(collectionName).findOne({ email: emailRegex });
+          if (doc) {
+            return res.status(200).json({ ok: true, exists: true, source: 'mongodb', merchant: sanitizeServerMerchant(doc) });
+          }
+        }
+      }
+    } catch (dbErr: any) {
+      console.warn('[Server] /api/stores/check-email MongoDB warning:', dbErr?.message || dbErr);
+    }
+
+    // 2. Supabase `stores` — exact (eq) match, the canonical auth mirror.
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (isConfigured) {
+        const sbRes = await fetch(
+          `${supabaseUrl}/rest/v1/stores?email=eq.${encodeURIComponent(email)}&select=*&limit=1`,
+          {
+            headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' },
+            signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+          }
+        );
+        if (sbRes.ok) {
+          const rows = await sbRes.json();
+          if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
+            return res.status(200).json({ ok: true, exists: true, source: 'supabase', merchant: sanitizeServerMerchant(rows[0]) });
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn('[Server] /api/stores/check-email Supabase warning:', e?.message || e);
+    }
+
+    // 3. No document anywhere — this is a genuinely NEW email.
+    return res.status(200).json({ ok: true, exists: false, merchant: null });
+  } catch (err: any) {
+    console.error('[Server] GET /api/stores/check-email error:', err);
+    return res.status(200).json({ ok: false, exists: false, error: err?.message || String(err) });
+  }
+});
+
 // Store lookup by email: /api/stores/check/:email.
 app.get('/api/stores/check/:email', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');

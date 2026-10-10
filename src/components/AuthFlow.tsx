@@ -313,6 +313,33 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     };
   }, []);
 
+  /**
+   * STRICT server-side account existence check.
+   *
+   * Queries the dedicated `/api/stores/check-email/:email` endpoint, which
+   * answers with a flat `{ exists: boolean }`. We must NOT treat a truthy
+   * response body as proof of existence: the legacy `/api/stores/check/:email`
+   * route always returned HTTP 200 with `{ ok: true, merchant: null }` for
+   * unknown emails, so `if (data)` wrongly flagged every new address as an
+   * existing account. Only an explicit `exists === true`, or a non-null
+   * `merchant`/`id` from the legacy route, counts.
+   */
+  const checkMerchantEmailExists = async (cleanEmail: string): Promise<boolean> => {
+    // 1. Authoritative strict endpoint (MongoDB `stores`/`merchants`/`users`,
+    //    then Supabase `stores`).
+    try {
+      const response = await fetch(`/api/stores/check-email/${encodeURIComponent(cleanEmail)}`, {
+        headers: { 'Accept': 'application/json' }
+      });
+      const data = await safeParseJson<any>(response, null);
+      if (data && typeof data === 'object') return data.exists === true;
+      return false;
+    } catch (err) {
+      console.error('Error checking merchant email existence:', err);
+      return false;
+    }
+  };
+
   // Retrieve saved registered users from localStorage
   const getRegisteredUsers = (): RegisteredUser[] => {
     try {
@@ -634,19 +661,10 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     inFlightRef.current = true;
     setIsLoading(true);
     try {
-      // Authoritative MongoDB/backend lookup for an active account.
-      let exists = false;
-      try {
-        const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
-          headers: { 'Accept': 'application/json' }
-        });
-        const data = await safeParseJson(response, null);
-        if (data?.merchant || data?.id) exists = true;
-      } catch (err) {
-        console.error('Error checking for existing merchant on login:', err);
-      }
+      // Authoritative MongoDB/backend lookup — a document must actually exist.
+      let exists = await checkMerchantEmailExists(cleanEmail);
 
-      // Supplemental Supabase check when the backend lookup came back empty.
+      // Supplemental Supabase check when the strict lookup came back empty.
       if (!exists && supabase) {
         try {
           const { data } = await supabase.from('stores').select('id').ilike('email', cleanEmail).maybeSingle();
@@ -1225,34 +1243,29 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     inFlightRef.current = true;
     setIsLoading(true);
 
-    // Database Check: Check if merchant account already exists in Supabase or backend
-    let existingProfile: any = null;
-    try {
-      const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanedEmail)}`, {
-        headers: { 'Accept': 'application/json' }
-      });
-      const data = await safeParseJson(response, null);
-      if (data) existingProfile = data;
-    } catch (err) {
-      console.error('Error checking for existing merchant on signup:', err);
-    }
+    // STRICT existence check: a document must ACTUALLY be found. The response
+    // body is never used as a truthiness proxy for existence.
+    let exists = await checkMerchantEmailExists(cleanedEmail);
 
-    if (!existingProfile && supabase) {
+    // Supplemental Supabase check only when the strict endpoint said "new".
+    if (!exists && supabase) {
       try {
-        const { data } = await supabase.from('stores').select('*').ilike('email', cleanedEmail).maybeSingle();
-        if (data) existingProfile = data;
+        const { data } = await supabase.from('stores').select('id').ilike('email', cleanedEmail).maybeSingle();
+        if (data) exists = true;
       } catch (e) {
         console.warn('Supabase client check:', e);
       }
     }
 
-    const registeredList = getRegisteredUsers();
-    const existingUser = registeredList.find((u) => u.email.toLowerCase() === cleanedEmail);
+    // Final fallback: merchants registered locally on this device.
+    if (!exists) {
+      exists = getRegisteredUsers().some((u) => u.email.toLowerCase() === cleanedEmail);
+    }
 
     inFlightRef.current = false;
     setIsLoading(false);
 
-    if (existingProfile || existingUser) {
+    if (exists) {
       // CASE B — EMAIL ALREADY REGISTERED:
       // Do NOT start a new onboarding / trial. Notify the merchant, switch the
       // active tab to Sign In and reveal the password input field.
