@@ -340,6 +340,27 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     }
   };
 
+  /**
+   * Supplemental Supabase `stores` lookup by email.
+   *
+   * Uses `.eq()` (exact) and NOT `.ilike()`. PostgREST `ilike` is SQL LIKE: its
+   * `_` and `%` are WILDCARDS, so `a_b@gmail.com` would also match `axb@gmail.com`
+   * — and Gmail local parts routinely contain `_`/`.`, which is why gmail
+   * addresses in particular produced false "account already exists" hits.
+   * Our regex/`eq` path escapes those characters, so only an identical address
+   * can match.
+   */
+  const supabaseStoreByExactEmail = async (cleanEmail: string): Promise<any | null> => {
+    if (!supabase) return null;
+    try {
+      const { data } = await supabase.from('stores').select('*').eq('email', cleanEmail).maybeSingle();
+      return data || null;
+    } catch (err) {
+      console.warn('Supabase client check:', err);
+      return null;
+    }
+  };
+
   // Retrieve saved registered users from localStorage
   const getRegisteredUsers = (): RegisteredUser[] => {
     try {
@@ -664,15 +685,8 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       // Authoritative MongoDB/backend lookup — a document must actually exist.
       let exists = await checkMerchantEmailExists(cleanEmail);
 
-      // Supplemental Supabase check when the strict lookup came back empty.
-      if (!exists && supabase) {
-        try {
-          const { data } = await supabase.from('stores').select('id').ilike('email', cleanEmail).maybeSingle();
-          if (data) exists = true;
-        } catch (err) {
-          console.warn('Supabase client check:', err);
-        }
-      }
+      // Supplemental exact-match Supabase check when the strict lookup was empty.
+      if (!exists && await supabaseStoreByExactEmail(cleanEmail)) exists = true;
 
       // Final fallback: locally registered merchants on this device.
       if (!exists) {
@@ -727,26 +741,22 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // Wrapped in try/finally so a failed request can never leave the button
     // stuck in its loading state (and releases the in-flight lock).
     try {
+    // Only a real record counts. The legacy route answers HTTP 200 with
+    // `{ ok: true, merchant: null }` for unknown emails, so the body's
+    // truthiness must never be treated as proof of an existing account.
     let existingProfile: any = null;
     try {
       const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
         headers: { 'Accept': 'application/json' }
       });
-      const data = await safeParseJson(response, null);
-      if (data) existingProfile = data;
+      const data = await safeParseJson<any>(response, null);
+      if (data?.merchant || data?.id) existingProfile = data.merchant || data;
     } catch (e) {
       console.error('Error checking for existing merchant:', e);
     }
 
-    // Direct Supabase query as supplemental check
-    if (!existingProfile && supabase) {
-      try {
-        const { data } = await supabase.from('stores').select('*').ilike('email', cleanEmail).maybeSingle();
-        if (data) existingProfile = data;
-      } catch (e) {
-        console.warn('Supabase client check:', e);
-      }
-    }
+    // Direct Supabase query as supplemental check (exact match, never `ilike`).
+    if (!existingProfile) existingProfile = await supabaseStoreByExactEmail(cleanEmail);
 
     // Try Supabase Auth password login first if configured
     if (supabase) {
@@ -896,26 +906,21 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     inFlightRef.current = true;
     setIsLoading(true);
 
-    // Database Check Before Account Creation: Check if merchant already exists in Supabase
+    // Database Check Before Account Creation: only a real record counts; the
+    // response body's truthiness is never proof of an existing account.
     let existingProfile: any = null;
     try {
       const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
         headers: { 'Accept': 'application/json' }
       });
-      const data = await safeParseJson(response, null);
-      if (data) existingProfile = data;
+      const data = await safeParseJson<any>(response, null);
+      if (data?.merchant || data?.id) existingProfile = data.merchant || data;
     } catch (e) {
       console.error('Error checking for existing merchant:', e);
     }
 
-    if (!existingProfile && supabase) {
-      try {
-        const { data } = await supabase.from('stores').select('*').ilike('email', cleanEmail).maybeSingle();
-        if (data) existingProfile = data;
-      } catch (e) {
-        console.warn('Supabase client check:', e);
-      }
-    }
+    // Exact-match (never `ilike`) supplemental Supabase lookup.
+    if (!existingProfile) existingProfile = await supabaseStoreByExactEmail(cleanEmail);
 
     const registeredList = getRegisteredUsers();
     const existingUser = registeredList.find((u) => u.email.toLowerCase() === cleanEmail);
@@ -1247,15 +1252,10 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // body is never used as a truthiness proxy for existence.
     let exists = await checkMerchantEmailExists(cleanedEmail);
 
-    // Supplemental Supabase check only when the strict endpoint said "new".
-    if (!exists && supabase) {
-      try {
-        const { data } = await supabase.from('stores').select('id').ilike('email', cleanedEmail).maybeSingle();
-        if (data) exists = true;
-      } catch (e) {
-        console.warn('Supabase client check:', e);
-      }
-    }
+    // Supplemental exact-match Supabase check only when the strict endpoint
+    // said "new". `.eq` (never `.ilike`) so gmail/`_`-containing addresses
+    // cannot cross-match a different stored email.
+    if (!exists && await supabaseStoreByExactEmail(cleanedEmail)) exists = true;
 
     // Final fallback: merchants registered locally on this device.
     if (!exists) {
