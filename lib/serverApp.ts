@@ -839,29 +839,32 @@ app.post('/api/auth/merchant/verify-password', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Password is required.' });
     }
 
-    const db = await connectToMongoDB();
-    const storesCol = db.collection('stores');
-    const record = await storesCol.findOne({
-      $or: [{ email: cleanEmail }, { email: cleanEmail.toLowerCase() }],
-    });
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable. Please try again shortly.' });
+    }
+    const storesCol = mongoose.connection.db.collection('stores');
+    const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const record = await storesCol.findOne({ email: emailRegex });
 
     if (!record) {
       return res.status(404).json({ ok: false, error: 'No account found with this email.' });
     }
 
     // Prefer bcrypt hash comparison; fall back to plaintext only for legacy accounts
+    const bcrypt = await import('bcryptjs');
     const storedHash: string | undefined = record.passwordHash || record.password_hash;
     const storedPlain: string | undefined = record.password;
 
     let passwordMatches = false;
     if (storedHash) {
-      passwordMatches = await bcrypt.compare(cleanPassword, storedHash);
+      passwordMatches = await bcrypt.default.compare(cleanPassword, storedHash);
     } else if (storedPlain) {
       // Legacy plaintext — compare directly and opportunistically upgrade to hash
       passwordMatches = storedPlain === cleanPassword;
       if (passwordMatches) {
         // Upgrade to bcrypt hash silently
-        const newHash = await bcrypt.hash(cleanPassword, 12);
+        const newHash = await bcrypt.default.hash(cleanPassword, 12);
         await storesCol.updateOne(
           { _id: record._id },
           { $set: { passwordHash: newHash }, $unset: { password: '' } }

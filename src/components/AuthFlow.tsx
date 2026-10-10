@@ -102,8 +102,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const [twoFactorPhone, setTwoFactorPhone] = useState('');
   const [twoFactorCode, setTwoFactorCode] = useState('');
 
-  // Sign Up Flow Steps
+  // Sign Up Flow Steps. 'otp' is legacy (the email OTP step is bypassed by the
+  // smart existence check) and is kept only so the old branch still typechecks.
   const [signupStep, setSignupStep] = useState<'email' | 'otp' | 'register'>('email');
+  // Set when a Sign In submit finds no account, so the email step can show the
+  // "No account found… Please Sign Up" notice with a one-click tab switch.
+  const [loginEmailMissing, setLoginEmailMissing] = useState(false);
 
   // Common / Shared State
   const [email, setEmail] = useState('');
@@ -588,6 +592,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     setErrorMsg('');
     setEmailError('');
     setInfoNotice(null);
+    setLoginEmailMissing(false);
     setPendingTwoFactor(null);
     setTwoFactorCode('');
     if (newMode === 'signup') {
@@ -598,6 +603,77 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       // half-finished password screen from an earlier attempt.
       setLoginStep('email');
       setLoginPassword('');
+    }
+  };
+
+  // ==========================================
+  // SMART EMAIL EXISTENCE CHECK (SIGN IN, STEP 1)
+  // ==========================================
+  /**
+   * Sign In step 1. Unlike the old inline handler that always advanced to the
+   * password screen, this queries MongoDB/backend first:
+   *   CASE A — email exists  -> advance to the password input field.
+   *   CASE B — email unknown -> "No account found with this email. Please Sign
+   *            Up to create your store." and offer a one-click switch to Sign Up.
+   */
+  const handleLoginEmailSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (inFlightRef.current) return;
+    setErrorMsg('');
+    setEmailError('');
+    setInfoNotice(null);
+    setLoginEmailMissing(false);
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (!isValidEmail(cleanEmail)) {
+      setErrorMsg('auth_err_invalid_email');
+      setEmailError('auth_err_invalid_email');
+      return;
+    }
+
+    inFlightRef.current = true;
+    setIsLoading(true);
+    try {
+      // Authoritative MongoDB/backend lookup for an active account.
+      let exists = false;
+      try {
+        const response = await fetch(`/api/stores/check/${encodeURIComponent(cleanEmail)}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        const data = await safeParseJson(response, null);
+        if (data?.merchant || data?.id) exists = true;
+      } catch (err) {
+        console.error('Error checking for existing merchant on login:', err);
+      }
+
+      // Supplemental Supabase check when the backend lookup came back empty.
+      if (!exists && supabase) {
+        try {
+          const { data } = await supabase.from('stores').select('id').ilike('email', cleanEmail).maybeSingle();
+          if (data) exists = true;
+        } catch (err) {
+          console.warn('Supabase client check:', err);
+        }
+      }
+
+      // Final fallback: locally registered merchants on this device.
+      if (!exists) {
+        exists = getRegisteredUsers().some((u) => u.email.toLowerCase() === cleanEmail);
+      }
+
+      if (!exists) {
+        // CASE B — no account for this email.
+        setLoginEmailMissing(true);
+        setErrorMsg('auth_err_no_account');
+        toast.error(t('auth_err_no_account'));
+        return;
+      }
+
+      // CASE A — account exists: reveal the password input field.
+      setLoginStep('password');
+    } finally {
+      inFlightRef.current = false;
+      setIsLoading(false);
     }
   };
 
@@ -1177,16 +1253,24 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     setIsLoading(false);
 
     if (existingProfile || existingUser) {
-      // Existing merchant detected! Do NOT trigger new onboarding or new trial creation
+      // CASE B — EMAIL ALREADY REGISTERED:
+      // Do NOT start a new onboarding / trial. Notify the merchant, switch the
+      // active tab to Sign In and reveal the password input field.
       handleSwitchMode('login');
       setEmail(cleanedEmail);
       setLoginStep('password');
-      setInfoNotice(fmt('auth_info_existing_account', { email: cleanedEmail }));
+      setLoginEmailMissing(false);
+      setErrorMsg(fmt('auth_info_existing_account', { email: cleanedEmail }));
+      setInfoNotice(null);
       setToastMsg('auth_toast_existing_account');
       return;
     }
 
-    // Advance directly to Step 3 (Profile Setup) for new merchants
+    // CASE A — NEW EMAIL:
+    // Never ask for a password here. Move straight to Step 2: Profile Setup
+    // (Mobile Number, Store Name and New Password are collected there).
+    handleSwitchMode('signup');
+    setEmail(cleanedEmail);
     setSignupStep('register');
     setToastMsg('auth_toast_email_confirmed');
   };
@@ -1515,13 +1599,15 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         {/* SIGN UP TIMELINE BAR (Only shown during Sign Up) */}
         {mode === 'signup' && (
           <div className="flex items-center justify-between px-6 text-xs">
-            <div className={`flex items-center gap-1.5 font-bold ${signupStep === 'email' ? 'text-[#D4AF37]' : 'text-slate-400'}`}>
-              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${signupStep === 'email' ? 'bg-[#D4AF37] text-slate-950 font-black' : 'bg-[#282E3F] text-slate-300'}`}>1</span>
+            <div className={`flex items-center gap-1.5 font-bold ${signupStep !== 'register' ? 'text-[#D4AF37]' : 'text-slate-400'}`}>
+              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${signupStep !== 'register' ? 'bg-[#D4AF37] text-slate-950 font-black' : 'bg-[#282E3F] text-slate-300'}`}>1</span>
               <span>Email</span>
             </div>
             <div className="h-0.5 flex-1 mx-4 bg-[#2E3548]" />
             <div className={`flex items-center gap-1.5 font-bold ${signupStep === 'register' ? 'text-[#D4AF37]' : 'text-slate-400'}`}>
-              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${signupStep === 'register' ? 'bg-[#D4AF37] text-slate-950 font-black' : 'bg-[#282E3F] text-slate-300'}`}>2</span>
+              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${signupStep === 'register' ? 'bg-[#D4AF37] text-slate-950 font-black' : 'bg-[#282E3F] text-slate-300'}`}>
+                {signupStep === 'register' && isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : '2'}
+              </span>
               <span>Profile Setup</span>
             </div>
           </div>
@@ -1622,16 +1708,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           <>
             {loginStep === 'email' ? (
               <div className="space-y-4">
-                <form onSubmit={(e) => {
-                  e.preventDefault();
-                  const cleanEmail = email.trim().toLowerCase();
-                  if (!cleanEmail || !cleanEmail.includes('@')) {
-                    setErrorMsg('Please enter a valid email address.');
-                    return;
-                  }
-                  setErrorMsg('');
-                  setLoginStep('password');
-                }} className="space-y-4">
+                <form onSubmit={handleLoginEmailSubmit} className="space-y-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1.5">
                       {t('auth_email_label')}
@@ -1651,12 +1728,43 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
                   <button
                     type="submit"
-                    className="w-full py-3 bg-[#D4AF37] hover:bg-[#FCF6BA] text-slate-950 font-extrabold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-[#D4AF37]/25"
+                    disabled={isLoading}
+                    className="w-full py-3 bg-[#D4AF37] hover:bg-[#FCF6BA] disabled:opacity-50 text-slate-950 font-extrabold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-lg shadow-[#D4AF37]/25"
                   >
-                    <span>Next</span>
-                    <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Checking...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Next</span>
+                        <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+                      </>
+                    )}
                   </button>
                 </form>
+
+                {/* Smart check: an unknown email is offered a one-click switch to Sign Up */}
+                {loginEmailMissing && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 p-3 rounded-xl text-xs flex flex-wrap items-center justify-between gap-2">
+                    <span className="flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{renderMsg('auth_err_no_account')}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLoginEmailMissing(false);
+                        setErrorMsg('');
+                        handleSwitchMode('signup');
+                      }}
+                      className="text-[#D4AF37] font-bold hover:underline cursor-pointer"
+                    >
+                      {t('sign_up')}
+                    </button>
+                  </div>
+                )}
 
                 {/* Divider */}
                 <div className="relative flex py-2 items-center">
