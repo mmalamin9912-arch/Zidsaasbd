@@ -1380,7 +1380,9 @@ if (m.storeSlug) {
           };
 
           if (req.email) {
-            await supabase.from('stores').update(updatePayload).ilike('email', req.email.trim());
+            // Exact full-address match. `.ilike` treats `_`/`%` as wildcards, so
+            // it could apply a plan change to a different merchant's store.
+            await supabase.from('stores').update(updatePayload).eq('email', req.email.trim().toLowerCase());
             await supabase.from('subscriptions').upsert([{
               merchant_email: req.email.trim().toLowerCase(),
               store_slug: (req.storeName || '').toLowerCase().replace(/\s+/g, '-'),

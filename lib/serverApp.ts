@@ -844,10 +844,13 @@ app.post('/api/auth/merchant/verify-password', async (req, res) => {
       return res.status(503).json({ ok: false, error: 'Database unavailable. Please try again shortly.' });
     }
     const storesCol = mongoose.connection.db.collection('stores');
-    const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-    const record = await storesCol.findOne({ email: emailRegex });
+    // Exact full-string equality — a regex/wildcard lookup could resolve a
+    // DIFFERENT account and then verify a password against the wrong record.
+    const record =
+      (await storesCol.findOne({ email: cleanEmail })) ||
+      (await storesCol.findOne({ emailLower: cleanEmail }));
 
-    if (!record) {
+    if (!record || String(record.email || record.emailLower || '').trim().toLowerCase() !== cleanEmail) {
       return res.status(404).json({ ok: false, error: 'No account found with this email.' });
     }
 
@@ -1039,10 +1042,12 @@ app.post(['/api/auth/password-reset/send-otp', '/api/auth/reset-otp/send', '/api
     try {
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-        const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        // Exact full-string match so the OTP is attached to exactly one account.
+        const emailFilter = { $or: [{ email: cleanEmail }, { emailLower: cleanEmail }] };
         const otpUpdate = {
           $set: {
             email: cleanEmail,
+            emailLower: cleanEmail,
             resetOtpHash: hashedOtp,
             reset_otp_hash: hashedOtp,
             resetOtpExpiresAt: expiresAt,
@@ -1050,8 +1055,8 @@ app.post(['/api/auth/password-reset/send-otp', '/api/auth/reset-otp/send', '/api
             updated_at: new Date()
           }
         };
-        await mongoose.connection.db.collection('stores').updateOne({ email: emailRegex }, otpUpdate, { upsert: true });
-        await mongoose.connection.db.collection('merchants').updateOne({ email: emailRegex }, otpUpdate);
+        await mongoose.connection.db.collection('stores').updateOne(emailFilter, otpUpdate, { upsert: true });
+        await mongoose.connection.db.collection('merchants').updateOne(emailFilter, otpUpdate);
       }
     } catch (mongoErr) {
       console.warn('[Server] MongoDB OTP save warning:', mongoErr);
@@ -1133,9 +1138,10 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
     try {
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-        const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-        const storeDoc = await mongoose.connection.db.collection('stores').findOne({ email: emailRegex });
-        const merchDoc = !storeDoc ? await mongoose.connection.db.collection('merchants').findOne({ email: emailRegex }) : null;
+        // Exact full-string match (plus the normalised legacy field).
+        const emailFilter = { $or: [{ email: cleanEmail }, { emailLower: cleanEmail }] };
+        const storeDoc = await mongoose.connection.db.collection('stores').findOne(emailFilter);
+        const merchDoc = !storeDoc ? await mongoose.connection.db.collection('merchants').findOne(emailFilter) : null;
         const targetDoc = storeDoc || merchDoc;
 
         if (targetDoc) {
@@ -1180,9 +1186,12 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
     try {
       await connectToMongoDB();
       if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-        const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+        // Exact full-string match so only this account's password is replaced.
+        const emailFilter = { $or: [{ email: cleanEmail }, { emailLower: cleanEmail }] };
         const updateDoc = {
           $set: {
+            email: cleanEmail,
+            emailLower: cleanEmail,
             password: cleanPassword,
             passwordHash: hashedPassword,
             password_hash: hashedPassword,
@@ -1195,8 +1204,8 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
             updated_at: new Date()
           }
         };
-        await mongoose.connection.db.collection('stores').updateOne({ email: emailRegex }, updateDoc);
-        await mongoose.connection.db.collection('merchants').updateOne({ email: emailRegex }, updateDoc);
+        await mongoose.connection.db.collection('stores').updateOne(emailFilter, updateDoc);
+        await mongoose.connection.db.collection('merchants').updateOne(emailFilter, updateDoc);
       }
     } catch (mongoErr) {
       console.warn('[Server] POST /api/auth/reset-password MongoDB warning:', mongoErr);
@@ -1209,8 +1218,10 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
       if (isConfigured) {
         for (const table of ['stores', 'merchants'] as const) {
+          // `eq.` — an `ilike.` PATCH would rewrite the password of any row
+          // matching the wildcard pattern, i.e. potentially another account.
           await fetch(
-            `${supabaseUrl}/rest/v1/${table}?email=ilike.${encodeURIComponent(cleanEmail)}`,
+            `${supabaseUrl}/rest/v1/${table}?email=eq.${encodeURIComponent(cleanEmail)}`,
             {
               method: 'PATCH',
               headers: {
@@ -3785,7 +3796,9 @@ app.get('/api/merchants/check/:email', async (req, res) => {
 
   if (isConfigured) {
     try {
-      const sbRes = await fetch(`${supabaseUrl}/rest/v1/merchants?email=ilike.${encodeURIComponent(email)}&select=*&limit=1`, {
+      // `eq.` for an exact full-address match; `ilike.` would let `_`/`%`
+      // wildcards match a different merchant's email.
+      const sbRes = await fetch(`${supabaseUrl}/rest/v1/merchants?email=eq.${encodeURIComponent(email)}&select=*&limit=1`, {
         headers: {
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`
@@ -3793,8 +3806,9 @@ app.get('/api/merchants/check/:email', async (req, res) => {
       });
       if (sbRes.ok) {
         const rows = await sbRes.json();
-        if (Array.isArray(rows) && rows.length > 0) {
-          return res.json(sanitizeServerMerchant(rows[0]));
+        if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
+          const stored = String(rows[0].email || '').trim().toLowerCase();
+          if (stored === email) return res.json(sanitizeServerMerchant(rows[0]));
         }
       }
     } catch (e) {
@@ -5332,35 +5346,75 @@ app.get('/api/stores/by-slug', async (req, res) => {
 // `:ref = "slug"` and return `merchant: null` instead of ever reaching their
 // real handler. That exact mis-ordering is what produced the production 404s.
 
+/**
+ * Normalise a user-supplied email for existence lookups: trim outer whitespace
+ * and lowercase the WHOLE string. Every existence query in this file must run
+ * the input through this first, so `  User@X.com ` and `user@x.com` are the
+ * same account.
+ */
+function normalizeCheckEmail(raw: unknown): string {
+  return String(raw ?? '').trim().toLowerCase();
+}
+
+/**
+ * Absolute exact-string email lookup across MongoDB collections.
+ *
+ * Uses a plain equality query (`{ email: normalized }`) — NOT a regex and NOT
+ * `$regex` — so it can only ever match a document whose `email` field is the
+ * identical full string. A regex (even a `^…$` anchored one) and PostgREST's
+ * `ilike` both invite partial/wildcard matches, which is how different Gmail
+ * addresses were being reported as the same existing account.
+ *
+ * The candidate list covers the stores written over time plus legacy spellings;
+ * the `emailLower` pass tolerates rows stored with mixed case by comparing the
+ * normalised form the DB maintains on read.
+ */
+async function findExactEmailMatch(email: string): Promise<{ doc: any; collection: string } | null> {
+  await connectToMongoDB();
+  if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return null;
+
+  for (const collectionName of ['stores', 'merchants', 'users']) {
+    try {
+      // 1. Exact equality on the canonical lowercase field.
+      let doc = await mongoose.connection.db.collection(collectionName).findOne({ email: email });
+      // 2. Exact equality on the raw `email` field for legacy mixed-case rows.
+      if (!doc) doc = await mongoose.connection.db.collection(collectionName).findOne({ emailLower: email });
+      if (doc) {
+        // Reject any residual mismatch: the stored value must equal the input
+        // after trimming + lowercasing, so a partial/wildcard hit can never pass.
+        const stored = normalizeCheckEmail(doc.email || doc.emailLower);
+        if (stored === email) return { doc, collection: collectionName };
+      }
+    } catch (err: any) {
+      if (!/ns not found|does not exist/i.test(String(err?.message || ''))) {
+        console.warn(`[Server] check-email ${collectionName} lookup warning:`, err?.message || err);
+      }
+    }
+  }
+  return null;
+}
+
 // STRICT email existence check: /api/stores/check-email/:email.
 //
 // Returns a flat, unambiguous contract — `{ ok: true, exists: boolean }` — where
-// `exists` is true ONLY when a fully-created account document is actually found
-// for this exact email. Callers must never infer existence from the truthiness
+// `exists` is true ONLY when a fully-created account document is found for the
+// COMPLETE email string. Callers must never infer existence from the truthiness
 // of the response object (an unknown email previously came back as a truthy
 // `{ ok: true, merchant: null }`, which wrongly flagged brand-new signups as
 // "account already exists").
 app.get('/api/stores/check-email/:email', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const email = String(req.params.email || '').trim().toLowerCase();
+    const email = normalizeCheckEmail(req.params.email);
     if (!email || !email.includes('@')) {
       return res.status(200).json({ ok: false, exists: false, error: 'Valid email is required.' });
     }
 
-    // 1. MongoDB — exact email match on `stores`, then `merchants`.
-    //    Case-insensitive anchored regex so `User@X.com` matches `user@x.com`
-    //    WITHOUT ever matching a different address by substring.
+    // 1. MongoDB — absolute exact-string lookup (no regex, no ilike).
     try {
-      await connectToMongoDB();
-      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-        const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-        for (const collectionName of ['stores', 'merchants', 'users']) {
-          const doc = await mongoose.connection.db.collection(collectionName).findOne({ email: emailRegex });
-          if (doc) {
-            return res.status(200).json({ ok: true, exists: true, source: 'mongodb', merchant: sanitizeServerMerchant(doc) });
-          }
-        }
+      const match = await findExactEmailMatch(email);
+      if (match) {
+        return res.status(200).json({ ok: true, exists: true, source: 'mongodb', merchant: sanitizeServerMerchant(match.doc) });
       }
     } catch (dbErr: any) {
       console.warn('[Server] /api/stores/check-email MongoDB warning:', dbErr?.message || dbErr);
@@ -5411,8 +5465,10 @@ app.get('/api/stores/check/:email', async (req, res) => {
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
       if (isConfigured) {
         for (const table of ['stores', 'merchants'] as const) {
+          // `eq.` — EXACT equality. `ilike.` is SQL LIKE, where `_` and `%` are
+          // wildcards, so one Gmail address could match a different stored one.
           const sbRes = await fetch(
-            `${supabaseUrl}/rest/v1/${table}?email=ilike.${encodeURIComponent(email)}&select=*&limit=1`,
+            `${supabaseUrl}/rest/v1/${table}?email=eq.${encodeURIComponent(email)}&select=*&limit=1`,
             {
               headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
               signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
@@ -5430,22 +5486,13 @@ app.get('/api/stores/check/:email', async (req, res) => {
       console.warn('[Server] /api/stores/check Supabase warning:', e?.message || e);
     }
 
-    // 2. Fallback: MongoDB query on the stores and merchants collections. Only
+    // 2. Fallback: exact-string MongoDB query on stores and merchants. Only
     //    reached when Supabase is unconfigured, times out, or has no such email
     //    — so the dashboard still resolves the account during a Supabase outage.
     try {
-      await connectToMongoDB();
-      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-        const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-        const storeDoc = await mongoose.connection.db.collection('stores').findOne({ email: emailRegex });
-        if (storeDoc) {
-          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(storeDoc), source: 'mongodb' });
-        }
-
-        const merchDoc = await mongoose.connection.db.collection('merchants').findOne({ email: emailRegex });
-        if (merchDoc) {
-          return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(merchDoc), source: 'mongodb' });
-        }
+      const match = await findExactEmailMatch(email);
+      if (match) {
+        return res.status(200).json({ ok: true, merchant: sanitizeServerMerchant(match.doc), source: 'mongodb' });
       }
     } catch (dbErr) {
       console.warn('[Server] /api/stores/check MongoDB warning:', dbErr);
@@ -5668,7 +5715,12 @@ app.post('/api/stores/update', async (req, res) => {
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       try {
         const filterOr: any[] = [];
-        if (email) filterOr.push({ email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
+        // Exact full-string equality for email (never a regex/wildcard), so an
+        // update can only ever address the row whose email matches verbatim.
+        const normalizedFilterEmail = String(email || '').trim().toLowerCase();
+        if (normalizedFilterEmail) {
+          filterOr.push({ email: normalizedFilterEmail }, { emailLower: normalizedFilterEmail });
+        }
         if (storeSlug) filterOr.push({ store_slug: storeSlug }, { storeSlug });
         if (storeId) filterOr.push({ id: storeId }, { store_id: storeId });
 

@@ -99,6 +99,10 @@ async function lookupSupabaseByEmail(email: string): Promise<{ record: AuthMerch
     if (!Array.isArray(rows) || rows.length === 0) return { record: null };
 
     const row = rows[0];
+    // `eq.` already guarantees an exact match, but re-assert it so a
+    // misconfigured column/operator can never surface a different account.
+    const stored = String(row?.email || '').trim().toLowerCase();
+    if (stored !== email.trim().toLowerCase()) return { record: null };
     const record = normalizeSupabaseRecord(row);
     return { record };
   } catch (err: any) {
@@ -120,12 +124,20 @@ async function lookupMongoByEmail(email: string): Promise<{ record: AuthMerchant
     const db = mongoose.connection.db;
     if (!db) return { record: null, error: 'MongoDB connection handle unavailable.' };
 
-    const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    // Absolute exact-string equality — never a regex. A non-anchored or
+    // case-folded pattern query can return a DIFFERENT account whose address
+    // merely resembles the input, which is what produced false "already exists"
+    // hits between distinct Gmail addresses.
+    const normalizedEmail = email.trim().toLowerCase();
 
     for (const collectionName of ['stores', 'merchants']) {
       try {
-        const doc = await db.collection(collectionName).findOne({ email: emailRegex });
+        let doc = await db.collection(collectionName).findOne({ email: normalizedEmail });
+        if (!doc) doc = await db.collection(collectionName).findOne({ emailLower: normalizedEmail });
         if (doc) {
+          // Defence in depth: the stored value must equal the normalised input.
+          const stored = String(doc.email || doc.emailLower || '').trim().toLowerCase();
+          if (stored !== normalizedEmail) continue;
           const record = normalizeMongoRecord(doc);
           return { record };
         }
@@ -158,8 +170,11 @@ async function upsertMongoRecord(
     const db = mongoose.connection.db;
     if (!db) return { ok: false, error: 'MongoDB connection handle unavailable.' };
 
-    const emailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-    const existing = await db.collection('stores').findOne({ email: emailRegex });
+    // Exact full-string matching for the upsert target too, so this write can
+    // never overwrite a different merchant's row.
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailFilter = { $or: [{ email: normalizedEmail }, { emailLower: normalizedEmail }] };
+    const existing = await db.collection('stores').findOne(emailFilter);
 
     const now = new Date().toISOString();
     // `_id` (and `$`-prefixed operator keys) must never reach an update operator:
@@ -169,11 +184,17 @@ async function upsertMongoRecord(
     const cleanRecord = stripImmutableKeys(record);
     if (existing) {
       await db.collection('stores').updateOne(
-        { email: emailRegex },
-        { $set: { ...cleanRecord, updated_at: now, updatedAt: now } }
+        emailFilter,
+        { $set: { ...cleanRecord, email: normalizedEmail, emailLower: normalizedEmail, updated_at: now, updatedAt: now } }
       );
     } else {
-      await db.collection('stores').insertOne({ ...cleanRecord, created_at: now, createdAt: now });
+      await db.collection('stores').insertOne({
+        ...cleanRecord,
+        email: normalizedEmail,
+        emailLower: normalizedEmail,
+        created_at: now,
+        createdAt: now,
+      });
     }
     return { ok: true };
   } catch (err: any) {
