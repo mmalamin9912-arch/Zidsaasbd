@@ -1,17 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="zid-gold" x1="12" y1="8" x2="52" y2="56" gradientUnits="userSpaceOnUse">
+    <linearGradient id="ab-gold" x1="12" y1="8" x2="52" y2="56" gradientUnits="userSpaceOnUse">
       <stop stop-color="#FFF4A6"/>
       <stop offset=".48" stop-color="#FBBF24"/>
       <stop offset="1" stop-color="#B77912"/>
     </linearGradient>
-    <linearGradient id="zid-surface" x1="4" y1="2" x2="60" y2="62" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1E293B"/>
-      <stop offset="1" stop-color="#090E1A"/>
+    <linearGradient id="ab-surface" x1="4" y1="2" x2="60" y2="62" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#16223B"/>
+      <stop offset="1" stop-color="#070C18"/>
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="15" fill="url(#zid-surface)"/>
-  <rect x="3" y="3" width="58" height="58" rx="12" fill="none" stroke="#FBBF24" stroke-opacity=".6" stroke-width="2"/>
-  <path d="M17 18h31L25.5 31.5H47L17 47h31" fill="none" stroke="url(#zid-gold)" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
-  <path d="M47 18h2" stroke="#FFF4A6" stroke-linecap="round" stroke-width="5"/>
+
+  <!-- Dark navy rounded badge -->
+  <rect width="64" height="64" rx="15" fill="url(#ab-surface)"/>
+  <rect x="3.5" y="3.5" width="57" height="57" rx="11.5" fill="none" stroke="#FBBF24" stroke-opacity=".55" stroke-width="2"/>
+
+  <!-- Bridge: suspension cable arch -->
+  <path d="M13 27 C24 11 40 11 51 27" fill="none" stroke="url(#ab-gold)" stroke-width="2.5" stroke-linecap="round" stroke-opacity=".9"/>
+  <!-- Bridge: vertical hangers -->
+  <path d="M21 19 V28 M32 15 V30 M43 19 V28" fill="none" stroke="#FBBF24" stroke-opacity=".5" stroke-width="1.6" stroke-linecap="round"/>
+
+  <!-- Interlocking Z · S · B letterforms forming the bridge span -->
+  <g fill="none" stroke="url(#ab-gold)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Z -->
+    <path d="M12 33 L24 33 L12 47 L24 47"/>
+    <!-- S -->
+    <path d="M40 33 C39 30 34 30 34 34 C34 38 41 38 41 42 C41 46 34 48 33 46"/>
+    <!-- B (stem + upper + lower bowls) -->
+    <path d="M46 33 V47"/>
+    <path d="M46 33 C52 33 52 40 46 40"/>
+    <path d="M46 40 C54 40 54 47 46 47"/>
+  </g>
+
+  <!-- Bridge deck: the letters rest on a shared gold deck -->
+  <path d="M10 52 H54" fill="none" stroke="url(#ab-gold)" stroke-width="4.5" stroke-linecap="round"/>
 </svg>
