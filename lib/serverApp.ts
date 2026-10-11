@@ -5497,6 +5497,14 @@ async function findExactEmailMatch(email: string): Promise<{ doc: any; collectio
 // "account already exists").
 app.get('/api/stores/check-email/:email', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
+  // Never cache an existence check. Mobile browsers (iOS Safari, Chrome
+  // Android) aggressively cache GET responses, so without these headers a
+  // repeat check for the same URL can be served from cache with a stale
+  // `exists: true` — forcing a brand-new email onto the Sign In screen. This
+  // response MUST always be re-evaluated live against MongoDB.
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   try {
     const email = normalizeCheckEmail(req.params.email);
     if (!email || !email.includes('@')) {

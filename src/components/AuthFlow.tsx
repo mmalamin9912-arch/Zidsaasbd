@@ -328,9 +328,14 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // 1. Authoritative strict endpoint (MongoDB `stores`/`merchants`/`users`,
     //    then Supabase `stores`).
     try {
-      const response = await fetch(`/api/stores/check-email/${encodeURIComponent(cleanEmail)}`, {
-        headers: { 'Accept': 'application/json' }
-      });
+      // Cache-busting + no-store: mobile browsers (iOS Safari / Chrome
+      // Android) cache GET responses, which made a repeat check for the same
+      // address return a stale `exists: true`. A unique `_` param plus
+      // `cache: 'no-store'` forces every lookup to hit the backend fresh.
+      const response = await fetch(
+        `/api/stores/check-email/${encodeURIComponent(cleanEmail)}?_=${Date.now()}`,
+        { headers: { 'Accept': 'application/json' }, cache: 'no-store' }
+      );
       const data = await safeParseJson<any>(response, null);
       if (data && typeof data === 'object') return data.exists === true;
       return false;
@@ -1899,7 +1904,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           <>
             {/* STEP 1: EMAIL ENTRY */}
             {signupStep === 'email' && (
-              <form onSubmit={handleSignupEmailSubmit} className="space-y-4">
+              <form onSubmit={handleSignupEmailSubmit} className="space-y-4" noValidate>
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1.5">
                     Merchant Email Address *
