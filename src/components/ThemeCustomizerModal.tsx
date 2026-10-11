@@ -65,6 +65,24 @@ import {
   MoreHorizontal,
 } from 'lucide-react';
 
+/**
+ * Default demo gallery images shown for a brand-new store (and restored when
+ * gallery settings are reset). Official e-commerce / shopping showcase assets
+ * served from `/public/images/demo-gallery/` so Vite resolves them at root —
+ * no external/wedding placeholder URLs. `link` is '' (no external hop);
+ * merchants can still override every entry with their own uploads from the
+ * Theme Editor side panel (Page Content → Gallery), which replaces these.
+ */
+const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
+  { url: '/images/demo-gallery/online-shopping.svg', caption: 'Online Shopping', link: '' },
+  { url: '/images/demo-gallery/apparel-rack.svg', caption: 'Apparel Collection', link: '' },
+  { url: '/images/demo-gallery/lifestyle-products.svg', caption: 'Lifestyle Products', link: '' },
+  { url: '/images/demo-gallery/sports-gear.svg', caption: 'Sports & Fitness', link: '' },
+  { url: '/images/demo-gallery/profit-metrics.svg', caption: 'Profit Metrics', link: '' },
+  { url: '/images/demo-gallery/qr-payment.svg', caption: 'QR Payment', link: '' },
+  { url: '/images/demo-gallery/bd-ecommerce-dashboard.svg', caption: 'E-Commerce Dashboard', link: '' },
+];
+
 interface ThemeCustomizerModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -276,12 +294,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>(
     Array.isArray(merchant?.themeConfig?.galleryImages) && merchant?.themeConfig?.galleryImages?.length > 0
       ? merchant.themeConfig.galleryImages
-      : [
-          { url: 'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?auto=format&fit=crop&w=300&q=80', caption: 'Artisan Craftsmanship 1', link: '#' },
-          { url: 'https://images.unsplash.com/photo-1612196808214-b8e1d6145a8c?auto=format&fit=crop&w=300&q=80', caption: 'Artisan Craftsmanship 2', link: '#' },
-          { url: 'https://images.unsplash.com/photo-1590736969955-71cb94801759?auto=format&fit=crop&w=300&q=80', caption: 'Artisan Craftsmanship 3', link: '#' },
-          { url: 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=300&q=80', caption: 'Artisan Craftsmanship 4', link: '#' }
-        ]
+      : DEFAULT_GALLERY_IMAGES
   );
 
   // 6. Logo & Social Media
@@ -1406,6 +1419,9 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                 setHeroTitle('Eid Ul Adha Special Collection 2026');
                 setShowHeroBanner(true);
                 setShowAnnouncement(true);
+                // Restore the default demo gallery too, so a reset returns the
+                // official showcase assets (merchant's own uploads are cleared).
+                setGalleryImages(DEFAULT_GALLERY_IMAGES);
                 setHasUnsavedChanges(true);
               }}
               className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 bg-[#282E3F] px-2 py-1 rounded-lg border border-[#3A435E] cursor-pointer"

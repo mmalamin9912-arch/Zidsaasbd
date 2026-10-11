@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" width="600" height="400" role="img" aria-label="Apparel rack">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16223B"/><stop offset="1" stop-color="#070C18"/>
+    </linearGradient>
+    <linearGradient id="gold2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFF4A3"/><stop offset="0.5" stop-color="#D4AF37"/><stop offset="1" stop-color="#B77912"/>
+    </linearGradient>
+  </defs>
+  <rect width="600" height="400" fill="url(#bg2)"/>
+  <!-- rack -->
+  <rect x="150" y="70" width="300" height="8" rx="4" fill="url(#gold2)"/>
+  <rect x="150" y="320" width="300" height="8" rx="4" fill="#374151"/>
+  <rect x="160" y="78" width="8" height="242" rx="4" fill="#374151"/>
+  <rect x="432" y="78" width="8" height="242" rx="4" fill="#374151"/>
+  <!-- shirts -->
+  <g>
+    <path d="M190 92 l30 8 v90 l-30 10z" fill="#D4AF37" opacity="0.9"/>
+    <path d="M240 100 l30 6 v90 l-30 8z" fill="#38BDF8" opacity="0.75"/>
+    <path d="M290 100 l32 8 v92 l-32 8z" fill="#A78BFA" opacity="0.7"/>
+    <path d="M338 96 l30 8 v90 l-30 8z" fill="#F472B6" opacity="0.7"/>
+    <path d="M382 102 l34 8 v90 l-34 8z" fill="url(#gold2)" opacity="0.85"/>
+  </g>
+  <!-- hangers -->
+  <g stroke="#94A3B8" stroke-width="4" fill="none" stroke-linecap="round">
+    <path d="M205 78 q10 -12 0 -20"/><path d="M255 82 q10 -12 0 -20"/><path d="M306 82 q10 -12 0 -20"/><path d="M353 78 q10 -12 0 -20"/><path d="M399 84 q10 -12 0 -20"/>
+  </g>
+  <text x="150" y="360" font-family="Segoe UI,Arial" font-size="30" font-weight="700" fill="url(#gold2)">Apparel &amp; Fashion</text>
+</svg>
