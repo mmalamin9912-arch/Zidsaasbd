@@ -205,18 +205,174 @@
   box-shadow: 0 0 80px rgba(14, 165, 233, .11), inset 0 0 64px rgba(251, 191, 36, .04);
 }
 
-.zid-splash__mark { position: relative; width: 118px; height: 96px; display: grid; place-items: center; }
-.zid-splash__core, .zid-splash__orbit { position: absolute; font-size: 50px; font-weight: 900; line-height: 1; letter-spacing: 0; }
-.zid-splash__core { z-index: 2; color: #fbbf24; animation: zid-splash-core 5.5s cubic-bezier(.2,.8,.2,1) both; }
-.zid-splash__orbit { color: #f8fafc; animation-duration: 5.5s; animation-timing-function: cubic-bezier(.2,.8,.2,1); animation-fill-mode: both; }
-.zid-splash__orbit--i { animation-name: zid-splash-orbit-i; }
-.zid-splash__orbit--d { animation-name: zid-splash-orbit-d; }
-.zid-splash__brand { position: relative; font-size: 18px; font-weight: 900; letter-spacing: .16em; animation: zid-splash-brand 5.5s ease-out both; }
-.zid-splash__brand span { color: #fbbf24; font-size: 11px; letter-spacing: .1em; }
-.zid-splash__bar { position: relative; width: 132px; height: 2px; overflow: hidden; background: rgba(148, 163, 184, .24); }
-.zid-splash__bar span { display: block; width: 100%; height: 100%; background: #fbbf24; animation: zid-splash-progress 5.5s ease-in-out both; }
+/* Glow particles rising around the title */
+.zid-splash__sparks { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.zid-splash__spark {
+  position: absolute;
+  bottom: 36%;
+  border-radius: 50%;
+  background: #fde68a;
+  box-shadow: 0 0 10px 2px rgba(253, 230, 138, .8), 0 0 24px 5px rgba(251, 191, 36, .32);
+  opacity: 0;
+  animation: zid-spark-rise 2.2s ease-out infinite;
+}
+
+/* Cartoon cast row — the three mascot letters sit side-by-side spelling ZID */
+.zid-splash__cast {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.zid-char-slot { position: relative; }
+
+.zid-char {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform-origin: 50% 100%;
+  animation: zid-char-celebrate 1.4s ease-in-out infinite;
+}
+
+.zid-char--z { --char-color: #FBBF24; --glow: rgba(251, 191, 36, .55); }
+.zid-char--i { --char-color: #38BDF8; --glow: rgba(56, 189, 248, .55); animation-delay: .12s; }
+.zid-char--d { --char-color: #A78BFA; --glow: rgba(167, 139, 250, .55); animation-delay: .24s; }
+
+.zid-char__body {
+  font-size: 84px;
+  font-weight: 900;
+  line-height: .88;
+  color: var(--char-color);
+  text-shadow:
+    0 4px 0 rgba(7, 12, 24, .55),
+    0 10px 22px rgba(0, 0, 0, .45),
+    0 0 28px var(--glow);
+}
+
+/* Face — blinking eyes + smiling mouth on the upper part of the letter */
+.zid-char__face {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 3;
+}
+.zid-char__eye {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #0b1120;
+  animation: zid-char-blink 3.2s ease-in-out infinite;
+}
+.zid-char__eye--r { animation-delay: .03s; }
+.zid-char__smile {
+  position: absolute;
+  top: 15px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 20px;
+  height: 10px;
+  border: 2.5px solid #0b1120;
+  border-top: none;
+  border-radius: 0 0 20px 20px;
+}
+
+/* Wiggling cartoon hands on both sides of the body */
+.zid-char__hand {
+  position: absolute;
+  top: 48px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--char-color);
+  border: 2px solid rgba(7, 12, 24, .85);
+  transform-origin: center;
+  z-index: 4;
+  animation: zid-char-hand-wiggle .9s ease-in-out infinite;
+}
+.zid-char__hand--l { left: -11px; }
+.zid-char__hand--r { right: -11px; animation-delay: .12s; }
+
+/* Wiggling cartoon feet under the body */
+.zid-char__feet {
+  position: absolute;
+  bottom: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 22px;
+  z-index: 1;
+}
+.zid-char__foot {
+  width: 22px;
+  height: 11px;
+  border-radius: 50% 50% 42% 42%;
+  background: var(--char-color);
+  border: 2px solid rgba(7, 12, 24, .85);
+  transform-origin: 50% 0;
+  animation: zid-char-foot-wiggle .9s ease-in-out infinite;
+}
+.zid-char__foot--r { animation-delay: .12s; }
+
+/* Title */
+.zid-splash__brand {
+  position: relative;
+  z-index: 2;
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: .18em;
+  color: #f8fafc;
+  text-shadow: 0 0 18px rgba(251, 191, 36, .4);
+  animation: zid-splash-brand 1.4s ease-out .45s both;
+}
+.zid-splash__brand span { color: #fbbf24; font-size: 12px; letter-spacing: .12em; }
+
+/* ── Cartoon character keyframes (referenced by .zid-char* + .zid-splash__spark) ── */
+
+/* Celebration wiggle/dance loop once the character has grounded. */
+@keyframes zid-char-celebrate {
+  0%, 100% { transform: rotate(-3deg) translateY(0) scale(1); }
+  25% { transform: rotate(3deg) translateY(-5px) scale(1.03); }
+  50% { transform: rotate(-2deg) translateY(0) scale(1); }
+  75% { transform: rotate(2deg) translateY(-3px) scale(1.02); }
+}
+
+/* Blinking eyes — squash the eye shut for an instant, then open. */
+@keyframes zid-char-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(0.1); }
+}
+
+/* Wiggling cartoon hands — swing side to side. */
+@keyframes zid-char-hand-wiggle {
+  0%, 100% { transform: rotate(-18deg) translateY(0); }
+  50% { transform: rotate(18deg) translateY(-4px); }
+}
+
+/* Wiggling cartoon feet — kick up and down. */
+@keyframes zid-char-foot-wiggle {
+  0%, 100% { transform: rotate(-9deg); }
+  50% { transform: rotate(9deg); }
+}
+
+/* Rising glow particles — drift upward and fade out for the "glowing particle" effect. */
+@keyframes zid-spark-rise {
+  0% { opacity: 0; transform: translateY(0) scale(.6); }
+  15% { opacity: 1; }
+  70% { opacity: .85; }
+  100% { opacity: 0; transform: translateY(-150px) scale(1.15); }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .zid-splash, .zid-splash__core, .zid-splash__orbit, .zid-splash__brand, .zid-splash__bar span, .zid-splash__ambient { animation-duration: .01ms; animation-delay: 0ms; }
+  .zid-splash, .zid-splash__ambient, .zid-splash__brand,
+  .zid-char, .zid-char__eye, .zid-char__hand, .zid-char__foot, .zid-splash__spark {
+    animation-duration: .01ms; animation-delay: 0ms; animation-iteration-count: 1;
+  }
   .zid-splash--exiting { transition-duration: .01ms; }
 }
