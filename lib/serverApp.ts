@@ -5513,29 +5513,14 @@ app.get('/api/stores/check-email/:email', async (req, res) => {
       console.warn('[Server] /api/stores/check-email MongoDB warning:', dbErr?.message || dbErr);
     }
 
-    // 2. Supabase `stores` — exact (eq) match, the canonical auth mirror.
-    try {
-      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-      if (isConfigured) {
-        const sbRes = await fetch(
-          `${supabaseUrl}/rest/v1/stores?email=eq.${encodeURIComponent(email)}&select=*&limit=1`,
-          {
-            headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' },
-            signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
-          }
-        );
-        if (sbRes.ok) {
-          const rows = await sbRes.json();
-          if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
-            return res.status(200).json({ ok: true, exists: true, source: 'supabase', merchant: sanitizeServerMerchant(rows[0]) });
-          }
-        }
-      }
-    } catch (e: any) {
-      console.warn('[Server] /api/stores/check-email Supabase warning:', e?.message || e);
-    }
-
-    // 3. No document anywhere — this is a genuinely NEW email.
+    // 2. No MongoDB document for this exact email — this is a genuinely NEW
+    //    email. PURE MONGODB lookup: existence is decided ONLY by the database
+    //    query above (findExactEmailMatch does an exact `findOne({ email })`
+    //    across the `stores`/`merchants`/`users` collections this app persists
+    //    accounts to). There is deliberately NO Supabase secondary check and NO
+    //    mock/fallback `true` here — those layers surfaced stale/duplicate rows
+    //    and forced brand-new signups onto the Sign-In password screen. A new
+    //    address MUST resolve to `exists: false` so Sign Up advances to Step 2.
     return res.status(200).json({ ok: true, exists: false, merchant: null });
   } catch (err: any) {
     console.error('[Server] GET /api/stores/check-email error:', err);

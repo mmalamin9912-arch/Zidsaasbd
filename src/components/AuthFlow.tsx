@@ -1248,19 +1248,16 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     inFlightRef.current = true;
     setIsLoading(true);
 
-    // STRICT existence check: a document must ACTUALLY be found. The response
-    // body is never used as a truthiness proxy for existence.
-    let exists = await checkMerchantEmailExists(cleanedEmail);
-
-    // Supplemental exact-match Supabase check only when the strict endpoint
-    // said "new". `.eq` (never `.ilike`) so gmail/`_`-containing addresses
-    // cannot cross-match a different stored email.
-    if (!exists && await supabaseStoreByExactEmail(cleanedEmail)) exists = true;
-
-    // Final fallback: merchants registered locally on this device.
-    if (!exists) {
-      exists = getRegisteredUsers().some((u) => u.email.toLowerCase() === cleanedEmail);
-    }
+    // STRICT PURE-MONGODB existence check. `exists` is true ONLY when the
+    // database actually contains an account for this exact email — decided
+    // solely by /api/stores/check-email/:email (a pure MongoDB lookup). There
+    // is deliberately NO supplemental Supabase client check and NO localStorage
+    // fallback here: those extra layers produced false positives that pushed
+    // brand-new, never-before-seen emails onto the Sign-In password screen. A
+    // new email MUST resolve to `exists: false` so Sign Up proceeds to Step 2
+    // (Profile Setup). "Account already exists" is shown ONLY on a strict
+    // DB-confirmed `exists: true`.
+    const exists = await checkMerchantEmailExists(cleanedEmail);
 
     inFlightRef.current = false;
     setIsLoading(false);
