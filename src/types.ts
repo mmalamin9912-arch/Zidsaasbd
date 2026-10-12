@@ -216,6 +216,13 @@ export interface MerchantProfile {
   totalSalesBDT?: number;
   activeThemeId?: string;
   themeConfig?: any;
+  /**
+   * snake_case spelling of {@link themeConfig} used by MongoDB / Supabase
+   * (`stores.theme_config`). The API canonicalises BOTH keys on read, and the
+   * theme editor writes both on publish, so either spelling may appear on a
+   * hydrated profile.
+   */
+  theme_config?: any;
   heroTitle?: string;
   heroSubtitle?: string;
   heroImage?: string;

@@ -49,6 +49,10 @@ import {
   writeThemeRequest,
 } from './adminRequests.js';
 import { pick, toNumber } from './hybridDb.js';
+// Shared gallery defaults + the Unsplash purge. Kept in its own module so the
+// server AND the browser bundle apply the exact same rule when a saved
+// `themeConfig.galleryImages` is read or written (see lib/galleryDefaults.ts).
+import { canonicalizeThemeConfig, sanitizeGalleryImages, sanitizeStoredThemeConfig } from './galleryDefaults.js';
 import type { DataSource } from './hybridDb.js';
 import {
   writeSubscription,
@@ -595,7 +599,10 @@ function sanitizeServerMerchant(m: any) {
   const plan_started_at = isStale ? new Date().toISOString() : (m.plan_started_at || m.planStartedAt || calcStart);
   const expires_at = isStale ? new Date(Date.now() + durationDays * 86400000).toISOString() : (m.expires_at || m.expiresAt || calcExpiry);
 
-  return {
+  // Canonicalise on the way out: every store record answer carries the theme
+  // config under BOTH spellings and a gallery list that is free of legacy
+  // Unsplash demo rows (see lib/galleryDefaults.ts).
+  return canonicalizeThemeConfig({
     ...m,
     subscriptionPlan: planId,
     duration_days: durationDays,
@@ -608,7 +615,7 @@ function sanitizeServerMerchant(m: any) {
     subscriptionExpiry: isPaid ? expires_at.split('T')[0] : null,
     trialDaysRemaining: isPaid ? 0 : (m.trialDaysRemaining ?? 30),
     isLocked: false
-  };
+  });
 }
 
 const jsonError = (res: express.Response, status: number, error: string) => res.status(status).json({ ok: false, error });
@@ -1632,8 +1639,11 @@ async function handleThemeSettingsWrite(req: any, res: any) {
     const storeSlug = storeSlugRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
     const email = String(body.email || body.merchant_email || '').trim().toLowerCase();
     const themeId = String(body.themeId || body.theme_id || body.themeName || body.theme_name || 'default').trim() || 'default';
-    const themeConfig = (body.themeConfig && typeof body.themeConfig === 'object' ? body.themeConfig : null)
+    const themeConfigRaw = (body.themeConfig && typeof body.themeConfig === 'object' ? body.themeConfig : null)
       || (body.theme_config && typeof body.theme_config === 'object' ? body.theme_config : null);
+    // Force-purge legacy Unsplash demo rows BEFORE the config reaches MongoDB,
+    // so old demo gallery data can never be re-saved (and re-surfaced later).
+    const themeConfig = sanitizeStoredThemeConfig(themeConfigRaw) || themeConfigRaw;
     if (!storeSlug && !email) {
       return res.status(200).json({ ok: false, error: 'A store slug or email is required.' });
     }
@@ -1707,7 +1717,7 @@ app.get('/api/themes/settings', async (req, res) => {
       try {
         const store: any = await db.collection('stores').findOne({ $or: or });
         const cfg = store?.theme_config || store?.themeConfig || null;
-        return res.status(200).json({ ok: true, store_slug: storeSlug || email, theme_id: themeId || null, themeConfig: cfg, source: 'stores' });
+        return res.status(200).json({ ok: true, store_slug: storeSlug || email, theme_id: themeId || null, themeConfig: sanitizeStoredThemeConfig(cfg), source: 'stores' });
       } catch (e: any) {
         console.warn('[Server] GET /api/themes/settings fallback warning:', e?.message || e);
       }
@@ -1715,7 +1725,7 @@ app.get('/api/themes/settings', async (req, res) => {
     return res.status(200).json({
       ok: true, store_slug: doc?.store_slug || storeSlug || email,
       theme_id: doc?.theme_id || themeId || null,
-      themeConfig: doc?.theme_config || doc?.themeConfig || null,
+      themeConfig: sanitizeStoredThemeConfig(doc?.theme_config || doc?.themeConfig),
       updatedAt: doc?.updated_at || doc?.updatedAt || null, source: 'theme_settings',
     });
   } catch (err: any) {
@@ -5058,7 +5068,7 @@ app.get('/api/storefront/:slug?', async (req, res) => {
     // the storefront still renders — and, critically, so `codConfig` reaches the
     // checkout and the delivery zones price themselves (Inside City / Outside
     // City) instead of falling back to "To be confirmed".
-    let merchantRecord: any = payload.merchant || null;
+    let merchantRecord: any = canonicalizeThemeConfig(payload.merchant || null);
     if (!merchantRecord || String(merchantRecord.storeSlug || merchantRecord.store_slug || '').toLowerCase() !== slug) {
       try {
         merchantRecord = (await resolveStoreRecordFlexible(slug)) || merchantRecord;
@@ -5663,7 +5673,7 @@ async function resolveStoreRecordFlexible(ref: string): Promise<Record<string, u
   // 1. Supabase REST / memory / local payload file.
   try {
     const found = await lookupStoreRecord(clean);
-    if (found) return found;
+    if (found) return canonicalizeThemeConfig(found as any);
   } catch (e: any) {
     console.warn('[Server] resolveStoreRecordFlexible lookup warning:', e?.message || e);
   }
@@ -5682,11 +5692,11 @@ async function resolveStoreRecordFlexible(ref: string): Promise<Record<string, u
       if (isUuidLike(clean)) orClauses.push({ id: clean }, { _id: clean });
       const storeDoc = await (mongoose.connection.db.collection('stores') as any)
         .findOne({ $or: orClauses });
-      if (storeDoc) return storeDoc as Record<string, unknown>;
+      if (storeDoc) return canonicalizeThemeConfig(storeDoc as Record<string, unknown>);
 
       const merchDoc = await (mongoose.connection.db.collection('merchants') as any)
         .findOne({ $or: [{ store_slug: lower }, { storeSlug: lower }] });
-      if (merchDoc) return merchDoc as Record<string, unknown>;
+      if (merchDoc) return canonicalizeThemeConfig(merchDoc as Record<string, unknown>);
     }
   } catch (e: any) {
     console.warn('[Server] resolveStoreRecordFlexible mongo warning:', e?.message || e);
@@ -5833,7 +5843,10 @@ app.post('/api/stores/update', async (req, res) => {
             if (!tc || typeof tc !== 'object' || Array.isArray(tc)) continue;
             for (const [k, v] of Object.entries(tc as Record<string, any>)) {
               if (k === '_id') continue;
-              flatTheme[`${rawKey}.${k}`] = v;
+              // Force-purge legacy Unsplash demo rows at the DB boundary: any
+              // `galleryImages` write is sanitised, so old demo data can never
+              // round-trip back into MongoDB (see lib/galleryDefaults.ts).
+              flatTheme[`${rawKey}.${k}`] = k === 'galleryImages' ? sanitizeGalleryImages(v) : v;
             }
             delete cleanPatch[rawKey];
           }

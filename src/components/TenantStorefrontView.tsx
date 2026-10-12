@@ -167,6 +167,8 @@ import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
 import { findThemeById, resolveLayoutForTheme } from '../lib/themeRegistry';
 import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
+// Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts).
+import { sanitizeGalleryImages } from '../../lib/galleryDefaults';
 
 interface TenantStorefrontViewProps {
   storeSlug: string;
@@ -443,7 +445,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           if (themeRow && active) {
             const dbMerchant = {
               ...existingBefore,
-              themeConfig: themeRow.themeConfig || existingBefore?.merchant?.themeConfig || {},
+              // Read BOTH theme-config spellings: the store record may carry only
+              // `theme_config` (snake) — ignoring it made the storefront fall back
+              // to the stale localStorage copy (old demo Unsplash data) on reload
+              // even though Mongo held the freshly-published gallery.
+              themeConfig: themeRow.themeConfig || themeRow.theme_config || existingBefore?.merchant?.themeConfig || existingBefore?.merchant?.theme_config || {},
               heroTitle: themeRow.heroTitle || existingBefore?.merchant?.heroTitle,
               heroSubtitle: themeRow.heroSubtitle || existingBefore?.merchant?.heroSubtitle,
               heroImage: themeRow.heroImage || existingBefore?.merchant?.heroImage,
@@ -454,7 +460,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             const mergedTheme = {
               ...existingBefore,
               merchant: dbMerchant,
-              themeCustomization: themeRow.themeConfig || existingBefore?.themeCustomization || {},
+              themeCustomization: themeRow.themeConfig || themeRow.theme_config || existingBefore?.themeCustomization || {},
               products: Array.isArray(apiProducts) && apiProducts.length > 0 ? apiProducts : (existingBefore?.products || []),
               // Carry the delivery/COD + payment config through the same merge so
               // the checkout's zone prices are always the merchant's live values.
@@ -631,7 +637,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const activeTheme = (storefrontThemes || []).find((theme) => theme?.id === effectiveThemeId)
     || (storefrontThemes || [])[0];
   const registryTheme = findThemeById(effectiveThemeId);
-  const merchantThemeConfig = (storefrontMerchant.themeConfig || liveStoreData.themeCustomization || {}) as Record<string, unknown>;
+  const merchantThemeConfig = (
+    storefrontMerchant.themeConfig
+    || storefrontMerchant.theme_config
+    || liveStoreData.themeCustomization
+    || {}
+  ) as Record<string, unknown>;
   // Resolved theme settings: themeConfig (from editor/Supabase) > themeCustomization > hardcoded defaults
   const resolvedTheme = {
     headerSticky: merchantThemeConfig.headerSticky !== false,
@@ -691,7 +702,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     countdownOverlayOpacity: typeof merchantThemeConfig.countdownOverlayOpacity === 'number' ? merchantThemeConfig.countdownOverlayOpacity : 60,
     showGallery: merchantThemeConfig.showGallery !== false,
     galleryHeading: (typeof merchantThemeConfig.galleryHeading === 'string' && merchantThemeConfig.galleryHeading) || 'Gallery',
-    galleryImages: Array.isArray(merchantThemeConfig.galleryImages) ? (merchantThemeConfig.galleryImages as Array<{ url: string; caption?: string; link?: string; }>) : [],
+    // `[]` fallback keeps the old behaviour (no saved gallery → section hidden),
+    // while any saved list is passed through the Unsplash purge: legacy demo rows
+    // are stripped and replaced with the 7 official showcase images, and the
+    // merchant's own additions/deletions render exactly as published.
+    galleryImages: sanitizeGalleryImages(merchantThemeConfig.galleryImages, []),
     showSocialBlock: merchantThemeConfig.showSocialBlock !== false,
     socialTagline: (typeof merchantThemeConfig.socialTagline === 'string' && merchantThemeConfig.socialTagline) || 'Follow us for daily updates',
     facebookHandle: (typeof merchantThemeConfig.facebookHandle === 'string' && merchantThemeConfig.facebookHandle) || '',

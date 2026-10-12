@@ -6,6 +6,10 @@ import { readAndDownscaleImage, LOGO_MAX_EDGE, MAX_IMAGE_EDGE } from '../utils/i
 import SafeImage from './SafeImage';
 import { supabase } from '../lib/supabase';
 import {
+  getDefaultGalleryImages,
+  sanitizeGalleryImages,
+} from '../../lib/galleryDefaults';
+import {
   ArrowLeft,
   Check,
   ChevronDown,
@@ -66,22 +70,11 @@ import {
 } from 'lucide-react';
 
 /**
- * Default demo gallery images shown for a brand-new store (and restored when
- * gallery settings are reset). Seven e-commerce showcase photos served directly
- * from Google's image CDN, so they load with no build-time asset bundling.
- * `caption` is left blank (no overlay text) and `link` is '' (no external hop);
- * merchants can still override every entry — change, add or delete — from the
- * Theme Editor side panel (Page Content → Gallery), which replaces these.
+ * Default demo gallery images are defined ONCE in `lib/galleryDefaults.ts` so
+ * the theme editor, the storefront and the API all share the same 7 official
+ * e-commerce showcase photos (and the same Unsplash-purge rule). See that
+ * module for the source of truth.
  */
-const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
-  { url: 'https://lh3.googleusercontent.com/d/193007_2.jpg', caption: '', link: '' },
-  { url: 'https://lh3.googleusercontent.com/d/192999_2.jpg', caption: '', link: '' },
-  { url: 'https://lh3.googleusercontent.com/d/193000_2.webp', caption: '', link: '' },
-  { url: 'https://lh3.googleusercontent.com/d/192998_2.png', caption: '', link: '' },
-  { url: 'https://lh3.googleusercontent.com/d/192997_2.webp', caption: '', link: '' },
-  { url: 'https://lh3.googleusercontent.com/d/192995.jpg', caption: '', link: '' },
-  { url: 'https://lh3.googleusercontent.com/d/192994_2.webp', caption: '', link: '' },
-];
 
 interface ThemeCustomizerModalProps {
   isOpen: boolean;
@@ -291,11 +284,16 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   // 5. Gallery
   const [showGallery, setShowGallery] = useState(merchant?.themeConfig?.showGallery ?? true);
   const [galleryHeading, setGalleryHeading] = useState(merchant?.themeConfig?.galleryHeading ?? 'Gallery');
-  const [galleryImages, setGalleryImages] = useState<GalleryImage[]>(
-    Array.isArray(merchant?.themeConfig?.galleryImages) && merchant?.themeConfig?.galleryImages?.length > 0
-      ? merchant.themeConfig.galleryImages
-      : DEFAULT_GALLERY_IMAGES
-  );
+  const [galleryImages, setGalleryImages] = useState<GalleryImage[]>(() => {
+    // Force-purge old demo data: any SAVED list containing `images.unsplash.com`
+    // rows is stripped and re-seeded with the 7 official showcase images, while
+    // the merchant's own (Unsplash-free) rows — edits and deletions included —
+    // round-trip untouched. A store that never saved a gallery starts from the
+    // same defaults. Runs once at mount so the editor always opens on the
+    // persisted, purge-applied state.
+    const saved = sanitizeGalleryImages(merchant?.themeConfig?.galleryImages);
+    return saved.length > 0 ? saved : getDefaultGalleryImages();
+  });
 
   // 6. Logo & Social Media
   const [showSocialBlock, setShowSocialBlock] = useState(merchant?.themeConfig?.showSocialBlock ?? true);
@@ -365,9 +363,11 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     if (mode === 'add') {
       setGalleryImages([...galleryImages, { url: base64String, caption: 'New Image', link: '#' }]);
     } else if (mode === 'update' && index !== undefined) {
-      const newImages = [...galleryImages];
-      newImages[index].url = base64String;
-      setGalleryImages(newImages);
+      // Replace the row instead of mutating it in place: the list can share
+      // object references with `merchant.themeConfig.galleryImages`, and an
+      // in-place edit never notifies the state manager (so the change would be
+      // missing from the persisted themeConfig).
+      setGalleryImages(galleryImages.map((img, i) => (i === index ? { ...img, url: base64String } : img)));
     }
   };
 
@@ -1421,7 +1421,9 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                 setShowAnnouncement(true);
                 // Restore the default demo gallery too, so a reset returns the
                 // official showcase assets (merchant's own uploads are cleared).
-                setGalleryImages(DEFAULT_GALLERY_IMAGES);
+                // A fresh copy each time: mutating the shared constant from one
+                // reset would leak into every later reset/store.
+                setGalleryImages(getDefaultGalleryImages());
                 setHasUnsavedChanges(true);
               }}
               className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 bg-[#282E3F] px-2 py-1 rounded-lg border border-[#3A435E] cursor-pointer"
@@ -2500,9 +2502,8 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                     type="text"
                                     value={img.url}
                                     onChange={(e) => {
-                                      const newImages = [...galleryImages];
-                                      newImages[idx].url = e.target.value;
-                                      setGalleryImages(newImages);
+                                      const url = e.target.value;
+                                      setGalleryImages(prev => prev.map((img, i) => (i === idx ? { ...img, url } : img)));
                                     }}
                                     className="w-full bg-[#131620] border border-[#2E3548] text-white p-1 rounded-md text-[10px]"
                                     placeholder="Image URL"
@@ -2512,9 +2513,8 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                       type="text"
                                       value={img.caption || ''}
                                       onChange={(e) => {
-                                        const newImages = [...galleryImages];
-                                        newImages[idx].caption = e.target.value;
-                                        setGalleryImages(newImages);
+                                        const caption = e.target.value;
+                                        setGalleryImages(prev => prev.map((img, i) => (i === idx ? { ...img, caption } : img)));
                                       }}
                                       className="w-full bg-[#131620] border border-[#2E3548] text-white p-1 rounded-md text-[10px]"
                                       placeholder="Caption"
@@ -2523,9 +2523,8 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                       type="text"
                                       value={img.link || ''}
                                       onChange={(e) => {
-                                        const newImages = [...galleryImages];
-                                        newImages[idx].link = e.target.value;
-                                        setGalleryImages(newImages);
+                                        const link = e.target.value;
+                                        setGalleryImages(prev => prev.map((img, i) => (i === idx ? { ...img, link } : img)));
                                       }}
                                       className="w-full bg-[#131620] border border-[#2E3548] text-white p-1 rounded-md text-[10px]"
                                       placeholder="Link"

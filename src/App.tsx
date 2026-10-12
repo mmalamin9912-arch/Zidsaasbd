@@ -523,12 +523,20 @@ export default function App() {
 
     // Merchant Settings & Profile by storeSlug
     if (merchant?.storeSlug) {
-      safeFetch(`/api/stores/slug/${encodeURIComponent(merchant.storeSlug)}`).then(dbMerchant => {
+      safeFetch(`/api/stores/slug/${encodeURIComponent(merchant.storeSlug)}`).then(res => {
+        // The route answers `{ ok, store_slug, merchant }` — the envelope is NOT
+        // the store record. Spreading it used to pollute the profile with
+        // `ok`/`store_slug`/`merchant` keys and left `themeConfig` on the stale
+        // local copy, so gallery items freshly saved to MongoDB never reached
+        // the theme editor on reload. Unwrap the real record and accept either
+        // theme-config spelling the DB returns.
+        const dbMerchant: any = res?.merchant || null;
         if (isMounted && dbMerchant) {
           setMerchant(prev => ({
             ...prev,
             ...dbMerchant,
             themeConfig: dbMerchant.themeConfig || dbMerchant.theme_config || prev.themeConfig,
+            theme_config: dbMerchant.themeConfig || dbMerchant.theme_config || prev.themeConfig,
           }));
         }
       });

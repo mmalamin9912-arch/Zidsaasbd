@@ -11,6 +11,9 @@ import { initialMerchant } from '../data/initialData';
 import { writeZidStoreData } from './storeData';
 import { safeParseJson } from './safeFetch';
 import { safeSetItem, safeGetItem } from '../utils/safeStorage';
+// Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts) — one
+// rule for every read of a saved `themeConfig`, browser or server.
+import { sanitizeStoredThemeConfig } from '../../lib/galleryDefaults';
 
 export interface SubscriptionSyncOptions {
   merchant: MerchantProfile;
@@ -121,6 +124,17 @@ export function resolveMerchantSubscription(
   const trialEndsAt = !isPaid ? (merged.trial_ends_at || merged.trialEndsAt || expires_at) : undefined;
   const trialDaysRemaining = !isPaid ? (merged.trial_days_remaining ?? merged.trialDaysRemaining ?? 30) : 0;
 
+  // ── Theme config: map BOTH spellings + force-purge old demo data ──────────
+  // MongoDB/Supabase records carry `theme_config` (snake) while the theme
+  // editor and storefront read `themeConfig` (camel). Only copying whichever
+  // key the DB happened to use meant a reload that read the snake_case copy
+  // left `themeConfig` sitting on the seed profile — the editor then fell back
+  // to the default gallery and the next auto-sync overwrote the freshly-saved
+  // gallery in the database (gallery edits "lost on refresh"). Resolving the
+  // union here ALSO strips any legacy `images.unsplash.com` demo rows.
+  const rawThemeConfig = (merged as any).themeConfig ?? (merged as any).theme_config;
+  const themeConfig = sanitizeStoredThemeConfig(rawThemeConfig) ?? (initialMerchant as any).themeConfig;
+
   const storeName = merged.store_name || merged.storeName || initialMerchant.storeName;
   const storeSlug = merged.store_slug || merged.storeSlug || (storeName ? storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : 'mystore');
   const ownerName = merged.owner_name || merged.ownerName || merged.full_name || initialMerchant.ownerName;
@@ -131,6 +145,11 @@ export function resolveMerchantSubscription(
   return {
     ...initialMerchant,
     ...merged,
+    // Both spellings point at the SAME sanitised object so every consumer —
+    // theme editor, storefront, auto-sync — sees the persisted gallery (and
+    // never the legacy Unsplash demo rows).
+    themeConfig,
+    theme_config: themeConfig,
     storeName,
     storeSlug,
     ownerName,

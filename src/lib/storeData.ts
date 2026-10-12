@@ -1,5 +1,8 @@
 import type { MerchantProfile, Product, ThemeConfig } from '../types';
 import { safeSetItem } from '../utils/safeStorage';
+// Force-purge legacy Unsplash demo rows out of the cached theme config so the
+// localStorage copy can never resurface them (lib/galleryDefaults.ts).
+import { sanitizeStoredThemeConfig } from '../../lib/galleryDefaults';
 
 /** One browser-wide source of truth for the merchant editor and storefront. */
 export const ZID_STORE_DATA_KEY = 'zid_store_data';
@@ -17,12 +20,36 @@ export interface ZidStoreData {
 
 const keyFor = (storeSlug?: string) => storeSlug ? `${ZID_STORE_DATA_KEY}:${storeSlug}` : ZID_STORE_DATA_KEY;
 
+/**
+ * Strip legacy Unsplash demo gallery rows from the cached payload.
+ *
+ * The cache is read on every load, so this is the localStorage half of the
+ * force-purge: a stale `zid_store_data` / `ZID_MERCHANT_STORE_DATA` entry can
+ * never hand the theme editor or storefront the old demo images again, and the
+ * next `writeZidStoreData` persists the cleaned shape back.
+ */
+function purgeLegacyGallery<T extends ZidStoreData>(data: T): T {
+  const next = { ...data };
+  const merchant = next.merchant as MerchantProfile | undefined;
+  if (merchant && typeof merchant === 'object') {
+    const cfg = sanitizeStoredThemeConfig((merchant as any).themeConfig ?? (merchant as any).theme_config);
+    if (cfg) {
+      next.merchant = { ...merchant, themeConfig: cfg, theme_config: cfg } as MerchantProfile;
+    }
+  }
+  if (next.themeCustomization && typeof next.themeCustomization === 'object') {
+    const cfg = sanitizeStoredThemeConfig(next.themeCustomization);
+    if (cfg) next.themeCustomization = cfg;
+  }
+  return next;
+}
+
 export function readZidStoreData(storeSlug?: string): ZidStoreData {
   if (typeof window === 'undefined') return {};
   try {
     const shared = JSON.parse(window.localStorage.getItem(keyFor(storeSlug)) || '{}');
     const legacy = JSON.parse(window.localStorage.getItem(LEGACY_STORE_DATA_KEY) || '{}');
-    return { ...legacy, ...shared };
+    return purgeLegacyGallery({ ...legacy, ...shared });
   } catch {
     return {};
   }
