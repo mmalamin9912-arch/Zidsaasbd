@@ -67,20 +67,20 @@ import {
 
 /**
  * Default demo gallery images shown for a brand-new store (and restored when
- * gallery settings are reset). Official e-commerce / shopping showcase assets
- * served from `/public/images/demo-gallery/` so Vite resolves them at root —
- * no external/wedding placeholder URLs. `link` is '' (no external hop);
- * merchants can still override every entry with their own uploads from the
+ * gallery settings are reset). Seven e-commerce showcase photos served directly
+ * from Google's image CDN, so they load with no build-time asset bundling.
+ * `caption` is left blank (no overlay text) and `link` is '' (no external hop);
+ * merchants can still override every entry — change, add or delete — from the
  * Theme Editor side panel (Page Content → Gallery), which replaces these.
  */
 const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
-  { url: '/images/demo-gallery/online-shopping.svg', caption: 'Online Shopping', link: '' },
-  { url: '/images/demo-gallery/apparel-rack.svg', caption: 'Apparel Collection', link: '' },
-  { url: '/images/demo-gallery/lifestyle-products.svg', caption: 'Lifestyle Products', link: '' },
-  { url: '/images/demo-gallery/sports-gear.svg', caption: 'Sports & Fitness', link: '' },
-  { url: '/images/demo-gallery/profit-metrics.svg', caption: 'Profit Metrics', link: '' },
-  { url: '/images/demo-gallery/qr-payment.svg', caption: 'QR Payment', link: '' },
-  { url: '/images/demo-gallery/bd-ecommerce-dashboard.svg', caption: 'E-Commerce Dashboard', link: '' },
+  { url: 'https://lh3.googleusercontent.com/d/193007_2.jpg', caption: '', link: '' },
+  { url: 'https://lh3.googleusercontent.com/d/192999_2.jpg', caption: '', link: '' },
+  { url: 'https://lh3.googleusercontent.com/d/193000_2.webp', caption: '', link: '' },
+  { url: 'https://lh3.googleusercontent.com/d/192998_2.png', caption: '', link: '' },
+  { url: 'https://lh3.googleusercontent.com/d/192997_2.webp', caption: '', link: '' },
+  { url: 'https://lh3.googleusercontent.com/d/192995.jpg', caption: '', link: '' },
+  { url: 'https://lh3.googleusercontent.com/d/192994_2.webp', caption: '', link: '' },
 ];
 
 interface ThemeCustomizerModalProps {
