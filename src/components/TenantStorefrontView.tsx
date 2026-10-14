@@ -2926,8 +2926,108 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               </section>
               )}
 
-              {/* Products Section (Grid / Carousel / List) — themed from Theme Editor */}
-              {resolvedTheme.showFeaturedGrid && (
+              {/* Products Section (Grid / Carousel / List) — themed from Theme Editor.
+                  LuxuryBoutique renders the curated "Trending Now" clean light
+                  card layout; DefaultModern / TechStorePro keep the dark product
+                  grid below EXACTLY as before. */}
+              {resolvedTheme.showFeaturedGrid && themeStyle.collectionLayout === 'trending' && isLuxuryTheme && (
+              <section id="storefront-products-section" className="space-y-4">
+                <div className="flex items-end justify-between border-b border-slate-200 pb-3">
+                  <div>
+                    <h2 className="text-xl sm:text-2xl font-serif font-bold text-slate-900 tracking-tight">
+                      Trending Now
+                    </h2>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      {activeCategoryFilter !== 'all' ? `Filtered by ${activeCategoryFilter}` : t('sf_discover_collection')}
+                    </p>
+                  </div>
+                  {activeCategoryFilter !== 'all' && (
+                    <button
+                      onClick={() => setActiveCategoryFilter('all')}
+                      className="text-[10px] font-bold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200 hover:bg-slate-200 transition cursor-pointer"
+                    >
+                      Clear Filter
+                    </button>
+                  )}
+                </div>
+
+                {displayProducts.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-12 text-center space-y-2">
+                    <ShoppingBag className="mx-auto h-10 w-10 text-slate-300" />
+                    <h3 className="text-sm font-black text-slate-700">{isLoadingSupabase ? t('sf_loading_storefront') : t('sf_no_products')}</h3>
+                    <p className="text-xs text-slate-400">
+                      {isLoadingSupabase
+                        ? 'Fetching products from the store database…'
+                        : catalogLoadFailed
+                          ? 'Products could not be loaded right now. Please try again later.'
+                          : t('sf_no_products_desc')}
+                    </p>
+                  </div>
+                ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6">
+                  {displayProducts.map(p => (
+                    <div
+                      key={p.id}
+                      data-testid="product-card"
+                      data-product-id={p.id}
+                      className="group cursor-pointer flex flex-col bg-white rounded-2xl overflow-hidden border border-slate-100 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-300"
+                    >
+                      <div
+                        className="relative aspect-[3/4] bg-slate-100 overflow-hidden"
+                        onClick={() => setQuickViewProduct(p)}
+                      >
+                        <SafeImage
+                          src={resolveProductImage(p)}
+                          alt={p.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition duration-700"
+                        />
+                        {p.compareAtPriceBDT && p.compareAtPriceBDT > (p.priceBDT || 0) && (
+                          <span className="absolute top-3 left-3 bg-slate-900 text-white text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full shadow-md">
+                            Sale
+                          </span>
+                        )}
+                        {(p.stock ?? 99) <= 0 && (
+                          <span className="absolute top-3 right-3 bg-white/90 text-rose-600 text-[9px] font-bold px-2 py-0.5 rounded-full backdrop-blur-sm">
+                            Sold Out
+                          </span>
+                        )}
+                        <div className="absolute inset-x-0 bottom-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity bg-gradient-to-t from-slate-900/60 to-transparent flex justify-center">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleAddToCart(p); }}
+                            className="w-full bg-white text-slate-900 font-bold text-[11px] py-2.5 rounded-xl uppercase tracking-widest hover:bg-slate-100 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled={(p.stock ?? 99) <= 0}
+                          >
+                            {(p.stock ?? 99) <= 0 ? 'Sold Out' : 'Quick Add'}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="p-3.5 space-y-1">
+                        <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+                          {p.category || 'Collection'}
+                        </span>
+                        <h4
+                          className="font-medium text-sm text-slate-900 line-clamp-2 leading-snug"
+                          onClick={() => setQuickViewProduct(p)}
+                        >
+                          {p.title}
+                        </h4>
+                        <div className="flex items-center gap-2 pt-0.5">
+                          <span className="text-sm font-bold text-slate-900">৳{(p.priceBDT ?? 0).toLocaleString()}</span>
+                          {p.compareAtPriceBDT && (
+                            <span className="text-xs text-slate-400 line-through">৳{(p.compareAtPriceBDT ?? 0).toLocaleString()}</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                )}
+              </section>
+              )}
+
+              {/* Products Section (Grid / Carousel / List) — the ORIGINAL dark
+                  layout, unchanged for DefaultModern / TechStorePro. */}
+              {resolvedTheme.showFeaturedGrid && !isLuxuryTheme && (
               <section id="storefront-products-section" className="space-y-3.5">
                 <div className="flex justify-between items-center border-b border-slate-800/80 pb-2.5">
                   <div>
