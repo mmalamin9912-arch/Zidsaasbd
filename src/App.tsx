@@ -40,7 +40,8 @@ import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { normalizeOrders } from './utils/orderUtils';
 import { verifySuperAdminPin } from './lib/adminAuth';
 import { isStoreCode, isUuid } from './lib/storeId';
-import { resolveLayoutForTheme } from './lib/themeRegistry';
+import { findThemeById } from './lib/themeRegistry';
+import { resolveThemeComponentLayout } from './components/themes';
 import {
   fetchPlatformConfig,
   savePlatformConfig,
@@ -1755,10 +1756,28 @@ export default function App() {
     // renders the classic full-featured storefront for 'classic', and the
     // dedicated supermarket/fashion layouts for those themes. Unknown/absent
     // themes fall back to classic, so a store is never blank.
-    const activeLayout = resolveLayoutForTheme({ id: targetMerchant?.activeThemeId });
+    // Resolution uses the FULL catalogue row (id + name + category + layout),
+    // never the bare id: an opaque published id such as a Mongo ObjectId or
+    // "theme-3" would otherwise always miss the registry and fall back to the
+    // default template even when the merchant published "Luxury Boutique".
+    const activeCatalogueTheme = (Array.isArray(platformThemes) ? platformThemes : []).find(
+      (t: any) => String((t as any)?.id || (t as any)?.slug || '').trim().toLowerCase() === String(targetMerchant?.activeThemeId || '').trim().toLowerCase()
+    ) as any;
+    const activeRegistryTheme = findThemeById(targetMerchant?.activeThemeId);
+    const activeLayout = resolveThemeComponentLayout({
+      id: targetMerchant?.activeThemeId,
+      name: activeCatalogueTheme?.name || (activeRegistryTheme as any)?.name,
+      category: activeCatalogueTheme?.category || (activeRegistryTheme as any)?.category,
+      layout: activeCatalogueTheme?.layout || (activeRegistryTheme as any)?.layout,
+    });
+    // Remount the whole shell on theme publish (key includes theme id + a
+    // publish stamp) so the new layout paints instantly — the Vite SPA has no
+    // Next.js layout cache to purge, so a key change IS the cache purge.
+    const storefrontShellKey = `storefront:${storeSlug || targetMerchant.storeSlug}:${targetMerchant?.activeThemeId || 'default'}:${(targetMerchant as any)?.themeVersion || (targetMerchant as any)?.theme_updated_at || ''}`;
 
     return (
       <TenantStorefrontView
+        key={storefrontShellKey}
         storeSlug={storeSlug || targetMerchant.storeSlug}
         merchant={targetMerchant}
         products={targetProducts}

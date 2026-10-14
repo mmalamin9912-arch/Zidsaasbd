@@ -1670,8 +1670,111 @@ app.delete('/api/admin/themes/:id', async (req, res) => {
   }
 });
 
+// ── Theme Publishing (merchant storefront theme switch) ─────────────────────
+// POST /api/admin/theme/publish — publish a theme LIVE for a store.
+app.post('/api/admin/theme/publish', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+  try {
+    const body = req.body || {};
+    const storeSlug = String(body.storeSlug || body.store_slug || body.slug || '').trim().toLowerCase();
+    const email = String(body.email || body.merchant_email || '').trim().toLowerCase();
+    const storeId = String(body.storeId || body.store_id || '').trim();
+    const themeId = String(body.activeThemeId || body.themeId || body.theme_id || body.theme || '').trim();
+    if (!storeSlug && !email && !storeId) {
+      return res.status(200).json({ ok: false, error: 'A store slug, email or store id is required.' });
+    }
+    if (!themeId) {
+      return res.status(200).json({ ok: false, error: 'An activeThemeId is required.' });
+    }
+    const themeName = String(body.activeThemeName || body.themeName || body.theme_name || body?.activeTheme?.name || '').trim();
+    const themeCategory = String(body.activeThemeCategory || body.category || body?.activeTheme?.category || '').trim();
+    const layoutRaw = String(body.activeThemeLayout || body.layout || body?.activeTheme?.layout || '').trim().toLowerCase();
+    const themeLayout = layoutRaw === 'fashion' || layoutRaw === 'supermarket' || layoutRaw === 'classic' ? layoutRaw : undefined;
+    const themeVersion = String(body.themeVersion || body.theme_version || body.theme_updated_at || new Date().toISOString());
+    const nowDate = new Date();
+
+    const setDoc: Record<string, any> = {
+      activeThemeId: themeId,
+      active_theme_id: themeId,
+      themeVersion,
+      theme_version: themeVersion,
+      theme_updated_at: nowDate,
+      updated_at: nowDate,
+    };
+    if (themeName) { setDoc.activeThemeName = themeName; setDoc.active_theme_name = themeName; }
+    if (themeCategory) { setDoc.activeThemeCategory = themeCategory; setDoc.active_theme_category = themeCategory; }
+    if (themeLayout) { setDoc.activeThemeLayout = themeLayout; setDoc.active_theme_layout = themeLayout; }
+    if (body.activeTheme && typeof body.activeTheme === 'object') setDoc.activeTheme = body.activeTheme;
+    // 1. MongoDB `stores` — the authoritative global theme state.
+    let mongoOk = false;
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const filterOr: any[] = [];
+        if (email) filterOr.push({ email }, { emailLower: email });
+        if (storeSlug) filterOr.push({ store_slug: storeSlug }, { storeSlug });
+        if (storeId) filterOr.push({ id: storeId }, { store_id: storeId });
+        if (filterOr.length > 0) {
+          await mongoose.connection.db.collection('stores').updateOne(
+            { $or: filterOr },
+            { $set: setDoc, ...(storeSlug ? { $setOnInsert: { store_slug: storeSlug, storeSlug } } : {}) },
+            { upsert: true }
+          );
+          mongoOk = true;
+        }
+      }
+    } catch (mongoErr: any) {
+      console.warn('[Server] POST /api/admin/theme/publish MongoDB warning:', mongoErr?.message || mongoErr);
+    }
+    // 2. Supabase `stores` mirror (snake_case columns only).
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (isConfigured && (storeSlug || email)) {
+        const sbPayload: Record<string, any> = {
+          active_theme_id: themeId,
+          theme_updated_at: nowDate.toISOString(),
+          updated_at: nowDate.toISOString(),
+        };
+        if (storeSlug) sbPayload.store_slug = storeSlug;
+        if (email) sbPayload.email = email;
+        const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores`, {
+          method: 'POST',
+          headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+          body: JSON.stringify(sbPayload),
+        });
+        if (!sbRes.ok) {
+          const detail = await sbRes.text().catch(() => '');
+          console.warn('[Server] POST /api/admin/theme/publish Supabase mirror warning:', sbRes.status, detail.slice(0, 200));
+        }
+      }
+    } catch (sbErr: any) {
+      console.warn('[Server] POST /api/admin/theme/publish Supabase warning:', sbErr?.message || sbErr);
+    }
+    // 3. In-memory mirror so the SAME process serves the new theme instantly.
+    try {
+      const key = storeSlug || email || storeId;
+      if (key) merchantStore.set(key, { ...(merchantStore.get(key) || {}), ...setDoc });
+    } catch { /* non-blocking */ }
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeSlug || email || storeId,
+      activeThemeId: themeId,
+      activeThemeName: themeName || undefined,
+      themeVersion,
+      sources: mongoOk ? ['mongodb'] : ['memory'],
+      cachePurged: true,
+      message: `Theme "${themeName || themeId}" is now live.`,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/theme/publish error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not publish theme.' });
+  }
+});
+
 // ── Merchant Theme Settings (theme section editor save/publish) ─────────────
-// POST /api/themes/settings — save the full themeConfig JSON for a store+theme
 // PUT  /api/themes/settings — same as POST (both verbs accepted so the editor
 //        can use PUT or POST without a 404/405)
 //
@@ -5321,6 +5424,16 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       products: storeProducts,
       categories: Array.isArray(payload.categories) ? payload.categories : [],
       themes: Array.isArray(payload.themes) ? payload.themes : [],
+      // Global published-theme state: the customer shell resolves its layout
+      // from THIS snapshot (id + name + category + layout + version), so a
+      // freshly published "Luxury Boutique" renders instantly with no cache.
+      activeThemeId: (storefrontMerchant as any)?.activeThemeId || (storefrontMerchant as any)?.active_theme_id,
+      activeTheme: {
+        id: (storefrontMerchant as any)?.activeThemeId || (storefrontMerchant as any)?.active_theme_id,
+        name: (storefrontMerchant as any)?.activeThemeName || (storefrontMerchant as any)?.active_theme_name,
+        category: (storefrontMerchant as any)?.activeThemeCategory || (storefrontMerchant as any)?.active_theme_category,
+        layout: (storefrontMerchant as any)?.activeThemeLayout || (storefrontMerchant as any)?.active_theme_layout,
+      },
       bankAccounts: Array.isArray(merchantRecord?.bankAccounts)
         ? merchantRecord.bankAccounts
         : (Array.isArray(payload.bankAccounts) ? payload.bankAccounts : []),
@@ -5340,8 +5453,14 @@ app.get('/api/storefront/:slug?', async (req, res) => {
         : [],
       faqs: Array.isArray(faqs) ? faqs : [],
       seoConfig,
+      themeVersion: (storefrontMerchant as any)?.themeVersion || (storefrontMerchant as any)?.theme_version || (storefrontMerchant as any)?.theme_updated_at,
     };
 
+    // Purge layout cache: a freshly published theme must reach customers
+    // instantly, never from a stale CDN / browser snapshot.
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     return res.json({ ok: true, store_slug: slug, storefront });
   } catch (err: any) {
     console.error('[Server] GET /api/storefront/:slug error:', err);

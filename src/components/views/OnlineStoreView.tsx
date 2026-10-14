@@ -193,17 +193,56 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
       return;
     }
 
+    // Publish the theme catalogue SNAPSHOT (not just the id) everywhere: id +
+    // name + category + layout. The live storefront resolves its layout from
+    // this metadata, so an opaque id ("theme-3", ObjectId, …) still renders the
+    // ACTUAL LuxuryBoutique / TechStorePro component instead of falling back
+    // to the default free template. A `themeVersion` stamp busts the storefront
+    // shell key so customers see the new layout instantly.
+    const publishStamp = new Date().toISOString();
+    const activeThemeSnapshot = {
+      id: theme.id,
+      name: (theme as any).name,
+      category: (theme as any).category,
+      layout: (theme as any).layout,
+    };
+    const publishedMerchantFields = {
+      activeThemeId: theme.id,
+      activeThemeName: (theme as any).name,
+      activeThemeCategory: (theme as any).category,
+      activeThemeLayout: (theme as any).layout,
+      themeVersion: publishStamp,
+      theme_updated_at: publishStamp,
+    };
+
     // 1. Update local state → storefront re-renders with the new layout at once.
     setMerchant(prev => ({
       ...prev,
-      activeThemeId: theme.id
+      ...publishedMerchantFields,
     }));
 
-    // 2. Persist the choice to the database immediately (Supabase-first / Mongo
-    //    fallback via /api/stores/update) so it survives reloads and applies on
-    //    every device — the live storefront reflects it the moment it's saved.
+    // 2. Publish globally: dedicated publish route saves activeThemeId to
+    //    MongoDB (Supabase mirror) and purges layout cache; the legacy update
+    //    route runs as a fallback so the choice survives reloads on every
+    //    device — the live storefront reflects it the moment it's saved.
     const slug = merchant?.storeSlug || (merchant as any)?.store_slug;
+    const publishPayload = {
+      storeSlug: slug,
+      store_slug: slug,
+      activeThemeId: theme.id,
+      activeThemeName: (theme as any).name,
+      activeThemeCategory: (theme as any).category,
+      activeThemeLayout: (theme as any).layout,
+      activeTheme: activeThemeSnapshot,
+      themeVersion: publishStamp,
+      theme_updated_at: publishStamp,
+    };
     try {
+      fetch('/api/admin/theme/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+        body: JSON.stringify(publishPayload),
+      }).catch(err => console.warn('[OnlineStoreView] theme publish warning:', err));
       fetch('/api/stores/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -211,7 +250,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           merchant: {
             ...merchant,
             storeSlug: slug,
-            activeThemeId: theme.id,
+            ...publishedMerchantFields,
           },
         }),
       }).catch(err => console.warn('[OnlineStoreView] theme publish persist warning:', err));
@@ -220,13 +259,18 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     }
 
     // 3. Broadcast via the shared store so an open storefront tab updates live
-    //    without a refresh.
+    //    without a refresh. Purging the stale snapshot is this SPA's "layout
+    //    cache purge".
     try {
       if (slug) {
         const existing = readZidStoreData(slug);
         writeZidStoreData({
           ...existing,
-          merchant: { ...((existing?.merchant || {}) as MerchantProfile), activeThemeId: theme.id },
+          merchant: { ...((existing?.merchant || {}) as MerchantProfile), ...publishedMerchantFields },
+          activeTheme: activeThemeSnapshot,
+          activeThemeId: theme.id,
+          themeVersion: publishStamp,
+          theme_updated_at: publishStamp,
         }, slug);
       }
     } catch (err) {

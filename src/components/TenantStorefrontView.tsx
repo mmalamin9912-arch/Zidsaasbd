@@ -166,6 +166,7 @@ function mapSupabaseCategory(c: any) {
 import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
 import { findThemeById, resolveLayoutForTheme } from '../lib/themeRegistry';
+import { resolveThemeComponentLayout } from './themes';
 import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
 // Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts).
 import { sanitizeGalleryImages } from '../../lib/galleryDefaults';
@@ -637,6 +638,20 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const activeTheme = (storefrontThemes || []).find((theme) => theme?.id === effectiveThemeId)
     || (storefrontThemes || [])[0];
   const registryTheme = findThemeById(effectiveThemeId);
+  // Full catalogue row for the ACTIVE theme: name + category + layout travel
+  // with the id so an opaque id (Mongo ObjectId / "theme-3") still resolves to
+  // its real layout (e.g. "Luxury Boutique" -> fashion). `findThemeById` only
+  // knows built-ins; the live platform catalogue arrives via `themes`.
+  const activeCatalogueRow = (storefrontThemes || []).find(
+    (theme: any) =>
+      String(theme?.id || theme?.slug || '').trim().toLowerCase() === String(effectiveThemeId || '').trim().toLowerCase()
+  ) as any;
+  const activeThemeMeta = {
+    id: effectiveThemeId,
+    name: activeCatalogueRow?.name || (activeTheme as any)?.name || registryTheme?.name,
+    category: activeCatalogueRow?.category || (activeTheme as any)?.category || registryTheme?.category,
+    layout: (activeCatalogueRow as any)?.layout || (activeTheme as any)?.layout || registryTheme?.layout,
+  };
   const merchantThemeConfig = (
     storefrontMerchant.themeConfig
     || storefrontMerchant.theme_config
@@ -2251,7 +2266,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // 'classic' falls through to the full-featured storefront below. This is the
   // mechanism that makes choosing a theme on the dashboard actually change
   // what shoppers see on /store/:slug.
-  const resolvedLayout = layout || resolveLayoutForTheme({ id: effectiveThemeId });
+  const resolvedLayout = layout || resolveThemeComponentLayout(activeThemeMeta);
+  // Remount on every publish so a freshly published theme swaps layout
+  // instantly (no stale DOM / memoised classic shell surviving the switch).
   if (resolvedLayout === 'supermarket') {
     return <SupermarketTechMockup accentColor={primaryColor} />;
   }
