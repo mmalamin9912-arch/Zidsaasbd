@@ -34,6 +34,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
 import dns from 'node:dns/promises';
+import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 // Platform-wide aggregation for the Super Admin Portal. Lives in lib/ and is
 // bundled by Vercel alongside this file (same pattern as lib/faqGenerator).
@@ -1779,6 +1780,127 @@ app.get('/api/themes/settings', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] GET /api/themes/settings error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Could not load theme settings.', themeConfig: null });
+  }
+});
+
+// ── Super Admin Gateway PIN verification ─────────────────────────────────────
+// POST /api/admin/verify-pin — the server-side source of truth for the Super
+// Admin Gateway PIN. The gateway used to compare the PIN against a VITE_
+// variable compiled into the browser bundle; this route moves the secret to
+// the SERVER environment, where it never ships to the client and a rotation
+// needs no rebuild.
+//
+// Resolution order: SUPER_ADMIN_PIN, then ADMIN_MASTER_KEY. When NEITHER is
+// set the route FAILS GRACEFULLY: it answers 200 with
+// `code: 'ADMIN_PIN_NOT_CONFIGURED'` and step-by-step setup instructions
+// instead of throwing — the UI renders those instructions verbatim, so a fresh
+// checkout can never crash or silently lock the operator out.
+//
+// Contract (always 200 JSON, never 5xx, never throws):
+//   { ok: true }                                          — PIN accepted
+//   { ok: false, code: 'PIN_REQUIRED' }                   — empty input
+//   { ok: false, code: 'INVALID_PIN' }                    — wrong PIN
+//   { ok: false, code: 'RATE_LIMITED' }                   — too many failures
+//   { ok: false, configured: false,
+//     code: 'ADMIN_PIN_NOT_CONFIGURED',
+//     error: '<setup instructions>' }                     — no env var set
+declare global {
+  // eslint-disable-next-line no-var
+  var __zidAdminPinAttempts: Map<string, { count: number; lockedUntil: number }> | undefined;
+}
+
+const ADMIN_PIN_MAX_ATTEMPTS = 5;
+const ADMIN_PIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+function adminPinAttempts(): Map<string, { count: number; lockedUntil: number }> {
+  if (!global.__zidAdminPinAttempts) global.__zidAdminPinAttempts = new Map();
+  return global.__zidAdminPinAttempts;
+}
+
+app.post('/api/admin/verify-pin', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const configuredPin = String(process.env.SUPER_ADMIN_PIN || process.env.ADMIN_MASTER_KEY || '').trim();
+    if (!configuredPin) {
+      return res.status(200).json({
+        ok: false,
+        configured: false,
+        code: 'ADMIN_PIN_NOT_CONFIGURED',
+        error:
+          'Super Admin access is not configured on the server. To enable it: (1) open (or create) the ' +
+          '.env.local file in the project root, (2) add SUPER_ADMIN_PIN=your-strong-pin ' +
+          '(ADMIN_MASTER_KEY is accepted as a fallback), (3) restart the dev server with `npm run dev` ' +
+          '— or redeploy — and try again.',
+      });
+    }
+
+    const pin = String(req.body?.pin ?? req.body?.passcode ?? req.body?.password ?? '').trim();
+    if (!pin) {
+      return res.status(200).json({
+        ok: false,
+        configured: true,
+        code: 'PIN_REQUIRED',
+        error: 'Enter the Super Admin PIN.',
+      });
+    }
+
+    // Best-effort per-IP throttle against brute force (per process; a cold
+    // serverless start simply resets the counters — defence in depth, not a
+    // replacement for a platform-level rate limit).
+    const ip =
+      String(req.headers['x-forwarded-for'] || (req.socket as any)?.remoteAddress || 'unknown')
+        .split(',')[0]
+        .trim() || 'unknown';
+    const attempts = adminPinAttempts();
+    const entry = attempts.get(ip);
+    if (entry && entry.lockedUntil > Date.now()) {
+      const waitMin = Math.ceil((entry.lockedUntil - Date.now()) / 60000);
+      return res.status(200).json({
+        ok: false,
+        configured: true,
+        code: 'RATE_LIMITED',
+        error: `Too many failed attempts. Try again in ~${waitMin} minute${waitMin === 1 ? '' : 's'}.`,
+      });
+    }
+
+    // Constant-time comparison on fixed-length SHA-256 digests: the response
+    // time cannot leak how many leading characters of the entered PIN matched.
+    const digest = (value: string) => crypto.createHash('sha256').update(value).digest();
+    const matches = crypto.timingSafeEqual(digest(pin), digest(configuredPin));
+
+    if (!matches) {
+      const next = entry || { count: 0, lockedUntil: 0 };
+      next.count += 1;
+      if (next.count >= ADMIN_PIN_MAX_ATTEMPTS) {
+        next.lockedUntil = Date.now() + ADMIN_PIN_LOCKOUT_MS;
+        next.count = 0;
+      }
+      attempts.set(ip, next);
+      if (attempts.size > 500) {
+        // Bound the map: drop entries whose lockout window has expired.
+        for (const [key, value] of attempts) {
+          if (value.lockedUntil && value.lockedUntil <= Date.now()) attempts.delete(key);
+        }
+      }
+      return res.status(200).json({
+        ok: false,
+        configured: true,
+        code: 'INVALID_PIN',
+        error: 'Invalid Super Admin PIN.',
+      });
+    }
+
+    attempts.delete(ip);
+    return res.status(200).json({ ok: true });
+  } catch (err: any) {
+    // A verification failure must NEVER crash the gateway or the function —
+    // answer as a structured miss the UI can render.
+    console.error('[Server] POST /api/admin/verify-pin error:', err);
+    return res.status(200).json({
+      ok: false,
+      code: 'VERIFY_ERROR',
+      error: 'PIN verification is temporarily unavailable. Check the server logs and try again.',
+    });
   }
 });
 

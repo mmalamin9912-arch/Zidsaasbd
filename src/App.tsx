@@ -38,6 +38,7 @@ import { TenantStorefrontView } from './components/TenantStorefrontView';
 import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { normalizeOrders } from './utils/orderUtils';
+import { verifySuperAdminPin } from './lib/adminAuth';
 import { isStoreCode, isUuid } from './lib/storeId';
 import { resolveLayoutForTheme } from './lib/themeRegistry';
 import {
@@ -134,18 +135,11 @@ function isBareStorePath(path: string): boolean {
   return !RESERVED_ROOT_SEGMENTS.has(segment.toLowerCase());
 }
 
-/**
- * Super Admin master passcode — read exclusively from the environment variable
- * `VITE_SUPER_ADMIN_PASSCODE`. There is intentionally NO hardcoded default and
- * no `3565` fallback: if the variable is unset the gate fails CLOSED and no
- * passcode can authenticate. Set it in your deployment environment (never in
- * source control).
- */
-const SUPER_ADMIN_PASSCODE = String(
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPER_ADMIN_PASSCODE) ||
-  (typeof process !== 'undefined' && process.env?.VITE_SUPER_ADMIN_PASSCODE) ||
-  ''
-).trim();
+// SUPER_ADMIN_PASSCODE (the old client-only check) has moved into
+// `src/lib/adminAuth.ts`. The PIN's source of truth is now SERVER-side —
+// `SUPER_ADMIN_PIN` (fallback `ADMIN_MASTER_KEY`) verified by
+// `POST /api/admin/verify-pin` — with a graceful legacy fallback for
+// deployments that still set `VITE_SUPER_ADMIN_PASSCODE`.
 
 export default function App() {
   const toast = useToast();
@@ -1545,6 +1539,10 @@ export default function App() {
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(false);
   const [adminPasswordInput, setAdminPasswordInput] = useState<string>('');
   const [adminLoginError, setAdminLoginError] = useState<string>('');
+  // True while POST /api/admin/verify-pin is in flight — disables the gateway
+  // submit buttons and swaps their label to "Verifying…" so a double-click
+  // cannot fire two authentication requests.
+  const [isVerifyingAdminPin, setIsVerifyingAdminPin] = useState<boolean>(false);
 
   const handleLoginSuccess = (userProfile: MerchantProfile) => {
     setMerchant(userProfile);
@@ -1812,16 +1810,30 @@ onPlaceOrder={async (newOrder) => {
               </div>
             </div>
 
-            <form onSubmit={(e) => {
+            {/* PIN verification runs SERVER-side via POST /api/admin/verify-pin
+                (SUPER_ADMIN_PIN, fallback ADMIN_MASTER_KEY). When the env var
+                is missing the API answers with setup instructions, which are
+                rendered verbatim in the error box below — the gateway never
+                crashes and never silently rejects every PIN. */}
+            <form onSubmit={async (e) => {
               e.preventDefault();
-              if (!SUPER_ADMIN_PASSCODE) {
-                setAdminLoginError('Super Admin access is not configured for this environment.');
-              } else if (adminPasswordInput === SUPER_ADMIN_PASSCODE) {
-                setIsAdminAuthenticated(true);
-                sessionStorage.setItem('zid_super_admin_auth', 'true');
-                setAdminLoginError('');
-              } else {
-                setAdminLoginError('Invalid Master Password.');
+              if (isVerifyingAdminPin) return;
+              setIsVerifyingAdminPin(true);
+              try {
+                const result = await verifySuperAdminPin(adminPasswordInput);
+                if (result.ok) {
+                  // Correct PIN — open the portal and stamp the session flag the
+                  // router checks on /admin, /super-admin, /admin-login and
+                  // /super-admin-gateway.
+                  setIsAdminAuthenticated(true);
+                  sessionStorage.setItem('zid_super_admin_auth', 'true');
+                  setAdminLoginError('');
+                  setAdminPasswordInput('');
+                } else {
+                  setAdminLoginError(result.error || 'Invalid Master Password / PIN.');
+                }
+              } finally {
+                setIsVerifyingAdminPin(false);
               }
             }} className="space-y-4">
               <div>
@@ -1839,7 +1851,7 @@ onPlaceOrder={async (newOrder) => {
               </div>
 
               {adminLoginError && (
-                <div className="bg-red-500/20 border border-red-500/40 text-red-400 p-3 rounded-xl text-xs font-bold">
+                <div className="bg-red-500/20 border border-red-500/40 text-red-400 p-3 rounded-xl text-xs font-bold whitespace-pre-wrap break-words">
                   {adminLoginError}
                 </div>
               )}
@@ -1858,9 +1870,10 @@ onPlaceOrder={async (newOrder) => {
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl text-sm transition shadow-lg shadow-red-600/30 cursor-pointer"
+                  disabled={isVerifyingAdminPin}
+                  className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl text-sm transition shadow-lg shadow-red-600/30 cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                 >
-                  Authenticate
+                  {isVerifyingAdminPin ? 'Verifying…' : 'Authenticate'}
                 </button>
               </div>
             </form>
@@ -2279,17 +2292,25 @@ onPlaceOrder={async (newOrder) => {
               </div>
             </div>
 
-            <form onSubmit={(e) => {
+            {/* Same server-side verification as the full-page gateway above —
+                see src/lib/adminAuth.ts and POST /api/admin/verify-pin. */}
+            <form onSubmit={async (e) => {
               e.preventDefault();
-              if (!SUPER_ADMIN_PASSCODE) {
-                setAdminLoginError('Super Admin access is not configured for this environment.');
-              } else if (adminPasswordInput === SUPER_ADMIN_PASSCODE) {
-                setIsAdminAuthenticated(true);
-                setIsAdminLoginModalOpen(false);
-                setAdminLoginError('');
-                setActiveTab('super_admin_portal');
-              } else {
-                setAdminLoginError('Invalid Master Password.');
+              if (isVerifyingAdminPin) return;
+              setIsVerifyingAdminPin(true);
+              try {
+                const result = await verifySuperAdminPin(adminPasswordInput);
+                if (result.ok) {
+                  setIsAdminAuthenticated(true);
+                  setIsAdminLoginModalOpen(false);
+                  setAdminLoginError('');
+                  setAdminPasswordInput('');
+                  setActiveTab('super_admin_portal');
+                } else {
+                  setAdminLoginError(result.error || 'Invalid Master Password / PIN.');
+                }
+              } finally {
+                setIsVerifyingAdminPin(false);
               }
             }} className="space-y-4">
               <div>
@@ -2308,7 +2329,7 @@ onPlaceOrder={async (newOrder) => {
               </div>
 
               {adminLoginError && (
-                <div className="bg-red-500/20 border border-red-500/40 text-red-400 p-3 rounded-xl text-xs font-bold">
+                <div className="bg-red-500/20 border border-red-500/40 text-red-400 p-3 rounded-xl text-xs font-bold whitespace-pre-wrap break-words">
                   {adminLoginError}
                 </div>
               )}
@@ -2323,9 +2344,10 @@ onPlaceOrder={async (newOrder) => {
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl text-sm transition shadow-lg shadow-red-600/30 cursor-pointer"
+                  disabled={isVerifyingAdminPin}
+                  className="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl text-sm transition shadow-lg shadow-red-600/30 cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                 >
-                  Unlock Admin Portal
+                  {isVerifyingAdminPin ? 'Verifying…' : 'Unlock Admin Portal'}
                 </button>
               </div>
             </form>

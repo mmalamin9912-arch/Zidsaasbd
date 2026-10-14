@@ -27,7 +27,6 @@ rewrite.js
 
 .vercel
 local-store.json
-.env*
 
 .refact/
 .vscode/
