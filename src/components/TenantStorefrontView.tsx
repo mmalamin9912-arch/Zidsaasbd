@@ -166,7 +166,8 @@ function mapSupabaseCategory(c: any) {
 import { BrandLogo } from './BrandLogo';
 import { useLanguage } from '../lib/i18n';
 import { findThemeById, resolveLayoutForTheme } from '../lib/themeRegistry';
-import { resolveThemeComponentLayout } from './themes';
+import { resolveThemeComponentLayout, resolveThemeComponentKey, resolveThemeStyle } from './themes';
+import { LuxuryBoutiqueHeader } from './StorefrontHeaders';
 import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
 // Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts).
 import { sanitizeGalleryImages } from '../../lib/galleryDefaults';
@@ -652,6 +653,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     category: activeCatalogueRow?.category || (activeTheme as any)?.category || registryTheme?.category,
     layout: (activeCatalogueRow as any)?.layout || (activeTheme as any)?.layout || registryTheme?.layout,
   };
+  // Complete dynamic style switcher for header / layout / colors / sections,
+  // driven by `storeConfig.activeThemeId`. Safe by construction: every field
+  // has a fallback so missing/undefined properties can never crash rendering.
+  const themeComponentKey = resolveThemeComponentKey(activeThemeMeta);
+  const themeStyle = resolveThemeStyle(activeThemeMeta);
+  const isLuxuryTheme = themeComponentKey === 'LuxuryBoutique' || themeStyle.headerVariant === 'luxury';
   const merchantThemeConfig = (
     storefrontMerchant.themeConfig
     || storefrontMerchant.theme_config
@@ -2454,15 +2461,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   return (
     <div
-      className="min-h-screen w-full font-sans bg-[#0f172a] text-slate-100 selection:text-slate-950 selection:bg-amber-400 overflow-x-hidden"
+      data-theme-component={themeComponentKey}
+      className={`min-h-screen w-full font-sans overflow-x-hidden ${isLuxuryTheme ? 'bg-slate-50 text-slate-900 selection:text-white selection:bg-slate-900' : 'bg-[#0f172a] text-slate-100 selection:text-slate-950 selection:bg-amber-400'}`}
       style={{
         // `--primary-accent` is the canonical token; `--theme-primary` remains
         // as an alias so any existing consumer keeps working unchanged.
         ['--primary-accent' as string]: primaryColor,
         ['--theme-primary' as string]: primaryColor,
+        backgroundColor: themeStyle.background,
+        color: themeStyle.foreground,
       } as React.CSSProperties}
     >
-      <div className="w-full min-h-screen bg-[#0f172a] text-slate-100 relative flex flex-col overflow-x-hidden pb-24">
+      <div className={`w-full min-h-screen relative flex flex-col overflow-x-hidden pb-24 ${isLuxuryTheme ? 'bg-slate-50 text-slate-900' : 'bg-[#0f172a] text-slate-100'}`} style={{ backgroundColor: themeStyle.shellBackground }}>
         {isSplashVisible && (
           <div className="fixed inset-0 z-[80] bg-slate-950/95 backdrop-blur-sm flex items-center justify-center">
             <div className="flex flex-col items-center gap-4 text-center animate-pulse">
@@ -2508,8 +2518,37 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           }
         `}</style>
 
-        {/* Top Header Bar (Luxury Dark Glassmorphism) */}
+        {/* Dynamic header: LuxuryBoutique renders the light/white minimalist
+            header (AURA wordmark + nav + circular category rail, NO promo
+            banners); DefaultModern / TechStorePro keep the standard dark
+            header below. */}
+        {isLuxuryTheme ? (
+          <LuxuryBoutiqueHeader
+            storeName={storefrontMerchant.storeName}
+            logoSrc={showHeaderLogo ? headerLogoSrc : undefined}
+            logoHeight={headerLogoHeight}
+            onLogoError={() => setHeaderLogoFailed(true)}
+            navLinks={storeModules.navigationMenus.header}
+            categories={storefrontCategories as any}
+            searchOpen={isSearchOpen}
+            searchQuery={searchQuery}
+            searchPlaceholder={t('sf_search_placeholder')}
+            cartCount={cart.reduce((s, i) => s + (i.quantity || 0), 0)}
+            themeStyle={themeStyle}
+            sticky={resolvedTheme.headerSticky}
+            onHome={() => { setCheckoutStep('catalog'); setMobileTab('home'); }}
+            onToggleMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            onToggleSearch={() => setIsSearchOpen(!isSearchOpen)}
+            onSearchChange={(v) => setSearchQuery(v)}
+            onClearSearch={() => setSearchQuery('')}
+            onOpenCart={() => setIsCartOpen(true)}
+            onSelectCategory={() => { setCheckoutStep('catalog'); setMobileTab('home'); }}
+          />
+        ) : (
+        <>
+        {/* Top Header Bar (Standard Dark) */}
         <header
+          data-theme-header="standard"
           className={`${resolvedTheme.headerSticky ? 'sticky top-0' : ''} z-40 ${
             headerPalette.isLight ? 'text-[#0f172a]' : 'text-[#e2e8f0]'
           } bg-[#0f172a]/90 backdrop-blur-xl border-b border-slate-800/80 shadow-2xl`}
@@ -2699,6 +2738,31 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             </div>
           )}
         </header>
+        {/* Luxury mobile menu (light) — the dark dropdown below is standard only. */}
+        {isLuxuryTheme && isMobileMenuOpen && (
+          <div className="border-t border-slate-100 bg-white shadow-xl p-3 space-y-1 animate-fade-in-up relative z-40">
+            <button
+              onClick={() => { setCheckoutStep('catalog'); setMobileTab('home'); setIsMobileMenuOpen(false); }}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition ${mobileTab === 'home' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+            >
+              <Home className="w-4 h-4" /> {t('sf_home')}
+            </button>
+            <button
+              onClick={() => { setCheckoutStep('catalog'); setMobileTab('orders'); setIsMobileMenuOpen(false); }}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition ${mobileTab === 'orders' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+            >
+              <PackageCheck className="w-4 h-4" /> {t('sf_my_orders')}
+            </button>
+            <button
+              onClick={() => { setCheckoutStep('catalog'); setMobileTab('profile'); setIsMobileMenuOpen(false); }}
+              className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition ${mobileTab === 'profile' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+            >
+              <User className="w-4 h-4" /> {t('sf_tab_profile')}
+            </button>
+          </div>
+        )}
+        </>
+        )}
 
       {/* Main Content Area */}
       <main className="w-full">
@@ -3030,8 +3094,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               </section>
               )}
 
-              {/* Countdown Timer Section — themed from Theme Editor */}
-              {resolvedTheme.showCountdown && (
+              {/* Countdown Timer Section — DefaultModern / TechStorePro ONLY.
+                  LuxuryBoutique hides promo banners/flash timers entirely. */}
+              {resolvedTheme.showCountdown && themeStyle.showFlashSale && !isLuxuryTheme && (
               <section
                 className="relative rounded-2xl overflow-hidden border border-rose-500/30 p-5 text-center space-y-2"
                 style={
@@ -3062,13 +3127,16 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               </section>
               )}
 
-              {/* Gallery Section — themed from Theme Editor.
+              {/* Gallery Section — DefaultModern / TechStorePro ONLY.
+                  LuxuryBoutique renders its curated "Trending Now" clean-card
+                  collection instead of the general gallery grid.
                   Reads `themeConfig.galleryImages`, which the customizer writes
                   through /api/stores/update. Blank rows (an "+ Add Image" entry
                   the merchant has not filled in yet) are dropped here rather
                   than rendered as empty tiles, and a whole section with no
-                  usable image is skipped entirely instead of leaving a gap. */}
-              {resolvedTheme.showGallery && galleryImageList.length > 0 && (
+                  usable image is skipped entirely instead of leaving a gap.
+                  Hidden on LuxuryBoutique (curated collection instead). */}
+              {resolvedTheme.showGallery && themeStyle.showGallerySection && !isLuxuryTheme && galleryImageList.length > 0 && (
               <section className="space-y-3">
                 <h2 className="text-sm font-black text-slate-100 tracking-tight uppercase flex items-center gap-2">
                   <Star className="w-4 h-4 text-amber-400" />

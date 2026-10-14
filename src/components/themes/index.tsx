@@ -23,6 +23,89 @@ import { resolveLayoutForTheme, type ThemeLayoutKey } from '../../lib/themeRegis
 /** Layout renderer mounted for each component key. */
 export type StorefrontThemeComponentKey = 'DefaultModern' | 'LuxuryBoutique' | 'TechStorePro';
 
+/**
+ * Complete per-theme style contract: header variant, page background, and
+ * which promo sections render. Every field is optional with a safe default so
+ * a missing / undefined property can never crash the storefront.
+ */
+export interface StorefrontThemeStyle {
+  /** Light minimalist boutique header vs dark standard header. */
+  headerVariant: 'luxury' | 'standard';
+  /** Page + shell background tokens. */
+  background: string;
+  shellBackground: string;
+  foreground: string;
+  /** Brand wordmark shown when the merchant has no logo (luxury header). */
+  brandWordmark: string;
+  /** Minimalist category rail under a luxury header. */
+  showCategoryRail: boolean;
+  /** Top announcement / promo banner strip. */
+  showAnnouncementBar: boolean;
+  /** Flash-sale countdown timer ("FLASH SALE ENDS IN"). */
+  showFlashSale: boolean;
+  /** Gallery section. */
+  showGallerySection: boolean;
+  /** Product collection layout inside the classic shell. */
+  collectionLayout: 'trending' | 'standard';
+}
+
+/** Full style preset per named theme component. */
+export const THEME_STYLE_PRESETS: Record<StorefrontThemeComponentKey, StorefrontThemeStyle> = {
+  LuxuryBoutique: {
+    headerVariant: 'luxury',
+    background: '#F8FAFC',
+    shellBackground: '#F8FAFC',
+    foreground: '#0F172A',
+    brandWordmark: 'AURA',
+    showCategoryRail: true,
+    showAnnouncementBar: false,
+    showFlashSale: false,
+    showGallerySection: false,
+    collectionLayout: 'trending',
+  },
+  DefaultModern: {
+    headerVariant: 'standard',
+    background: '#0F172A',
+    shellBackground: '#0F172A',
+    foreground: '#F1F5F9',
+    brandWordmark: 'STORE',
+    showCategoryRail: false,
+    showAnnouncementBar: true,
+    showFlashSale: true,
+    showGallerySection: true,
+    collectionLayout: 'standard',
+  },
+  TechStorePro: {
+    headerVariant: 'standard',
+    background: '#0F172A',
+    shellBackground: '#0F172A',
+    foreground: '#F1F5F9',
+    brandWordmark: 'STORE',
+    showCategoryRail: false,
+    showAnnouncementBar: true,
+    showFlashSale: true,
+    showGallerySection: true,
+    collectionLayout: 'standard',
+  },
+};
+
+/** Safe fallback when nothing resolves — the standard dark preset. */
+export const DEFAULT_THEME_STYLE: StorefrontThemeStyle = THEME_STYLE_PRESETS.DefaultModern;
+
+/**
+ * Resolve the full style contract for a published theme reference.
+ * Never throws and never returns undefined fields.
+ */
+export function resolveThemeStyle(
+  ref?: { id?: string | null; name?: string | null; category?: string | null; layout?: ThemeLayoutKey | string | null } | string | null
+): StorefrontThemeStyle {
+  try {
+    return THEME_STYLE_PRESETS[resolveThemeComponentKey(ref)] || DEFAULT_THEME_STYLE;
+  } catch {
+    return DEFAULT_THEME_STYLE;
+  }
+}
+
 /** Which layout each named component renders. */
 export const THEME_COMPONENT_LAYOUTS: Record<StorefrontThemeComponentKey, ThemeLayoutKey> = {
   DefaultModern: 'classic',
