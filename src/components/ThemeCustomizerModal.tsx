@@ -9,6 +9,7 @@ import {
   getDefaultGalleryImages,
   sanitizeGalleryImages,
 } from '../../lib/galleryDefaults';
+import { sanitizeImagePayload } from '../../lib/imagePayload';
 import {
   ArrowLeft,
   Check,
@@ -845,31 +846,50 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     // must keep the badge and surface the error instead of claiming success.
     const failures: string[] = [];
     try {
+      // ── Payload guard: prevent the 413 BEFORE it can happen ──────────────
+      // A 413 fires inside the body parser — before any route or the server's
+      // own `sanitizeImagePayload` can run — so oversized base64 gallery/logo
+      // photos used to kill the whole publish with an opaque error. Trim the
+      // outgoing payload here with the SAME per-image budget the server
+      // enforces, and report which fields were skipped instead of failing.
+      const storePayload = sanitizeImagePayload({
+        merchant: {
+          ...updatedMerchant,
+          store_slug: updatedMerchant.storeSlug,
+          activeThemeId: updatedMerchant.activeThemeId,
+          // The `stores` collection declares this field as `theme_config`,
+          // while the client has always sent `themeConfig`. Sending BOTH keeps
+          // the dot-notation writes (`theme_config.galleryImages`, …) landing
+          // under the key the store record actually uses, so Gallery/Video
+          // sections survive a save + reload on the public storefront.
+          theme_config: themeConfig,
+          themeConfig,
+        },
+        theme_config: themeConfig,
+        themeConfig,
+      });
+      if (storePayload.changed) {
+        console.warn('[ThemeCustomizer] Oversized image(s) trimmed before save:', storePayload.strippedFields.join(', '));
+        setHistoryLogs((prev) => [`Oversized image(s) skipped on save: ${storePayload.strippedFields.join(', ')}`, ...prev]);
+      }
       const res = await fetch('/api/stores/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          merchant: {
-            ...updatedMerchant,
-            store_slug: updatedMerchant.storeSlug,
-            activeThemeId: updatedMerchant.activeThemeId,
-            // The `stores` collection declares this field as `theme_config`,
-            // while the client has always sent `themeConfig`. Sending BOTH keeps
-            // the dot-notation writes (`theme_config.galleryImages`, …) landing
-            // under the key the store record actually uses, so Gallery/Video
-            // sections survive a save + reload on the public storefront.
-            theme_config: themeConfig,
-            themeConfig,
-          },
-          theme_config: themeConfig,
-          themeConfig,
-        }),
+        body: JSON.stringify(storePayload.value),
       });
       const text = await res.text().catch(() => '');
       let data: any = null;
       try { data = text && !text.trimStart().startsWith('<') ? JSON.parse(text) : null; } catch { data = null; }
       if (!res.ok || (data && data.ok === false)) {
-        failures.push(data?.error || `Store update failed (HTTP ${res.status}).`);
+        failures.push(
+          (res.status === 413
+            ? 'The save payload was too large for the server. Re-upload the biggest photo in a smaller size or remove some images, then publish again. '
+            : '') + (data?.error || `Store update failed (HTTP ${res.status}).`)
+        );
+      } else if (data?.warning) {
+        // Belt-and-braces: the server may still strip an image that slipped
+        // under the client budget but blew a downstream limit — surface it.
+        setHistoryLogs((prev) => [`Save notice: ${data.warning}`, ...prev]);
       }
     } catch (e: any) {
       console.warn('[ThemeCustomizer] Database theme save failed:', e);
@@ -882,6 +902,9 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     try {
       const slugForSettings = (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
         .toLowerCase().replace(/[^a-z0-9]/g, '');
+      // Same pre-trim as the store update above: the themeConfig embeds the
+      // gallery's base64 photos, which is the payload that used to 413.
+      const settingsPayload = sanitizeImagePayload({ themeConfig, theme_config: themeConfig });
       const res = await fetch('/api/themes/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -892,8 +915,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
           themeId: updatedMerchant.activeThemeId || (themeName || ''),
           themeName,
           themeVersion,
-          themeConfig,
-          theme_config: themeConfig,
+          ...settingsPayload.value,
         }),
       });
       const text = await res.text().catch(() => '');

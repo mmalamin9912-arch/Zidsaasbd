@@ -281,6 +281,25 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── Freshness: every /api response is DYNAMIC ─────────────────────────────────
+//
+// Express equivalent of Next.js `export const dynamic = 'force-dynamic'`. This
+// app is served by the Vercel serverless runtime, and a GET response without
+// cache headers is eligible for edge/browser caching. That is exactly how the
+// Order Management screen lost orders: a transient empty `/api/orders` answer
+// (a Mongo blip, a cold connection) could be CACHED, and the dashboard's poll
+// then applied the stale empty list on every tick — orders "disappeared" until
+// the cache expired. Marking every API response uncacheable guarantees each
+// request reaches the database and each answer is served fresh.
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
+  next();
+});
+
 // ── Request body limits ───────────────────────────────────────────────────────
 //
 // Express defaults `express.json()` to **100kb**. The dashboard legitimately
@@ -292,14 +311,43 @@ app.use((req, res, next) => {
 // BEFORE any route ran. That is the exact error in the log, and it made store
 // and category saves fail with no way for the merchant to succeed.
 //
-// The limit is raised to accommodate a realistic multi-image payload, and the
-// images themselves are stripped/downscaled before they reach the database (see
+// The limit is raised to accommodate a realistic multi-image payload (a gallery
+// publish can carry SEVERAL base64 photos at once), and the images themselves
+// are stripped/downscaled before they reach the database (see
 // `sanitizeImagePayload`), because raising the limit alone would just move the
-// failure to Mongo's 16MB document ceiling.
-const JSON_BODY_LIMIT = process.env.API_JSON_BODY_LIMIT || '25mb';
+// failure to Mongo's 16MB document ceiling. Override with API_JSON_BODY_LIMIT
+// for high-payload deployments.
+const JSON_BODY_LIMIT = process.env.API_JSON_BODY_LIMIT || '50mb';
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 // Some clients post uploads as form data rather than JSON.
 app.use(express.urlencoded({ limit: JSON_BODY_LIMIT, extended: true }));
+
+// Body-parser failures — notably `entity.too.large` (HTTP 413) and
+// `entity.parse.failed` (HTTP 400) — used to bubble up as the platform's HTML
+// error page, which every client parsed as an opaque
+// "Store update failed (HTTP 413)" with no hint about WHICH image blew the
+// budget. Answer them as structured JSON instead so the dashboard can show a
+// real, actionable message. Registered immediately after the parsers, before
+// any route, so it is the first error handler the parser's next(err) reaches.
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413)) {
+    return res.status(413).json({
+      ok: false,
+      code: 'PAYLOAD_TOO_LARGE',
+      error:
+        `Payload too large (limit ${JSON_BODY_LIMIT}). Images are downscaled before upload — ` +
+        're-upload the largest photo in a smaller size or remove some images, then save again.',
+    });
+  }
+  if (err && (err.type === 'entity.parse.failed' || err.status === 400 || err.statusCode === 400)) {
+    return res.status(400).json({
+      ok: false,
+      code: 'INVALID_JSON',
+      error: 'The request body was not valid JSON.',
+    });
+  }
+  return next(err);
+});
 
 const STORE_FILE = path.join(process.cwd(), 'local-store.json');
 
@@ -11976,9 +12024,13 @@ app.get('/api/orders', async (req, res) => {
     });
 
     // Honour `limit` (the tab-count probe asks for 1 row) while never allowing
-    // an unbounded read.
+    // an unbounded read. The bound used to be 500, which made orders DISAPPEAR:
+    // the dashboard poll replaces its whole list with this answer, so a store
+    // past 500 orders lost its oldest rows on every tick. 2000 keeps the payload
+    // bounded while fitting real order volumes; the default (no `limit` param)
+    // was raised from 500 to 1000 for the same reason.
     const limitRaw = Number(req.query.limit);
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 500;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 1000;
 
     let query: any = storeQuery;
     if (filterClauses) {
@@ -12035,8 +12087,10 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     if (filterClauses) {
       query = storeQuery ? { $and: [storeQuery, filterClauses] } : filterClauses;
     }
+    // Same generous bound as the collection route above — the old 500-row cap
+    // made older orders disappear from the dashboard once the store outgrew it.
     const limitRaw = Number(req.query.limit);
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 500;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 1000;
 
     let orders: any[] = [];
     try {

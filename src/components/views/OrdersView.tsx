@@ -363,7 +363,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // the active tab would delete the other rows from the list and break
         // the status counts and every other tab. The tab's own Mongo query runs
         // in `serverTabCount` below.
-        const res = await fetch(`/api/orders${params.toString() ? `?${params.toString()}` : ''}`);
+        // `cache: 'no-store'` plus the server's global no-store headers (the
+        // Express equivalent of force-dynamic) guarantee every poll reads the
+        // live database — a cached EMPTY answer is what made orders disappear.
+        const res = await fetch(`/api/orders${params.toString() ? `?${params.toString()}` : ''}`, { cache: 'no-store' });
         if (!res.ok) {
           console.warn(`Live order fetch returned ${res.status} — keeping the current list.`);
           return;
@@ -530,7 +533,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         const q = searchQuery.trim();
         if (q) params.set('search', q);
         params.set('limit', '1'); // we only need the count, not the rows
-        const res = await fetch(`/api/orders?${params.toString()}`);
+        const res = await fetch(`/api/orders?${params.toString()}`, { cache: 'no-store' });
         if (!res.ok) return;
         const data = await res.json();
         if (cancelled) return;

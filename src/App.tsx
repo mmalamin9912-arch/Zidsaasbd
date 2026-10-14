@@ -476,10 +476,13 @@ export default function App() {
     const storeSlug = merchant?.storeSlug || merchant?.id || 'default';
     let isMounted = true;
 
-    // Safe helper to fetch JSON
+    // Safe helper to fetch JSON. `cache: 'no-store'` mirrors the API's own
+    // no-store response headers (force-dynamic equivalent): the dashboard must
+    // always read fresh database rows — a cached empty `/api/orders` answer is
+    // what made orders disappear on reload.
     const safeFetch = async (url: string) => {
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) return null;
         const contentType = res.headers.get('content-type') || '';
         if (contentType && !contentType.includes('application/json')) {
