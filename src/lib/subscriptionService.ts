@@ -289,10 +289,13 @@ export async function syncMerchantSubscription(
   //
   // Both writes go through safeUpsertRow, which sanitises the payload (valid
   // ISO `updated_at`, no undefined/NaN), drops columns PostgREST reports as
-  // unknown (PGRST204) and — when `on_conflict=email` is rejected because
-  // `stores.email` has no unique constraint (42P10, HTTP 400) — falls back to
-  // update-by-email → insert. Each table is wrapped SEPARATELY so a schema
-  // rejection on one can never skip the other, and nothing can throw here.
+  // unknown (PGRST204) and — when a conflict target is rejected — falls back
+  // to update-by-natural-key → insert. `stores` targets `on_conflict=email`
+  // (made valid by migration 0010's unique index on stores.email) and
+  // `subscriptions` targets `on_conflict=merchant_email` (0010's unique index;
+  // one renewal row per merchant instead of one per save). Each table is
+  // wrapped SEPARATELY so a schema rejection on one can never skip the other,
+  // and nothing can throw here.
   const sbClient = getSupabaseClient();
   if (sbClient && cleanEmail) {
     try {
@@ -320,6 +323,10 @@ export async function syncMerchantSubscription(
       console.warn('[SubscriptionService] Supabase stores sync notice:', sbErr);
     }
 
+    // Natural identity: exactly one renewal row per merchant (0010's unique
+    // index on merchant_email). Until that migration is applied, safeUpsertRow's
+    // 42P10 fallback degrades to update-by-email → insert, so this can never
+    // 400-loop.
     try {
       const subsResult = await safeUpsertRow(sbClient, 'subscriptions', {
         merchant_email: cleanEmail,
@@ -332,7 +339,7 @@ export async function syncMerchantSubscription(
         payment_method: paymentMethod || null,
         status: status,
         updated_at: new Date().toISOString()
-      });
+      }, { onConflict: 'merchant_email', matchColumn: 'merchant_email' });
       if (!subsResult.ok) {
         console.warn('[SubscriptionService] Supabase subscriptions sync notice:', subsResult.error);
       }

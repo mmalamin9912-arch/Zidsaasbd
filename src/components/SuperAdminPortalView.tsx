@@ -71,7 +71,7 @@ import {
 } from 'lucide-react';
 import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, PlanFeatureFlags } from '../types';
 import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingDays, getPlanDisplayName } from '../utils/subscriptionUtils';
-import { supabase } from '../lib/supabase';
+import { supabase, getSupabaseClient, safeUpsertRow } from '../lib/supabase';
 import { savePlan } from '../lib/plansApi';
 import { FEATURE_FLAG_LABELS, featureFlagsOf, monthlyPriceOf, productLimitLabel, sortPlansByTier } from '../lib/planPricing';
 import { safeJson } from '../lib/storeApi';
@@ -1380,18 +1380,37 @@ if (m.storeSlug) {
           };
 
           if (req.email) {
+            const cleanReqEmail = req.email.trim().toLowerCase();
             // Exact full-address match. `.ilike` treats `_`/`%` as wildcards, so
             // it could apply a plan change to a different merchant's store.
-            await supabase.from('stores').update(updatePayload).eq('email', req.email.trim().toLowerCase());
-            await supabase.from('subscriptions').upsert([{
-              merchant_email: req.email.trim().toLowerCase(),
-              store_slug: (req.storeName || '').toLowerCase().replace(/\s+/g, '-'),
-              subscription_plan: req.planId,
-              plan_started_at: plan_started_at,
-              expires_at: expires_at,
-              duration_days: durationDays,
-              status: 'active'
-            }]);
+            await supabase.from('stores').update(updatePayload).eq('email', cleanReqEmail);
+
+            // Renewal row upserted on its NATURAL identity
+            // (`subscriptions.merchant_email`, unique per migration 0010) so
+            // each approval updates the one existing row instead of blindly
+            // inserting duplicates — and, on pre-0010 schemas without the
+            // unique index, safeUpsertRow degrades to update-by-email → insert
+            // instead of letting `on_conflict` 400. Payload keys/types match
+            // the 0007/0010 table columns exactly; `updated_at` is a valid ISO
+            // timestamptz value. Never throws into the approval flow.
+            const subResult = await safeUpsertRow(
+              getSupabaseClient(),
+              'subscriptions',
+              {
+                merchant_email: cleanReqEmail,
+                store_slug: (req.storeName || '').toLowerCase().replace(/\s+/g, '-'),
+                subscription_plan: req.planId,
+                plan_started_at: plan_started_at,
+                expires_at: expires_at,
+                duration_days: durationDays,
+                status: 'active',
+                updated_at: new Date().toISOString()
+              },
+              { onConflict: 'merchant_email', matchColumn: 'merchant_email' }
+            );
+            if (!subResult.ok) {
+              console.warn('Notice: Supabase subscriptions sync', subResult.error);
+            }
           }
         } catch (err) {
           console.warn('Notice: Supabase approve sync notice', err);

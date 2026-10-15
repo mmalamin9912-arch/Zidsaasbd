@@ -455,10 +455,34 @@ async function upsertByNaturalKey(
   client: SupabaseClient,
   table: string,
   row: Record<string, any>,
-  matchColumn: string
+  matchColumn: string,
+  depth = 0
 ): Promise<SafeWriteResult> {
+  // A missing/empty natural key must NEVER be sent as `?col=eq.undefined` —
+  // that is an invalid query parameter that would 400 on every attempt and
+  // turn one bad payload into a stream of rapid failing retries.
+  const matchValue = row[matchColumn];
+  if (
+    matchValue === undefined ||
+    matchValue === null ||
+    (typeof matchValue === 'string' && !matchValue.trim())
+  ) {
+    return {
+      ok: false,
+      code: 'NO_MATCH_KEY',
+      error: `Cannot fall back to an update on "${table}.${matchColumn}" — the natural key value is missing from the payload.`,
+    };
+  }
+  // Bounded recursion: each level drops at most one rejected column.
+  if (depth > 3) {
+    return {
+      ok: false,
+      code: 'MAX_DEPTH',
+      error: `Fallback update for ${table}.${matchColumn} exceeded its retry budget.`,
+    };
+  }
+
   try {
-    const matchValue = row[matchColumn];
     const { error: updateError } = await client.from(table).update(row).eq(matchColumn, matchValue);
     if (updateError) {
       const status = (updateError as any)?.status;
@@ -469,7 +493,7 @@ async function upsertByNaturalKey(
         delete row[unknownCol];
         rememberDroppedColumn(table, unknownCol);
         console.warn(`[supabase] Dropped unknown column "${unknownCol}" from ${table} fallback update.`);
-        return upsertByNaturalKey(client, table, row, matchColumn);
+        return upsertByNaturalKey(client, table, row, matchColumn, depth + 1);
       }
       return {
         ok: false,
