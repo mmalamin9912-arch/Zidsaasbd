@@ -116,7 +116,7 @@ import {
   RECOVERY_TEMPLATE_PLACEHOLDERS,
 } from './abandonedCarts.js';
 import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId, postgrestWrite } from './supabaseSchema.js';
-import { sanitizeImagePayload, formatBytes } from './imagePayload.js';
+import { sanitizeImagePayload, formatBytes, approximateSize, MAX_PAYLOAD_BYTES } from './imagePayload.js';
 
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
@@ -1687,6 +1687,23 @@ app.post('/api/admin/theme/publish', async (req, res) => {
   res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
   try {
     const body = req.body || {};
+    // ── 413 guard (server-side, post-parse) ─────────────────────────────
+    // The body parser limit (API_JSON_BODY_LIMIT) stops absurd payloads, but a
+    // multi-MB merchant/theme blob that SQUEEZES under it would still 400 on
+    // the Supabase mirror and push the Mongo doc toward the 16MB ceiling. The
+    // publish route only needs the theme SWITCH (id + snapshot + version), so
+    // reject an oversized body here with a friendly 413 instead of writing it.
+    const bodyBytes = approximateSize(body);
+    if (bodyBytes > MAX_PAYLOAD_BYTES) {
+      return res.status(413).json({
+        ok: false,
+        code: 'PAYLOAD_TOO_LARGE',
+        error:
+          `Theme publish payload is ${formatBytes(bodyBytes)} (limit ${formatBytes(MAX_PAYLOAD_BYTES)}). ` +
+          'The publish only needs the theme selection — bulky inline images are stored separately. ' +
+          'Remove or shrink large photos, then publish again.',
+      });
+    }
     const storeSlug = String(body.storeSlug || body.store_slug || body.slug || '').trim().toLowerCase();
     const email = String(body.email || body.merchant_email || '').trim().toLowerCase();
     const storeId = String(body.storeId || body.store_id || '').trim();
@@ -1812,12 +1829,34 @@ async function handleThemeSettingsWrite(req: any, res: any) {
   res.setHeader('Content-Type', 'application/json');
   try {
     const body = req.body || {};
-    const storeSlugRaw = String(body.storeSlug || body.store_slug || body.slug || '').trim();
+    // ── 413 guard: strip oversized inline base64 BEFORE sizing ───────────
+    // The themeConfig embeds gallery/logo `data:` photos — the payload that
+    // used to blow past the body-parser limit and die as an opaque 413 with
+    // NOTHING saved. Sanitize first (same per-image budget as /api/stores/
+    // update), then size the TRIMMED body: only a still-oversized payload
+    // after trimming is rejected with a friendly message.
+    const bodySanitized = sanitizeImagePayload(body);
+    const trimmedBody = bodySanitized.value as Record<string, any>;
+    const bodyBytes = approximateSize(trimmedBody);
+    if (bodyBytes > MAX_PAYLOAD_BYTES) {
+      return res.status(413).json({
+        ok: false,
+        code: 'PAYLOAD_TOO_LARGE',
+        strippedFields: bodySanitized.strippedFields,
+        error:
+          `Theme settings payload is ${formatBytes(bodyBytes)} even after trimming ` +
+          `${formatBytes(bodySanitized.before - bodySanitized.after)} of inline images ` +
+          `(limit ${formatBytes(MAX_PAYLOAD_BYTES)}). ` +
+          `Oversized fields skipped: ${bodySanitized.strippedFields.join(', ') || 'none'}. ` +
+          'Host large photos/video remotely and paste URLs instead, then save again.',
+      });
+    }
+    const storeSlugRaw = String(trimmedBody.storeSlug || trimmedBody.store_slug || trimmedBody.slug || '').trim();
     const storeSlug = storeSlugRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const email = String(body.email || body.merchant_email || '').trim().toLowerCase();
-    const themeId = String(body.themeId || body.theme_id || body.themeName || body.theme_name || 'default').trim() || 'default';
-    const themeConfigRaw = (body.themeConfig && typeof body.themeConfig === 'object' ? body.themeConfig : null)
-      || (body.theme_config && typeof body.theme_config === 'object' ? body.theme_config : null);
+    const email = String(trimmedBody.email || trimmedBody.merchant_email || '').trim().toLowerCase();
+    const themeId = String(trimmedBody.themeId || trimmedBody.theme_id || trimmedBody.themeName || trimmedBody.theme_name || 'default').trim() || 'default';
+    const themeConfigRaw = (trimmedBody.themeConfig && typeof trimmedBody.themeConfig === 'object' ? trimmedBody.themeConfig : null)
+      || (trimmedBody.theme_config && typeof trimmedBody.theme_config === 'object' ? trimmedBody.theme_config : null);
     // Force-purge legacy Unsplash demo rows BEFORE the config reaches MongoDB,
     // so old demo gallery data can never be re-saved (and re-surfaced later).
     const themeConfig = sanitizeStoredThemeConfig(themeConfigRaw) || themeConfigRaw;
@@ -1832,8 +1871,8 @@ async function handleThemeSettingsWrite(req: any, res: any) {
     const doc: Record<string, any> = {
       store_slug: key, storeSlug: key, email: email || undefined,
       theme_id: themeId, themeId,
-      theme_name: String(body.themeName || body.theme_name || themeId),
-      theme_version: String(body.themeVersion || body.theme_version || ''),
+      theme_name: String(trimmedBody.themeName || trimmedBody.theme_name || themeId),
+      theme_version: String(trimmedBody.themeVersion || trimmedBody.theme_version || ''),
       theme_config: themeConfig, themeConfig,
       updated_at: nowIso, updatedAt: nowIso,
     };
@@ -1862,7 +1901,20 @@ async function handleThemeSettingsWrite(req: any, res: any) {
     } catch (err: any) {
       console.warn('[Server] /api/themes/settings mirror warning:', err?.message || err);
     }
-    return res.status(200).json({ ok: true, store_slug: key, theme_id: themeId, updatedAt: nowIso });
+    return res.status(200).json({
+      ok: true, store_slug: key, theme_id: themeId, updatedAt: nowIso,
+      // Tell the editor when inline images were trimmed, so it can show a
+      // friendly notice instead of the merchant silently losing a photo.
+      ...(bodySanitized.changed
+        ? {
+            warning:
+              `${bodySanitized.strippedFields.length} oversized image(s) ` +
+              `(${formatBytes(bodySanitized.before - bodySanitized.after)} of base64) were skipped. ` +
+              'Use images under 1.5MB or host large photos remotely.',
+            strippedFields: bodySanitized.strippedFields,
+          }
+        : {}),
+    });
   } catch (err: any) {
     console.error('[Server] /api/themes/settings error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Could not save theme settings.' });

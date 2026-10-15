@@ -6,7 +6,8 @@ import SafeImage from '../SafeImage';
 import { readAndDownscaleImage } from '../../utils/imageUtils';
 import { useToast } from '../ToastProvider';
 import { resolveThemeThumbnail, THEME_THUMBNAIL_PLACEHOLDER } from '../../lib/themeRegistry';
-import {  readZidStoreData, writeZidStoreData } from '../../lib/storeData';
+import { readZidStoreData, writeZidStoreData } from '../../lib/storeData';
+import { sanitizeImagePayload, approximateSize, MAX_PAYLOAD_BYTES, formatBytes } from '../../../lib/imagePayload';
 import {
   loadStorefrontModules,
   saveStoreModule,
@@ -186,7 +187,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     return false;
   };
 
-  const handlePublishTheme = (theme: ThemeMarketItem) => {
+  const handlePublishTheme = async (theme: ThemeMarketItem) => {
     if (!isThemeUnlocked(theme)) {
       setUpgradingForTheme(theme);
       setShowUpgradePrompt(true);
@@ -225,8 +226,15 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     //    MongoDB (Supabase mirror) and purges layout cache; the legacy update
     //    route runs as a fallback so the choice survives reloads on every
     //    device — the live storefront reflects it the moment it's saved.
+    //
+    //    413-SAFE: the publish route only needs the theme SWITCH (id + name +
+    //    category + layout + version) — NEVER the merchant's inline base64
+    //    photos. The old code echoed `...merchant` (with every logo/gallery
+    //    `data:` blob) into /api/stores/update, which is exactly what blew the
+    //    body parser (HTTP 413). Send URLs + text config only; bulky images are
+    //    stripped here and saved separately by the Theme Customizer.
     const slug = merchant?.storeSlug || (merchant as any)?.store_slug;
-    const publishPayload = {
+    const publishPayload = sanitizeImagePayload({
       storeSlug: slug,
       store_slug: slug,
       activeThemeId: theme.id,
@@ -236,26 +244,64 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
       activeTheme: activeThemeSnapshot,
       themeVersion: publishStamp,
       theme_updated_at: publishStamp,
+    }).value;
+    // Minimal fallback patch: theme switch + identity only (no images/config).
+    const fallbackMerchantPatch = sanitizeImagePayload({
+      storeSlug: slug,
+      store_slug: slug,
+      email: (merchant as any)?.email,
+      id: (merchant as any)?.id,
+      activeThemeId: theme.id,
+      activeThemeName: (theme as any).name,
+      activeThemeCategory: (theme as any).category,
+      activeThemeLayout: (theme as any).layout,
+      themeVersion: publishStamp,
+      theme_updated_at: publishStamp,
+    }).value;
+    const payloadBytes = approximateSize(publishPayload);
+    if (payloadBytes > MAX_PAYLOAD_BYTES) {
+      toast.error(
+        `Theme publish payload is ${formatBytes(payloadBytes)} (limit ${formatBytes(MAX_PAYLOAD_BYTES)}). ` +
+        'Remove large inline images first, then publish again.'
+      );
+      return;
+    }
+    const parseJsonBody = async (res: Response) => {
+      const text = await res.text().catch(() => '');
+      try { return text && !text.trimStart().startsWith('<') ? JSON.parse(text) : null; }
+      catch { return null; }
     };
+    const publishErrorMessage = (status: number, data: any) => status === 413
+      ? 'The theme publish payload was too large for the server. The theme selection was NOT saved — ' +
+        're-upload the biggest photo in a smaller size (or host it remotely), then publish again.'
+      : (data?.error || `Theme publish failed (HTTP ${status}).`);
     try {
-      fetch('/api/admin/theme/publish', {
+      const publishRes = await fetch('/api/admin/theme/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
         body: JSON.stringify(publishPayload),
-      }).catch(err => console.warn('[OnlineStoreView] theme publish warning:', err));
-      fetch('/api/stores/update', {
+      });
+      const publishData = await parseJsonBody(publishRes);
+      if (!publishRes.ok || (publishData && publishData.ok === false)) {
+        toast.error(publishErrorMessage(publishRes.status, publishData));
+        return;
+      }
+      const fallbackRes = await fetch('/api/stores/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          merchant: {
-            ...merchant,
-            storeSlug: slug,
-            ...publishedMerchantFields,
-          },
-        }),
-      }).catch(err => console.warn('[OnlineStoreView] theme publish persist warning:', err));
-    } catch (err) {
-      console.warn('[OnlineStoreView] theme publish persist notice:', err);
+        body: JSON.stringify({ merchant: fallbackMerchantPatch }),
+      });
+      const fallbackData = await parseJsonBody(fallbackRes);
+      if (!fallbackRes.ok || (fallbackData && fallbackData.ok === false)) {
+        toast.error(publishErrorMessage(fallbackRes.status, fallbackData));
+        return;
+      }
+      if (fallbackData?.warning) {
+        toast.warning(fallbackData.warning as string);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Theme publish request failed. Please retry.');
+      return;
     }
 
     // 3. Broadcast via the shared store so an open storefront tab updates live
