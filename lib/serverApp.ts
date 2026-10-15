@@ -115,7 +115,7 @@ import {
   MESSAGE_LOGS_COLLECTION,
   RECOVERY_TEMPLATE_PLACEHOLDERS,
 } from './abandonedCarts.js';
-import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId } from './supabaseSchema.js';
+import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId, postgrestWrite } from './supabaseSchema.js';
 import { sanitizeImagePayload, formatBytes } from './imagePayload.js';
 
 
@@ -1369,21 +1369,29 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
         for (const table of ['stores', 'merchants'] as const) {
           // `eq.` — an `ilike.` PATCH would rewrite the password of any row
           // matching the wildcard pattern, i.e. potentially another account.
-          await fetch(
-            `${supabaseUrl}/rest/v1/${table}?email=eq.${encodeURIComponent(cleanEmail)}`,
+          // postgrestWrite sends proper JSON, stamps a valid ISO `updated_at`
+          // and — if the table lacks `password` and/or `updated_at` (PGRST204)
+          // — drops just that field and retries instead of 400ing the whole
+          // password reset mirror.
+          const mirrorResult = await postgrestWrite(
+            supabaseUrl,
+            supabaseKey,
+            `/rest/v1/${table}?email=eq.${encodeURIComponent(cleanEmail)}`,
             {
               method: 'PATCH',
-              headers: {
-                apikey: supabaseKey,
-                Authorization: `Bearer ${supabaseKey}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
+              body: {
                 password: cleanPassword,
                 updated_at: new Date().toISOString()
-              })
+              }
             }
-          ).catch(() => {});
+          );
+          if (!mirrorResult.ok && mirrorResult.status !== 0) {
+            console.warn(
+              `[Server] Supabase ${table} password mirror warning:`,
+              mirrorResult.status,
+              mirrorResult.detail.slice(0, 200)
+            );
+          }
         }
       }
     } catch (sbErr) {
@@ -1740,14 +1748,25 @@ app.post('/api/admin/theme/publish', async (req, res) => {
         };
         if (storeSlug) sbPayload.store_slug = storeSlug;
         if (email) sbPayload.email = email;
-        const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores`, {
+        // postgrestWrite: unknown columns (theme_updated_at on older schemas)
+        // are dropped and retried, and a unique/email collision falls back to
+        // a PATCH on the store's natural key instead of answering 400/409.
+        const sbResult = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
           method: 'POST',
-          headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
-          body: JSON.stringify(sbPayload),
+          headers: { Prefer: 'resolution=merge-duplicates' },
+          body: sbPayload,
+          conflictPatchPath: storeSlug
+            ? `/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeSlug)}`
+            : email
+              ? `/rest/v1/stores?email=eq.${encodeURIComponent(email)}`
+              : undefined,
         });
-        if (!sbRes.ok) {
-          const detail = await sbRes.text().catch(() => '');
-          console.warn('[Server] POST /api/admin/theme/publish Supabase mirror warning:', sbRes.status, detail.slice(0, 200));
+        if (!sbResult.ok) {
+          console.warn(
+            '[Server] POST /api/admin/theme/publish Supabase mirror warning:',
+            sbResult.status,
+            sbResult.detail.slice(0, 200)
+          );
         }
       }
     } catch (sbErr: any) {
@@ -6197,24 +6216,35 @@ app.post('/api/stores/update', async (req, res) => {
         const cleanSbPayload = sbSanitized.value as Record<string, any>;
 
         if (Object.keys(cleanSbPayload).length > 0) {
-          const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores`, {
+          // Stamp the SAME updated_at the Mongo update carries so both mirrors
+          // agree; postgrestWrite guarantees valid JSON + a castable ISO value
+          // and drops/retries any field the deployed table does not have
+          // (e.g. `password` on schemas without that column) instead of
+          // rejecting the entire profile save with a 400. On a unique-identity
+          // collision it PATCHes the existing row instead of failing.
+          if (cleanSbPayload.updated_at === undefined) {
+            cleanSbPayload.updated_at = new Date().toISOString();
+          }
+          const identityPatchPath = storeSlug
+            ? `/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeSlug)}`
+            : email
+              ? `/rest/v1/stores?email=eq.${encodeURIComponent(email)}`
+              : storeId
+                ? `/rest/v1/stores?id=eq.${encodeURIComponent(storeId)}`
+                : undefined;
+          const sbResult = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
             method: 'POST',
-            headers: {
-              apikey: supabaseKey,
-              Authorization: `Bearer ${supabaseKey}`,
-              'Content-Type': 'application/json',
-              Prefer: 'resolution=merge-duplicates',
-            },
-            body: JSON.stringify(cleanSbPayload),
+            headers: { Prefer: 'resolution=merge-duplicates' },
+            body: cleanSbPayload,
+            conflictPatchPath: identityPatchPath,
           });
-          if (!sbRes.ok) {
+          if (!sbResult.ok) {
             // Read the body: a bare status code hid the real cause (usually an
             // unknown column or a size rejection) behind "warning: 400".
-            const detail = await sbRes.text().catch(() => '');
             console.warn(
               '[Server] /api/stores/update Supabase mirror warning:',
-              sbRes.status,
-              detail.slice(0, 300)
+              sbResult.status,
+              sbResult.detail.slice(0, 300)
             );
           }
         }
@@ -6418,20 +6448,25 @@ app.post('/api/onboarding/complete-step', async (req, res) => {
         console.warn('[Server] complete-step: MongoDB is not connected; step value not persisted.');
       }
       // Mirror to Supabase (best-effort; a drifted table must not fail the step).
+      // postgrestWrite sanitises the raw client patch: proper JSON, a stamped
+      // valid ISO `updated_at`, unknown columns dropped & retried (PGRST204)
+      // and uncastable values removed (22P02) — a 400 can no longer fail the step.
       try {
         const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
         if (isConfigured) {
-          const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeRef)}`, {
-            method: 'PATCH',
-            headers: {
-              apikey: supabaseKey,
-              Authorization: `Bearer ${supabaseKey}`,
-              'Content-Type': 'application/json',
-              Prefer: 'return=minimal',
-            },
-            body: JSON.stringify(patch),
-          });
-          if (!sbRes.ok) console.warn('[Server] complete-step Supabase mirror warning:', sbRes.status);
+          const sbResult = await postgrestWrite(
+            supabaseUrl,
+            supabaseKey,
+            `/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeRef)}`,
+            {
+              method: 'PATCH',
+              headers: { Prefer: 'return=minimal' },
+              body: { ...patch, updated_at: new Date().toISOString() },
+            }
+          );
+          if (!sbResult.ok) {
+            console.warn('[Server] complete-step Supabase mirror warning:', sbResult.status, sbResult.detail.slice(0, 200));
+          }
         }
       } catch (sbErr: any) {
         console.warn('[Server] complete-step Supabase warning:', sbErr?.message || sbErr);

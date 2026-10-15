@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, getSupabaseClient, safeUpsertRow } from './supabase';
 import { safeParseJson } from './safeFetch';
 
 export interface CountryCodeOption {
@@ -249,17 +249,24 @@ export async function sendWhatsAppOtp(
     // 3. Direct WhatsApp Launch URL
     const directLink = buildWhatsAppDirectLink(normalized, otpCode, validation.country);
 
-    // 4. Direct Supabase Database persistence if Supabase client is initialized
-    if (supabase) {
+    // 4. Direct Supabase Database persistence if Supabase client is initialized.
+    //    safeUpsertRow guards `on_conflict=phone` (unique-constraint 400s fall
+    //    back to update-by-phone) and drops unknown columns, so a schema
+    //    mismatch here can never break the OTP that was already generated.
+    const sbClient = getSupabaseClient();
+    if (sbClient) {
       try {
-        await supabase.from('whatsapp_otps').upsert({
+        const otpResult = await safeUpsertRow(sbClient, 'whatsapp_otps', {
           phone: normalized,
           code: otpCode,
           expires_at: expiresAt,
           status: 'pending',
           user_type: userType,
           created_at: new Date().toISOString()
-        }, { onConflict: 'phone' });
+        }, { onConflict: 'phone', matchColumn: 'phone' });
+        if (!otpResult.ok) {
+          console.warn('Supabase DB table save warning:', otpResult.error);
+        }
       } catch (e) {
         console.warn('Supabase DB table save warning:', e);
       }
@@ -385,10 +392,21 @@ export async function verifyWhatsAppOtp(
           type: 'sms'
         });
         if (!authErr && authData?.session) {
-          await supabase.from('whatsapp_otps').update({
+          // `verified_at` may not exist on older whatsapp_otps schemas; a
+          // PGRST204 would reject the WHOLE update (HTTP 400) and the status
+          // would never flip. Retry status-only so verification still persists.
+          const verifiedPatch: Record<string, any> = {
             status: 'verified',
             verified_at: new Date().toISOString()
-          }).eq('phone', normalized);
+          };
+          const { error: markErr } = await supabase
+            .from('whatsapp_otps')
+            .update(verifiedPatch)
+            .eq('phone', normalized);
+          if (markErr && /verified_at/i.test(String((markErr as any)?.message || ''))) {
+            delete verifiedPatch.verified_at;
+            await supabase.from('whatsapp_otps').update(verifiedPatch).eq('phone', normalized);
+          }
 
           return {
             success: true,

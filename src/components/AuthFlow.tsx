@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MerchantProfile } from '../types';
-import { supabase } from '../lib/supabase';
+import { supabase, safeSignInWithPassword, safeUpdateAuthPassword, validateSupabaseCredentials } from '../lib/supabase';
 import AuthLayout from './AuthLayout';
 import SafeImage from './SafeImage';
 import { BrandLogo } from './BrandLogo';
@@ -763,15 +763,25 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // Direct Supabase query as supplemental check (exact match, never `ilike`).
     if (!existingProfile) existingProfile = await supabaseStoreByExactEmail(cleanEmail);
 
-    // Try Supabase Auth password login first if configured
-    if (supabase) {
+    // Try Supabase Auth password login first if configured.
+    // Credentials are validated BEFORE the request so malformed input or a
+    // short password never fires a doomed GoTrue `token?grant_type=password`
+    // call (HTTP 400). Skipped input simply falls through to the strict
+    // backend verification below — a Supabase auth 400 can never crash login.
+    const credentialIssue = validateSupabaseCredentials(
+      { email: cleanEmail, password: cleanPassword },
+      { minPasswordLength: 6 }
+    );
+    if (!credentialIssue && supabase) {
       try {
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email: cleanEmail,
-          password: cleanPassword,
-        });
+        const attempt = await safeSignInWithPassword(
+          supabase,
+          { email: cleanEmail, password: cleanPassword },
+          { minPasswordLength: 6 }
+        );
+        const data = attempt.data;
 
-        if (!error && (data.user || data.session)) {
+        if (attempt.ok && (data?.user || data?.session)) {
           setIsLoading(false);
           const derivedName = (cleanEmail.split('@')[0] || 'My Store').replace(/[^a-zA-Z0-9]/g, ' ');
           const derivedSlug = (cleanEmail.split('@')[0] || 'store').replace(/[^a-z0-9]/g, '');
@@ -780,8 +790,8 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
             : resolveMerchantSubscription({
                 ...defaultMerchant,
                 email: cleanEmail,
-                ownerName: data.user?.user_metadata?.full_name || cleanEmail.split('@')[0] || 'Store Owner',
-                storeName: data.user?.user_metadata?.store_name || `${derivedName} Store`,
+                ownerName: data?.user?.user_metadata?.full_name || cleanEmail.split('@')[0] || 'Store Owner',
+                storeName: data?.user?.user_metadata?.store_name || `${derivedName} Store`,
                 phone: defaultMerchant.phone || '',
                 storeSlug: derivedSlug,
                 subscriptionPlan: 'free_trial',
@@ -790,6 +800,17 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
           await finishLogin(userProfile);
           return;
+        }
+
+        if (!attempt.skipped) {
+          // GoTrue answered with an error (400 invalid_credentials / user not
+          // found, 429 rate limit, …). Log it and continue to backend verify —
+          // the strict bcrypt path below decides the outcome for the user.
+          console.warn(
+            '[AuthFlow] Supabase password sign-in notice:',
+            attempt.status || '',
+            attempt.error || ''
+          );
         }
       } catch (err) {
         console.warn('Supabase password login attempt:', err);
@@ -1088,12 +1109,18 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         console.warn('Store update password call warning:', storeUpdateErr);
       }
 
-      // 3. Supabase Auth update if session/client is present
+      // 3. Supabase Auth update if session/client is present.
+      //    safeUpdateAuthPassword validates (min 6 chars) and never throws —
+      //    a GoTrue 400 here must not fail the reset that already succeeded
+      //    on the backend.
       if (supabase) {
         try {
-          await supabase.auth.updateUser({
-            password: cleanNewPassword,
-          }).catch(() => {});
+          const sbUpdate = await safeUpdateAuthPassword(supabase, cleanNewPassword);
+          if (!sbUpdate.ok && !sbUpdate.skipped) {
+            console.warn('Supabase auth password update notice:', sbUpdate.error || '');
+          } else if (sbUpdate.skipped && sbUpdate.reason === 'invalid_input') {
+            console.warn('Supabase auth password update skipped:', sbUpdate.error || '');
+          }
         } catch (sbErr) {
           console.warn('Supabase auth password update attempt:', sbErr);
         }
@@ -1505,13 +1532,20 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
     if (supabase) {
       try {
-        await supabase.auth.updateUser({
-          password: cleanPassword,
+        // Profile + password in ONE updateUser call, validated first so a
+        // short password never reaches GoTrue as a 400. Non-blocking: the
+        // backend registration above already succeeded if we got here.
+        const sbUpdate = await safeUpdateAuthPassword(supabase, cleanPassword, {
           data: {
             full_name: fullName,
             store_name: storeName.trim(),
-          }
+          },
         });
+        if (!sbUpdate.ok && !sbUpdate.skipped) {
+          console.warn('Supabase updateUser password notice:', sbUpdate.error || '');
+        } else if (sbUpdate.skipped && sbUpdate.reason === 'invalid_input') {
+          console.warn('Supabase updateUser skipped:', sbUpdate.error || '');
+        }
       } catch (err) {
         console.warn('Supabase updateUser password notice:', err);
       }

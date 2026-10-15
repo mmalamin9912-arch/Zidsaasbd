@@ -4,7 +4,7 @@ import { TenantStorefrontView } from './TenantStorefrontView';
 import { readZidStoreData, writeZidStoreData } from '../lib/storeData';
 import { readAndDownscaleImage, LOGO_MAX_EDGE, MAX_IMAGE_EDGE } from '../utils/imageUtils';
 import SafeImage from './SafeImage';
-import { supabase } from '../lib/supabase';
+import { getSupabaseClient, safeUpsertRow } from '../lib/supabase';
 import {
   getDefaultGalleryImages,
   sanitizeGalleryImages,
@@ -944,27 +944,32 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
 
     // Persist to Supabase 'stores' table (theme_config + hero/announcement fields)
     // so the customer-facing storefront renders the saved theme after reload.
+    //
+    // safeUpsertRow sanitises `updated_at`, drops columns the deployed table
+    // does not have (e.g. hero_* on older schemas) instead of 400ing the whole
+    // write, and falls back to update-by-email when `on_conflict=email` has no
+    // unique constraint to target. Failures stay non-blocking (warn only) so
+    // publishing can never be crashed by a mirror rejection.
     try {
-      if (supabase && merchant?.email) {
-        const { error: themeSaveErr } = await supabase
-          .from('stores')
-          .upsert({
-            email: updatedMerchant.email.trim().toLowerCase(),
-            store_name: updatedMerchant.storeName,
-            store_slug: (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
-              .toLowerCase().replace(/[^a-z0-9]/g, ''),
-            theme_config: themeConfig,
-            hero_title: heroTitle,
-            hero_subtitle: heroSubtitle,
-            hero_image: heroImage,
-            hero_images: heroImages,
-            announcement_text: announcementText,
-            logo_url: logoImageUrl || desktopLogoUrl || mobileLogoUrl || '',
-            active_theme_id: updatedMerchant.activeThemeId || null,
-            updated_at: new Date().toISOString()
-          }, { onConflict: 'email' });
-        if (themeSaveErr) {
-          console.warn('[ThemeCustomizer] Supabase theme save notice:', themeSaveErr.message);
+      const sbClient = getSupabaseClient();
+      if (sbClient && merchant?.email) {
+        const saveResult = await safeUpsertRow(sbClient, 'stores', {
+          email: updatedMerchant.email.trim().toLowerCase(),
+          store_name: updatedMerchant.storeName,
+          store_slug: (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
+            .toLowerCase().replace(/[^a-z0-9]/g, ''),
+          theme_config: themeConfig,
+          hero_title: heroTitle,
+          hero_subtitle: heroSubtitle,
+          hero_image: heroImage,
+          hero_images: heroImages,
+          announcement_text: announcementText,
+          logo_url: logoImageUrl || desktopLogoUrl || mobileLogoUrl || '',
+          active_theme_id: updatedMerchant.activeThemeId || null,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'email', matchColumn: 'email' });
+        if (!saveResult.ok) {
+          console.warn('[ThemeCustomizer] Supabase theme save notice:', saveResult.error);
         }
       }
     } catch (e) {

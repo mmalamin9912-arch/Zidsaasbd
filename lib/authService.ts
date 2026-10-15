@@ -23,6 +23,7 @@
 import mongoose from 'mongoose';
 import { getMongoUri, describeMongoError, DB_NAME } from './db.js';
 import { getSupabaseServerConfig, querySupabaseTable } from './hybridDb.js';
+import { postgrestWrite } from './supabaseSchema.js';
 import type { DataSource } from './hybridDb.js';
 
 /**
@@ -214,20 +215,27 @@ async function upsertSupabaseRecord(
   if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
 
   try {
-    const res = await fetch(`${supabaseUrl}/rest/v1/stores`, {
+    // The incoming `record` mixes snake_case Supabase columns with camelCase
+    // Mongo keys (storeName, createdAt, trialEndsAt, …) and may carry a
+    // non-UUID `id`. A raw POST would 400 (PGRST204 / 22P02) and silently skip
+    // the mirror. postgrestWrite serialises proper JSON, drops exactly the
+    // keys the deployed table rejects, and — on a unique/email collision —
+    // PATCHes the existing row by its natural key instead of failing.
+    const nowIso = new Date().toISOString();
+    const result = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
       method: 'POST',
-      headers: {
-        apikey: supabaseKey,
-        Authorization: `Bearer ${supabaseKey}`,
-        'Content-Type': 'application/json',
-        Prefer: 'resolution=merge-duplicates',
-      },
-      body: JSON.stringify({ ...record, email }),
-      signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+      headers: { Prefer: 'resolution=merge-duplicates' },
+      body: { ...record, email, updated_at: record.updated_at || nowIso },
+      conflictPatchPath: `/rest/v1/stores?email=eq.${encodeURIComponent(email)}`,
+      timeoutMs: 8000,
     });
 
-    if (res.ok) return { ok: true, statusCode: res.status };
-    return { ok: false, error: `Supabase upsert responded ${res.status}`, statusCode: res.status };
+    if (result.ok) return { ok: true, statusCode: result.status };
+    return {
+      ok: false,
+      error: `Supabase upsert responded ${result.status}${result.detail ? `: ${result.detail.slice(0, 200)}` : ''}`,
+      statusCode: result.status,
+    };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Supabase upsert failed' };
   }

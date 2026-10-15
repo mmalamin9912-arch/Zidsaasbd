@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { getSupabaseClient, safeUpsertRow } from './supabase';
 import { MerchantProfile, SubscriptionPlanId } from '../types';
 import {
   getPlanDurationInDays,
@@ -187,7 +187,8 @@ export async function fetchMerchantSubscriptionFromSupabase(
 
   // Stores are the canonical tenant record. Try every supported ownership/contact
   // column independently because older projects may only have a subset of them.
-  if (supabase) {
+  const sbReadClient = getSupabaseClient();
+  if (sbReadClient) {
     const storeQueries: Array<{ column: string; value: string }> = [
       ...(userId ? [{ column: 'user_id', value: userId }, { column: 'auth_user_id', value: userId }] : []),
       ...(cleanEmail ? [{ column: 'email', value: cleanEmail }] : []),
@@ -195,7 +196,7 @@ export async function fetchMerchantSubscriptionFromSupabase(
     ];
     for (const query of storeQueries) {
       try {
-        const { data } = await supabase.from('stores').select('*').eq(query.column, query.value).maybeSingle();
+        const { data } = await sbReadClient.from('stores').select('*').eq(query.column, query.value).maybeSingle();
         if (data) {
           dbMerchant = data;
           break;
@@ -284,45 +285,59 @@ export async function syncMerchantSubscription(
   const cleanEmail = (updatedProfile.email || '').trim().toLowerCase();
   const cleanSlug = updatedProfile.storeSlug || updatedProfile.storeName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-  // 1. Sync to Supabase `stores` and `subscriptions`
-  if (supabase && cleanEmail) {
+  // 1. Sync to Supabase `stores` and `subscriptions`.
+  //
+  // Both writes go through safeUpsertRow, which sanitises the payload (valid
+  // ISO `updated_at`, no undefined/NaN), drops columns PostgREST reports as
+  // unknown (PGRST204) and — when `on_conflict=email` is rejected because
+  // `stores.email` has no unique constraint (42P10, HTTP 400) — falls back to
+  // update-by-email → insert. Each table is wrapped SEPARATELY so a schema
+  // rejection on one can never skip the other, and nothing can throw here.
+  const sbClient = getSupabaseClient();
+  if (sbClient && cleanEmail) {
     try {
-      await supabase
-        .from('stores')
-        .upsert({
-          email: cleanEmail,
-          store_name: updatedProfile.storeName,
-          store_slug: cleanSlug,
-          // Permanent identity — survives any slug/name change.
-          ...(updatedProfile.storeCode ? { store_code: updatedProfile.storeCode } : {}),
-          owner_name: updatedProfile.ownerName,
-          phone: updatedProfile.phone,
-          subscription_plan: planId,
-          subscription_expiry: expiryDate,
-          plan_started_at,
-          expires_at,
-          duration_days: durationDays,
-          trial_days_remaining: isPaid ? 0 : 30,
-          trial_ends_at: isPaid ? null : expires_at,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'email' });
-
-      await supabase
-        .from('subscriptions')
-        .upsert([{
-          merchant_email: cleanEmail,
-          store_slug: cleanSlug,
-          subscription_plan: planId,
-          plan_started_at,
-          expires_at,
-          duration_days: durationDays,
-          transaction_id: transactionId || null,
-          payment_method: paymentMethod || null,
-          status: status,
-          updated_at: new Date().toISOString()
-        }]);
+      const storesResult = await safeUpsertRow(sbClient, 'stores', {
+        email: cleanEmail,
+        store_name: updatedProfile.storeName,
+        store_slug: cleanSlug,
+        // Permanent identity — survives any slug/name change.
+        ...(updatedProfile.storeCode ? { store_code: updatedProfile.storeCode } : {}),
+        owner_name: updatedProfile.ownerName,
+        phone: updatedProfile.phone,
+        subscription_plan: planId,
+        subscription_expiry: expiryDate,
+        plan_started_at,
+        expires_at,
+        duration_days: durationDays,
+        trial_days_remaining: isPaid ? 0 : 30,
+        trial_ends_at: isPaid ? null : expires_at,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'email', matchColumn: 'email' });
+      if (!storesResult.ok) {
+        console.warn('[SubscriptionService] Supabase stores sync notice:', storesResult.error);
+      }
     } catch (sbErr) {
-      console.warn('[SubscriptionService] Supabase sync notice:', sbErr);
+      console.warn('[SubscriptionService] Supabase stores sync notice:', sbErr);
+    }
+
+    try {
+      const subsResult = await safeUpsertRow(sbClient, 'subscriptions', {
+        merchant_email: cleanEmail,
+        store_slug: cleanSlug,
+        subscription_plan: planId,
+        plan_started_at,
+        expires_at,
+        duration_days: durationDays,
+        transaction_id: transactionId || null,
+        payment_method: paymentMethod || null,
+        status: status,
+        updated_at: new Date().toISOString()
+      });
+      if (!subsResult.ok) {
+        console.warn('[SubscriptionService] Supabase subscriptions sync notice:', subsResult.error);
+      }
+    } catch (sbErr) {
+      console.warn('[SubscriptionService] Supabase subscriptions sync notice:', sbErr);
     }
   }
 
