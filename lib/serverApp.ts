@@ -1743,6 +1743,12 @@ app.post('/api/admin/theme/publish', async (req, res) => {
       if (isConfigured && (storeSlug || email)) {
         const sbPayload: Record<string, any> = {
           active_theme_id: themeId,
+          // Mirror the full snapshot best-effort: postgrestWrite drops unknown
+          // columns + retries, so older schemas just keep id + timestamps.
+          ...(themeName ? { active_theme_name: themeName } : {}),
+          ...(themeCategory ? { active_theme_category: themeCategory } : {}),
+          ...(themeLayout ? { active_theme_layout: themeLayout } : {}),
+          theme_version: themeVersion,
           theme_updated_at: nowDate.toISOString(),
           updated_at: nowDate.toISOString(),
         };

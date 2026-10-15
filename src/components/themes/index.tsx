@@ -122,7 +122,9 @@ export const THEME_COMPONENT_LAYOUTS: Record<StorefrontThemeComponentKey, ThemeL
  * stripped), so every spelling resolves to the right component.
  */
 const ALIAS_TO_LAYOUT: Array<{ match: RegExp; layout: ThemeLayoutKey }> = [
-  { match: /luxuryboutique|luxurybouquet|boutique|luxury|elegantfashion|fashion/, layout: 'fashion' },
+  // Luxury Boutique + fashion family — exact luxury-boutique slug first so a
+  // paid "luxury-boutique" publish can NEVER fall through to classic.
+  { match: /luxuryboutique|luxurybouquet|boutique|luxury|elegantfashion|elegant|lifestyle|apparel|fashion/, layout: 'fashion' },
   { match: /techstorepro|techstore|supermarkettech|supermarket|megastore|megamart|tech/, layout: 'supermarket' },
   { match: /defaultmodern|growth|classic|modern/, layout: 'classic' },
 ];

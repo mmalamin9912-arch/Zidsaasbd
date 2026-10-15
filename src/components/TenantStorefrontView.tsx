@@ -168,6 +168,7 @@ import { useLanguage } from '../lib/i18n';
 import { findThemeById, resolveLayoutForTheme } from '../lib/themeRegistry';
 import { resolveThemeComponentLayout, resolveThemeComponentKey, resolveThemeStyle } from './themes';
 import { LuxuryBoutiqueHeader } from './StorefrontHeaders';
+import { LuxuryBoutique } from './themes/LuxuryBoutique';
 import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
 // Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts).
 import { sanitizeGalleryImages } from '../../lib/galleryDefaults';
@@ -401,8 +402,14 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         let apiMobileBanking: any[] = [];
         const slug = effectiveSlug || storeSlug || 'bd';
 
-        // Load full storefront payload from Express API
-        const storefrontRes = await fetch(`/api/storefront/${encodeURIComponent(slug)}`);
+        // Load full storefront payload from Express API — NEVER cached: a
+        // published paid theme (e.g. luxury-boutique) must render instantly.
+        // This fetch is the Vite-SPA equivalent of Next.js `fetch(..., { cache:
+        // 'no-store' })` / dynamic rendering for the customer storefront.
+        const storefrontRes = await fetch(`/api/storefront/${encodeURIComponent(slug)}`, {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        });
         const storefrontData = await storefrontRes.json().catch(() => null);
 
         if (storefrontData && storefrontData.storefront) {
@@ -451,18 +458,30 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               // `theme_config` (snake) — ignoring it made the storefront fall back
               // to the stale localStorage copy (old demo Unsplash data) on reload
               // even though Mongo held the freshly-published gallery.
+              // `active_theme_id` / `active_theme_name|category|layout` (snake)
+              // come from Supabase-first records; ignoring them kept the OLD
+              // `activeThemeId` (camel) and the storefront rendered the previous
+              // theme even though the DB row held the new publish.
               themeConfig: themeRow.themeConfig || themeRow.theme_config || existingBefore?.merchant?.themeConfig || existingBefore?.merchant?.theme_config || {},
-              heroTitle: themeRow.heroTitle || existingBefore?.merchant?.heroTitle,
-              heroSubtitle: themeRow.heroSubtitle || existingBefore?.merchant?.heroSubtitle,
-              heroImage: themeRow.heroImage || existingBefore?.merchant?.heroImage,
-              announcementText: themeRow.announcementText || existingBefore?.merchant?.announcementText,
-              logoUrl: themeRow.logoUrl || existingBefore?.merchant?.logoUrl,
-              activeThemeId: themeRow.activeThemeId || existingBefore?.merchant?.activeThemeId,
+              heroTitle: themeRow.heroTitle || (themeRow as any).hero_title || existingBefore?.merchant?.heroTitle,
+              heroSubtitle: themeRow.heroSubtitle || (themeRow as any).hero_subtitle || existingBefore?.merchant?.heroSubtitle,
+              heroImage: themeRow.heroImage || (themeRow as any).hero_image || existingBefore?.merchant?.heroImage,
+              announcementText: themeRow.announcementText || (themeRow as any).announcement_text || existingBefore?.merchant?.announcementText,
+              logoUrl: themeRow.logoUrl || (themeRow as any).logo_url || existingBefore?.merchant?.logoUrl,
+              activeThemeId: themeRow.activeThemeId || (themeRow as any).active_theme_id || existingBefore?.merchant?.activeThemeId || (existingBefore?.merchant as any)?.active_theme_id,
+              activeThemeName: (themeRow as any).activeThemeName || (themeRow as any).active_theme_name || (existingBefore?.merchant as any)?.activeThemeName || (existingBefore?.merchant as any)?.active_theme_name,
+              activeThemeCategory: (themeRow as any).activeThemeCategory || (themeRow as any).active_theme_category || (existingBefore?.merchant as any)?.activeThemeCategory || (existingBefore?.merchant as any)?.active_theme_category,
+              activeThemeLayout: (themeRow as any).activeThemeLayout || (themeRow as any).active_theme_layout || (existingBefore?.merchant as any)?.activeThemeLayout || (existingBefore?.merchant as any)?.active_theme_layout,
+              themeVersion: (themeRow as any).themeVersion || (themeRow as any).theme_version || (themeRow as any).theme_updated_at || (existingBefore?.merchant as any)?.themeVersion || (existingBefore?.merchant as any)?.theme_version,
             };
             const mergedTheme = {
               ...existingBefore,
               merchant: dbMerchant,
               themeCustomization: themeRow.themeConfig || themeRow.theme_config || existingBefore?.themeCustomization || {},
+              // Server snapshot wins: id + name + category + layout + version so
+              // layout resolution never depends on a stale catalogue row.
+              ...(storefrontData?.storefront?.activeTheme?.id || (themeRow as any).active_theme_id || themeRow.activeThemeId ? { activeTheme: { ...(storefrontData?.storefront?.activeTheme || {}), id: storefrontData?.storefront?.activeTheme?.id || (themeRow as any).active_theme_id || themeRow.activeThemeId, name: storefrontData?.storefront?.activeTheme?.name || (themeRow as any).active_theme_name || (themeRow as any).activeThemeName, category: storefrontData?.storefront?.activeTheme?.category || (themeRow as any).active_theme_category || (themeRow as any).activeThemeCategory, layout: storefrontData?.storefront?.activeTheme?.layout || (themeRow as any).active_theme_layout || (themeRow as any).activeThemeLayout } } : {}),
+              ...(storefrontData?.storefront?.themeVersion || (themeRow as any).theme_version || (themeRow as any).themeVersion ? { themeVersion: storefrontData?.storefront?.themeVersion || (themeRow as any).theme_version || (themeRow as any).themeVersion } : {}),
               products: Array.isArray(apiProducts) && apiProducts.length > 0 ? apiProducts : (existingBefore?.products || []),
               // Carry the delivery/COD + payment config through the same merge so
               // the checkout's zone prices are always the merchant's live values.
@@ -471,8 +490,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
               ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
             };
-            writeZidStoreData(mergedTheme as ZidStoreData, storeSlug);
-            setLiveStoreData(mergedTheme as ZidStoreData);
+            writeZidStoreData(mergedTheme as unknown as ZidStoreData, storeSlug);
+            setLiveStoreData(mergedTheme as unknown as ZidStoreData);
             return;
           }
         } catch (themeErr: any) {
@@ -635,7 +654,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // The theme actually in effect: a preview theme (Super Admin eye icon / merchant
   // demo) overrides the merchant's persisted selection WITHOUT mutating it. The
   // registry supplies the theme's layout + accent colour.
-  const effectiveThemeId = previewThemeId || storefrontMerchant.activeThemeId;
+  // Read BOTH spellings: Supabase-first rows carry `active_theme_id` (snake);
+  // the publish snapshot on liveStoreData carries id+layout directly.
+  const snapshotTheme: any = (liveStoreData as any)?.activeTheme || {};
+  const effectiveThemeId = previewThemeId
+    || (storefrontMerchant as any).activeThemeId
+    || (storefrontMerchant as any).active_theme_id;
   const activeTheme = (storefrontThemes || []).find((theme) => theme?.id === effectiveThemeId)
     || (storefrontThemes || [])[0];
   const registryTheme = findThemeById(effectiveThemeId);
@@ -649,9 +673,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   ) as any;
   const activeThemeMeta = {
     id: effectiveThemeId,
-    name: activeCatalogueRow?.name || (activeTheme as any)?.name || registryTheme?.name,
-    category: activeCatalogueRow?.category || (activeTheme as any)?.category || registryTheme?.category,
-    layout: (activeCatalogueRow as any)?.layout || (activeTheme as any)?.layout || registryTheme?.layout,
+    name: activeCatalogueRow?.name || (activeTheme as any)?.name || (storefrontMerchant as any)?.activeThemeName || (storefrontMerchant as any)?.active_theme_name || snapshotTheme?.name || registryTheme?.name,
+    category: activeCatalogueRow?.category || (activeTheme as any)?.category || (storefrontMerchant as any)?.activeThemeCategory || (storefrontMerchant as any)?.active_theme_category || snapshotTheme?.category || registryTheme?.category,
+    // Snapshot layout FIRST: the publish carries id+layout together precisely
+    // so an opaque id still resolves to fashion/supermarket without a catalogue hit.
+    layout: snapshotTheme?.layout || (storefrontMerchant as any)?.activeThemeLayout || (storefrontMerchant as any)?.active_theme_layout || (activeCatalogueRow as any)?.layout || (activeTheme as any)?.layout || registryTheme?.layout,
   };
   // Complete dynamic style switcher for header / layout / colors / sections,
   // driven by `storeConfig.activeThemeId`. Safe by construction: every field
@@ -2279,8 +2305,16 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   if (resolvedLayout === 'supermarket') {
     return <SupermarketTechMockup accentColor={primaryColor} />;
   }
-  if (resolvedLayout === 'fashion') {
-    return <ElegantFashionMockup accentColor={primaryColor} />;
+  // Published paid boutique theme ("luxury-boutique") → dedicated Luxury
+  // Boutique component: AURA luxury header, light #F8FAFC background, trending
+  // collection layout. Paid publishes and default themes never share markup.
+  if (resolvedLayout === 'fashion' || themeComponentKey === 'LuxuryBoutique') {
+    return (
+      <LuxuryBoutique
+        accentColor={primaryColor}
+        storeName={storefrontMerchant.storeName || storeDisplayName}
+      />
+    );
   }
 
   // Shared customer order list — rendered by the ORDERS TAB ONLY.
