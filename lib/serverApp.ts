@@ -226,10 +226,11 @@ export async function getMongoDb(dbName: string = DB_NAME) {
  *
  *   1. `express` → `parseurl` — handled properly by scripts/patch-url-parse.cjs,
  *      which rewrites that module to use the WHATWG `URL` API.
- *   2. `follow-redirects` (via the MongoDB driver) — a large, security-sensitive
- *      module we should NOT hand-rewrite in a postinstall step.
+ *   2. `follow-redirects` (via the MongoDB driver) — handled the same way by
+ *      scripts/patch-url-parse.cjs (one-line `new URL(input)` substitution).
  *
- * So the remaining warning is suppressed at the process level, narrowly: only
+ * So any leftover warning (e.g. a fresh install where postinstall has not run
+ * yet) is suppressed at the process level, narrowly: only
  * DEP0169, and only the deprecation-warning type. Every other warning — including
  * any real deprecation we introduce later — still surfaces normally.
  */

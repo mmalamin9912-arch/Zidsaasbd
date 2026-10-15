@@ -214,7 +214,12 @@ function patchParseurl() {
   // Legacy (unpatched) or partially-patched file → rewrite it. We overwrite
   // whenever the file is not our canonical source, which also self-heals a
   // truncated/partial previous run.
-  const isLegacy = /url\.parse\(|require\(['"]url['"]\)/.test(current);
+  // NOTE: match only REAL code usage — the string `url.parse` also appears in
+  // our own patch comments, so a bare substring test would false-positive on
+  // an already-patched file and report "legacy" forever.
+  const isLegacy = /(^|[^\w$/'"])url\.parse\s*\(/.test(current)
+    || /require\(\s*['"]url['"]\s*\)/.test(current)
+    || /new\s+url\.Url\s*\(/.test(current);
   const isOurPatch = current.includes(MARKER);
   if (!isLegacy && !isOurPatch) {
     return { patched: false, reason: 'no legacy url.parse usage found' };
@@ -258,7 +263,8 @@ function patchFollowRedirects() {
 
   const current = fs.readFileSync(target, 'utf8');
 
-  // Already migrated → nothing to do.
+  // Already migrated → nothing to do. Checked FIRST so our own patch comment
+  // ("Was: validateUrl(url.parse(input))") can never false-positive as legacy.
   if (current.includes(FOLLOW_REDIRECTS_MARKER)) {
     return { patched: false, reason: 'already patched' };
   }
