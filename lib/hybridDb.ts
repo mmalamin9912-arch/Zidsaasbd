@@ -83,6 +83,61 @@ export function getSupabaseServerConfig() {
   };
 }
 
+/* ────────────────────────── JSON-plain sanitising ────────────────────────── */
+
+/**
+ * Deep-clone a value into something that is guaranteed to survive
+ * `JSON.stringify` and BSON serialisation.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The Express app is wrapped by the Vercel/Next serverless handler, which
+ * JSON-serialises `req.body` into a plain object. When an admin config write is
+ * proxied through a chain of plain-object merges (`{ ...record }`), a spread of
+ * a NON-plain object copies its own enumerable properties only — a Buffer or a
+ * class instance loses its prototype and a `Map`/`Set` serialises to `{}`.
+ * Writing that value to Mongo or to a PostgREST `payload` column then fails the
+ * size/validation check and the admin sees an opaque "could not save".
+ *
+ * Converting to JSON-plain FIRST makes the write deterministic: `Date` becomes
+ * an ISO string, `Map`/`Set` become arrays, buffers are dropped and functions /
+ * symbols are skipped — exactly what PostgREST and BSON accept.
+ *
+ * NEVER throws and NEVER loses a primitive: anything non-serialisable degrades
+ * to `undefined` rather than taking down the request.
+ */
+export function toJsonPlain<T>(input: T): T {
+  if (input === null || input === undefined) return input;
+  const t = typeof input;
+  if (t === 'string' || t === 'number' || t === 'boolean') return input;
+  if (t === 'bigint') return String(input) as unknown as T;
+  if (t === 'function' || t === 'symbol') return undefined as unknown as T;
+  if (input instanceof Date) return input.toISOString() as unknown as T;
+
+  if (Array.isArray(input)) {
+    return input.map((item) => toJsonPlain(item)) as unknown as T;
+  }
+
+  if (typeof input === 'object') {
+    // Buffer / TypedArray / other binary containers are not valid JSON — drop.
+    if (ArrayBuffer.isView(input) || input instanceof ArrayBuffer) {
+      return undefined as unknown as T;
+    }
+
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(input as Record<string, unknown>)) {
+      const value = toJsonPlain((input as Record<string, unknown>)[key]);
+      // Skip what JSON.stringify would silently drop anyway, so the persisted
+      // document matches what the admin actually sees.
+      if (value === undefined) continue;
+      out[key] = value;
+    }
+    return out as unknown as T;
+  }
+
+  return undefined as unknown as T;
+}
+
 /* ────────────────────────── result envelope ────────────────────────── */
 
 export type DataSource = 'mongodb' | 'supabase' | 'runtime' | 'none';

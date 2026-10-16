@@ -138,7 +138,7 @@ interface SuperAdminPortalViewProps {
   onSwitchToMerchantPortal: () => void;
   onLoginAsMerchant: (merchant: MerchantProfile) => void;
   platformSettings: PlatformSettings;
-  onUpdatePlatformSettings: (settings: PlatformSettings) => void;
+  onUpdatePlatformSettings: (settings: PlatformSettings) => Promise<boolean>;
   platformAnnouncement: PlatformAnnouncement;
   onUpdatePlatformAnnouncement: (announcement: PlatformAnnouncement) => void;
   platformPlans: SubscriptionPlan[];
@@ -156,7 +156,7 @@ interface SuperAdminPortalViewProps {
   broadcastHistory: BroadcastMessage[];
   onUpdateBroadcastHistory: React.Dispatch<React.SetStateAction<BroadcastMessage[]>>;
   automationSettings: PlatformAutomationSettings;
-  onUpdateAutomationSettings: React.Dispatch<React.SetStateAction<PlatformAutomationSettings>>;
+  onUpdateAutomationSettings: (settings: PlatformAutomationSettings) => Promise<boolean>;
   adminTeam: AdminTeamMember[];
   onUpdateAdminTeam: React.Dispatch<React.SetStateAction<AdminTeamMember[]>>;
   rolePermissions: AdminRolePermission[];
@@ -896,11 +896,31 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     setTimeout(() => setSaveSuccess(null), 3000);
   };
 
-  const handleSaveSettings = (e: React.FormEvent) => {
+  const handleToggleAutomation = async (key: keyof PlatformAutomationSettings) => {
+    const next = { ...automationSettings, [key]: !automationSettings[key] };
+    const ok = await onUpdateAutomationSettings(next);
+    if (!ok) {
+      toast.error('Automation setting was NOT saved', {
+        description:
+          'The database write failed and your change was rolled back. ' +
+          'Please check your connection and try again.',
+      });
+    }
+  };
+
+  const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    onUpdatePlatformSettings(settingsForm);
-    setSaveSuccess('Platform settings updated successfully!');
-    setTimeout(() => setSaveSuccess(null), 3000);
+    const ok = await onUpdatePlatformSettings(settingsForm);
+    if (ok) {
+      setSaveSuccess('Platform settings updated successfully!');
+      setTimeout(() => setSaveSuccess(null), 3000);
+    } else {
+      toast.error('Platform settings were NOT saved', {
+        description:
+          'The database write failed and your changes were rolled back. ' +
+          'Please check your connection and try again.',
+      });
+    }
   };
 
   const handleSaveAnnouncement = (e: React.FormEvent) => {
@@ -3929,15 +3949,19 @@ onUpdateMerchant(updatedCurrent);
                           <input
                             type="file"
                             accept="image/*"
-                            onChange={(e) => {
+                            onChange={async (e) => {
                               const file = e.target.files?.[0];
-                              if (file) {
-                                const reader = new FileReader();
-                                reader.onloadend = () => {
-                                  setSettingsForm({...settingsForm, faviconUrl: reader.result as string});
-                                };
-                                reader.readAsDataURL(file);
-                              }
+                              e.target.value = '';
+                              if (!file) return;
+                              // Downscale + re-encode like every other upload in the
+                              // app. A raw FileReader.readAsDataURL would persist a
+                              // full-size base64 favicon (a 2MB PNG becomes ~2.7MB of
+                              // base64) into the shared `platform_config` document,
+                              // which risks the Supabase/PostgREST mirror rejecting the
+                              // whole save. `readAndDownscaleImage` never throws and
+                              // falls back to the original when it cannot improve it.
+                              const dataUrl = await readAndDownscaleImage(file, 128);
+                              if (dataUrl) setSettingsForm({ ...settingsForm, faviconUrl: dataUrl });
                             }}
                             className="text-xs text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-[#2E3548] file:text-white hover:file:bg-[#3A435E] cursor-pointer"
                           />
@@ -4608,7 +4632,7 @@ onUpdateMerchant(updatedCurrent);
                       </div>
                       <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.subscriptionExpiryWarning ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                        onClick={() => onUpdateAutomationSettings({...automationSettings, subscriptionExpiryWarning: !automationSettings.subscriptionExpiryWarning})}
+                        onClick={() => handleToggleAutomation('subscriptionExpiryWarning')}
                       >
                         <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${automationSettings.subscriptionExpiryWarning ? 'left-5' : 'left-1'}`} />
                       </div>
@@ -4621,7 +4645,7 @@ onUpdateMerchant(updatedCurrent);
                       </div>
                       <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.welcomeEmail ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                        onClick={() => onUpdateAutomationSettings({...automationSettings, welcomeEmail: !automationSettings.welcomeEmail})}
+                        onClick={() => handleToggleAutomation('welcomeEmail')}
                       >
                         <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${automationSettings.welcomeEmail ? 'left-5' : 'left-1'}`} />
                       </div>
@@ -4634,7 +4658,7 @@ onUpdateMerchant(updatedCurrent);
                       </div>
                       <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.paymentApprovalAlert ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                        onClick={() => onUpdateAutomationSettings({...automationSettings, paymentApprovalAlert: !automationSettings.paymentApprovalAlert})}
+                        onClick={() => handleToggleAutomation('paymentApprovalAlert')}
                       >
                         <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${automationSettings.paymentApprovalAlert ? 'left-5' : 'left-1'}`} />
                       </div>
@@ -4647,7 +4671,7 @@ onUpdateMerchant(updatedCurrent);
                       </div>
                       <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${automationSettings.merchantSuspensionAlert ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                        onClick={() => onUpdateAutomationSettings({...automationSettings, merchantSuspensionAlert: !automationSettings.merchantSuspensionAlert})}
+                        onClick={() => handleToggleAutomation('merchantSuspensionAlert')}
                       >
                         <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${automationSettings.merchantSuspensionAlert ? 'left-5' : 'left-1'}`} />
                       </div>

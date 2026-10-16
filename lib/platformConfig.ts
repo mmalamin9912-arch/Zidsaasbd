@@ -21,7 +21,7 @@
  */
 
 import { getMongoDb, getMongoUri, describeMongoError, DB_NAME } from './db.js';
-import { getSupabaseServerConfig, querySupabaseTable, queryMongoCollection } from './hybridDb.js';
+import { getSupabaseServerConfig, querySupabaseTable, queryMongoCollection, toJsonPlain } from './hybridDb.js';
 import type { DataSource } from './hybridDb.js';
 
 /* ────────────────────────── result envelope ────────────────────────── */
@@ -208,11 +208,21 @@ export async function writeConfigDocument(
   const sources: DataSource[] = [];
   const now = new Date().toISOString();
 
-  // Strip Mongo-only helper keys before sending to Supabase.
+  // Strip Mongo-only helper keys AND convert the payload to JSON-plain values.
+  //
+  // The Express app runs behind the Vercel/Next serverless wrapper, which
+  // JSON-serialises `req.body`. A plain-object spread of a NON-plain value (a
+  // Buffer, a class instance, a Map) silently loses its contents, and the
+  // resulting document then fails PostgREST/BSON validation — surfacing to the
+  // admin as an opaque "could not save". `toJsonPlain` makes the write
+  // deterministic: Dates become ISO strings, binary containers are dropped and
+  // anything JSON.stringify would omit is skipped up front.
   const cleanPayload: Record<string, any> = {};
   for (const [k, v] of Object.entries(payload)) {
     if (k === '_id' || k.startsWith('_')) continue;
-    cleanPayload[k] = v;
+    const safe = toJsonPlain(v);
+    if (safe === undefined) continue;
+    cleanPayload[k] = safe;
   }
 
   const sb = await writeSupabaseRow(supabaseTable, {

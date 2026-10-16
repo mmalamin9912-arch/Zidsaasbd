@@ -1216,18 +1216,6 @@ export default function App() {
   // admins/devices, not trapped in one browser.
 
   /** Payment gateways + platform settings + automation, saved as one document. */
-  const persistPlatformConfig = useCallback((partial: {
-    adminPaymentConfig?: AdminPaymentGatewayConfig;
-    platformSettings?: any;
-    automationSettings?: any;
-  }) => {
-    void savePlatformConfig({
-      adminPaymentConfig: partial.adminPaymentConfig,
-      platformSettings: partial.platformSettings,
-      automationSettings: partial.automationSettings,
-    });
-  }, []);
-
   // Latest-value refs so the side-effecting persistence runs OUTSIDE the state
   // updater. React (StrictMode) invokes updater functions twice in dev, which
   // would otherwise double-fire every save.
@@ -1273,21 +1261,65 @@ export default function App() {
     []
   );
 
-  const handleUpdatePlatformSettings = useCallback((updater: React.SetStateAction<any>) => {
-    const prev = platformSettingsRef.current;
-    const next = typeof updater === 'function' ? updater(prev) : updater;
-    platformSettingsRef.current = next;
-    setPlatformSettings(next);
-    persistPlatformConfig({ platformSettings: next });
-  }, [persistPlatformConfig]);
+  const handleUpdatePlatformSettings = useCallback(
+    async (updater: React.SetStateAction<any>): Promise<boolean> => {
+      const prev = platformSettingsRef.current;
+      const next = typeof updater === 'function' ? updater(prev) : updater;
 
-  const handleUpdateAutomationSettings = useCallback((updater: React.SetStateAction<PlatformAutomationSettings>) => {
-    const prev = automationSettingsRef.current;
-    const next = typeof updater === 'function' ? (updater as (p: PlatformAutomationSettings) => PlatformAutomationSettings)(prev) : updater;
-    automationSettingsRef.current = next;
-    setAutomationSettings(next);
-    persistPlatformConfig({ automationSettings: next });
-  }, [persistPlatformConfig]);
+      // Optimistic update so the Super Admin portal, Header, Sidebar and every
+      // merchant storefront reflect the new branding / defaults immediately.
+      platformSettingsRef.current = next;
+      setPlatformSettings(next);
+      safeSetItem('ZID_PLATFORM_SETTINGS', JSON.stringify(next));
+
+      try {
+        const ok = await savePlatformConfig({
+          adminPaymentConfig: adminPaymentConfigRef.current,
+          platformSettings: next,
+          automationSettings: automationSettingsRef.current,
+        });
+        if (!ok) throw new Error('Platform configuration was not accepted by the database.');
+        return true;
+      } catch (err: any) {
+        console.warn('[App] platform config persist notice:', err?.message || err);
+        // Roll back so local state, localStorage and the database never diverge.
+        platformSettingsRef.current = prev;
+        setPlatformSettings(prev);
+        safeSetItem('ZID_PLATFORM_SETTINGS', JSON.stringify(prev));
+        return false;
+      }
+    },
+    []
+  );
+
+  const handleUpdateAutomationSettings = useCallback(
+    async (updater: React.SetStateAction<PlatformAutomationSettings>): Promise<boolean> => {
+      const prev = automationSettingsRef.current;
+      const next = typeof updater === 'function' ? (updater as (p: PlatformAutomationSettings) => PlatformAutomationSettings)(prev) : updater;
+
+      automationSettingsRef.current = next;
+      setAutomationSettings(next);
+      safeSetItem('ZID_AUTOMATION_SETTINGS', JSON.stringify(next));
+
+      try {
+        const ok = await savePlatformConfig({
+          adminPaymentConfig: adminPaymentConfigRef.current,
+          platformSettings: platformSettingsRef.current,
+          automationSettings: next,
+        });
+        if (!ok) throw new Error('Automation settings were not accepted by the database.');
+        return true;
+      } catch (err: any) {
+        console.warn('[App] automation settings persist notice:', err?.message || err);
+        // Roll back so local state, localStorage and the database never diverge.
+        automationSettingsRef.current = prev;
+        setAutomationSettings(prev);
+        safeSetItem('ZID_AUTOMATION_SETTINGS', JSON.stringify(prev));
+        return false;
+      }
+    },
+    []
+  );
 
   const handleUpdateSecuritySettings = useCallback(async (updater: React.SetStateAction<PlatformSecuritySettings>): Promise<boolean> => {
     const prev = platformSecuritySettingsRef.current;
