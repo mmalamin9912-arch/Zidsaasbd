@@ -178,6 +178,63 @@ export const BUILTIN_THEMES: ThemeRegistryEntry[] = [
     price: 1999,
     thumbnailUrl: THEME_THUMBNAILS['elegant-fashion'],
   },
+  // ── Seed / initialData catalog ids (theme-1/2/3) ──────────────────────
+  // These are the ids stored in MongoDB when a merchant publishes a theme
+  // from the initial catalog. Without these entries, id-based lookup falls
+  // back to heuristics, which need the theme NAME in the metadata chain.
+  // Adding them here guarantees layout resolution even when name is missing.
+  {
+    id: 'theme-1',
+    name: 'Default Modern',
+    category: 'General',
+    layout: 'classic',
+    primaryColor: '#00D68F',
+    isFree: true,
+    price: 0,
+    thumbnailUrl: THEME_THUMBNAILS['default modern'],
+  },
+  {
+    id: 'theme-2',
+    name: 'Luxury Boutique',
+    category: 'Fashion',
+    layout: 'fashion',
+    primaryColor: '#E8D5C4',
+    isFree: false,
+    price: 1999,
+    thumbnailUrl: THEME_THUMBNAILS['luxury boutique'],
+  },
+  {
+    id: 'theme-3',
+    name: 'Tech Store Pro',
+    category: 'Electronics',
+    layout: 'supermarket',
+    primaryColor: '#00D68F',
+    isFree: false,
+    price: 2499,
+    thumbnailUrl: THEME_THUMBNAILS['tech store pro'],
+  },
+  // ── Explicit luxury-boutique slug (used in some publish flows) ──────────
+  {
+    id: 'luxury-boutique',
+    name: 'Luxury Boutique',
+    category: 'Fashion',
+    layout: 'fashion',
+    primaryColor: '#E8D5C4',
+    isFree: false,
+    price: 1999,
+    thumbnailUrl: THEME_THUMBNAILS['luxury boutique'],
+  },
+  // ── default-modern slug ─────────────────────────────────────────────────
+  {
+    id: 'default-modern',
+    name: 'Default Modern',
+    category: 'General',
+    layout: 'classic',
+    primaryColor: '#00D68F',
+    isFree: true,
+    price: 0,
+    thumbnailUrl: THEME_THUMBNAILS['default modern'],
+  },
 ];
 
 /** Fast id → entry lookup for the built-ins. */
@@ -194,6 +251,11 @@ const BUILTIN_BY_ID = new Map(BUILTIN_THEMES.map((theme) => [theme.id.toLowerCas
  */
 export function resolveLayoutForTheme(theme?: Partial<ThemeRegistryEntry> | null): ThemeLayoutKey {
   if (!theme) return 'classic';
+  // A stale explicit 'classic' must not suppress the boutique family when the
+  // theme ID is the luxury-boutique slug (publish snapshots can carry it).
+  const idNorm = String(theme.id || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const isLuxuryBoutiqueId = /luxuryboutique|luxurybouquet|boutique/.test(idNorm);
+  if (isLuxuryBoutiqueId) return 'fashion';
   if (theme.layout) return theme.layout;
 
   const id = String(theme.id || '').toLowerCase();

@@ -2300,27 +2300,29 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // mechanism that makes choosing a theme on the dashboard actually change
   // what shoppers see on /store/:slug.
   const resolvedLayout = layout || resolveThemeComponentLayout(activeThemeMeta);
-  // Strict check for the Luxury Boutique theme by activeThemeId.
-  if (effectiveThemeId?.toLowerCase() === 'luxury-boutique') {
+  // ── Explicit theme switcher: distinct component trees per activeThemeId ──
+  // 'luxury-boutique' (and any boutique/fashion-family theme) mounts the
+  // DEDICATED LuxuryBoutique tree — AURA header, circular category rail,
+  // "The Summer Collection" hero, luxury product cards — with the merchant's
+  // REAL catalogue data. Everything else falls through to the classic
+  // DefaultModern storefront below.
+  const isLuxuryBoutiqueTheme = resolvedLayout === 'fashion'
+    || themeComponentKey === 'LuxuryBoutique'
+    || String(effectiveThemeId || '').trim().toLowerCase() === 'luxury-boutique';
+  if (isLuxuryBoutiqueTheme) {
     return (
       <LuxuryBoutique
         accentColor={primaryColor}
         storeName={storefrontMerchant.storeName || storeDisplayName}
+        logoUrl={(storefrontMerchant as any).logoUrl || (storefrontMerchant as any).logo_url || resolvedTheme.desktopLogoUrl || undefined}
+        products={displayProducts as any[]}
+        categories={rawStorefrontCategories as any[]}
       />
     );
   }
   // Supermarket layout has its own dedicated mockup.
   if (resolvedLayout === 'supermarket') {
     return <SupermarketTechMockup accentColor={primaryColor} />;
-  }
-  // Fashion layout fallback (including any other boutique themes).
-  if (resolvedLayout === 'fashion' || themeComponentKey === 'LuxuryBoutique') {
-    return (
-      <LuxuryBoutique
-        accentColor={primaryColor}
-        storeName={storefrontMerchant.storeName || storeDisplayName}
-      />
-    );
   }
 
   // Shared customer order list — rendered by the ORDERS TAB ONLY.

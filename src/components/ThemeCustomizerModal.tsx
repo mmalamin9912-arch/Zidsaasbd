@@ -1,6 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GalleryImage, MerchantProfile, Product, ThemeConfig } from '../types';
 import { TenantStorefrontView } from './TenantStorefrontView';
+// Resolves the theme being customised to its component-tree layout, so the
+// preview frame swaps to the dedicated LuxuryBoutique tree (AURA header,
+// circular categories, Summer Collection hero) instead of only recolouring
+// the default storefront.
+import { resolveThemeComponentLayout } from './themes';
 import { readZidStoreData, writeZidStoreData } from '../lib/storeData';
 import { readAndDownscaleImage, LOGO_MAX_EDGE, MAX_IMAGE_EDGE } from '../utils/imageUtils';
 import SafeImage from './SafeImage';
@@ -81,6 +86,8 @@ interface ThemeCustomizerModalProps {
   isOpen: boolean;
   onClose: () => void;
   themeName?: string;
+  /** The theme catalogue ID being customised (e.g. 'theme-2', 'luxury-boutique'). */
+  themeId?: string;
   themeVersion?: string;
   merchant?: MerchantProfile;
   onPublish?: (merchant: MerchantProfile) => void;
@@ -92,12 +99,14 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   isOpen,
   onClose,
   themeName = 'Growth',
+  themeId,
   themeVersion = '1.0.0',
   merchant,
   onPublish,
   isPremiumPlan,
   onOpenSubscriptionModal
 }) => {
+
   // Device Preview View Mode: 'desktop' | 'mobile' | 'tablet'
   const [deviceMode, setDeviceMode] = useState<'desktop' | 'mobile' | 'tablet'>('mobile');
 
@@ -4546,6 +4555,12 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                   themes={previewThemes}
                   previewMode
                   isMobile={deviceMode === 'mobile'}
+                  // Pass the theme being customised so TenantStorefrontView
+                  // renders the LuxuryBoutique tree (not just default colors).
+                  previewThemeId={themeId || liveMerchant.activeThemeId || (liveMerchant as any).active_theme_id}
+                  layout={resolveThemeComponentLayout(previewThemes.find(
+                    (t: any) => String(t?.id) === String(themeId || liveMerchant.activeThemeId || (liveMerchant as any).active_theme_id),
+                  ))}
                   onPlaceOrder={(order) => {
                     console.log('Order placed in live customizer preview:', order);
                   }}

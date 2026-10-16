@@ -1782,6 +1782,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
             setThemeToCustomize(null);
           }}
           themeName={themeToCustomize?.name || currentActiveTheme.name}
+          themeId={themeToCustomize?.id || currentActiveTheme.id || merchant?.activeThemeId}
           themeVersion={themeToCustomize?.version || currentActiveTheme.version}
           merchant={merchant}
           onPublish={(updatedMerchant) => setMerchant(updatedMerchant)}

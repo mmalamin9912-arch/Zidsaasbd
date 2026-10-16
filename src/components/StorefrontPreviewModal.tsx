@@ -3,8 +3,10 @@ import { MerchantProfile, Product, BankAccount, MobileBankingConfig } from '../t
 import { X, ExternalLink, Monitor, Tablet, Smartphone, Sparkles, Lock, CheckCircle2, ShoppingBag } from 'lucide-react';
 import { TenantStorefrontView } from './TenantStorefrontView';
 import { ThemeMarketItem } from './views/OnlineStoreView';
-import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
+import { SupermarketTechMockup } from './ThemeMockups';
+import { LuxuryBoutique as LuxuryBoutiqueLayout } from './themes/LuxuryBoutique';
 import { resolveLayoutForTheme } from '../lib/themeRegistry';
+
 
 interface StorefrontPreviewModalProps {
   isOpen: boolean;
@@ -188,7 +190,16 @@ export const StorefrontPreviewModal: React.FC<StorefrontPreviewModalProps> = ({
               {resolveLayoutForTheme({ id: themeId, category: previewTheme?.category, name: previewTheme?.name }) === 'supermarket' ? (
                 <SupermarketTechMockup accentColor={previewAccent} />
               ) : resolveLayoutForTheme({ id: themeId, category: previewTheme?.category, name: previewTheme?.name }) === 'fashion' ? (
-                <ElegantFashionMockup accentColor={previewAccent} />
+                // Render the REAL Luxury Boutique component tree — AURA header,
+                // circular categories, "The Summer Collection" hero, product grid.
+                // NOT the ElegantFashionMockup stub.
+                <LuxuryBoutiqueLayout
+                  accentColor={previewAccent}
+                  storeName={merchant?.storeName}
+                  logoUrl={(merchant as any)?.logoUrl || (merchant as any)?.logo_url || undefined}
+                  products={products as any[]}
+                  categories={(merchant as any)?.categories || (merchant as any)?.storefrontCategories || []}
+                />
               ) : (
                 <TenantStorefrontView
                   storeSlug={merchant?.storeSlug || ''}

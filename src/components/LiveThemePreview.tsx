@@ -1,8 +1,10 @@
 import React from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig } from '../types';
 import { TenantStorefrontView } from './TenantStorefrontView';
-import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
+import { SupermarketTechMockup } from './ThemeMockups';
+import { LuxuryBoutique as LuxuryBoutiqueLayout } from './themes/LuxuryBoutique';
 import { resolveLayoutForTheme, SAMPLE_PRODUCTS, SAMPLE_STORE, ThemeLayoutKey } from '../lib/themeRegistry';
+
 
 /**
  * LiveThemePreview — renders the ACTUAL storefront layout for a given theme id.
@@ -67,8 +69,22 @@ export const LiveThemePreview: React.FC<LiveThemePreviewProps> = ({
   }
 
   if (resolvedLayout === 'fashion') {
-    return <ElegantFashionMockup accentColor={previewAccent} />;
+    // Render the REAL Luxury Boutique component tree — AURA wordmark header,
+    // circular category rail (Summer/Dresses/Bags/Shoes/Jewelry/Denim),
+    // "The Summer Collection" hero with "DISCOVER NOW" CTA, unique product grid.
+    // Real merchant data is forwarded so a preview shows the merchant's own
+    // catalogue; the curated boutique set fills in when there is none.
+    return (
+      <LuxuryBoutiqueLayout
+        accentColor={previewAccent}
+        storeName={previewMerchant.storeName}
+        logoUrl={(previewMerchant as any).logoUrl || (previewMerchant as any).logo_url || undefined}
+        products={previewProducts as any[]}
+        categories={(previewMerchant as any).categories || (previewMerchant as any).storefrontCategories || []}
+      />
+    );
   }
+
 
   return (
     <TenantStorefrontView

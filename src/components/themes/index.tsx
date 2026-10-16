@@ -10,15 +10,16 @@
  *
  *   - DefaultModern  → 'classic'     (full luxury storefront)
  *   - TechStorePro   → 'supermarket' (mega-store mockup)
- *   - LuxuryBoutique → 'fashion'     (boutique mockup)
+ *   - LuxuryBoutique → 'fashion'     (REAL boutique component tree)
  *
  * Unknown / admin-created theme ids still resolve via the shared registry
  * heuristics (category + name), so a brand-new catalogue entry never renders
  * a blank storefront.
  */
 import React from 'react';
-import { SupermarketTechMockup, ElegantFashionMockup } from '../ThemeMockups';
+import { SupermarketTechMockup } from '../ThemeMockups';
 import { resolveLayoutForTheme, type ThemeLayoutKey } from '../../lib/themeRegistry';
+import { LuxuryBoutique as LuxuryBoutiqueComponent } from './LuxuryBoutique';
 
 /** Layout renderer mounted for each component key. */
 export type StorefrontThemeComponentKey = 'DefaultModern' | 'LuxuryBoutique' | 'TechStorePro';
@@ -147,7 +148,14 @@ export function resolveThemeComponentLayout(ref?: {
   if (!ref) return 'classic';
   const entry = typeof ref === 'string' ? { id: ref } : ref;
   const explicit = String(entry.layout || '').toLowerCase().trim() as ThemeLayoutKey;
-  if (explicit === 'classic' || explicit === 'supermarket' || explicit === 'fashion') return explicit;
+  if (explicit === 'fashion' || explicit === 'supermarket') return explicit;
+  // A stale/incorrect explicit 'classic' (e.g. a publish snapshot or catalogue
+  // row that carried the wrong layout) must NOT suppress the boutique family:
+  // when the theme's ID itself is the luxury-boutique slug, fashion wins.
+  const idOnly = normaliseRef((entry as any).id || '');
+  const isLuxuryBoutiqueId = /luxuryboutique|luxurybouquet|boutique/.test(idOnly);
+  if (explicit === 'classic' && isLuxuryBoutiqueId) return 'fashion';
+  if (explicit === 'classic') return 'classic';
   const haystack = normaliseRef(
     `${(entry as any).id || ''} ${(entry as any).name || ''} ${(entry as any).category || ''}`
   );
@@ -188,10 +196,19 @@ export const DefaultModern: React.FC<{ accentColor?: string; storeName?: string 
   </div>
 );
 
-/** Premium boutique layout — the ACTUAL LuxuryBoutique component. */
-export const LuxuryBoutique: React.FC<{ accentColor?: string }> = ({ accentColor }) => (
+/**
+ * Premium boutique layout — renders the ACTUAL LuxuryBoutique component tree:
+ *   • AURA wordmark header with luxury navigation
+ *   • Circular category rail (Summer, Dresses, Bags, Shoes, Jewelry, Denim)
+ *   • "The Summer Collection" hero banner with "Discover Now" CTA
+ *   • Unique product card grid with luxury typography
+ *
+ * This wraps src/components/themes/LuxuryBoutique.tsx — NOT the
+ * ElegantFashionMockup stub from ThemeMockups.tsx.
+ */
+export const LuxuryBoutique: React.FC<{ accentColor?: string; storeName?: string }> = ({ accentColor, storeName }) => (
   <div data-theme-component="LuxuryBoutique" data-layout="fashion">
-    <ElegantFashionMockup accentColor={accentColor} />
+    <LuxuryBoutiqueComponent accentColor={accentColor} storeName={storeName} />
   </div>
 );
 
