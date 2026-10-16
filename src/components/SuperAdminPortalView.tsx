@@ -144,7 +144,7 @@ interface SuperAdminPortalViewProps {
   platformPlans: SubscriptionPlan[];
   onUpdatePlatformPlans: (plans: SubscriptionPlan[]) => void;
   platformThemes: PlatformTheme[];
-  onUpdatePlatformThemes: (themes: PlatformTheme[]) => void;
+  onUpdatePlatformThemes: (themes: PlatformTheme[]) => Promise<boolean>;
   supportTickets: SupportTicket[];
   onUpdateSupportTickets: React.Dispatch<React.SetStateAction<SupportTicket[]>>;
   platformAddons: PlatformAddon[];
@@ -709,27 +709,42 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     setIsThemeModalOpen(true);
   };
 
-  const handleDeleteTheme = (id: string) => {
-    if (confirm('Are you sure you want to delete this theme?')) {
-      onUpdatePlatformThemes(platformThemes.filter(t => t.id !== id));
-      setSaveSuccess('Theme deleted successfully!');
-      setTimeout(() => setSaveSuccess(null), 3000);
+  const handleDeleteTheme = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this theme?')) return;
+    try {
+      const res = await fetch(`/api/admin/themes/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => null);
+      if (!data || data.ok !== true) {
+        toast.error('Theme delete failed — the database could not be updated. The theme was NOT removed.');
+        return;
+      }
+    } catch (err: any) {
+      toast.error('Theme delete request failed — the theme was NOT removed.');
+      return;
     }
+    const deleted = await onUpdatePlatformThemes(platformThemes.filter(t => t.id !== id));
+    if (!deleted) {
+      toast.error('Theme removed from the database, but the catalogue could not be re-synced locally. Refresh the page.');
+      return;
+    }
+    setSaveSuccess('Theme deleted successfully!');
+    setTimeout(() => setSaveSuccess(null), 3000);
   };
 
-  const handleSaveTheme = (e: React.FormEvent) => {
+  const handleSaveTheme = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editingThemeId) {
-      onUpdatePlatformThemes(platformThemes.map(t => t.id === editingThemeId ? { ...t, ...themeForm } as PlatformTheme : t));
-      setSaveSuccess('Theme updated successfully!');
-    } else {
-      const newTheme: PlatformTheme = {
-        ...themeForm,
-        id: `theme-${Date.now()}`
-      } as PlatformTheme;
-      onUpdatePlatformThemes([newTheme, ...platformThemes]);
-      setSaveSuccess('New theme added successfully!');
+    const nextThemes = editingThemeId
+      ? platformThemes.map(t => t.id === editingThemeId ? { ...t, ...themeForm } as PlatformTheme : t)
+      : [{ ...themeForm, id: `theme-${Date.now()}` } as PlatformTheme, ...platformThemes];
+    const ok = await onUpdatePlatformThemes(nextThemes);
+    if (!ok) {
+      toast.error('Theme could not be saved to the database. Your changes were rolled back.');
+      return;
     }
+    setSaveSuccess(editingThemeId ? 'Theme updated successfully!' : 'New theme added successfully!');
     setIsThemeModalOpen(false);
     setTimeout(() => setSaveSuccess(null), 3000);
   };

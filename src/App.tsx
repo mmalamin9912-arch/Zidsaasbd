@@ -994,42 +994,49 @@ export default function App() {
    * DELETE endpoint directly; here we simply mirror the resulting catalogue so
    * merchant-facing/storefront code sees it immediately.
    */
-  const handleUpdatePlatformThemes = useCallback((themes: PlatformTheme[]) => {
+  const handleUpdatePlatformThemes = useCallback(async (themes: PlatformTheme[]): Promise<boolean> => {
+    const previous = platformThemes;
     setPlatformThemes(themes);
     safeSetItem('ZID_PLATFORM_THEMES', JSON.stringify(themes));
-    (async () => {
-      for (const theme of themes) {
-        try {
-          await fetch('/api/admin/themes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            // NOTE: `template_style` is a real Supabase column; `layout` is not,
-            // so the layout is transported inside `template_style` to avoid a
-            // PostgREST "unknown column" rejection. Mongo stores both keys.
-            body: JSON.stringify({
-              id: theme.id,
-              slug: theme.id,
-              name: theme.name,
-              category: theme.category,
-              price: theme.price,
-              priceBDT: theme.price,
-              isFree: theme.isFree,
-              previewUrl: theme.previewUrl,
-              preview_url: theme.previewUrl,
-              thumbnailUrl: theme.thumbnailUrl,
-              thumbnail_url: theme.thumbnailUrl,
-              status: theme.status,
-              template_style: theme.layout,
-              template: theme.layout,
-              layout: theme.layout,
-            }),
-          });
-        } catch (err: any) {
-          console.warn('[App] platform theme persist notice:', err?.message || err);
-        }
+    let allOk = true;
+    for (const theme of themes) {
+      try {
+        await fetch('/api/admin/themes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          // NOTE: `template_style` is a real Supabase column; `layout` is not,
+          // so the layout is transported inside `template_style` to avoid a
+          // PostgREST "unknown column" rejection. Mongo stores both keys.
+          body: JSON.stringify({
+            id: theme.id,
+            slug: theme.id,
+            name: theme.name,
+            category: theme.category,
+            price: theme.price,
+            priceBDT: theme.price,
+            isFree: theme.isFree,
+            previewUrl: theme.previewUrl,
+            preview_url: theme.previewUrl,
+            thumbnailUrl: theme.thumbnailUrl,
+            thumbnail_url: theme.thumbnailUrl,
+            status: theme.status,
+            template_style: theme.layout,
+            template: theme.layout,
+            layout: theme.layout,
+          }),
+        });
+      } catch (err: any) {
+        console.warn('[App] platform theme persist notice:', err?.message || err);
+        allOk = false;
       }
-    })();
-  }, []);
+    }
+    if (!allOk) {
+      setPlatformThemes(previous);
+      safeSetItem('ZID_PLATFORM_THEMES', JSON.stringify(previous));
+      return false;
+    }
+    return true;
+  }, [platformThemes]);
 
   // ── Load Super Admin platform configuration from the database ────────────────
   // Payment gateways, platform settings (tax / trial / branding / AI), security
