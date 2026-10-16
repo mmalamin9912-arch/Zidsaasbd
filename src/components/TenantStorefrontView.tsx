@@ -2300,14 +2300,20 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // mechanism that makes choosing a theme on the dashboard actually change
   // what shoppers see on /store/:slug.
   const resolvedLayout = layout || resolveThemeComponentLayout(activeThemeMeta);
-  // Remount on every publish so a freshly published theme swaps layout
-  // instantly (no stale DOM / memoised classic shell surviving the switch).
+  // Strict check for the Luxury Boutique theme by activeThemeId.
+  if (effectiveThemeId?.toLowerCase() === 'luxury-boutique') {
+    return (
+      <LuxuryBoutique
+        accentColor={primaryColor}
+        storeName={storefrontMerchant.storeName || storeDisplayName}
+      />
+    );
+  }
+  // Supermarket layout has its own dedicated mockup.
   if (resolvedLayout === 'supermarket') {
     return <SupermarketTechMockup accentColor={primaryColor} />;
   }
-  // Published paid boutique theme ("luxury-boutique") → dedicated Luxury
-  // Boutique component: AURA luxury header, light #F8FAFC background, trending
-  // collection layout. Paid publishes and default themes never share markup.
+  // Fashion layout fallback (including any other boutique themes).
   if (resolvedLayout === 'fashion' || themeComponentKey === 'LuxuryBoutique') {
     return (
       <LuxuryBoutique
