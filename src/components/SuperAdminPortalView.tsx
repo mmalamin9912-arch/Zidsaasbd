@@ -128,7 +128,7 @@ interface SuperAdminPortalViewProps {
   currentMerchant: MerchantProfile;
   onUpdateMerchant: (updated: MerchantProfile) => void;
   adminPaymentConfig: AdminPaymentGatewayConfig;
-  onUpdateAdminPaymentConfig: (config: AdminPaymentGatewayConfig) => void;
+  onUpdateAdminPaymentConfig: (config: AdminPaymentGatewayConfig) => Promise<boolean>;
   pendingRequests: SubscriptionRequest[];
   onUpdatePendingRequests: React.Dispatch<React.SetStateAction<SubscriptionRequest[]>>;
   themePurchaseRequests?: ThemePurchaseRequest[];
@@ -1359,11 +1359,18 @@ const newPlan: SubscriptionPlan = {
     toast.success(`Store slug updated to "${savedSlug}".`);
   };
 
-  const handleSaveGateways = (e: React.FormEvent) => {
+  const handleSaveGateways = async (e: React.FormEvent) => {
     e.preventDefault();
-    onUpdateAdminPaymentConfig(gatewayForm);
-    setGatewaySavedMessage(true);
-    setTimeout(() => setGatewaySavedMessage(false), 3000);
+    const ok = await onUpdateAdminPaymentConfig(gatewayForm);
+    if (ok) {
+      setGatewaySavedMessage(true);
+      setTimeout(() => setGatewaySavedMessage(false), 3000);
+    } else {
+      toast.error('Failed to sync payment gateways', {
+        description:
+          'Your gateway changes were not written to the database. Local state was rolled back — please check your connection and try again.',
+      });
+    }
   };
 
   const handleApproveRequest = async (reqId: string) => {

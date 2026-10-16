@@ -1241,13 +1241,37 @@ export default function App() {
   adminPaymentConfigRef.current = adminPaymentConfig;
   platformSettingsRef.current = platformSettings;
 
-  const handleUpdateAdminPaymentConfig = useCallback((updater: React.SetStateAction<AdminPaymentGatewayConfig>) => {
-    const prev = adminPaymentConfigRef.current;
-    const next = typeof updater === 'function' ? (updater as (p: AdminPaymentGatewayConfig) => AdminPaymentGatewayConfig)(prev) : updater;
-    adminPaymentConfigRef.current = next;
-    setAdminPaymentConfig(next);
-    persistPlatformConfig({ adminPaymentConfig: next });
-  }, [persistPlatformConfig]);
+  const handleUpdateAdminPaymentConfig = useCallback(
+    async (updater: React.SetStateAction<AdminPaymentGatewayConfig>): Promise<boolean> => {
+      const prev = adminPaymentConfigRef.current;
+      const next = typeof updater === 'function' ? (updater as (p: AdminPaymentGatewayConfig) => AdminPaymentGatewayConfig)(prev) : updater;
+
+      // Optimistic update so the Super Admin UI and every merchant checkout
+      // (PublicCheckout / SubscriptionModal) reflect the new gateway numbers,
+      // account types and toggles immediately.
+      adminPaymentConfigRef.current = next;
+      setAdminPaymentConfig(next);
+      safeSetItem('ZID_ADMIN_PAYMENT_CONFIG', JSON.stringify(next));
+
+      try {
+        const ok = await savePlatformConfig({
+          adminPaymentConfig: next,
+          platformSettings: platformSettingsRef.current,
+          automationSettings: automationSettingsRef.current,
+        });
+        if (!ok) throw new Error('Payment gateway configuration was not accepted by the database.');
+        return true;
+      } catch (err: any) {
+        console.warn('[App] admin payment config persist notice:', err?.message || err);
+        // Roll back so local state and the database never diverge.
+        adminPaymentConfigRef.current = prev;
+        setAdminPaymentConfig(prev);
+        safeSetItem('ZID_ADMIN_PAYMENT_CONFIG', JSON.stringify(prev));
+        return false;
+      }
+    },
+    []
+  );
 
   const handleUpdatePlatformSettings = useCallback((updater: React.SetStateAction<any>) => {
     const prev = platformSettingsRef.current;
