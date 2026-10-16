@@ -150,9 +150,9 @@ interface SuperAdminPortalViewProps {
   platformAddons: PlatformAddon[];
   onUpdatePlatformAddons: (addons: PlatformAddon[]) => Promise<boolean>;
   auditLogs: AuditLog[];
-  onUpdateAuditLogs: React.Dispatch<React.SetStateAction<AuditLog[]>>;
+  onUpdateAuditLogs: (logs: AuditLog[]) => Promise<boolean>;
   securitySettings: PlatformSecuritySettings;
-  onUpdateSecuritySettings: React.Dispatch<React.SetStateAction<PlatformSecuritySettings>>;
+  onUpdateSecuritySettings: (settings: PlatformSecuritySettings) => Promise<boolean>;
   broadcastHistory: BroadcastMessage[];
   onUpdateBroadcastHistory: React.Dispatch<React.SetStateAction<BroadcastMessage[]>>;
   automationSettings: PlatformAutomationSettings;
@@ -557,11 +557,15 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     return matchesSearch && matchesSeverity;
   });
 
-  const handleClearLogs = () => {
+  const handleClearLogs = async () => {
     if (confirm('Are you sure you want to clear all system audit logs? This action cannot be undone.')) {
-      onUpdateAuditLogs([]);
-      setSaveSuccess('System audit logs cleared successfully.');
-      setTimeout(() => setSaveSuccess(null), 3000);
+      const ok = await onUpdateAuditLogs([]);
+      if (ok) {
+        setSaveSuccess('System audit logs cleared successfully.');
+        setTimeout(() => setSaveSuccess(null), 3000);
+      } else {
+        toast.error('Failed to clear audit logs — the database wipe did not complete. Logs were NOT removed.');
+      }
     }
   };
 
@@ -4881,7 +4885,10 @@ onUpdateMerchant(updatedCurrent);
                       </div>
                       <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${securitySettings.force2FAForMerchants ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                        onClick={() => onUpdateSecuritySettings({...securitySettings, force2FAForMerchants: !securitySettings.force2FAForMerchants})}
+                        onClick={async () => {
+                          const ok = await onUpdateSecuritySettings({...securitySettings, force2FAForMerchants: !securitySettings.force2FAForMerchants});
+                          if (!ok) toast.error('Failed to save security settings — changes were rolled back.');
+                        }}
                       >
                         <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${securitySettings.force2FAForMerchants ? 'left-5' : 'left-1'}`} />
                       </div>
@@ -4894,7 +4901,10 @@ onUpdateMerchant(updatedCurrent);
                       </div>
                       <div
                         className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${securitySettings.ipWhitelistingEnabled ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                        onClick={() => onUpdateSecuritySettings({...securitySettings, ipWhitelistingEnabled: !securitySettings.ipWhitelistingEnabled})}
+                        onClick={async () => {
+                          const ok = await onUpdateSecuritySettings({...securitySettings, ipWhitelistingEnabled: !securitySettings.ipWhitelistingEnabled});
+                          if (!ok) toast.error('Failed to save security settings — changes were rolled back.');
+                        }}
                       >
                         <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all ${securitySettings.ipWhitelistingEnabled ? 'left-5' : 'left-1'}`} />
                       </div>
@@ -4911,7 +4921,10 @@ onUpdateMerchant(updatedCurrent);
                         max="120"
                         step="5"
                         value={securitySettings.adminSessionTimeout}
-                        onChange={(e) => onUpdateSecuritySettings({...securitySettings, adminSessionTimeout: parseInt(e.target.value)})}
+                        onChange={async (e) => {
+                          const ok = await onUpdateSecuritySettings({...securitySettings, adminSessionTimeout: parseInt(e.target.value)});
+                          if (!ok) toast.error('Failed to save security settings — changes were rolled back.');
+                        }}
                         className="w-full h-1.5 bg-[#181B26] rounded-full appearance-none cursor-pointer accent-indigo-600"
                       />
                     </div>
@@ -4927,7 +4940,10 @@ onUpdateMerchant(updatedCurrent);
                         max="10"
                         step="1"
                         value={securitySettings.maxLoginAttempts}
-                        onChange={(e) => onUpdateSecuritySettings({...securitySettings, maxLoginAttempts: parseInt(e.target.value)})}
+                        onChange={async (e) => {
+                          const ok = await onUpdateSecuritySettings({...securitySettings, maxLoginAttempts: parseInt(e.target.value)});
+                          if (!ok) toast.error('Failed to save security settings — changes were rolled back.');
+                        }}
                         className="w-full h-1.5 bg-[#181B26] rounded-full appearance-none cursor-pointer accent-indigo-600"
                       />
                     </div>

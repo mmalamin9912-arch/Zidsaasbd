@@ -1289,15 +1289,23 @@ export default function App() {
     persistPlatformConfig({ automationSettings: next });
   }, [persistPlatformConfig]);
 
-  const handleUpdateSecuritySettings = useCallback((updater: React.SetStateAction<PlatformSecuritySettings>) => {
+  const handleUpdateSecuritySettings = useCallback(async (updater: React.SetStateAction<PlatformSecuritySettings>): Promise<boolean> => {
     const prev = platformSecuritySettingsRef.current;
     const next = typeof updater === 'function' ? (updater as (p: PlatformSecuritySettings) => PlatformSecuritySettings)(prev) : updater;
     platformSecuritySettingsRef.current = next;
     setPlatformSecuritySettings(next);
-    void saveSecuritySettings(next);
+    const ok = await saveSecuritySettings(next);
+    if (!ok) {
+      // Roll back the optimistic update so the UI never shows a policy that
+      // was not durably persisted.
+      platformSecuritySettingsRef.current = prev;
+      setPlatformSecuritySettings(prev);
+      return false;
+    }
+    return true;
   }, []);
 
-  const handleUpdateAuditLogs = useCallback((updater: React.SetStateAction<AuditLog[]>) => {
+  const handleUpdateAuditLogs = useCallback(async (updater: React.SetStateAction<AuditLog[]>): Promise<boolean> => {
     const prev = auditLogsRef.current;
     const next = typeof updater === 'function' ? (updater as (p: AuditLog[]) => AuditLog[])(prev) : updater;
     auditLogsRef.current = next;
@@ -1306,8 +1314,16 @@ export default function App() {
     // a full wipe is deleted from BOTH providers. New entries are appended via
     // the dedicated POST route.
     if (Array.isArray(next) && next.length === 0 && prev.length > 0) {
-      void clearAuditLogs();
+      const ok = await clearAuditLogs();
+      if (!ok) {
+        // Roll back the optimistic clear so stale logs are not hidden when the
+        // database wipe failed.
+        auditLogsRef.current = prev;
+        setAuditLogs(prev);
+        return false;
+      }
     }
+    return true;
   }, []);
 
   /** Support tickets: update local state then write the affected ticket(s) to
