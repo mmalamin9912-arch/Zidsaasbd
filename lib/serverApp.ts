@@ -235,11 +235,13 @@ export async function getMongoDb(dbName: string = DB_NAME) {
  * any real deprecation we introduce later — still surfaces normally.
  */
 const DEP0169_PATTERN = /url\.parse\(\) behavior is not standardized/i;
+const DEP0169_CODE = 'DEP0169';
 process.on('warning', (warning: any) => {
   const name = String(warning?.name || '');
   if (name !== 'DeprecationWarning') return;
+  const code = String((warning as any)?.code || '');
   const text = `${warning?.message || ''} ${warning?.stack || ''}`;
-  if (!DEP0169_PATTERN.test(text)) return;
+  if (code !== DEP0169_CODE && !DEP0169_PATTERN.test(text)) return;
   // Handled here so it does not reach the platform logger. Swallow and return.
 });
 
