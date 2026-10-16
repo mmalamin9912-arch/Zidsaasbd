@@ -95,6 +95,9 @@ export async function saveBroadcastDetailed(
   ok: boolean;
   notificationDelivered: boolean;
   fromCache: boolean;
+  emailDelivered?: boolean;
+  emailProvider?: string;
+  emailError?: string;
   warning?: string;
 }> {
   try {
@@ -108,6 +111,9 @@ export async function saveBroadcastDetailed(
       success?: boolean;
       notificationDelivered?: boolean;
       fromCache?: boolean;
+      emailDelivered?: boolean;
+      emailProvider?: string;
+      emailError?: string;
       warning?: string;
     }>(res);
     return {
@@ -116,6 +122,9 @@ export async function saveBroadcastDetailed(
       ok: Boolean(data?.ok ?? data?.success),
       notificationDelivered: Boolean(data?.notificationDelivered),
       fromCache: Boolean(data?.fromCache),
+      emailDelivered: Boolean(data?.emailDelivered),
+      emailProvider: data?.emailProvider,
+      emailError: data?.emailError,
       warning: data?.warning,
     };
   } catch (err) {

@@ -540,6 +540,11 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       setSaveSuccess(
         `Broadcast delivered to merchant bells via the runtime cache (not saved to the database).`
       );
+    } else if (result.notificationDelivered && result.emailDelivered) {
+      setSaveSuccess(`Broadcast sent successfully to ${newBroadcast.audience} — in-app bell + email delivered${result.emailProvider ? ` via ${result.emailProvider}` : ''}.`);
+    } else if (result.notificationDelivered && result.emailError) {
+      toast.warning(`In-app notification delivered, but the email leg failed: ${result.emailError}`);
+      setSaveSuccess(`Broadcast reached merchant bells, but emails failed: ${result.emailError}`);
     } else if (result.notificationDelivered) {
       setSaveSuccess(`Broadcast sent successfully to ${newBroadcast.audience}.`);
     } else {

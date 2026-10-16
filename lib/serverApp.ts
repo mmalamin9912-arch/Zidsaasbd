@@ -117,6 +117,147 @@ import {
 } from './abandonedCarts.js';
 import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId, postgrestWrite } from './supabaseSchema.js';
 import { sanitizeImagePayload, formatBytes, approximateSize, MAX_PAYLOAD_BYTES } from './imagePayload.js';
+// Central email transport (Resend first, SMTP/Nodemailer fallback). Every
+// broadcast and automation-trigger email goes through `sendEmail` so delivery
+// attempts and failures produce one consistent, greppable log line.
+import { sendEmail, isEmailConfigured, buildBrandedEmailHtml, escapeHtml, paragraphsFromText } from './emailService.js';
+
+// ── Broadcast & automation email dispatch ─────────────────────────────────────
+/**
+ * Resolve the real email addresses of the merchants a broadcast/notification
+ * should reach. Accepts a mix of store ids / slugs / emails and looks each up
+ * across both Mongo collections ('stores' and 'merchants'). When `cohort` is
+ * 'all' (no explicit ids), EVERY merchant email in the database is returned —
+ * the audience filter ('free_trial' / 'paid') is applied to the rows so a
+ * Free-Trial broadcast never lands in a paid merchant's inbox.
+ */
+async function resolveBroadcastRecipients(options: {
+  merchantIds?: string[];
+  audienceFilter?: string;
+}): Promise<string[]> {
+  const out = new Map<string, string>();
+  const addRow = (row: any) => {
+    const email = String(row?.email || row?.merchant_email || row?.emailLower || '').trim().toLowerCase();
+    if (email && email.includes('@')) out.set(email, email);
+  };
+
+  try {
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (db) {
+      const filter: Record<string, any> = {};
+      const cohort = String(options.audienceFilter || 'all');
+      const nowIso = new Date().toISOString();
+      if (cohort === 'paid') {
+        filter.$or = [
+          { is_locked: { $ne: true } },
+          { isLocked: { $ne: true } },
+        ];
+        filter.subscription_status = { $regex: /^active$/i };
+      } else if (cohort === 'free_trial') {
+        filter.$or = [
+          { subscription_plan: { $in: ['free_trial', 'trial', ''] } },
+          { subscriptionPlan: { $in: ['free_trial', 'trial', ''] } },
+          { subscription_status: { $in: [null, '', 'trial', 'PENDING_APPROVAL', 'pending_approval'] } },
+          { trialEndsAt: { $gte: nowIso } },
+        ];
+      }
+
+      for (const collectionName of ['stores', 'merchants']) {
+        try {
+          const rows = await db.collection(collectionName).find(filter, {
+            projection: { email: 1, merchant_email: 1, emailLower: 1 },
+          }).limit(2000).toArray();
+          rows.forEach(addRow);
+        } catch (err: any) {
+          console.warn(`[Email] recipient lookup ${collectionName} warning:`, err?.message || err);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Email] recipient lookup error:', err?.message || err);
+  }
+
+  return [...out.values()];
+}
+
+/**
+ * Fire the real email leg of a broadcast or automation trigger.
+ *
+ * `channel` mirrors the admin form's "Notification Type" selector:
+ *   'App'    → in-app only, no email is attempted.
+ *   'Email'  → email only.
+ *   'Both'   → in-app notification AND email.
+ *
+ * Never throws and never blocks the HTTP response for long: email is awaited
+ * inline because serverless functions are frozen after the response is sent,
+ * so fire-and-forget here would silently drop the send.
+ */
+async function dispatchBroadcastEmail(options: {
+  channel?: string;
+  recipients: string[];
+  subject: string;
+  body: string;
+  actionUrl?: string | null;
+  heading?: string;
+  footerNote?: string;
+}): Promise<{ ok: boolean; delivered: number; provider?: string; error?: string }> {
+  const channel = String(options.channel || 'Both');
+  if (/app\s*only|^app$/i.test(channel)) {
+    return { ok: true, delivered: 0 }; // in-app only by design
+  }
+  if (!options.recipients.length) {
+    console.warn(`[Email] broadcast "${options.subject}" skipped: no recipient emails resolved.`);
+    return { ok: false, delivered: 0, error: 'No merchant emails resolved for the selected audience.' };
+  }
+
+  const html = buildBrandedEmailHtml({
+    heading: options.heading || options.subject,
+    bodyHtml: paragraphsFromText(options.body),
+    actionUrl: options.actionUrl || null,
+    actionLabel: 'Open Dashboard',
+    footerNote: options.footerNote,
+  });
+
+  const result = await sendEmail({
+    to: options.recipients,
+    subject: options.subject,
+    html,
+    text: options.body,
+  });
+
+  return {
+    ok: result.ok,
+    delivered: result.ok ? options.recipients.length : 0,
+    provider: result.provider,
+    error: result.error,
+  };
+}
+
+/** Resolve one merchant's email from an id/slug/email reference. */
+async function resolveMerchantEmail(ref: string): Promise<string | null> {
+  const clean = String(ref || '').trim().toLowerCase();
+  if (!clean) return null;
+  if (clean.includes('@')) return clean;
+  try {
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) return null;
+    for (const collectionName of ['stores', 'merchants']) {
+      try {
+        const doc = await db.collection(collectionName).findOne({
+          $or: [
+            { store_slug: clean }, { storeSlug: clean }, { slug: clean },
+            { id: clean }, { storeId: clean }, { store_id: clean },
+          ],
+        }, { projection: { email: 1, merchant_email: 1 } });
+        const email = String(doc?.email || doc?.merchant_email || '').trim().toLowerCase();
+        if (email && email.includes('@')) return email;
+      } catch { /* try next collection */ }
+    }
+  } catch (err: any) {
+    console.warn('[Email] resolveMerchantEmail warning:', err?.message || err);
+  }
+  return null;
+}
 
 
 // ── MongoDB connection helpers (inlined from lib/db.ts) ───────────────────────
@@ -812,11 +953,44 @@ app.post('/api/auth/merchant/register', async (req, res) => {
       ? 'Logged into your existing store account.'
       : 'Store account created successfully.';
 
+    // ── Automation trigger: Welcome Email ──────────────────────────────────
+    // The Super Admin "Automation Triggers" toggle `welcomeEmail` must send a
+    // real welcome email to the merchant's registered address on first
+    // registration. Best-effort: a mailer failure must never fail the
+    // registration itself.
+    let welcomeEmailSent = false;
+    let welcomeEmailError: string | undefined;
+    if (!merchant.isExisting) {
+      try {
+        const mailResult = await dispatchBroadcastEmail({
+          channel: 'Both',
+          recipients: [email],
+          subject: `Welcome to Zid BD — ${merchant.storeName || 'your store'} is live 🎉`,
+          body:
+            `Hi${merchant.ownerName ? ` ${merchant.ownerName}` : ''}, welcome aboard!\n\n` +
+            `Your store ${merchant.storeName || ''} has been created on the Zid BD merchant platform.` +
+            ` You can now add products, take orders and start selling.\n\n` +
+            `Your store address: /${merchant.storeSlug || ''}\n\n` +
+            `If you need a hand getting set up, reply to this email — our team is here to help.`,
+          actionUrl: '/dashboard',
+          heading: 'Welcome to Zid BD 🎉',
+          footerNote: 'Sent automatically because your store has the Welcome Email automation enabled.',
+        });
+        welcomeEmailSent = mailResult.ok && mailResult.delivered > 0;
+        welcomeEmailError = mailResult.error;
+      } catch (emailErr: any) {
+        console.error('[Server] merchant register welcome email error:', emailErr?.message || emailErr);
+        welcomeEmailError = emailErr?.message || 'Welcome email dispatch failed.';
+      }
+    }
+
     return res.status(200).json({
       ok: true,
       isExisting: merchant.isExisting,
       sources: merchant.sources,
       message,
+      welcomeEmailSent,
+      welcomeEmailError,
       merchant: {
         id: merchant.id,
         storeId: merchant.storeId,
@@ -2489,13 +2663,56 @@ app.post('/api/notifications', async (req, res) => {
       severity: 'Info',
     });
 
+    // ── Real email leg ────────────────────────────────────────────────────
+    // A targeted notification sent with type 'Email Alert' / 'Both (App + Email)'
+    // must reach the merchant's inbox, not only their bell. Previously the
+    // channel selector here was decorative too — nothing was ever emailed.
+    let emailDelivered = false;
+    let emailError: string | undefined;
+    let emailProvider: string | undefined;
+    const message = String(payload?.message || payload?.body || '').trim();
+    if (message) {
+      try {
+        let recipients: string[] = [];
+        if (wantsSpecific) {
+          const emails = await Promise.all(created.length ? created.map(() => '') : []);
+          void emails;
+          for (const id of [...new Set(merchantIds)]) {
+            const email = await resolveMerchantEmail(id);
+            if (email) recipients.push(email);
+          }
+        } else {
+          recipients = await resolveBroadcastRecipients({
+            audienceFilter: String(payload?.audienceFilter || payload?.audience_filter || 'all'),
+          });
+        }
+        const mailResult = await dispatchBroadcastEmail({
+          channel: String(payload?.type === 'broadcast' ? (payload?.channel || 'Both') : 'Both'),
+          recipients,
+          subject: title,
+          body: message,
+          actionUrl: payload?.actionUrl || payload?.action_url || payload?.actionLink,
+          heading: 'Platform Notification',
+        });
+        emailDelivered = mailResult.ok && mailResult.delivered > 0;
+        emailError = mailResult.error;
+        emailProvider = mailResult.provider;
+      } catch (emailErr: any) {
+        console.error('[Server] notification email dispatch error:', emailErr?.message || emailErr);
+        emailError = emailErr?.message || 'Email dispatch failed.';
+      }
+    }
+
     const delivered = created.length;
     return res.status(200).json({
       ok: delivered > 0,
       notifications: created,
       delivered,
+      emailDelivered,
+      emailProvider,
+      emailError,
       message: delivered > 0
-        ? `Notification delivered to ${delivered} audience${delivered === 1 ? '' : 's'}.`
+        ? `Notification delivered to ${delivered} audience${delivered === 1 ? '' : 's'}${emailDelivered ? ' + email sent' : ''}.`
         : (failures[0] || 'Could not save notification.'),
     });
   } catch (err: any) {
@@ -2584,6 +2801,33 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
       console.warn('[Server] broadcast notification fan-out error:', fanoutErr?.message || fanoutErr);
     }
 
+    // ── Real email leg ────────────────────────────────────────────────────────
+    // The admin form's "Notification Type" selector ('App Only' / 'Email Alert'
+    // / 'Both (App + Email)') decides whether merchants get an actual email in
+    // addition to the in-app bell entry. Without this the email half of the
+    // selector was purely decorative — nothing was ever sent.
+    let emailDelivered = false;
+    let emailError: string | undefined;
+    let emailProvider: string | undefined;
+    try {
+      const recipients = await resolveBroadcastRecipients({ audienceFilter });
+      const mailResult = await dispatchBroadcastEmail({
+        channel: String(broadcast.type || body.type || 'Both'),
+        recipients,
+        subject: broadcast.subject,
+        body: broadcast.body || broadcast.message || '',
+        actionUrl: broadcast.actionUrl || broadcast.action_url || broadcast.actionLink,
+        heading: 'Platform Broadcast',
+      });
+      emailDelivered = mailResult.ok && mailResult.delivered > 0;
+      emailError = mailResult.error;
+      emailProvider = mailResult.provider;
+    } catch (emailErr: any) {
+      // A failed email must never fail a broadcast that already reached the bell.
+      console.error('[Server] broadcast email dispatch error:', emailErr?.message || emailErr);
+      emailError = emailErr?.message || 'Email dispatch failed.';
+    }
+
     void appendAuditLog({
       adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
       action: `Sent mass broadcast: ${broadcast.subject}`,
@@ -2592,8 +2836,7 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
       severity: 'Info',
     });
 
-    // Degraded (runtime-cache) writes are still a SUCCESS from the caller's
-    // point of view — the broadcast reached the bell — but the operator is told
+    // Degraded (runtime-cache) writes are still a SUCCESS from the caller    // point of view — the broadcast reached the bell — but the operator is told
     // via `warning` that it never reached durable storage.
     const cachedOnly = result.sources.includes('runtime');
     return res.status(200).json({
@@ -2604,6 +2847,9 @@ app.post('/api/admin/broadcast-history', async (req, res) => {
       // Surfaced so the admin UI can tell the operator the message reached the
       // merchant bell, not just the history table.
       notificationDelivered,
+      emailDelivered,
+      emailProvider,
+      emailError,
       fromCache: Boolean(result.fromCache),
       warning: result.warning,
       message: cachedOnly
@@ -2658,6 +2904,28 @@ app.post('/api/admin/broadcast', async (req, res) => {
       console.warn('[Server] broadcast notification fan-out error:', fanoutErr?.message || fanoutErr);
     }
 
+    // Real email leg — same behaviour as /api/admin/broadcast-history above.
+    let emailDelivered = false;
+    let emailError: string | undefined;
+    let emailProvider: string | undefined;
+    try {
+      const recipients = await resolveBroadcastRecipients({ audienceFilter });
+      const mailResult = await dispatchBroadcastEmail({
+        channel: String(broadcast.type || body.type || 'Both'),
+        recipients,
+        subject: broadcast.subject,
+        body: broadcast.body || broadcast.message || '',
+        actionUrl: broadcast.actionUrl || broadcast.action_url || broadcast.actionLink,
+        heading: 'Platform Broadcast',
+      });
+      emailDelivered = mailResult.ok && mailResult.delivered > 0;
+      emailError = mailResult.error;
+      emailProvider = mailResult.provider;
+    } catch (emailErr: any) {
+      console.error('[Server] broadcast email dispatch error:', emailErr?.message || emailErr);
+      emailError = emailErr?.message || 'Email dispatch failed.';
+    }
+
     void appendAuditLog({
       adminUser: String(body.adminUser || body.admin_user || 'Super Admin'),
       action: `Sent mass broadcast: ${broadcast.subject}`,
@@ -2675,6 +2943,9 @@ app.post('/api/admin/broadcast', async (req, res) => {
       broadcast: result.data,
       sources: result.sources,
       notificationDelivered,
+      emailDelivered,
+      emailProvider,
+      emailError,
       fromCache: Boolean(result.fromCache),
       warning: result.warning,
       message: cachedOnly
@@ -3168,7 +3439,46 @@ app.patch('/api/admin/merchants/:ref', async (req, res) => {
     const action = String(body.action || '').trim();
     if (!action) return res.status(200).json({ ok: false, error: 'An action is required.' });
     const result = await applyMerchantAction(ref, action, body);
-    return res.status(200).json(result);
+
+    // ── Automation trigger: Merchant Suspension Alert ──────────────────────
+    // The Super Admin "Automation Triggers" toggle `merchantSuspensionAlert`
+    // must email the merchant when their account is suspended or reinstated.
+    // Best-effort: a mailer failure must never fail the admin action itself.
+    let emailDelivered = false;
+    let emailError: string | undefined;
+    if (result.ok && (action === 'suspend' || action === 'unsuspend')) {
+      try {
+        const recipientEmail = await resolveMerchantEmail(ref);
+        if (recipientEmail) {
+          const suspended = action === 'suspend';
+          const mailResult = await dispatchBroadcastEmail({
+            channel: 'Both',
+            recipients: [recipientEmail],
+            subject: suspended
+              ? 'Action required — your store access has been suspended'
+              : 'Good news — your store access has been reinstated',
+            body: suspended
+              ? `Your store has been suspended by the platform administration team.\n\n` +
+                `While suspended, your storefront and dashboard access are locked and customers cannot place orders.\n\n` +
+                `If you believe this is a mistake, or you wish to settle any outstanding balance, please contact support.`
+              : `Your store has been reinstated. Your dashboard and storefront are fully accessible again, and customers can place orders.\n\n` +
+                `Welcome back!`,
+            actionUrl: '/dashboard',
+            heading: suspended ? 'Store Access Suspended' : 'Store Access Restored',
+            footerNote: 'Sent automatically because your store has Suspension Alerts enabled.',
+          });
+          emailDelivered = mailResult.ok && mailResult.delivered > 0;
+          emailError = mailResult.error;
+        } else {
+          console.warn(`[Server] merchant ${action}: suspension alert email skipped — no merchant email resolved for ${ref}.`);
+        }
+      } catch (emailErr: any) {
+        console.error(`[Server] merchant ${action} email dispatch error:`, emailErr?.message || emailErr);
+        emailError = emailErr?.message || 'Email dispatch failed.';
+      }
+    }
+
+    return res.status(200).json({ ...result, emailDelivered, emailError });
   } catch (err: any) {
     console.error('[Server] PATCH /api/admin/merchants/:ref error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Merchant action failed.' });
@@ -7076,6 +7386,40 @@ app.post('/api/subscription/approve', async (req, res) => {
       console.warn('[Server] subscription approve renewal write failed:', err?.message || err);
     }
 
+    // ── 4. Automation trigger: Payment / Subscription-Approval email ───────
+    // The Super Admin "Automation Triggers" toggle `paymentApprovalAlert`
+    // must email the merchant when their payment is approved. Best-effort: a
+    // failed/unconfigured mailer must never make a successful DB approval
+    // look like a failure.
+    let emailDelivered = false;
+    let emailError: string | undefined;
+    try {
+      const recipientEmail = await resolveMerchantEmail(email || storeSlug || storeName);
+      if (recipientEmail) {
+        const mailResult = await dispatchBroadcastEmail({
+          channel: 'Both',
+          recipients: [recipientEmail],
+          subject: `Payment approved — your ${planName} plan is now active`,
+          body:
+            `Good news! Your payment for the ${planName} plan has been approved.\n\n` +
+            `Plan: ${planName}\n` +
+            `Start date: ${plan_started_at.split('T')[0]}\n` +
+            `Valid until: ${expiryDate}\n\n` +
+            `Your store is fully unlocked. Log in to your dashboard to continue selling.`,
+          actionUrl: '/dashboard',
+          heading: 'Payment Approved 🎉',
+          footerNote: 'Sent automatically because your store has Payment Approval Alerts enabled.',
+        });
+        emailDelivered = mailResult.ok && mailResult.delivered > 0;
+        emailError = mailResult.error;
+      } else {
+        console.warn('[Server] subscription approve: paymentApprovalAlert email skipped — no merchant email resolved.', { email, storeSlug, storeName });
+      }
+    } catch (emailErr: any) {
+      console.error('[Server] subscription approve email dispatch error:', emailErr?.message || emailErr);
+      emailError = emailErr?.message || 'Email dispatch failed.';
+    }
+
     const ok = mongoSources.length > 0;
     return res.status(200).json({
       ok,
@@ -7087,12 +7431,94 @@ app.post('/api/subscription/approve', async (req, res) => {
       expires_at,
       expiry_date: expiryDate,
       duration_days,
+      emailDelivered,
+      emailError,
       sources: [...mongoSources, ...(subscriptionWrite?.sources || [])],
       error: ok ? undefined : mongoError || 'No store document matched this merchant, so nothing was updated.',
     });
   } catch (err: any) {
     console.error('[Server] POST /api/subscription/approve error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Could not record the subscription approval.' });
+  }
+});
+
+/**
+ * POST /api/automation/subscription-expiry-check — Subscription Expiry Warning.
+ *
+ * Scans every merchant store and emails those whose plan expires within
+ * `days` (default 7). Designed to be hit by a cron job / scheduled trigger
+ * (e.g. Vercel Cron or an external scheduler). Body: { days?: number,
+ * dryRun?: boolean }. Returns a per-merchant delivery summary so an operator
+ * can verify the automation actually fired.
+ */
+app.post('/api/automation/subscription-expiry-check', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const days = Math.max(0, Number(body.days ?? 7) || 7);
+    const dryRun = Boolean(body.dryRun);
+
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) {
+      return res.status(200).json({ ok: false, emailed: 0, error: 'MongoDB is not configured or unavailable.' });
+    }
+
+    const horizon = new Date(Date.now() + days * 86400000).toISOString();
+    const nowIso = new Date().toISOString();
+    const rows: any[] = [];
+    for (const collectionName of ['stores', 'merchants']) {
+      try {
+        const docs = await db.collection(collectionName).find({
+          is_locked: { $ne: true },
+          isLocked: { $ne: true },
+          $or: [
+            { expires_at: { $gte: nowIso, $lte: horizon } },
+            { expiresAt: { $gte: nowIso, $lte: horizon } },
+            { subscription_expiry: { $gte: nowIso.split('T')[0], $lte: horizon.split('T')[0] } },
+          ],
+        }, { projection: { email: 1, merchant_email: 1, store_name: 1, storeName: 1, expires_at: 1, expiresAt: 1, subscription_expiry: 1 } }).limit(500).toArray();
+        rows.push(...docs);
+      } catch (err: any) {
+        console.warn(`[Server] expiry-check ${collectionName} warning:`, err?.message || err);
+      }
+    }
+
+    // Dedupe by email — a store mirrored across both collections must not get
+    // two warning emails.
+    const byEmail = new Map<string, any>();
+    for (const row of rows) {
+      const email = String(row?.email || row?.merchant_email || '').trim().toLowerCase();
+      if (email && email.includes('@') && !byEmail.has(email)) byEmail.set(email, row);
+    }
+
+    const results: Array<{ email: string; ok: boolean; error?: string }> = [];
+    for (const [email, row] of byEmail) {
+      const expiry = String(row.expires_at || row.expiresAt || row.subscription_expiry || '');
+      if (dryRun) {
+        results.push({ email, ok: true });
+        continue;
+      }
+      const mailResult = await dispatchBroadcastEmail({
+        channel: 'Both',
+        recipients: [email],
+        subject: `Your Zid BD subscription expires soon${expiry ? ` — ${expiry.split('T')[0]}` : ''}`,
+        body:
+          `Heads up! Your ${row.storeName || row.store_name || ''} subscription on Zid BD expires on ${expiry.split('T')[0] || 'an upcoming date'}.\n\n` +
+          `Renew before expiry to keep your storefront live and avoid any interruption to your orders.\n\n` +
+          `You can renew any time from your dashboard under Subscription.`,
+        actionUrl: '/dashboard/settings/subscription',
+        heading: 'Subscription Expiring Soon ⏰',
+        footerNote: 'Sent automatically because your store has Subscription Expiry Warnings enabled.',
+      });
+      results.push({ email, ok: mailResult.ok && mailResult.delivered > 0, error: mailResult.error });
+    }
+
+    const emailed = results.filter((r) => r.ok).length;
+    console.log(`[Server] subscription-expiry-check: ${emailed}/${results.length} warning emails delivered (days=${days}, dryRun=${dryRun}).`);
+    return res.status(200).json({ ok: true, checked: results.length, emailed, results });
+  } catch (err: any) {
+    console.error('[Server] POST /api/automation/subscription-expiry-check error:', err);
+    return res.status(200).json({ ok: false, emailed: 0, error: err?.message || 'Expiry check failed.' });
   }
 });
 
