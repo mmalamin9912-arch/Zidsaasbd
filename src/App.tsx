@@ -1358,6 +1358,50 @@ export default function App() {
     }
   });
 
+  /**
+   * Persist the Super Admin add-on catalogue to the database AND local state.
+   *
+   * Every add-on in the list is upserted via POST /api/admin/addons
+   * (Supabase-first, MongoDB fallback). Deletions are handled by the admin UI
+   * calling DELETE /api/admin/addons/:id directly; here we mirror the resulting
+   * catalogue so merchant-facing code sees it immediately.
+   */
+  const handleUpdatePlatformAddons = useCallback(async (addons: PlatformAddon[]): Promise<boolean> => {
+    const previous = platformAddons;
+    setPlatformAddons(addons);
+    safeSetItem('ZID_PLATFORM_ADDONS', JSON.stringify(addons));
+    let allOk = true;
+    for (const addon of addons) {
+      try {
+        await fetch('/api/admin/addons', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: addon.id,
+            slug: addon.id,
+            name: addon.name,
+            category: addon.category,
+            pricingType: addon.pricingType,
+            price: addon.price,
+            priceBDT: addon.price,
+            description: addon.description,
+            icon: addon.icon,
+            isPublished: addon.isPublished,
+          }),
+        });
+      } catch (err: any) {
+        console.warn('[App] platform add-on persist notice:', err?.message || err);
+        allOk = false;
+      }
+    }
+    if (!allOk) {
+      setPlatformAddons(previous);
+      safeSetItem('ZID_PLATFORM_ADDONS', JSON.stringify(previous));
+      return false;
+    }
+    return true;
+  }, [platformAddons]);
+
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
     try {
       const saved = localStorage.getItem('ZID_AUDIT_LOGS');
@@ -1948,7 +1992,7 @@ onPlaceOrder={async (newOrder) => {
         supportTickets={supportTickets}
         onUpdateSupportTickets={handleUpdateSupportTickets}
         platformAddons={platformAddons}
-        onUpdatePlatformAddons={setPlatformAddons}
+        onUpdatePlatformAddons={handleUpdatePlatformAddons}
         auditLogs={auditLogs}
         onUpdateAuditLogs={handleUpdateAuditLogs}
         securitySettings={platformSecuritySettings}

@@ -148,7 +148,7 @@ interface SuperAdminPortalViewProps {
   supportTickets: SupportTicket[];
   onUpdateSupportTickets: React.Dispatch<React.SetStateAction<SupportTicket[]>>;
   platformAddons: PlatformAddon[];
-  onUpdatePlatformAddons: (addons: PlatformAddon[]) => void;
+  onUpdatePlatformAddons: (addons: PlatformAddon[]) => Promise<boolean>;
   auditLogs: AuditLog[];
   onUpdateAuditLogs: React.Dispatch<React.SetStateAction<AuditLog[]>>;
   securitySettings: PlatformSecuritySettings;
@@ -647,27 +647,42 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     setIsAddonModalOpen(true);
   };
 
-  const handleDeleteAddon = (id: string) => {
-    if (confirm('Are you sure you want to delete this add-on?')) {
-      onUpdatePlatformAddons(platformAddons.filter(a => a.id !== id));
-      setSaveSuccess('Add-on deleted successfully!');
-      setTimeout(() => setSaveSuccess(null), 3000);
+  const handleDeleteAddon = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this add-on?')) return;
+    try {
+      const res = await fetch(`/api/admin/addons/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => null);
+      if (!data || data.ok !== true) {
+        toast.error('Add-on delete failed — the database could not be updated. The add-on was NOT removed.');
+        return;
+      }
+    } catch (err: any) {
+      toast.error('Add-on delete request failed — the add-on was NOT removed.');
+      return;
     }
+    const deleted = await onUpdatePlatformAddons(platformAddons.filter(a => a.id !== id));
+    if (!deleted) {
+      toast.error('Add-on removed from the database, but the catalogue could not be re-synced locally. Refresh the page.');
+      return;
+    }
+    setSaveSuccess('Add-on deleted successfully!');
+    setTimeout(() => setSaveSuccess(null), 3000);
   };
 
-  const handleSaveAddon = (e: React.FormEvent) => {
+  const handleSaveAddon = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editingAddonId) {
-      onUpdatePlatformAddons(platformAddons.map(a => a.id === editingAddonId ? { ...a, ...addonForm } as PlatformAddon : a));
-      setSaveSuccess('Add-on updated successfully!');
-    } else {
-      const newAddon: PlatformAddon = {
-        ...addonForm,
-        id: `addon-${Date.now()}`
-      } as PlatformAddon;
-      onUpdatePlatformAddons([newAddon, ...platformAddons]);
-      setSaveSuccess('New add-on added successfully!');
+    const nextAddons = editingAddonId
+      ? platformAddons.map(a => a.id === editingAddonId ? { ...a, ...addonForm } as PlatformAddon : a)
+      : [{ ...addonForm, id: `addon-${Date.now()}` } as PlatformAddon, ...platformAddons];
+    const ok = await onUpdatePlatformAddons(nextAddons);
+    if (!ok) {
+      toast.error('Add-on could not be saved to the database. Your changes were rolled back.');
+      return;
     }
+    setSaveSuccess(editingAddonId ? 'Add-on updated successfully!' : 'New add-on added successfully!');
     setIsAddonModalOpen(false);
     setTimeout(() => setSaveSuccess(null), 3000);
   };
