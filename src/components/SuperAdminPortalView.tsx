@@ -75,6 +75,52 @@ import { supabase, getSupabaseClient, safeUpsertRow } from '../lib/supabase';
 import { savePlan } from '../lib/plansApi';
 import { FEATURE_FLAG_LABELS, featureFlagsOf, monthlyPriceOf, productLimitLabel, sortPlansByTier } from '../lib/planPricing';
 import { safeJson } from '../lib/storeApi';
+
+/** Safe, non-throwing wrapper for admin merchant write actions. Never throws:
+ * a network/parse failure resolves to `{ ok: false, error }` so the UI degrades. */
+async function safeAdminMerchantFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<{ ok: boolean; error?: string; data?: unknown }> {
+  try {
+    const res = await fetch(input, init);
+    const text = await res.text().catch(() => '');
+    const data =
+      text && !text.trimStart().startsWith('<')
+        ? JSON.parse(text)
+        : null;
+    return {
+      ok: res.ok,
+      error: data?.error || (res.ok ? undefined : 'Request failed.'),
+      data,
+    };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Network error.' };
+  }
+}
+
+/** PATCH /api/admin/merchants/:ref — extend_trial, change_plan, suspend, unsuspend */
+export async function patchAdminMerchant(
+  ref: string,
+  action: string,
+  payload: Record<string, unknown>
+): Promise<{ ok: boolean; error?: string; data?: unknown }> {
+  const body = { action, ...payload };
+  return safeAdminMerchantFetch(`/api/admin/merchants/${encodeURIComponent(ref)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** DELETE /api/admin/merchants/:ref */
+export async function deleteAdminMerchant(
+  ref: string
+): Promise<{ ok: boolean; error?: string; data?: unknown }> {
+  return safeAdminMerchantFetch(`/api/admin/merchants/${encodeURIComponent(ref)}`, {
+    method: 'DELETE',
+  });
+}
 import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 import { normalizeMerchantSlug, validateMerchantSlug, updateMerchantSlug } from '../lib/adminMerchantsApi';
 
@@ -1756,7 +1802,7 @@ if (m.storeSlug) {
     toast.warning('Theme purchase request rejected.');
   };
 
-  const handleExtendTrial = (storeName: string, days: number) => {
+  const handleExtendTrial = async (storeName: string, days: number) => {
     let updatedEndsAtIso = '';
     let updatedRemaining = 0;
     const updatedMerchants = allMerchants.map(m => {
@@ -1785,6 +1831,13 @@ if (m.storeSlug) {
       }
       return m;
     });
+
+    // Persist the trial extension to the backend so it survives refresh and is
+    // immediately honoured on the merchant's dashboard / storefront access rules.
+    const extendStoreSlug = allMerchants.find(m => m?.storeName === storeName)?.storeSlug;
+    if (extendStoreSlug) {
+      await patchAdminMerchant(extendStoreSlug, 'extend_trial', { days });
+    }
 
     onUpdateAllMerchants(updatedMerchants);
     try {
@@ -1816,7 +1869,7 @@ onUpdateMerchant(updatedCurrent);
     toast.success(`Successfully extended trial for "${storeName}" by ${days} days.`);
   };
 
-  const handleToggleLockMerchant = (storeName: string) => {
+  const handleToggleLockMerchant = async (storeName: string) => {
     let nextLockedState = false;
     const updatedMerchants = allMerchants.map(m => {
       if (m?.storeName === storeName) {
@@ -1840,6 +1893,13 @@ onUpdateMerchant(updatedCurrent);
       }
       return m;
     });
+
+    // Persist suspend/unsuspend so the merchant's dashboard and storefront
+    // access rules are updated immediately (isLocked flips the gateway lock).
+    const toggleStoreSlug = allMerchants.find(m => m?.storeName === storeName)?.storeSlug;
+    if (toggleStoreSlug) {
+      await patchAdminMerchant(toggleStoreSlug, nextLockedState ? 'suspend' : 'unsuspend', {});
+    }
 
     onUpdateAllMerchants(updatedMerchants);
     try {
@@ -1871,6 +1931,10 @@ onUpdateMerchant(updatedCurrent);
 
   const handleDeleteMerchant = (storeSlug: string, storeName: string) => {
     if (window.confirm(`WARNING: Are you sure you want to permanently delete the merchant "${storeName}"? This action cannot be undone.`)) {
+      // Delete first so a network failure never leaves the UI in a partially-deleted state.
+      void deleteAdminMerchant(storeSlug).catch((err) => {
+        toast.error(`Delete failed: ${err?.message || 'unknown error'}`);
+      });
       const updatedMerchants = allMerchants.filter(m => m?.storeSlug !== storeSlug);
       onUpdateAllMerchants(updatedMerchants);
       try {
@@ -1967,7 +2031,7 @@ onUpdateMerchant(updatedCurrent);
     }
   };
 
-  const handleChangePlan = (storeName: string) => {
+  const handleChangePlan = async (storeName: string) => {
     const m = allMerchants.find(x => x?.storeName === storeName);
     if (!m) return;
 
@@ -2015,6 +2079,12 @@ onUpdateMerchant(updatedCurrent);
       }
       return x;
     });
+
+    // Persist the plan change to the backend so it's immediately honoured on
+    // subscription expiry / storefront access rights.
+    if (m?.storeSlug) {
+      await patchAdminMerchant(m.storeSlug, 'change_plan', { plan: nextPlan });
+    }
 
     onUpdateAllMerchants(updatedMerchants);
     try {
