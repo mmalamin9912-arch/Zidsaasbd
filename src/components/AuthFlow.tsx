@@ -45,6 +45,7 @@ import { fetchStoreByRef } from '../lib/storeApi';
 import { readAndDownscaleImage } from '../utils/imageUtils';
 import { isValidEmail } from '../utils/validation';
 import { toast } from './ToastProvider';
+import { setStoredSession } from '../lib/authSession';
 
 interface AuthFlowProps {
   onLoginSuccess: (userProfile: MerchantProfile) => void;
@@ -99,6 +100,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   // whose password already checked out — the session is only issued once the
   // WhatsApp OTP in `twoFactorCode` is verified.
   const [pendingTwoFactor, setPendingTwoFactor] = useState<MerchantProfile | null>(null);
+  const [pendingTwoFactorToken, setPendingTwoFactorToken] = useState<string | undefined>(undefined);
   const [twoFactorPhone, setTwoFactorPhone] = useState('');
   const [twoFactorCode, setTwoFactorCode] = useState('');
 
@@ -424,11 +426,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
    * Issues the session and hands the profile to the dashboard. Split out of
    * `finishLogin` so the 2FA gate can call it only AFTER the OTP is verified.
    */
-  const completeLogin = (enrichedProfile: MerchantProfile) => {
-    safeSetItem('zid_auth_session', {
+  const completeLogin = (enrichedProfile: MerchantProfile, token?: string) => {
+    setStoredSession({
       email: enrichedProfile.email,
       loggedInAt: new Date().toISOString(),
       userProfile: enrichedProfile,
+      token,
     });
 
     safeRemoveItem('zid_pre_payment');
@@ -513,7 +516,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
    * issued. When 2FA is off (or the store cannot be resolved) the original
    * behaviour is preserved exactly.
    */
-  const finishLogin = async (profile: MerchantProfile) => {
+  const finishLogin = async (profile: MerchantProfile, token?: string) => {
     const enrichedProfile = enhanceWithPrepayment(profile);
     const emailFallback = enrichedProfile.email || email.trim().toLowerCase();
 
@@ -527,7 +530,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     }
 
     if (!matchedTwoFactorSlug) {
-      completeLogin(enrichedProfile);
+      completeLogin(enrichedProfile, token);
       return;
     }
 
@@ -552,6 +555,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
     // Park the login and ask the backend to dispatch the OTP.
     setPendingTwoFactor(enrichedProfile);
+    setPendingTwoFactorToken(token);
     setTwoFactorPhone(phone);
     setTwoFactorCode('');
     setMode('2fa');
@@ -600,9 +604,11 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
 
       if (data?.verified === true) {
         const profile = pendingTwoFactor;
+        const token = pendingTwoFactorToken;
         setPendingTwoFactor(null);
+        setPendingTwoFactorToken(undefined);
         setTwoFactorCode('');
-        completeLogin(profile);
+        completeLogin(profile, token);
         return;
       }
 
@@ -870,7 +876,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           logoUrl: defaultMerchant.logoUrl || '',
         });
 
-    await finishLogin(userProfile);
+    await finishLogin(userProfile, verifyResult?.token);
     return;
 
     } catch (err) {
@@ -1484,7 +1490,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         }
 
         try {
-          await finishLogin(userProfile);
+          await finishLogin(userProfile, regData?.token);
         } finally {
           inFlightRef.current = false;
           setIsLoading(false);

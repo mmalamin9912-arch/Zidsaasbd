@@ -36,6 +36,7 @@ import fs from 'fs/promises';
 import dns from 'node:dns/promises';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
+import jwt from 'jsonwebtoken';
 // Platform-wide aggregation for the Super Admin Portal. Lives in lib/ and is
 // bundled by Vercel alongside this file (same pattern as lib/faqGenerator).
 // The explicit '.js' extension is required under "type": "module".
@@ -425,6 +426,39 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// ── Auth Token & Session Cookie Helpers ──────────────────────────────────────
+const JWT_SECRET = process.env.JWT_SECRET || process.env.ADMIN_MASTER_KEY || 'zid-bd-merchant-session-secret-2026';
+
+function parseRequestCookies(cookieHeader?: string): Record<string, string> {
+  const list: Record<string, string> = {};
+  if (!cookieHeader) return list;
+  cookieHeader.split(';').forEach((cookie) => {
+    const [name, ...rest] = cookie.split('=');
+    const trimmedName = name?.trim();
+    if (!trimmedName) return;
+    const value = rest.join('=').trim();
+    list[trimmedName] = decodeURIComponent(value);
+  });
+  return list;
+}
+
+function generateMerchantSessionToken(merchant: any): string {
+  try {
+    return jwt.sign(
+      {
+        id: merchant.id || merchant._id || merchant.storeId,
+        email: merchant.email,
+        storeSlug: merchant.storeSlug || merchant.store_slug,
+        storeCode: merchant.storeCode || merchant.store_code,
+      },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+  } catch (err) {
+    return `sess_${Buffer.from(merchant.email || 'user').toString('base64')}_${Date.now()}`;
+  }
+}
 
 // ── Freshness: every /api response is DYNAMIC ─────────────────────────────────
 //
@@ -984,8 +1018,15 @@ app.post('/api/auth/merchant/register', async (req, res) => {
       }
     }
 
+    const sessionToken = generateMerchantSessionToken(merchant);
+    res.setHeader(
+      'Set-Cookie',
+      `zid_session_token=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`
+    );
+
     return res.status(200).json({
       ok: true,
+      token: sessionToken,
       isExisting: merchant.isExisting,
       sources: merchant.sources,
       message,
@@ -1035,8 +1076,14 @@ app.post('/api/auth/merchant/login', async (req, res) => {
     const merchant = await authenticateMerchant({ email: cleanEmail });
     if (merchant) {
       const sanitized = sanitizeServerMerchant(merchant);
+      const sessionToken = generateMerchantSessionToken(merchant);
+      res.setHeader(
+        'Set-Cookie',
+        `zid_session_token=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`
+      );
       return res.status(200).json({
         ok: true,
+        token: sessionToken,
         sources: merchant.sources,
         merchant: {
           ...sanitized,
@@ -1118,8 +1165,14 @@ app.post('/api/auth/merchant/verify-password', async (req, res) => {
     // Password correct — return merchant profile (sanitized)
     const merchant = await authenticateMerchant({ email: cleanEmail });
     const sanitized = merchant ? sanitizeServerMerchant(merchant) : {};
+    const sessionToken = generateMerchantSessionToken(merchant || { email: cleanEmail });
+    res.setHeader(
+      'Set-Cookie',
+      `zid_session_token=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`
+    );
     return res.status(200).json({
       ok: true,
+      token: sessionToken,
       merchant: merchant
         ? { ...sanitized, id: merchant.id, storeId: merchant.storeId, storeSlug: merchant.storeSlug, storeCode: merchant.storeCode }
         : { email: cleanEmail },
@@ -1128,6 +1181,73 @@ app.post('/api/auth/merchant/verify-password', async (req, res) => {
     console.error('[Server] POST /api/auth/merchant/verify-password error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Password verification failed.' });
   }
+});
+
+// GET /api/auth/session — validate persistent session / cookie / token on page reload
+app.get(['/api/auth/session', '/api/auth/me'], async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const cookies = parseRequestCookies(req.headers.cookie);
+    const authHeader = req.headers.authorization || '';
+    const token =
+      cookies.zid_session_token ||
+      (authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '') ||
+      (typeof req.query.token === 'string' ? req.query.token : '');
+
+    let email = typeof req.query.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET) as any;
+        if (decoded?.email) {
+          email = decoded.email;
+        }
+      } catch (jwtErr) {
+        if (token.startsWith('sess_')) {
+          const parts = token.split('_');
+          if (parts[1]) {
+            try {
+              email = Buffer.from(parts[1], 'base64').toString('utf8');
+            } catch {}
+          }
+        }
+      }
+    }
+
+    if (!email || !email.includes('@')) {
+      return res.status(200).json({ ok: false, authenticated: false });
+    }
+
+    const merchant = await authenticateMerchant({ email });
+    if (!merchant) {
+      return res.status(200).json({ ok: false, authenticated: false });
+    }
+
+    const sanitized = sanitizeServerMerchant(merchant);
+    return res.status(200).json({
+      ok: true,
+      authenticated: true,
+      merchant: {
+        ...sanitized,
+        id: merchant.id,
+        storeId: merchant.storeId,
+        storeSlug: merchant.storeSlug,
+        storeCode: merchant.storeCode,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Server] /api/auth/session error:', err);
+    return res.status(200).json({ ok: false, authenticated: false, error: err?.message });
+  }
+});
+
+// POST /api/auth/logout — clear persistent HTTP-only cookie
+app.post(['/api/auth/logout', '/api/auth/merchant/logout'], (req, res) => {
+  res.setHeader(
+    'Set-Cookie',
+    'zid_session_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'
+  );
+  return res.status(200).json({ ok: true, message: 'Logged out successfully' });
 });
 
 // GET /api/auth/merchant/check-email/:email — checks Supabase first, then MongoDB

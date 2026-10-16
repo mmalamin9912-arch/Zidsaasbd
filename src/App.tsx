@@ -37,6 +37,7 @@ import { StorefrontPreviewModal } from './components/StorefrontPreviewModal';
 import { TenantStorefrontView } from './components/TenantStorefrontView';
 import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
+import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
 import { verifySuperAdminPin } from './lib/adminAuth';
 import { isStoreCode, isUuid } from './lib/storeId';
@@ -100,7 +101,7 @@ import {
   fetchMerchantSubscriptionFromSupabase,
   syncMerchantSubscription
 } from './lib/subscriptionService';
-import { Menu, ShieldAlert, Clock, ArrowUpRight } from 'lucide-react';
+import { Menu, ShieldAlert, Clock, ArrowUpRight, Sparkles, Loader2 } from 'lucide-react';
 
 /**
  * Reserved first-path-segments that are application routes, not store refs.
@@ -198,8 +199,8 @@ export default function App() {
       if (path === '/' || path === '' || path === '/pricing' || path === '/landing') {
         return false;
       }
-      const savedSession = localStorage.getItem('zid_auth_session');
-      return !!savedSession;
+      const savedSession = getStoredSession();
+      return !!(savedSession && (savedSession.userProfile || savedSession.email));
     } catch (e) {
       return false;
     }
@@ -211,8 +212,36 @@ export default function App() {
     if (path === '/' || path === '' || path === '/pricing' || path === '/landing') {
       return true;
     }
-    const savedSession = localStorage.getItem('zid_auth_session');
-    return !savedSession;
+    const savedSession = getStoredSession();
+    return !(savedSession && (savedSession.userProfile || savedSession.email));
+  });
+
+  // Explicit loading state while validating the session on page load/refresh
+  // Prevents eager redirects to '/' during initial hydration or session revalidation
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(() => {
+    const path = window.location.pathname;
+    if (
+      path === '/' ||
+      path === '' ||
+      path === '/pricing' ||
+      path === '/landing' ||
+      path.startsWith('/store/') ||
+      path.startsWith('/e/') ||
+      isBareStorePath(path) ||
+      path === '/register' ||
+      path === '/signup' ||
+      path === '/login' ||
+      path === '/signin' ||
+      path.startsWith('/admin') ||
+      path.startsWith('/super-admin')
+    ) {
+      return false;
+    }
+    const session = getStoredSession();
+    if (session && (session.userProfile || session.email)) {
+      return false;
+    }
+    return true;
   });
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('signup');
   const [preAuthCheckoutPlan, setPreAuthCheckoutPlan] = useState<string | null>(null);
@@ -228,66 +257,137 @@ export default function App() {
   }, []);
 
   React.useEffect(() => {
+    let isMounted = true;
+
     // Auth State Detection on Load & Strict Root Landing Page Routing
-    const checkAuthAndRoute = () => {
+    const checkAuthAndRoute = async () => {
       const path = window.location.pathname;
       if (path === '/admin' || path === '/super-admin' || path === '/admin-login' || path === '/super-admin-gateway') {
         const adminSession = sessionStorage.getItem('zid_super_admin_auth');
         if (adminSession === 'true') {
           setIsAdminAuthenticated(true);
         }
+        setIsAuthChecking(false);
         return;
       }
 
       if (path.startsWith('/store/') || path.startsWith('/e/')) {
+        setIsAuthChecking(false);
         return;
       }
 
-      // A bare store reference — `/ZID-BD-5150`, `/dhaka-threads` — is a
-      // storefront link, NOT an app route. Without this branch the path matched
-      // nothing, so the edge fell through to the platform's 404 HTML page
-      // ("The page could not be found"). We rewrite it to the real storefront
-      // route (which resolves slug/code/UUID via the store API) so the URL
-      // always lands on a page that exists.
+      // A bare store reference — `/ZID-BD-5150`, `/dhaka-threads`
       if (isBareStorePath(path)) {
         const ref = path.replace(/^\/+/, '');
         const target = `/store/${ref}`;
         window.history.replaceState({}, '', target);
         setCurrentPath(target);
         setShowLanding(false);
+        setIsAuthChecking(false);
         return;
       }
 
-      const session = localStorage.getItem('zid_auth_session');
+      // Multi-layer session retrieval (LocalStorage, SessionStorage, Cookies, storeData)
+      const session = getStoredSession();
+      const hasSession = !!(session && (session.userProfile || session.email));
 
       // Root path (/) must show the Landing Page first.
-      // Do NOT automatically redirect unauthenticated users or fresh visitors directly to /dashboard.
       if (path === '/' || path === '' || path === '/pricing' || path === '/landing') {
         setShowLanding(true);
-        if (!session) {
+        if (!hasSession) {
           setIsAuthenticated(false);
         }
+        setIsAuthChecking(false);
+        return;
+      } else if (path === '/register' || path === '/signup') {
+        setShowLanding(false);
+        setAuthMode('signup');
+        setIsAuthChecking(false);
+        return;
+      } else if (path === '/login' || path === '/signin') {
+        setShowLanding(false);
+        setAuthMode('login');
+        setIsAuthChecking(false);
+        return;
       } else if (path === '/dashboard' || path.startsWith('/dashboard/')) {
-        if (session) {
+        if (hasSession) {
+          // Session found in storage: preserve dashboard route, never redirect to '/'
           setIsAuthenticated(true);
           setShowLanding(false);
           setActiveTab('dashboard');
-        } else {
-          // Unauthenticated user trying to access /dashboard directly
+          if (session?.userProfile) {
+            setMerchant(resolveMerchantSubscription(session.userProfile));
+          }
+          setIsAuthChecking(false);
+
+          // Revalidate in background with server
+          try {
+            const serverCheck = await validateSessionWithServer();
+            if (serverCheck?.merchant && isMounted) {
+              setMerchant(resolveMerchantSubscription(serverCheck.merchant));
+            }
+          } catch (err) {
+            console.warn('[App] Background session check warning:', err);
+          }
+          return;
+        }
+
+        // If no local session in storage, validate with server session/cookie before redirecting
+        try {
+          const serverCheck = await validateSessionWithServer();
+          if (serverCheck?.merchant && isMounted) {
+            const resolved = resolveMerchantSubscription(serverCheck.merchant);
+            setStoredSession({
+              email: resolved.email,
+              loggedInAt: new Date().toISOString(),
+              userProfile: resolved,
+            });
+            setMerchant(resolved);
+            setIsAuthenticated(true);
+            setShowLanding(false);
+            setActiveTab('dashboard');
+            setIsAuthChecking(false);
+            return;
+          }
+        } catch (err) {
+          console.warn('[App] Server session check error:', err);
+        }
+
+        // Supabase session check fallback
+        if (supabase) {
+          try {
+            const { data } = await supabase.auth.getSession();
+            if (data?.session?.user && isMounted) {
+              setIsAuthenticated(true);
+              setShowLanding(false);
+              setActiveTab('dashboard');
+              setIsAuthChecking(false);
+              void fetchMerchantProfile(data.session.user.id, data.session.user.email);
+              return;
+            }
+          } catch (err) {
+            console.warn('[App] Supabase session check error:', err);
+          }
+        }
+
+        // Only after all validation options are exhausted, redirect unauthenticated users
+        if (isMounted) {
           setIsAuthenticated(false);
           setShowLanding(true);
           window.history.replaceState({}, '', '/');
           setCurrentPath('/');
+          setIsAuthChecking(false);
         }
-      } else if (path === '/register' || path === '/signup') {
-        setShowLanding(false);
-        setAuthMode('signup');
-      } else if (path === '/login' || path === '/signin') {
-        setShowLanding(false);
-        setAuthMode('login');
+      } else {
+        setIsAuthChecking(false);
       }
     };
-    checkAuthAndRoute();
+
+    void checkAuthAndRoute();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const sanitizeMerchantProfile = (raw: any): MerchantProfile => {
@@ -296,11 +396,8 @@ export default function App() {
 
   const [merchant, setMerchant] = useState<MerchantProfile>(() => {
     try {
-      const savedSession = localStorage.getItem('zid_auth_session');
-      if (savedSession) {
-        const parsed = JSON.parse(savedSession);
-        if (parsed?.userProfile) return resolveMerchantSubscription(parsed.userProfile);
-      }
+      const savedSession = getStoredSession();
+      if (savedSession?.userProfile) return resolveMerchantSubscription(savedSession.userProfile);
       const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
       if (saved) {
         const storeMerchant = JSON.parse(saved).merchant;
@@ -1669,9 +1766,15 @@ export default function App() {
   const [isVerifyingAdminPin, setIsVerifyingAdminPin] = useState<boolean>(false);
 
   const handleLoginSuccess = (userProfile: MerchantProfile) => {
+    setStoredSession({
+      email: userProfile.email,
+      loggedInAt: new Date().toISOString(),
+      userProfile,
+    });
     setMerchant(userProfile);
     setIsAuthenticated(true);
     setShowLanding(false);
+    setIsAuthChecking(false);
 
     // Record this browser as an active device so Security settings can show a
     // real session list and "Log Out All Other Devices" has something to revoke.
@@ -1738,8 +1841,7 @@ export default function App() {
 
   const handleLogout = () => {
     try {
-      localStorage.removeItem('zid_auth_session');
-      localStorage.removeItem('zid_intended_plan');
+      clearStoredSession();
     } catch (e) {
       console.error(e);
     }
@@ -2078,6 +2180,31 @@ onPlaceOrder={async (newOrder) => {
         rolePermissions={rolePermissions}
         onUpdateRolePermissions={handleUpdateRolePermissions}
       />
+    );
+  }
+
+  if (isAuthChecking) {
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center font-sans ${
+        isDarkMode ? 'bg-[#141721] text-slate-100' : 'bg-[#F4F6F9] text-slate-900'
+      }`}>
+        <div className="flex flex-col items-center space-y-4 animate-in fade-in duration-300">
+          <div className="relative flex items-center justify-center">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-[#D4AF37] to-amber-500/20 flex items-center justify-center shadow-lg shadow-amber-500/10 animate-pulse">
+              <Sparkles className="w-8 h-8 text-[#D4AF37] animate-spin" style={{ animationDuration: '3s' }} />
+            </div>
+          </div>
+          <div className="text-center space-y-1">
+            <h2 className="text-base font-bold tracking-wide">
+              {merchant?.storeName ? `${merchant.storeName}` : 'Merchant Dashboard'}
+            </h2>
+            <p className="text-xs text-slate-400 flex items-center justify-center gap-1.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#D4AF37]" />
+              <span>Verifying session...</span>
+            </p>
+          </div>
+        </div>
+      </div>
     );
   }
 
