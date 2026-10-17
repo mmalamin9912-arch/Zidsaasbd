@@ -13344,6 +13344,157 @@ const handleOrderUpdate = async (req: any, res: any) => {
 app.put('/api/orders/:id', handleOrderUpdate);
 app.patch('/api/orders/:id', handleOrderUpdate);
 
+// ── DELETE /api/orders/bulk-delete · /api/orders/:id — order removal ─────────
+//
+// The table's "Delete Selected" / "Delete Order" actions previously had NO
+// backend at all: the client could only re-POST the surviving list (an UPSERT
+// sync, which never removes a row), so deleted orders reappeared on the next
+// poll and after every reload. These routes own the removal:
+//
+//  • The id the dashboard holds is the app-level `id` / `order_number` (see
+//    `findOrder`), NOT the Mongo `_id` — every spelling is probed, plus the
+//    `_id` when the key is ObjectId-shaped.
+//  • The write is scoped through the SAME identity-resolving `buildOrderQuery`
+//    the list route uses, so a delete can never reach a row the dashboard
+//    couldn't list, and an id collision in another store cannot remove a
+//    foreign order.
+//  • Always answers 200 with a shaped envelope — a stale row in a polling UI
+//    must not surface as a red network error (same contract as PUT above).
+async function buildOrderDeleteFilter(ids: string[], refRaw: unknown): Promise<Record<string, any>> {
+  const unique = Array.from(new Set(ids.map(v => String(v || '').trim()).filter(Boolean)));
+  if (unique.length === 0) throw new Error('At least one order id is required.');
+
+  const or: Record<string, any>[] = [];
+  for (const key of unique) {
+    const cleaned = key.replace(/^#/, '');
+    or.push(
+      { id: key },
+      { id: cleaned },
+      { order_number: key },
+      { order_number: cleaned },
+      { invoice_id: key },
+      { invoice_id: cleaned },
+      { transaction_id: key },
+      { tracking_code: key },
+      { trackingCode: key },
+    );
+    // Only treat the key as an ObjectId when it looks like one — casting an
+    // arbitrary string would throw and fail the whole delete.
+    if (/^[a-f0-9]{24}$/i.test(key)) {
+      try {
+        const { ObjectId } = await import('mongodb');
+        or.push({ _id: new ObjectId(key) });
+      } catch {
+        // mongodb driver unavailable — the string probes still cover it.
+      }
+    }
+  }
+
+  const filter: Record<string, any> = { $or: or };
+  const ref = String(refRaw || '').trim();
+  if (ref) {
+    const storeQuery = await buildOrderQuery(ref);
+    if (storeQuery) filter.$and = [storeQuery];
+  }
+  return filter;
+}
+
+// POST /api/orders/bulk-delete — remove MANY orders in one round-trip.
+// Body: { ids: string[], store_slug?, merchant_id? }. The client sends the
+// id array straight from its selection state, so the UI can drop the rows
+// optimistically and the background poll keeps them gone.
+app.post('/api/orders/bulk-delete', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const rawIds = Array.isArray(body.ids) ? body.ids : Array.isArray(body.orderIds) ? body.orderIds : [];
+    const ids = rawIds.map((v: any) => String(v || '').trim()).filter(Boolean);
+    if (ids.length === 0) {
+      return res.status(200).json({
+        ok: false,
+        deleted: 0,
+        requested: 0,
+        error: 'A non-empty array of order ids is required (body field `ids`).',
+      });
+    }
+    if (!MONGODB_URI) {
+      return res.status(200).json({ ok: false, deleted: 0, requested: ids.length, error: 'MONGODB_URI is not set.' });
+    }
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] POST /api/orders/bulk-delete DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json({ ok: false, deleted: 0, requested: ids.length, error: 'The database is unavailable.' });
+    }
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(200).json({ ok: false, deleted: 0, requested: ids.length, error: 'The database is unavailable.' });
+    }
+    const db = await getMongoDb(ORDERS_DB_NAME);
+    if (!db) {
+      return res.status(200).json({ ok: false, deleted: 0, requested: ids.length, error: 'The database is unavailable.' });
+    }
+
+    // Store reference with the SAME precedence as GET /api/orders — slug
+    // first, falling back to the merchant UUID; `buildOrderQuery` resolves
+    // either spelling into the full identity set.
+    const ref = String(
+      body.store_slug || body.storeSlug || body.store_id || body.merchant_id || body.merchantId ||
+      req.query.store_slug || req.query.storeSlug || req.query.merchant_id || ''
+    ).trim();
+    const filter = await buildOrderDeleteFilter(ids, ref);
+    const result = await db.collection(ORDERS_COLLECTION).deleteMany(filter);
+    const deleted = Number(result?.deletedCount || 0);
+    console.log(`[Server] bulk-delete: removed ${deleted}/${ids.length} order(s)${ref ? ` for store ${ref}` : ''}`);
+    return res.status(200).json({ ok: true, deleted, requested: ids.length, ids });
+  } catch (err: any) {
+    console.error('[Server] POST /api/orders/bulk-delete error:', err);
+    return res.status(200).json({ ok: false, deleted: 0, error: err?.message || 'Bulk delete failed.' });
+  }
+});
+
+// DELETE /api/orders/:id — remove ONE order (the row's "Delete Order" action).
+app.delete('/api/orders/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, deleted: 0, error: 'An order id is required.' });
+    if (!MONGODB_URI) return res.status(200).json({ ok: false, deleted: 0, error: 'MONGODB_URI is not set.' });
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] DELETE /api/orders/:id DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json({ ok: false, deleted: 0, error: 'The database is unavailable.' });
+    }
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(200).json({ ok: false, deleted: 0, error: 'The database is unavailable.' });
+    }
+    const db = await getMongoDb(ORDERS_DB_NAME);
+    if (!db) return res.status(200).json({ ok: false, deleted: 0, error: 'The database is unavailable.' });
+
+    const ref = String(
+      (req.query.store_slug as string) ||
+      (req.query.storeSlug as string) ||
+      (req.query.store_id as string) ||
+      (req.query.merchant_id as string) ||
+      ''
+    ).trim();
+    const filter = await buildOrderDeleteFilter([id], ref);
+    const result = await db.collection(ORDERS_COLLECTION).deleteMany(filter);
+    const deleted = Number(result?.deletedCount || 0);
+    // `ok: true` with `deleted: 0` means "already gone" — the UI should still
+    // drop the row (it may have been removed from another device/tab).
+    return res.status(200).json({
+      ok: true,
+      deleted,
+      id,
+      error: deleted > 0 ? undefined : 'That order was not found — it may already have been deleted.',
+    });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/orders/:id error:', err);
+    return res.status(200).json({ ok: false, deleted: 0, error: err?.message || 'Order delete failed.' });
+  }
+});
+
 // ── Customers ───────────────────────────────
 // GET /api/customers — list every customer for a store (no filter → all rows).
 // GET /api/customers/:storeRef — customers for one store, matched FLEXIBLY on

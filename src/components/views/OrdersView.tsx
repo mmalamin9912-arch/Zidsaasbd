@@ -41,7 +41,9 @@ import {
   ShieldCheck,
   ShieldAlert,
   Shield,
-  RotateCcw
+  RotateCcw,
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 
 const getOrderToken = (ord: any) => {
@@ -281,6 +283,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    */
   const syncOrders = onSyncOrders || onUpdateOrders;
   const mergeServerOrders = (serverOrders: Order[]) => {
+    // Rows whose delete is in flight (or already committed this session) must
+    // never be resurrected by a poll response that raced the DELETE call.
+    if (deletingIdsRef.current.size > 0) {
+      serverOrders = serverOrders.filter(o => !deletingIdsRef.current.has(o.id));
+    }
     const pending = pendingWritesRef.current;
     const rejected = failedWritesRef.current;
     const hasPending = Object.keys(pending).length > 0;
@@ -562,16 +569,28 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       cancelled = true;
       clearTimeout(debounce);
     };
-  }, [merchantId, storeSlug, subMenu, statusTab, searchQuery]);
+  }, [merchantId, storeSlug, subMenu, statusTab, searchQuery, orders.length]);
 
   // Interactions state
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
   const [expandedOrderIds, setExpandedOrderIds] = useState<string[]>([]);
   const [activeMenu, setActiveMenu] = useState<{ id: string; type: 'payment' | 'status' } | null>(null);
 
+  // ── Order deletion ─────────────────────────────────────────────────────────
+  // Ids with a delete in flight OR already committed this session. The 20s
+  // background poll masks them (see `mergeServerOrders`) so a response that
+  // raced the DELETE request cannot resurrect a removed row.
+  const deletingIdsRef = useRef<Set<string>>(new Set());
+  // Rendering mirror of the set — drives the "Deleting…" spinners on rows,
+  // the toolbar and the confirm buttons.
+  const [deletingOrderIds, setDeletingOrderIds] = useState<string[]>([]);
+  // Single-row confirmation target: the row's Delete button sets it, the
+  // modal's confirm runs DELETE /api/orders/:id.
+  const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+
   // Bulk Actions & Modal states
   const [isActionsDropdownOpen, setIsActionsDropdownOpen] = useState(false);
-  const [bulkActionModal, setBulkActionModal] = useState<'change_status' | 'change_payment' | 'invoices' | 'summary' | 'shipping_label' | 'pickup' | null>(null);
+  const [bulkActionModal, setBulkActionModal] = useState<'change_status' | 'change_payment' | 'invoices' | 'summary' | 'shipping_label' | 'pickup' | 'delete' | null>(null);
   const [bulkTargetStatus, setBulkTargetStatus] = useState<Order['status']>('Preparing');
   const [bulkTargetPaymentStatus, setBulkTargetPaymentStatus] = useState<Order['paymentStatus']>('Paid');
   const [pickupDate, setPickupDate] = useState('2026-07-28');
@@ -1299,6 +1318,116 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     onUpdateOrders([...duplicated, ...orders]);
     setSelectedOrderIds([]);
     setIsActionsDropdownOpen(false);
+  };
+
+  // ── Order deletion (single + bulk) ─────────────────────────────────────────
+  /**
+   * Remove orders from the table AND from MongoDB.
+   *
+   * The rows are dropped from state FIRST (optimistic), so the table, the
+   * sidebar badge and every count widget update instantly; the ids are added
+   * to `deletingIdsRef` so a background poll racing the request cannot bring
+   * them back. One id goes through DELETE /api/orders/:id, several through
+   * POST /api/orders/bulk-delete — both scope the write to this store via
+   * `store_slug` / `merchant_id`, exactly like the PUT handler.
+   *
+   * On failure everything is restored (rows un-masked) and the merchant gets
+   * an error toast — nothing ever disappears silently.
+   */
+  const deleteOrdersFromServer = async (ids: string[], label: string): Promise<boolean> => {
+    const uniqueIds = Array.from(new Set(ids.map(id => String(id || '').trim()).filter(Boolean)));
+    if (uniqueIds.length === 0) return false;
+
+    const previous = latestOrdersRef.current;
+    uniqueIds.forEach(id => deletingIdsRef.current.add(id));
+    setDeletingOrderIds(prev => Array.from(new Set([...prev, ...uniqueIds])));
+    // Optimistic removal — the UI updates instantly, before the network settles.
+    syncOrders(previous.filter(o => !uniqueIds.includes(o.id)));
+
+    try {
+      const single = uniqueIds.length === 1;
+      const scope = `store_slug=${encodeURIComponent(storeSlug || '')}&merchant_id=${encodeURIComponent(merchantId || '')}`;
+      const res = single
+        ? await fetch(`/api/orders/${encodeURIComponent(uniqueIds[0])}?${scope}`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+          })
+        : await fetch('/api/orders/bulk-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ids: uniqueIds,
+              store_slug: storeSlug || '',
+              storeSlug: storeSlug || '',
+              merchant_id: merchantId || '',
+            }),
+          });
+
+      const rawBody = await res.text().catch(() => '');
+      let data: any = {};
+      try {
+        data = rawBody ? JSON.parse(rawBody) : {};
+      } catch {
+        data = {};
+      }
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `The server responded with HTTP ${res.status}.`);
+      }
+
+      // The rows are gone server-side: drop their write bookkeeping too so no
+      // stale spinner/revert logic keeps referencing a deleted order.
+      uniqueIds.forEach(id => {
+        delete pendingWritesRef.current[id];
+        delete failedWritesRef.current[id];
+      });
+      setSavingOrderIds(Object.keys(pendingWritesRef.current));
+
+      toast.success(
+        uniqueIds.length === 1 ? 'Order deleted.' : `${uniqueIds.length} orders deleted.`,
+        { description: 'The change is saved in the database.' }
+      );
+      return true;
+    } catch (err: any) {
+      // Roll back: un-mask the ids and put the rows back exactly as they were.
+      uniqueIds.forEach(id => deletingIdsRef.current.delete(id));
+      syncOrders(previous);
+      console.warn(`${label} failed:`, err?.message || err);
+      toast.error(
+        uniqueIds.length === 1 ? 'Could not delete that order.' : `Could not delete ${uniqueIds.length} orders.`,
+        { description: err?.message || 'Please try again.' }
+      );
+      return false;
+    } finally {
+      setDeletingOrderIds(prev => prev.filter(id => !uniqueIds.includes(id)));
+    }
+  };
+
+  /** Bulk toolbar "Delete Selected" → confirm modal → this. */
+  const handleBulkDeleteOrders = async () => {
+    const ids = orders.filter(o => selectedOrderIds.includes(o.id)).map(o => o.id);
+    if (ids.length === 0) {
+      setBulkActionModal(null);
+      return;
+    }
+    const ok = await deleteOrdersFromServer(ids, 'Bulk delete');
+    if (ok) {
+      setSelectedOrderIds([]);
+      setExpandedOrderIds(prev => prev.filter(id => !ids.includes(id)));
+      setBulkActionModal(null);
+    }
+    // On failure the modal stays open so the merchant can retry.
+  };
+
+  /** Row / expanded-panel "Delete Order" → confirm modal → this. */
+  const handleDeleteSingleOrder = async () => {
+    const target = orderToDelete;
+    if (!target) return;
+    setOrderToDelete(null);
+    const ok = await deleteOrdersFromServer([target.id], 'Order delete');
+    if (ok) {
+      setSelectedOrderIds(prev => prev.filter(id => id !== target.id));
+      setExpandedOrderIds(prev => prev.filter(id => id !== target.id));
+    }
   };
 
   const handleExportCSV = (ordersToExport: Order[]) => {
@@ -2179,9 +2308,28 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                           <span>Duplicate order</span>
                         </button>
                       </div>
+
+                      <div className="py-1">
+                        <button
+                          onClick={() => { setBulkActionModal('delete'); setIsActionsDropdownOpen(false); }}
+                          className="w-full text-left px-3.5 py-2 text-slate-200 hover:bg-rose-500/10 hover:text-rose-300 font-semibold flex items-center gap-2.5 cursor-pointer transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                          <span>Delete selected orders</span>
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
+
+                <button
+                  onClick={() => setBulkActionModal('delete')}
+                  disabled={deletingOrderIds.length > 0}
+                  className="bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer shadow-md transition disabled:opacity-60"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{deletingOrderIds.length > 0 ? 'Deleting…' : 'Delete Selected'}</span>
+                </button>
 
                 <button
                   onClick={() => setSelectedOrderIds([])}
@@ -2363,15 +2511,27 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                               <div className="text-[10px] text-slate-400 font-mono">{safeDate(ord?.createdAt)}</div>
                             </td>
 
-                            {/* Expand Row Details */}
+                            {/* Row Actions: Delete + Expand Details */}
                             <td className="p-3.5 text-right">
-                              <button
-                                onClick={() => toggleExpandRow(ord.id)}
-                                className="p-1.5 bg-[#181B26] hover:bg-[#282E3F] text-slate-300 hover:text-white rounded-lg border border-[#2E3548] transition cursor-pointer inline-flex items-center gap-1 text-[11px] font-semibold"
-                              >
-                                <span>{isExpanded ? 'Hide' : 'Expand'}</span>
-                                {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                              </button>
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  onClick={() => setOrderToDelete(ord)}
+                                  disabled={deletingOrderIds.includes(ord.id)}
+                                  title="Delete this order"
+                                  className="p-1.5 bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white rounded-lg border border-rose-500/30 transition cursor-pointer inline-flex items-center gap-1 text-[11px] font-semibold disabled:opacity-50"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>{deletingOrderIds.includes(ord.id) ? 'Deleting…' : 'Delete'}</span>
+                                </button>
+
+                                <button
+                                  onClick={() => toggleExpandRow(ord.id)}
+                                  className="p-1.5 bg-[#181B26] hover:bg-[#282E3F] text-slate-300 hover:text-white rounded-lg border border-[#2E3548] transition cursor-pointer inline-flex items-center gap-1 text-[11px] font-semibold"
+                                >
+                                  <span>{isExpanded ? 'Hide' : 'Expand'}</span>
+                                  {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                                </button>
+                              </div>
                             </td>
                           </tr>
 
@@ -2415,6 +2575,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                       >
                                         <Truck className="w-3.5 h-3.5" />
                                         <span>Courier Dispatch</span>
+                                      </button>
+
+                                      <button
+                                        onClick={() => setOrderToDelete(ord)}
+                                        disabled={deletingOrderIds.includes(ord.id)}
+                                        className="bg-rose-500/10 text-rose-400 border border-rose-500/30 px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1 hover:bg-rose-600 hover:text-white cursor-pointer disabled:opacity-50 transition"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                        <span>{deletingOrderIds.includes(ord.id) ? 'Deleting...' : 'Delete Order'}</span>
                                       </button>
                                     </div>
                                   </div>
@@ -3394,6 +3563,96 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-extrabold rounded-xl text-xs cursor-pointer shadow-md"
               >
                 Schedule & Dispatch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Delete Confirmation Modal */}
+      {bulkActionModal === 'delete' && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-[#1D212E] border border-[#2E3548] rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-[#2E3548] pb-3">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-rose-400" />
+                <span>Delete {selectedOrderIds.length} Order{selectedOrderIds.length === 1 ? '' : 's'}?</span>
+              </h3>
+              <button onClick={() => setBulkActionModal(null)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-3 text-xs space-y-1.5">
+              <p className="font-bold text-rose-200">This permanently removes the selected orders from your store.</p>
+              <p className="text-rose-300/80">
+                Order history, tracking links and invoices for these orders will no longer be available.
+                This action cannot be undone.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-[#2E3548] pt-4">
+              <button
+                onClick={() => setBulkActionModal(null)}
+                className="px-4 py-2 bg-[#202533] text-slate-300 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkDeleteOrders}
+                disabled={deletingOrderIds.length > 0}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-extrabold rounded-xl text-xs cursor-pointer shadow-md disabled:opacity-60 inline-flex items-center gap-2"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>
+                  {deletingOrderIds.length > 0
+                    ? 'Deleting…'
+                    : `Delete ${selectedOrderIds.length} Order${selectedOrderIds.length === 1 ? '' : 's'}`}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Single Order Delete Confirmation Modal */}
+      {orderToDelete && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-[#1D212E] border border-[#2E3548] rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-[#2E3548] pb-3">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-rose-400" />
+                <span>Delete Order {orderToDelete.orderNumber || orderToDelete.id}?</span>
+              </h3>
+              <button onClick={() => setOrderToDelete(null)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-3 text-xs space-y-1.5">
+              <p className="font-bold text-rose-200">
+                {orderToDelete.customerName} · ৳{safeAmount(orderToDelete?.totalBDT)} BDT
+              </p>
+              <p className="text-rose-300/80">
+                This permanently removes the order from your store. Order history, tracking and the
+                invoice for it will no longer be available. This action cannot be undone.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-[#2E3548] pt-4">
+              <button
+                onClick={() => setOrderToDelete(null)}
+                className="px-4 py-2 bg-[#202533] text-slate-300 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteSingleOrder}
+                disabled={deletingOrderIds.length > 0}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-extrabold rounded-xl text-xs cursor-pointer shadow-md disabled:opacity-60 inline-flex items-center gap-2"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{deletingOrderIds.length > 0 ? 'Deleting…' : 'Delete Order'}</span>
               </button>
             </div>
           </div>
