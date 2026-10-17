@@ -5914,6 +5914,8 @@ app.get('/api/storefront/:slug?', async (req, res) => {
     });
 
     let storefrontMerchant: any = merchantRecord;
+    // Growth pixel injection runs FIRST so the social passthrough below (which
+    // spreads the final record) can never wipe the injected pixel IDs.
     if (merchantRecord && growthConfig) {
       const base: Record<string, any> =
         (merchantRecord.integrationsConfig && typeof merchantRecord.integrationsConfig === 'object')
@@ -5931,6 +5933,39 @@ app.get('/api/storefront/:slug?', async (req, res) => {
           integrationsConfig: { ...base, ...injected },
         };
       }
+    }
+    if (merchantRecord) {
+      // ── Explicit social-field passthrough ──────────────────────────────
+      // The storefront's floating Messenger/WhatsApp/social buttons read these
+      // keys off `storefront.merchant`. Store documents saved by older builds
+      // (or by different panels) use alternate spellings, so every accepted
+      // spelling is normalised here — the endpoint ALWAYS returns ALL of:
+      // `facebookPageUrl`, `facebookPageId`, `whatsappNumber`,
+      // `instagramProfile` and `tikTokLink` ('' when unset).
+      const pickStr = (...keys: string[]): string => {
+        for (const k of keys) {
+          const v = (merchantRecord as any)?.[k];
+          if (typeof v === 'string' && v.trim()) return v.trim();
+        }
+        return '';
+      };
+      const integrations = ((storefrontMerchant as any)?.integrationsConfig && typeof (storefrontMerchant as any).integrationsConfig === 'object')
+        ? (storefrontMerchant as any).integrationsConfig
+        : {};
+      const rawPageId = String(integrations.facebookPageId ?? (storefrontMerchant as any)?.facebookPageId ?? '').trim();
+      storefrontMerchant = {
+        ...storefrontMerchant,
+        facebookPageUrl: pickStr('facebookPageUrl', 'facebookUrl', 'facebook_page_url', 'facebook'),
+        facebookPageId: /^\d{5,25}$/.test(rawPageId) ? rawPageId : '',
+        whatsappNumber: pickStr('whatsappNumber', 'whatsapp', 'whatsapp_number'),
+        instagramProfile: pickStr('instagramProfile', 'instagramUrl', 'instagram_profile', 'instagram'),
+        tikTokLink: pickStr('tikTokLink', 'tiktokUrl', 'tiktok', 'tikTok'),
+        integrationsConfig: {
+          ...integrations,
+          // Keep the PUBLIC Page ID unredacted so the floating widget renders.
+          facebookPageId: /^\d{5,25}$/.test(rawPageId) ? rawPageId : (integrations.facebookPageId || ''),
+        },
+      };
     }
 
     // ── Online Store modules (brand / navigation / pages / blog / FAQ / SEO) ──

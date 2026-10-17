@@ -388,11 +388,34 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   const [storeModules, setStoreModules] = useState<StorefrontModules>(EMPTY_MODULES);
   // Real store UUID resolved from the 'stores' table — used for orders.store_id
   const [resolvedStoreId, setResolvedStoreId] = useState<string>('');
+  // Per-slug response caches + in-flight guards. Every storefront fetch below
+  // is keyed on the stable `effectiveStoreSlug` string, so a parent re-render
+  // that hands down a NEW `merchant` object identity can never re-fire the
+  // network calls (the old `[storeSlug, merchant]` deps did exactly that,
+  // stacking [pending] requests in DevTools). A cached slug returns instantly;
+  // a slug with a request already in flight is skipped until it settles.
+  const policiesCacheRef = React.useRef<Record<string, any>>({});
+  const policiesInflightRef = React.useRef<Record<string, AbortController>>({});
+  const localeLoadedRef = React.useRef<Record<string, boolean>>({});
+  const localeInflightRef = React.useRef<Record<string, boolean>>({});
+  const catalogLoadedRef = React.useRef<Record<string, boolean>>({});
+  const catalogInflightRef = React.useRef<Record<string, boolean>>({});
+  const storefrontLoadedRef = React.useRef<Record<string, boolean>>({});
+  const storefrontInflightRef = React.useRef<Record<string, AbortController>>({});
+  const configLoadedRef = React.useRef<Record<string, boolean>>({});
+  const configInflightRef = React.useRef<Record<string, boolean>>({});
   useEffect(() => subscribeToZidStoreData(setLiveStoreData, storeSlug), [storeSlug]);
   useEffect(() => {
     let active = true;
-    // Active store slug resolved from prop (route param) or merchant session — never hardcoded.
-    const effectiveSlug = effectiveStoreSlug;
+    // Stable string key ONLY — never the `merchant` object (its identity churn
+    // re-fires this effect and stacks [pending] /api/storefront requests).
+    const slug = effectiveStoreSlug || storeSlug || 'bd';
+    // Skip when this slug already loaded or already has a request in flight.
+    // React 18 StrictMode double-invokes effects in dev; without this guard
+    // the second invocation fires a duplicate fetch that hangs as [pending].
+    if (storefrontLoadedRef.current[slug] || storefrontInflightRef.current[slug]) return;
+    const controller = new AbortController();
+    storefrontInflightRef.current[slug] = controller;
     const loadStorefront = async () => {
       try {
         let apiProducts: any[] = [];
@@ -401,15 +424,16 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         let apiStoreRecord: any = null;
         let apiBankAccounts: any[] = [];
         let apiMobileBanking: any[] = [];
-        const slug = effectiveSlug || storeSlug || 'bd';
 
-        // Load full storefront payload from Express API — NEVER cached: a
-        // published paid theme (e.g. luxury-boutique) must render instantly.
-        // This fetch is the Vite-SPA equivalent of Next.js `fetch(..., { cache:
-        // 'no-store' })` / dynamic rendering for the customer storefront.
+        // Load full storefront payload from Express API — NEVER browser-cached
+        // (no-store) so a published paid theme renders instantly, but guarded by
+        // the per-slug refs above so exactly ONE request runs per slug. The
+        // AbortController cancels a superseded request instead of letting it
+        // hang as [pending] in DevTools.
         const storefrontRes = await fetch(`/api/storefront/${encodeURIComponent(slug)}`, {
           cache: 'no-store',
           headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+          signal: controller.signal,
         });
         const storefrontData = await storefrontRes.json().catch(() => null);
 
@@ -515,18 +539,22 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           writeZidStoreData(merged as ZidStoreData, storeSlug);
           setLiveStoreData(merged as ZidStoreData);
         }
-      } catch (e: any) { /* local slug-scoped cache remains the offline fallback */
-        console.warn('[TenantStorefrontView] storefront load exception:', e?.message || e);
+      } catch (e: any) {
+        // An aborted superset request is intentional — never log, never retry.
+        if (e?.name !== 'AbortError') console.warn('[TenantStorefrontView] storefront load exception:', e?.message || e);
+      } finally {
+        if (storefrontInflightRef.current[slug] === controller) delete storefrontInflightRef.current[slug];
+        // Mark loaded even on failure so the effect never spins a retry loop;
+        // the local slug-scoped cache remains the offline fallback.
+        storefrontLoadedRef.current[slug] = true;
       }
     };
     void loadStorefront();
-    // NOTE: removed the 3s setInterval poll. Polling Supabase every 3s while also
-    // calling writeZidStoreData()/setLiveStoreData() inside the poll created an
-    // infinite request loop (each write re-renders -> resubscribes -> refetches).
-    // Reactivity for cross-tab/local edits is already handled by the
-    // subscribeToZidStoreData listener above. A single load on mount + slug change
-    // is sufficient; Supabase Realtime covers live DB changes.
-    return () => { active = false; };
+    // NOTE: no setInterval poll. Polling while calling writeZidStoreData() /
+    // setLiveStoreData() inside the poll re-renders -> resubscribes -> refetches
+    // in an infinite loop. Reactivity for local edits is handled by the
+    // subscribeToZidStoreData listener; Supabase Realtime covers DB changes.
+    return () => { active = false; controller.abort(); };
   }, [effectiveStoreSlug]);
 
   const themeCustomization = (liveStoreData.themeCustomization || {}) as {
@@ -930,10 +958,14 @@ The render below must not guess. A merchant may paste
 
     /** Only accept a value that actually belongs to this platform. */
     const hostMatches: Record<string, (h: string) => boolean> = {
-      facebook: (h) => /(^|\.)facebook\.com$/.test(h) || /(^|\.)fb\.com$/.test(h),
+      facebook: (h) => /(^|\.)facebook\.com$/.test(h) || /(^|\.)fb\.com$/.test(h) || /(^|\.)m\.me$/.test(h) || /(^|\.)messenger\.com$/.test(h),
       instagram: (h) => /(^|\.)instagram\.com$/.test(h),
       tiktok: (h) => /(^|\.)tiktok\.com$/.test(h),
     };
+
+    // A bare numeric Page ID pasted into the Facebook field — keep it as-is so
+    // the Messenger widget can link it via m.me (e.g. "130070660193001").
+    if (channel === 'facebook' && /^\d{5,25}$/.test(bare)) return bare;
 
     // A value that is just a handle (`mypage`, `@mypage`) — build the canonical URL.
     if (!bare.includes('.')) {
@@ -1101,33 +1133,59 @@ The render below must not guess. A merchant may paste
     showInFooter?: boolean;
   }>({});
 
+  // Storefront policies (Settings → Legal policies). Keyed ONLY on stable
+  // primitives — the `merchant` OBJECT is intentionally excluded: its identity
+  // changes on every parent re-render, which re-fired this fetch endlessly and
+  // stacked [pending] requests in DevTools. A per-slug cache + AbortController
+  // guarantees one in-flight request per slug at a time.
+  const merchantSlugKey = (merchant as any)?.storeSlug as string | undefined;
   useEffect(() => {
-    const slug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
+    const slug = resolveActiveStoreSlug(storeSlug || merchantSlugKey);
     if (!slug) return;
+    if (policiesCacheRef.current[slug]) {
+      setStorefrontPolicies(policiesCacheRef.current[slug]);
+      return;
+    }
+    if (policiesInflightRef.current[slug]) return;
     let active = true;
+    const controller = new AbortController();
+    policiesInflightRef.current[slug] = controller;
     (async () => {
       try {
-        const res = await fetch(`/api/store/policies?store_slug=${encodeURIComponent(slug)}`);
+        const res = await fetch(`/api/store/policies?store_slug=${encodeURIComponent(slug)}`, {
+          signal: controller.signal,
+        });
         const data = await res.json();
-        if (active && data?.ok && data.policies) setStorefrontPolicies(data.policies);
+        if (active && data?.ok && data.policies) {
+          policiesCacheRef.current[slug] = data.policies;
+          setStorefrontPolicies(data.policies);
+        }
       } catch (e: any) {
-        console.warn('Storefront policies fetch warning:', e?.message || e);
+        if (e?.name !== 'AbortError') console.warn('Storefront policies fetch warning:', e?.message || e);
+      } finally {
+        if (policiesInflightRef.current[slug] === controller) delete policiesInflightRef.current[slug];
       }
     })();
-    return () => { active = false; };
-  }, [storeSlug, merchant]);
+    return () => { active = false; controller.abort(); };
+  }, [storeSlug, merchantSlugKey]);
 
   // Apply the merchant's saved default language ('bn' | 'en-US') so the whole
   // storefront — cart, checkout, invoices and automated communications — renders
   // in that language. A visitor's explicit toggle in localStorage still wins
   // during the session; this only seeds the merchant-selected default.
+  // Merchant default language. Same loop guard: `merchant` object excluded in
+  // favour of the stable slug string, one request per slug, abort on cleanup.
   useEffect(() => {
-    const slug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
-    if (!slug) return;
+    const slug = resolveActiveStoreSlug(storeSlug || merchantSlugKey);
+    if (!slug || localeLoadedRef.current[slug] || localeInflightRef.current[slug]) return;
+    localeInflightRef.current[slug] = true;
     let active = true;
+    const controller = new AbortController();
     (async () => {
       try {
-        const res = await fetch(`/api/stores/locale?store_slug=${encodeURIComponent(slug)}`);
+        const res = await fetch(`/api/stores/locale?store_slug=${encodeURIComponent(slug)}`, {
+          signal: controller.signal,
+        });
         const data = await res.json();
         if (!active) return;
         const savedLang = data?.localeConfig?.defaultLanguage;
@@ -1138,25 +1196,34 @@ The render below must not guess. A merchant may paste
           if (!visitorChoice) setLanguage(savedLang === 'bn' ? 'bn' : 'en');
         }
       } catch (e: any) {
-        console.warn('Storefront locale fetch warning:', e?.message || e);
+        if (e?.name !== 'AbortError') console.warn('Storefront locale fetch warning:', e?.message || e);
+      } finally {
+        localeInflightRef.current[slug] = false;
+        localeLoadedRef.current[slug] = true;
       }
     })();
-    return () => { active = false; };
-  }, [storeSlug, merchant, setLanguage]);
+    return () => { active = false; controller.abort(); };
+  }, [storeSlug, merchantSlugKey, setLanguage]);
 
   useEffect(() => {
     let active = true;
-    // Active store slug resolved from prop (route param) or merchant session — never hardcoded.
-    const effectiveSlug = resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug);
+    // Stable slug string ONLY — the old effect re-resolved from `merchant` and
+    // had no in-flight guard, so every parent re-render queued 2 more parallel
+    // /api/categories + /api/products calls that piled up as [pending].
+    const slug = effectiveStoreSlug || storeSlug || 'bd';
+    if (catalogLoadedRef.current[slug] || catalogInflightRef.current[slug]) return;
+    catalogInflightRef.current[slug] = true;
+    const controller = new AbortController();
     const fetchCatalog = async () => {
       let catData: any[] = [];
       let prodData: any[] = [];
 
-      // 1. Fetch categories and products from Express API
+      // 1. Fetch categories and products from Express API (abortable, so a
+      // superseded call settles as AbortError instead of hanging [pending]).
       try {
         const [catRes, prodRes] = await Promise.all([
-          fetch(`/api/categories?store_slug=${encodeURIComponent(effectiveSlug || storeSlug || 'bd')}`).then(r => r.json().catch(() => null)),
-          fetch(`/api/products?store_slug=${encodeURIComponent(effectiveSlug || storeSlug || 'bd')}`).then(r => r.json().catch(() => null)),
+          fetch(`/api/categories?store_slug=${encodeURIComponent(slug)}`, { signal: controller.signal }).then(r => r.json().catch(() => null)),
+          fetch(`/api/products?store_slug=${encodeURIComponent(slug)}`, { signal: controller.signal }).then(r => r.json().catch(() => null)),
         ]);
 
         if (catRes && Array.isArray(catRes.categories)) {
@@ -1168,8 +1235,9 @@ The render below must not guess. A merchant may paste
           prodData.push(...prodRes);
         }
       } catch (e: any) {
+        if (e?.name === 'AbortError') return;
         console.warn('Catalog API fetch warning:', e?.message || e);
-        setCatalogLoadFailed(true);
+        if (active) setCatalogLoadFailed(true);
       }
 
         // Check localStorage fallbacks — only THIS store's keys, never the mock
@@ -1225,8 +1293,13 @@ The render below must not guess. A merchant may paste
       }
     };
 
-    void fetchCatalog();
-    return () => { active = false; };
+    void fetchCatalog().finally(() => {
+      catalogInflightRef.current[slug] = false;
+      // Marked loaded even on failure: the /api/storefront payload + local
+      // cache remain as fallbacks, and without this the effect retry-loops.
+      catalogLoadedRef.current[slug] = true;
+    });
+    return () => { active = false; controller.abort(); };
   }, [effectiveStoreSlug]);
 
   // Products shown on the storefront come from the DATABASE (via API).
@@ -1285,9 +1358,28 @@ The render below must not guess. A merchant may paste
 
   // Injects Meta Pixel + GA4 once the IDs are known.
   useStorefrontTracking(integrationsConfig);
-  // Floating Messenger button — renders nothing unless the merchant saved a
-  // numeric Facebook Page ID in Settings → API.
-  const messengerPageId = integrationsConfig?.facebookPageId;
+  // Keep the Messenger Page ID in sync with the /api/storefront/:slug payload
+  // AND the merchant prop: state initialises once from the (often empty) first
+  // render, so without this the widget never sees the ID that arrives later.
+  useEffect(() => {
+    const fromPayload = (liveStoreData.merchant as any)?.integrationsConfig?.facebookPageId;
+    const fromProp = (merchant as any)?.integrationsConfig?.facebookPageId;
+    const next = String(fromPayload || fromProp || '').trim();
+    if (!next) return;
+    setIntegrationsConfig((prev) => {
+      if (String((prev as any)?.facebookPageId || '').trim() === next) return prev;
+      return { ...(prev || {}), facebookPageId: next };
+    });
+  }, [
+    (liveStoreData.merchant as any)?.integrationsConfig?.facebookPageId,
+    (merchant as any)?.integrationsConfig?.facebookPageId,
+  ]);
+  // Floating Messenger button — renders whenever a numeric Page ID (Settings →
+  // API) OR a Facebook Page URL (Settings → Social Media) exists. A store that
+  // only saved `facebookPageUrl` still gets the pinned button via the fallback.
+  const messengerPageId = integrationsConfig?.facebookPageId
+    || (liveStoreData.merchant as any)?.integrationsConfig?.facebookPageId
+    || (merchant as any)?.integrationsConfig?.facebookPageId;
   const hideOutOfStock = inventoryConfig?.hideOutOfStock === true;
   const merchantAllowPreOrder = inventoryConfig?.allowPreOrder === true;
   const minOrderQty = Number(inventoryConfig?.minOrderQty) || 1;
@@ -1535,23 +1627,27 @@ The render below must not guess. A merchant may paste
   const [storeCheckoutConfig, setStoreCheckoutConfig] = useState<MerchantProfile['checkoutConfig']>(storefrontMerchant.checkoutConfig);
 
 
+  // Checkout/gift/inventory/tax/integration configs. One guarded load per slug:
+  // concurrent duplicate fetches previously stacked 5 [pending] requests.
   useEffect(() => {
     const ref = String(effectiveStoreSlug || '').split(':')[0].trim();
-    if (!ref) return;
+    if (!ref || configLoadedRef.current[ref] || configInflightRef.current[ref]) return;
+    configInflightRef.current[ref] = true;
     let cancelled = false;
+    const controller = new AbortController();
 
     const load = async () => {
       try {
         const [giftRes, checkoutRes] = await Promise.all([
-          fetch(`/api/store/gift-options?store_slug=${encodeURIComponent(ref)}`),
-          fetch(`/api/store/checkout-settings?store_slug=${encodeURIComponent(ref)}`),
+          fetch(`/api/store/gift-options?store_slug=${encodeURIComponent(ref)}`, { signal: controller.signal }),
+          fetch(`/api/store/checkout-settings?store_slug=${encodeURIComponent(ref)}`, { signal: controller.signal }),
         ]);
         const [giftData, checkoutData, inventoryData, taxData, integrationsData] = await Promise.all([
           giftRes.json(),
           checkoutRes.json(),
-          fetch(`/api/store/inventory-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
-          fetch(`/api/store/tax-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
-          fetch(`/api/store/integration-properties?store_slug=${encodeURIComponent(ref)}`).then(r => r.json()),
+          fetch(`/api/store/inventory-properties?store_slug=${encodeURIComponent(ref)}`, { signal: controller.signal }).then(r => r.json()),
+          fetch(`/api/store/tax-properties?store_slug=${encodeURIComponent(ref)}`, { signal: controller.signal }).then(r => r.json()),
+          fetch(`/api/store/integration-properties?store_slug=${encodeURIComponent(ref)}`, { signal: controller.signal }).then(r => r.json()),
         ]);
         if (cancelled) return;
         const giftPayload = giftData?.giftOptions || giftData?.giftConfig;
@@ -1560,15 +1656,30 @@ The render below must not guess. A merchant may paste
         if (inventoryData?.ok && inventoryData.inventoryConfig) setInventoryConfig(inventoryData.inventoryConfig);
         if (taxData?.ok && taxData.taxConfig) setTaxConfig(taxData.taxConfig);
         if (integrationsData?.ok && integrationsData.integrationsConfig) {
-          setIntegrationsConfig(integrationsData.integrationsConfig);
+          // Merge — never blank the Page ID the /api/storefront payload or
+          // the merchant prop already supplied (an empty config row would
+          // otherwise hide the floating Messenger button).
+          const incoming = integrationsData.integrationsConfig as Record<string, unknown>;
+          setIntegrationsConfig((prev) => {
+            const merged: Record<string, unknown> = { ...(incoming || {}) };
+            for (const [k, v] of Object.entries(prev || {})) {
+              if ((merged[k] === undefined || merged[k] === '' || merged[k] === null) && v !== undefined && v !== '') {
+                merged[k] = v;
+              }
+            }
+            return merged as MerchantProfile['integrationsConfig'];
+          });
         }
-      } catch (err) {
-        console.warn('Storefront checkout config load warning:', err);
+      } catch (err: any) {
+        if (err?.name !== 'AbortError') console.warn('Storefront checkout config load warning:', err);
+      } finally {
+        configInflightRef.current[ref] = false;
+        configLoadedRef.current[ref] = true;
       }
     };
 
-    load();
-    return () => { cancelled = true; };
+    void load();
+    return () => { cancelled = true; controller.abort(); };
   }, [effectiveStoreSlug]);
 
   // Gift selection made by the customer on the checkout form.
