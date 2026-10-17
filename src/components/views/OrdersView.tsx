@@ -4,6 +4,8 @@ import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canoni
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
 import { loadCourierConfig } from '../../lib/logisticsApi';
+// A4 print template + shared token/QR helpers (see components/orders/PrintLabel.tsx).
+import { buildA4InvoiceHtml, resolvePrintStoreInfo, getOrderToken, generateQRCodeSVG } from '../orders/PrintLabel';
 import {
   ShoppingBag,
   Search,
@@ -46,44 +48,8 @@ import {
   AlertTriangle
 } from 'lucide-react';
 
-const getOrderToken = (ord: any) => {
-  if (ord?.orderToken) return ord.orderToken;
-  const cleanId = String(ord?.orderNumber || ord?.id || '72200789').replace(/[^a-zA-Z0-9]/g, '');
-  let sum = 0;
-  for (let i = 0; i < cleanId.length; i++) sum += cleanId.charCodeAt(i);
-  const hex = (sum * 9973).toString(16).toUpperCase();
-  return `TRK-${cleanId.slice(-4).toUpperCase()}${hex.slice(-4)}`;
-};
-
-const generateQRCodeSVG = (text: string, size = 64) => {
-  let rects = '';
-  const modulesCount = 21;
-
-  const drawFinder = (sr: number, sc: number) => {
-    for (let r = 0; r < 7; r++) {
-      for (let c = 0; c < 7; c++) {
-        const isOuter = r === 0 || r === 6 || c === 0 || c === 6;
-        const isInner = r >= 2 && r <= 4 && c >= 2 && c <= 4;
-        if (isOuter || isInner) {
-          rects += `<rect x="${(sc + c) * 2}" y="${(sr + r) * 2}" width="2" height="2" fill="black"/>`;
-        }
-      }
-    }
-  };
-
-  drawFinder(0, 0);
-  drawFinder(0, modulesCount - 7);
-  drawFinder(modulesCount - 7, 0);
-
-  for (let i = 0; i < modulesCount; i++) {
-    if (i % 2 === 0) {
-      rects += `<rect x="${i * 2}" y="24" width="2" height="2" fill="black"/>`;
-      rects += `<rect x="24" y="${i * 2}" width="2" height="2" fill="black"/>`;
-    }
-  }
-
-  return `<svg viewBox="0 0 42 42" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">${rects}</svg>`;
-};
+// `getOrderToken` / `generateQRCodeSVG` moved to ../orders/PrintLabel so the
+// A4 print document and these on-screen previews share one implementation.
 
 interface OrdersViewProps {
   orders: Order[];
@@ -1855,6 +1821,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     return orders.filter(o => selectedOrderIds.includes(o.id));
   }, [orders, selectedOrderIds]);
 
+  // Store branding for the print previews and the A4 popup document
+  // (resolved once from the cached merchant profile — see PrintLabel.tsx).
+  const printStore = useMemo(() => resolvePrintStoreInfo(), []);
+
   // Returns / Requests sub-menu — the dedicated customer-return queue.
   const renderReturnsPanel = () => (
     <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-6 space-y-4 shadow-lg">
@@ -2876,9 +2846,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <div>
                 <h3 className="text-lg font-bold text-white flex items-center gap-2">
                   <FileText className="w-5 h-5 text-purple-400" />
-                  <span>Selected Orders Tax Invoices ({selectedOrders.length})</span>
+                  <span>A4 Tax Invoices &amp; Packing Slips ({selectedOrders.length})</span>
                 </h3>
-                <p className="text-xs text-slate-400 mt-0.5">Official printable commercial tax invoice copies for selected orders</p>
+                <p className="text-xs text-slate-400 mt-0.5">Premium colored A4 invoice with brand header, payment seal, product table &amp; tax breakdown</p>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -2889,235 +2859,21 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       return;
                     }
 
-                    const invoicesHtml = selectedOrders.map(ord => `
-                      <div class="invoice-box">
-                        <div class="header">
-                          <div style="display: flex; align-items: center; gap: 14px;">
-                            <div>${generateQRCodeSVG(getOrderToken(ord), 60)}</div>
-                            <div>
-                              <h2>Zid Store / My Store</h2>
-                              <p>GST / BIN: 00399120-BD • Tax Registered Merchant</p>
-                              <p>Order Token: <b>${getOrderToken(ord)}</b></p>
-                            </div>
-                          </div>
-                          <div class="right">
-                            <span class="tax-badge">TAX INVOICE</span>
-                            <p class="order-num">${ord.orderNumber}</p>
-                            <p class="date">${safeDate(ord?.createdAt)}</p>
-                          </div>
-                        </div>
-
-                        <div class="meta-box">
-                          <div>
-                            <span class="label">Billed To Customer:</span>
-                            <p class="customer-name">${ord.customerName}</p>
-                            <p class="phone">${ord.customerPhone}</p>
-                            <p class="address">${ord.address}, ${ord.customerCity}</p>
-                          </div>
-                          <div class="right">
-                            <span class="label">Payment & Delivery:</span>
-                            <p>Method: ${ord.paymentMethod}</p>
-                            <p class="status">Status: ${ord.paymentStatus}</p>
-                            <p>Courier: ${ord.courierName || 'Steadfast'}</p>
-                          </div>
-                        </div>
-
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>Item Description</th>
-                              <th>Variant</th>
-                              <th class="center">Qty</th>
-                              <th class="right">Unit Price</th>
-                              <th class="right">Total</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            ${ord.items.map((it: any) => `
-                              <tr>
-                                <td><b>${it.productName}</b></td>
-                                <td>${it.variant}</td>
-                                <td class="center">${it.quantity}</td>
-                                <td class="right">৳${safeAmount(it?.unitPriceBDT)}</td>
-                                <td class="right"><b>৳${safeAmount(toNumber(it?.quantity) * toNumber(it?.unitPriceBDT))}</b></td>
-                              </tr>
-                            `).join('')}
-                          </tbody>
-                        </table>
-
-                        <div class="footer">
-                          <span class="thank-you">Thank you for shopping with My Store Zid Store!</span>
-                          <div class="right">
-                            <span class="grand-label">Grand Total BDT:</span>
-                            <span class="grand-total">৳${safeAmount(ord?.totalBDT)} BDT</span>
-                          </div>
-                        </div>
-                      </div>
-                    `).join('<div class="page-break"></div>');
-
-                    printWindow.document.write(`
-                      <!DOCTYPE html>
-                      <html>
-                        <head>
-                          <title>Tax Invoices - Zid Store</title>
-                          <style>
-                            body {
-                              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                              color: #111827;
-                              background: #ffffff;
-                              margin: 0;
-                              padding: 20px;
-                            }
-                            .invoice-box {
-                              background: #ffffff;
-                              border: 1px solid #e2e8f0;
-                              border-radius: 12px;
-                              padding: 24px;
-                              margin-bottom: 30px;
-                              box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
-                            }
-                            .header {
-                              display: flex;
-                              justify-content: space-between;
-                              align-items: flex-start;
-                              border-bottom: 2px solid #0f172a;
-                              padding-bottom: 16px;
-                              margin-bottom: 16px;
-                            }
-                            .header h2 {
-                              margin: 0 0 4px 0;
-                              font-size: 20px;
-                              font-weight: 900;
-                              text-transform: uppercase;
-                            }
-                            .header p {
-                              margin: 2px 0;
-                              font-size: 12px;
-                              color: #4b5563;
-                            }
-                            .right {
-                              text-align: right;
-                            }
-                            .tax-badge {
-                              background: #0f172a;
-                              color: #ffffff;
-                              font-family: monospace;
-                              font-size: 11px;
-                              font-weight: bold;
-                              padding: 4px 8px;
-                              border-radius: 6px;
-                            }
-                            .order-num {
-                              font-size: 14px;
-                              font-weight: bold;
-                              font-family: monospace;
-                              margin: 6px 0 2px 0;
-                            }
-                            .date {
-                              font-size: 11px;
-                              color: #6b7280;
-                              margin: 0;
-                            }
-                            .meta-box {
-                              display: flex;
-                              justify-content: space-between;
-                              background: #f8fafc;
-                              border: 1px solid #e2e8f0;
-                              border-radius: 8px;
-                              padding: 12px;
-                              font-size: 12px;
-                              margin-bottom: 16px;
-                            }
-                            .label {
-                              font-size: 10px;
-                              font-weight: bold;
-                              color: #64748b;
-                              text-transform: uppercase;
-                              display: block;
-                              margin-bottom: 4px;
-                            }
-                            .customer-name {
-                              font-weight: bold;
-                              font-size: 13px;
-                              margin: 0 0 2px 0;
-                            }
-                            .phone, .address {
-                              margin: 0;
-                              color: #475569;
-                            }
-                            .status {
-                              color: #059669;
-                              font-weight: bold;
-                            }
-                            table {
-                              width: 100%;
-                              border-collapse: collapse;
-                              font-size: 12px;
-                              margin-bottom: 16px;
-                            }
-                            th {
-                              border-bottom: 2px solid #0f172a;
-                              padding: 8px;
-                              text-align: left;
-                              font-size: 10px;
-                              text-transform: uppercase;
-                              color: #475569;
-                            }
-                            td {
-                              padding: 10px 8px;
-                              border-bottom: 1px solid #e2e8f0;
-                            }
-                            .center { text-align: center; }
-                            .right { text-align: right; }
-                            .footer {
-                              border-top: 2px solid #0f172a;
-                              padding-top: 12px;
-                              display: flex;
-                              justify-content: space-between;
-                              align-items: center;
-                              font-size: 12px;
-                            }
-                            .thank-you {
-                              font-style: italic;
-                              color: #64748b;
-                            }
-                            .grand-label {
-                              font-weight: bold;
-                              color: #64748b;
-                              margin-right: 8px;
-                            }
-                            .grand-total {
-                              font-size: 16px;
-                              font-weight: 900;
-                              font-family: monospace;
-                            }
-                            .page-break {
-                              page-break-after: always;
-                              break-after: page;
-                            }
-                            @media print {
-                              body { padding: 0; }
-                              .invoice-box { border: none; box-shadow: none; padding: 0; margin-bottom: 40px; }
-                            }
-                          </style>
-                        </head>
-                        <body>
-                          ${invoicesHtml}
-                          <script>
-                            window.onload = function() {
-                              window.print();
-                              setTimeout(function() { window.close(); }, 500);
-                            };
-                          </script>
-                        </body>
-                      </html>
-                    `);
+                    // A4 premium colored TAX INVOICE & PACKING SLIP — shared
+                    // template in components/orders/PrintLabel.tsx: brand header
+                    // (logo + store name + address), payment seal, itemised
+                    // product table with SKU, VAT/delivery breakdown and the
+                    // courier shipping block with barcode / QR / tracking.
+                    printWindow.document.write(buildA4InvoiceHtml(selectedOrders, resolvePrintStoreInfo()));
                     printWindow.document.close();
+
+
+
                   }}
                   className="bg-[#00D68F] text-slate-950 px-3.5 py-1.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow"
                 >
                   <Printer className="w-4 h-4" />
-                  <span>Print Invoices</span>
+                  <span>Print A4 Invoice</span>
                 </button>
                 <button onClick={() => setBulkActionModal(null)} className="text-slate-400 hover:text-white p-1">
                   <X className="w-5 h-5" />
@@ -3132,8 +2888,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <div className="flex items-center gap-3">
                       <div dangerouslySetInnerHTML={{ __html: generateQRCodeSVG(getOrderToken(ord), 60) }} />
                       <div>
-                        <h4 className="text-xl font-black text-slate-900 uppercase tracking-tight">Zid Store / My Store</h4>
-                        <p className="text-xs text-slate-600 font-medium">GST / BIN: 00399120-BD • Tax Registered Merchant</p>
+                        <h4 className="text-xl font-black text-slate-900 uppercase tracking-tight">{printStore.name}</h4>
+                        <p className="text-xs text-slate-600 font-medium">
+                          {printStore.vatNumber ? `VAT / BIN: ${printStore.vatNumber} • Tax Registered Merchant` : 'Tax Invoice & Packing Slip'}
+                        </p>
                         <p className="text-xs font-mono font-bold text-slate-700 mt-0.5">Token: {getOrderToken(ord)}</p>
                       </div>
                     </div>
@@ -3276,9 +3034,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <div>
                 <h3 className="text-lg font-bold text-white flex items-center gap-2">
                   <Printer className="w-5 h-5 text-cyan-400" />
-                  <span>Print Thermal Shipping Labels ({selectedOrders.length})</span>
+                  <span>Print A4 Invoice &amp; Packing Slip ({selectedOrders.length})</span>
                 </h3>
-                <p className="text-xs text-slate-400 mt-0.5">Ready for courier dispatch packaging affixing</p>
+                <p className="text-xs text-slate-400 mt-0.5">Premium A4 PDF — invoice, item breakdown &amp; courier label with barcode / QR / tracking</p>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -3289,165 +3047,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       return;
                     }
 
-                    const labelsHtml = selectedOrders.map(ord => `
-                      <div class="label-box">
-                        <div class="header">
-                          <span class="courier">${ord.courierName || 'Steadfast Express'}</span>
-                          <span class="cod">COD ৳${safeAmount(ord?.totalBDT)} BDT</span>
-                        </div>
-
-                        <div class="recipient">
-                          <span class="label">Recipient / Delivery Address:</span>
-                          <p class="name">${ord.customerName}</p>
-                          <p class="phone">${ord.customerPhone}</p>
-                          <p class="address">${ord.address}, ${ord.customerCity} (${ord.deliveryZone})</p>
-                        </div>
-
-                        <div class="barcode-box" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                          <div style="text-align: left; flex: 1;">
-                            <div class="barcode" style="font-size: 16px;">|||||| |||||||| |||||||</div>
-                            <p class="tracking">${ord.trackingCode || `TRACK-${ord.orderNumber}`}</p>
-                          </div>
-                          <div style="text-align: center;">
-                            ${generateQRCodeSVG(getOrderToken(ord), 52)}
-                            <p style="font-family: monospace; font-size: 8px; font-weight: bold; margin: 2px 0 0 0;">${getOrderToken(ord)}</p>
-                          </div>
-                        </div>
-
-                        <div class="footer">
-                          <span>Sender: Zid My Store Store</span>
-                          <span>Order: ${ord.orderNumber}</span>
-                        </div>
-                      </div>
-                    `).join('<div class="page-break"></div>');
-
-                    printWindow.document.write(`
-                      <!DOCTYPE html>
-                      <html>
-                        <head>
-                          <title>Thermal Shipping Labels - Zid Store</title>
-                          <style>
-                            body {
-                              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                              background: #ffffff;
-                              color: #0f172a;
-                              margin: 0;
-                              padding: 20px;
-                            }
-                            .label-box {
-                              width: 100%;
-                              max-width: 400px;
-                              border: 2px solid #000000;
-                              border-radius: 12px;
-                              padding: 16px;
-                              margin: 0 auto 24px auto;
-                              background: #ffffff;
-                              box-sizing: border-box;
-                            }
-                            .header {
-                              display: flex;
-                              justify-content: space-between;
-                              align-items: center;
-                              border-bottom: 2px solid #000000;
-                              padding-bottom: 8px;
-                              margin-bottom: 12px;
-                            }
-                            .courier {
-                              font-weight: 900;
-                              font-size: 14px;
-                              text-transform: uppercase;
-                            }
-                            .cod {
-                              font-family: monospace;
-                              font-weight: bold;
-                              font-size: 11px;
-                              background: #000000;
-                              color: #ffffff;
-                              padding: 3px 6px;
-                              border-radius: 4px;
-                            }
-                            .recipient {
-                              font-size: 12px;
-                              margin-bottom: 12px;
-                            }
-                            .label {
-                              font-size: 9px;
-                              font-weight: bold;
-                              text-transform: uppercase;
-                              color: #4b5563;
-                              display: block;
-                              margin-bottom: 2px;
-                            }
-                            .name {
-                              font-weight: 900;
-                              font-size: 14px;
-                              margin: 0 0 2px 0;
-                            }
-                            .phone {
-                              font-family: monospace;
-                              font-weight: bold;
-                              margin: 0 0 2px 0;
-                            }
-                            .address {
-                              margin: 0;
-                              color: #334155;
-                            }
-                            .barcode-box {
-                              background: #f1f5f9;
-                              border: 1px solid #cbd5e1;
-                              border-radius: 6px;
-                              padding: 10px;
-                              text-align: center;
-                              margin-bottom: 12px;
-                            }
-                            .barcode {
-                              font-family: monospace;
-                              font-size: 22px;
-                              letter-spacing: 3px;
-                              font-weight: 900;
-                            }
-                            .tracking {
-                              font-family: monospace;
-                              font-size: 10px;
-                              font-weight: bold;
-                              margin: 4px 0 0 0;
-                            }
-                            .footer {
-                              display: flex;
-                              justify-content: space-between;
-                              font-size: 9px;
-                              font-weight: bold;
-                              color: #475569;
-                              border-top: 1px solid #cbd5e1;
-                              padding-top: 8px;
-                            }
-                            .page-break {
-                              page-break-after: always;
-                              break-after: page;
-                            }
-                            @media print {
-                              body { padding: 0; }
-                              .label-box { border: 2px solid #000; box-shadow: none; margin-bottom: 30px; }
-                            }
-                          </style>
-                        </head>
-                        <body>
-                          ${labelsHtml}
-                          <script>
-                            window.onload = function() {
-                              window.print();
-                              setTimeout(function() { window.close(); }, 500);
-                            };
-                          </script>
-                        </body>
-                      </html>
-                    `);
+                    // The label flow now prints the same premium A4 invoice &
+                    // packing slip: the courier/barcode/QR/tracking block lives
+                    // inside the shared template (components/orders/PrintLabel).
+                    printWindow.document.write(buildA4InvoiceHtml(selectedOrders, resolvePrintStoreInfo()));
                     printWindow.document.close();
+
                   }}
                   className="bg-[#00D68F] text-slate-950 px-3.5 py-1.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow"
                 >
                   <Printer className="w-4 h-4" />
-                  <span>Print Labels</span>
+                  <span>Print A4 Packing Slip</span>
                 </button>
                 <button onClick={() => setBulkActionModal(null)} className="text-slate-400 hover:text-white p-1">
                   <X className="w-5 h-5" />
