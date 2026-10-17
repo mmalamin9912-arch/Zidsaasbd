@@ -5366,11 +5366,12 @@ The render below must not guess. A merchant may paste
       </footer>
       </div>
 
-      {/* Facebook Messenger Customer Chat — floating "Message us" button.
-          Renders nothing unless the merchant saved a numeric Page ID in
-          Settings → API. Placed last so its fixed-position bubble sits above
-          every storefront layer, including the mobile bottom bar. */}
-      <MessengerChatWidget pageId={messengerPageId} />
+      {/* Facebook Messenger floating chat button — ALWAYS visible when the
+          merchant saved a numeric Page ID (Settings → API) OR a Facebook Page
+          URL (Settings → Social Media). Pinned fixed bottom-6 right-6 with
+          z-[9999] so it sits above footers, sticky bars and theme layers.
+          Clicking opens the Messenger / Facebook URL in a new tab. */}
+      <MessengerChatWidget pageId={messengerPageId} pageUrl={resolvedTheme.facebookHandle} />
 
       {/* Floating WhatsApp chat button.
           Driven by the merchant profile's `whatsappNumber` (Settings → Social
@@ -5385,7 +5386,7 @@ The render below must not guess. A merchant may paste
           rel="noopener noreferrer"
           title="Chat on WhatsApp"
           aria-label="Chat on WhatsApp"
-          className="fixed bottom-24 right-5 z-[45] flex h-12 w-12 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/30 transition hover:scale-110"
+          className="fixed bottom-24 right-6 z-[9998] flex h-12 w-12 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/30 transition hover:scale-110"
         >
           <MessageCircle className="h-6 w-6" />
         </a>

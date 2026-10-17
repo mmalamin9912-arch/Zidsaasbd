@@ -1,44 +1,22 @@
 /**
- * Facebook Messenger Customer Chat widget for the storefront.
- *
- * WHY THIS EXISTS
- * ---------------
- * Bangladeshi merchants sell primarily through Facebook. A shopper who lands on
- * `storename.zidbdsaas.com` expects the same "Message us" button they see on the
- * merchant's Facebook page. This component loads Meta's official Customer Chat
- * SDK and renders it as a floating button, so a conversation started on the
- * storefront continues in the shopper's Messenger inbox.
- *
- * CONFIGURATION
- * -------------
- * The merchant pastes their numeric Facebook Page ID into
- * Dashboard → Settings → API → "Facebook Messenger Page ID"
- * (`integrationsConfig.facebookPageId`). The value is PUBLIC — the same ID ships
- * in the widget snippet on any website — so the server returns it unredacted.
- * When it is empty this component renders nothing at all.
- *
- * The SDK is injected lazily on mount and guarded by a module-level flag so a
- * re-render (or a second widget instance in the theme preview) cannot load the
- * script twice. If the merchant changes their Page ID while the tab is open, the
- * widget is torn down and re-initialised against the new page.
+ * Facebook Messenger floating chat button for the storefront.
+ * ALWAYS renders a pinned bottom-right button when a Page ID or Page URL
+ * exists — never depends on the Meta SDK for visibility. Clicking opens
+ * the Messenger / Facebook URL in a new tab. The legacy Customer Chat SDK
+ * is still loaded best-effort when a numeric Page ID is present.
  */
 
 import { useEffect } from 'react';
 
 /** Props supplied by the storefront renderer. */
 export interface MessengerChatWidgetProps {
-  /**
-   * Numeric Facebook Page ID. An empty/blank value disables the widget, and a
-   * non-numeric value (a pasted URL or @username) is ignored rather than being
-   * injected into the snippet.
-   */
+  /** Numeric Facebook Page ID → links to `m.me/<id>`. */
   pageId?: string | null;
-  /**
-   * Optional locale for the widget's own labels, e.g. `en_US` / `bn_IN`.
-   * Defaults to Meta's `en_US`.
-   */
+  /** Fallback Facebook Page URL / handle. Used when `pageId` is absent. */
+  pageUrl?: string | null;
+  /** Locale for the legacy SDK labels. Defaults to `en_US`. */
   locale?: string;
-  /** Smallest allowed width for the expanded chat window. */
+  /** Smallest allowed width for the legacy SDK chat window. */
   minimizedWidth?: number;
 }
 
@@ -110,14 +88,41 @@ function loadMessengerSdk(locale: string): Promise<void> {
   return sdkLoadPromise;
 }
 
+export function resolveMessengerHref(pageId?: string | null, pageUrl?: string | null): string {
+  const cleanId = String(pageId ?? '').trim();
+  if (/^\d{5,25}$/.test(cleanId)) return `https://m.me/${cleanId}`;
+  const raw = String(pageUrl ?? '').trim().replace(/^@/, '');
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^\d{5,25}$/.test(raw)) return `https://m.me/${raw}`;
+  const bare = raw.replace(/^www\./i, '');
+  if (/^(facebook\.com|fb\.com|m\.me)(\/|$)/i.test(bare)) return `https://${bare}`;
+  if (/^[a-zA-Z0-9._-]{2,100}$/.test(raw) && !raw.includes('.')) return `https://facebook.com/${raw}`;
+  const host = bare.split('/')[0].toLowerCase();
+  if (/(^|\.)facebook\.com$/.test(host) || /(^|\.)fb\.com$/.test(host) || /(^|\.)messenger\.com$/.test(host)) return `https://${bare}`;
+  return '';
+}
+
+/** Official Messenger glyph (white on Messenger blue). */
+function MessengerGlyph({ className = 'h-7 w-7' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 36 36" fill="currentColor" aria-hidden="true" className={className}>
+      <path d="M18 3C9.7 3 3 9.1 3 16.6c0 4.2 2.1 7.9 5.4 10.3v4.5l4.1-2.3c1.1.3 2.3.5 3.5.5 8.3 0 15-6.1 15-13.6S26.3 3 18 3zm1.2 18.3-3.7-4-7.2 4 7.9-8.4 3.8 4 7.1-4-7.9 8.4z" />
+    </svg>
+  );
+}
+
 export function MessengerChatWidget({
   pageId,
+  pageUrl,
   locale = 'en_US',
   minimizedWidth = 300,
 }: MessengerChatWidgetProps) {
-  // Only digits are valid; anything else would break the `page_id` attribute.
   const cleanPageId = String(pageId ?? '').trim();
   const isValidPageId = /^\d{5,25}$/.test(cleanPageId);
+  // ALWAYS-visible floating button target: numeric Page ID wins (m.me opens
+  // the chat directly), otherwise fall back to the saved Facebook Page URL.
+  const href = resolveMessengerHref(pageId, pageUrl);
 
   useEffect(() => {
     if (!isValidPageId) return;
@@ -154,9 +159,31 @@ export function MessengerChatWidget({
     };
   }, [cleanPageId, isValidPageId, locale, minimizedWidth]);
 
-  // The visible widget is rendered by Meta's SDK into the root element above, so
-  // this React tree intentionally renders nothing.
-  return null;
+  // No Page ID AND no Page URL → nothing to link to, render nothing.
+  if (!href) return null;
+
+  // Pinned floating button: fixed bottom-6 right-6 + z-[9999] keeps it above
+  // footers, sticky bottom bars and every theme layer. Rendered in the React
+  // tree (not the SDK) so it shows even when the SDK is blocked or retired.
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Chat with us on Messenger"
+      aria-label="Chat with us on Messenger"
+      data-testid="floating-messenger-widget"
+      className="fixed bottom-6 right-6 z-[9999] flex h-14 w-14 items-center justify-center rounded-full bg-[#0084FF] text-white shadow-2xl shadow-black/40 ring-1 ring-white/20 transition hover:scale-110 hover:bg-[#0073E0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+    >
+      <MessengerGlyph />
+      <span className="absolute -top-1 -right-1 flex h-4 w-4">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+        <span className="relative inline-flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[9px] font-black text-white">
+          1
+        </span>
+      </span>
+    </a>
+  );
 }
 
 export default MessengerChatWidget;
