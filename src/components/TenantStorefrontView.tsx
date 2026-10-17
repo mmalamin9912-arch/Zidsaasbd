@@ -758,10 +758,28 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     galleryImages: sanitizeGalleryImages(merchantThemeConfig.galleryImages, []),
     showSocialBlock: merchantThemeConfig.showSocialBlock !== false,
     socialTagline: (typeof merchantThemeConfig.socialTagline === 'string' && merchantThemeConfig.socialTagline) || 'Follow us for daily updates',
-    facebookHandle: (typeof merchantThemeConfig.facebookHandle === 'string' && merchantThemeConfig.facebookHandle) || '',
-    instagramHandle: (typeof merchantThemeConfig.instagramHandle === 'string' && merchantThemeConfig.instagramHandle) || '',
-    whatsappNumber: (typeof merchantThemeConfig.whatsappNumber === 'string' && merchantThemeConfig.whatsappNumber) || '',
-    tiktokHandle: (typeof merchantThemeConfig.tiktokHandle === 'string' && merchantThemeConfig.tiktokHandle) || '',
+    // ── Social links: PROFILE URL first, theme-config handle second. ─────────
+    //
+    // THE BUG THIS FIXES
+    // ------------------
+    // Settings → "Social Media & Business Links" writes FULL URLs onto the
+    // merchant profile (`facebookUrl`, `instagramUrl`, `tiktokUrl`,
+    // `whatsappNumber`). The storefront, however, read ONLY the theme editor's
+    // HANDLE fields (`facebookHandle`, `instagramHandle`, `tiktokHandle`,
+    // `whatsappNumber`) — a different data source the Social Media panel never
+    // touches. A merchant who pasted their Facebook Page URL into Settings saw
+    // no icon on their live storefront, because the handle it looked for was
+    // empty and the URL it ignored was not.
+    //
+    // Both sources are now honoured, profile first: a URL saved in Settings wins
+    // because that is the field the merchant actually filled in, and a handle
+    // set in the theme editor still works for stores that never touched
+    // Settings. `resolveSocialUrl` normalises either form into a usable link, so
+    // the render below only ever receives an absolute URL (or '').
+    facebookHandle: resolveSocialUrl('facebook', storefrontMerchant, merchantThemeConfig),
+    instagramHandle: resolveSocialUrl('instagram', storefrontMerchant, merchantThemeConfig),
+    whatsappNumber: resolveSocialUrl('whatsapp', storefrontMerchant, merchantThemeConfig),
+    tiktokHandle: resolveSocialUrl('tiktok', storefrontMerchant, merchantThemeConfig),
     youtubeHandle: (typeof merchantThemeConfig.youtubeHandle === 'string' && merchantThemeConfig.youtubeHandle) || '',
     showFacebook: merchantThemeConfig.showFacebook !== false,
     showInstagram: merchantThemeConfig.showInstagram !== false,
@@ -846,6 +864,92 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     } catch {
       window.location.href = href;
     }
+  }
+
+  /**
+   * Resolve one social channel into an ABSOLUTE url, or '' when unset.
+   *
+   * Two sources, in priority order:
+   *  1. The merchant profile URL written by Settings → Social Media
+   *     (`facebookUrl` / `instagramUrl` / `tiktokUrl` / `whatsappNumber`).
+   *  2. The theme editor's handle (`facebookHandle`, `instagramHandle`, …),
+   *     which is a bare `@name` or a full URL depending on what was typed.
+   *
+   * WHY NORMALISE HERE
+The render below must not guess. A merchant may paste
+   * `https://facebook.com/mypage`, `facebook.com/mypage`, or `@mypage` — all
+   * three mean the same store. Returning a finished absolute URL means the icon
+   * markup is unconditional and a malformed value simply yields '' (the icon is
+   * hidden) instead of an `<a href="undefined">`.
+   *
+   * WhatsApp is the one channel whose output is NOT a URL: `wa.me` needs bare
+   * digits, so the international number is returned (e.g. `8801700112233`) and
+   * the caller prefixes `https://wa.me/`.
+   */
+  function resolveSocialUrl(
+    channel: 'facebook' | 'instagram' | 'tiktok' | 'whatsapp',
+    profile: Record<string, any>,
+    theme: Record<string, any>,
+  ): string {
+    /** The profile keys each channel may be saved under. */
+    const profileKeys: Record<string, string[]> = {
+      facebook: ['facebookUrl', 'facebookPageUrl', 'facebook_page_url', 'facebook'],
+      instagram: ['instagramUrl', 'instagramProfile', 'instagram_profile', 'instagram'],
+      tiktok: ['tiktokUrl', 'tikTokLink', 'tiktok', 'tikTok'],
+      whatsapp: ['whatsappNumber', 'whatsapp', 'whatsapp_number'],
+    };
+    /** The theme-editor handle keys each channel may carry. */
+    const themeKeys: Record<string, string[]> = {
+      facebook: ['facebookHandle'],
+      instagram: ['instagramHandle'],
+      tiktok: ['tiktokHandle', 'tikTokHandle'],
+      whatsapp: ['whatsappNumber'],
+    };
+
+    const first = (source: Record<string, any>, keys: string[]): string => {
+      for (const key of keys) {
+        const value = source?.[key];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+      }
+      return '';
+    };
+
+    const raw = first(profile, profileKeys[channel]) || first(theme, themeKeys[channel]);
+    if (!raw) return '';
+
+    if (channel === 'whatsapp') {
+      // wa.me requires digits only, no '+', no spaces or dashes.
+      const digits = raw.replace(/[^0-9]/g, '');
+      return /^\d{7,15}$/.test(digits) ? digits : '';
+    }
+
+    // Strip a leading '@' (a handle) and any protocol the merchant included so
+    // the host can be checked without tripping over 'https://'.
+    const bare = raw.replace(/^@/, '').replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+    const host = bare.split('/')[0].toLowerCase();
+
+    /** Only accept a value that actually belongs to this platform. */
+    const hostMatches: Record<string, (h: string) => boolean> = {
+      facebook: (h) => /(^|\.)facebook\.com$/.test(h) || /(^|\.)fb\.com$/.test(h),
+      instagram: (h) => /(^|\.)instagram\.com$/.test(h),
+      tiktok: (h) => /(^|\.)tiktok\.com$/.test(h),
+    };
+
+    // A value that is just a handle (`mypage`, `@mypage`) — build the canonical URL.
+    if (!bare.includes('.')) {
+      const handle = bare.replace(/[^a-zA-Z0-9._]/g, '');
+      if (!handle) return '';
+      const base: Record<string, string> = {
+        facebook: 'https://facebook.com/',
+        instagram: 'https://instagram.com/',
+        tiktok: 'https://tiktok.com/@',
+      };
+      return `${base[channel]}${handle}`;
+    }
+
+    // A full URL (or a host the merchant typed without a scheme).
+    if (!hostMatches[channel](host)) return '';
+    return /^https?:\/\//i.test(raw) ? raw : `https://${bare}`;
   }
 
   /**
@@ -3483,16 +3587,16 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
                 </div>
                 <div className="flex items-center justify-center gap-3 pt-1">
                   {resolvedTheme.showFacebook && resolvedTheme.facebookHandle && (
-                    <a href={`https://facebook.com/${resolvedTheme.facebookHandle.replace(/^@/, '')}`} target="_blank" rel="noreferrer" title="Facebook" className="p-2.5 rounded-full bg-[#1877F2]/15 text-[#4d9fff] border border-[#1877F2]/30 hover:scale-110 transition"><Facebook className="w-4 h-4" /></a>
+                    <a href={resolvedTheme.facebookHandle} target="_blank" rel="noreferrer" title="Facebook" className="p-2.5 rounded-full bg-[#1877F2]/15 text-[#4d9fff] border border-[#1877F2]/30 hover:scale-110 transition"><Facebook className="w-4 h-4" /></a>
                   )}
                   {resolvedTheme.showInstagram && resolvedTheme.instagramHandle && (
-                    <a href={`https://instagram.com/${resolvedTheme.instagramHandle.replace(/^@/, '')}`} target="_blank" rel="noreferrer" title="Instagram" className="p-2.5 rounded-full bg-pink-500/15 text-pink-400 border border-pink-500/30 hover:scale-110 transition"><Instagram className="w-4 h-4" /></a>
+                    <a href={resolvedTheme.instagramHandle} target="_blank" rel="noreferrer" title="Instagram" className="p-2.5 rounded-full bg-pink-500/15 text-pink-400 border border-pink-500/30 hover:scale-110 transition"><Instagram className="w-4 h-4" /></a>
                   )}
                   {resolvedTheme.showWhatsapp && resolvedTheme.whatsappNumber && (
-                    <a href={`https://wa.me/${resolvedTheme.whatsappNumber.replace(/[^0-9]/g, '')}`} target="_blank" rel="noreferrer" title="WhatsApp" className="p-2.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:scale-110 transition"><MessageCircle className="w-4 h-4" /></a>
+                    <a href={`https://wa.me/${resolvedTheme.whatsappNumber}`} target="_blank" rel="noreferrer" title="WhatsApp" className="p-2.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:scale-110 transition"><MessageCircle className="w-4 h-4" /></a>
                   )}
                   {resolvedTheme.showTikTok && resolvedTheme.tiktokHandle && (
-                    <a href={`https://tiktok.com/@${resolvedTheme.tiktokHandle.replace(/^@/, '')}`} target="_blank" rel="noreferrer" title="TikTok" className="p-2.5 rounded-full bg-slate-500/15 text-slate-200 border border-slate-500/30 hover:scale-110 transition"><Music className="w-4 h-4" /></a>
+                    <a href={resolvedTheme.tiktokHandle} target="_blank" rel="noreferrer" title="TikTok" className="p-2.5 rounded-full bg-slate-500/15 text-slate-200 border border-slate-500/30 hover:scale-110 transition"><Music className="w-4 h-4" /></a>
                   )}
                   {resolvedTheme.showYouTube && resolvedTheme.youtubeHandle && (
                     <a href={`https://youtube.com/@${resolvedTheme.youtubeHandle.replace(/^@/, '')}`} target="_blank" rel="noreferrer" title="YouTube" className="p-2.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30 hover:scale-110 transition"><Youtube className="w-4 h-4" /></a>
@@ -5267,6 +5371,25 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           Settings → API. Placed last so its fixed-position bubble sits above
           every storefront layer, including the mobile bottom bar. */}
       <MessengerChatWidget pageId={messengerPageId} />
+
+      {/* Floating WhatsApp chat button.
+          Driven by the merchant profile's `whatsappNumber` (Settings → Social
+          Media). Renders ONLY when a usable number resolved, so a store that
+          never set one shows no button. Positioned above the Messenger bubble
+          (the SDK's own bubble sits bottom-right by default) so the two never
+          overlap. */}
+      {resolvedTheme.showWhatsapp && resolvedTheme.whatsappNumber && (
+        <a
+          href={`https://wa.me/${resolvedTheme.whatsappNumber}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Chat on WhatsApp"
+          aria-label="Chat on WhatsApp"
+          className="fixed bottom-24 right-5 z-[45] flex h-12 w-12 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/30 transition hover:scale-110"
+        >
+          <MessageCircle className="h-6 w-6" />
+        </a>
+      )}
     </div>
   );
 };
