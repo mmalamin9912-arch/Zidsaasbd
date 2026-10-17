@@ -273,6 +273,31 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     return () => clearInterval(timer);
   }, [mode, signupStep, resendTimer]);
 
+  // Surface a failed social sign-in that bounced back from the provider.
+  //
+  // When Google/Facebook returns with `?error=access_denied` (user dismissed the
+  // consent screen) or `?error_description=…` (mis-configured client id / redirect
+  // URL), the browser lands back on this page with a valid-looking URL and no
+  // session. Without this check the merchant sees a blank login form and assumes
+  // "Google login is broken". We read the params once, show the real reason, then
+  // strip them so a refresh does not re-raise the error.
+  useEffect(() => {
+    const oauthError = readOAuthErrorFromUrl();
+    if (!oauthError) return;
+    setErrorMsg(oauthError);
+    toast.error(t(oauthError));
+    try {
+      const url = new URL(window.location.href);
+      url.search = '';
+      url.hash = '';
+      window.history.replaceState({}, document.title, url.toString());
+    } catch {
+      /* history unavailable — the message is already shown */
+    }
+    // Runs once on mount; readOAuthErrorFromUrl is a pure URL reader.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auth state listener for magic link / session
   useEffect(() => {
     if (!supabase) return;
@@ -302,9 +327,22 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           };
           finishLogin(userProfile);
         } else {
-          // New User Setup
+          // New User Setup — an OAuth sign-up lands here with the provider's
+          // name/email already on the session, so seed the profile fields.
           setMode('signup');
           setSignupStep('register');
+          const meta = session.user.user_metadata || {};
+          const oauthName = meta.full_name || meta.name || '';
+          const oauthEmail = session.user.email || '';
+          // The registration form collects firstName/lastName, so split the
+          // provider's display name across them (Google sends `full_name`,
+          // Facebook sends `name`) instead of writing to a non-existent setter.
+          if (oauthName) {
+            const [first = '', ...rest] = String(oauthName).trim().split(/\s+/);
+            setFirstName(first);
+            setLastName(rest.join(' '));
+          }
+          if (oauthEmail) setEmail(oauthEmail);
           setToastMsg('auth_toast_email_verified');
         }
       }
@@ -889,7 +927,74 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     }
   };
 
-  const handleGoogleSignIn = async () => {
+  /**
+   * Build the OAuth callback URL Supabase returns to after the provider round-trip.
+   *
+   * WHY NOT `window.location.origin`
+   * -------------------------------
+   * The merchant dashboard is served on the apex domain, but the same bundle also
+   * runs on store subdomains (`storename.zidbdsaas.com`) and custom domains. The
+   * dashboard reads the active store from the origin it is loaded on, so we must
+   * return the merchant to the SAME origin they started on — otherwise a merchant
+   * who signs in from a custom domain lands on the apex and loses the store
+   * context they were in.
+   *
+   * The URL is normalised to the app root without a trailing slash and without a
+   * hash/fragment, so it always matches a single entry in the Supabase
+   * "Redirect URLs" allow-list. The literal `redirect_to` value must be added to
+   * Supabase → Authentication → URL Configuration → Redirect URLs (or matched by
+   * a wildcard such as `https://*.zidbdsaas.com/**`).
+   */
+  const buildOAuthRedirectUrl = (): string => {
+    try {
+      const url = new URL(window.location.href);
+      // Drop any pre-existing provider params so a retry does not carry a stale
+      // `?code=`/`?error=` fragment back into the next authorisation request.
+      url.search = '';
+      url.hash = '';
+      url.pathname = '/';
+      return url.toString();
+    } catch {
+      return window.location.origin;
+    }
+  };
+
+  /**
+   * Normalise whatever the provider/Supabase handed back in the URL fragment or
+   * query string into a message we can show. Supabase puts failures in
+   * `error` + `error_description` (Google also uses `error=access_denied` when
+   * the user dismisses the consent screen), while older flows put them in the
+   * hash. Reading all four keys means a cancelled or mis-configured sign-in
+   * surfaces a real reason instead of silently bouncing the merchant back to
+   * the login form.
+   */
+  const readOAuthErrorFromUrl = (): string | null => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const search = new URLSearchParams(window.location.search);
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const errCode = search.get('error') || hash.get('error') || '';
+      const errDesc =
+        search.get('error_description') ||
+        hash.get('error_description') ||
+        '';
+      if (!errCode && !errDesc) return null;
+      if (errCode === 'access_denied') return 'auth_err_google_cancelled';
+      return (errDesc ? decodeURIComponent(errDesc.replace(/\+/g, ' ')) : errCode) || 'auth_err_google_failed';
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Shared Supabase OAuth launcher for the social providers.
+   *
+   * On success Supabase navigates the browser to the provider's consent screen,
+   * so this promise resolves with `{ error: null }` and the component unmounts —
+   * the loading flag is released in the `finally` block so a blocked/aborted
+   * navigation (popup blocked, offline) does not leave the buttons spinning.
+   */
+  const startOAuth = async (provider: 'google' | 'facebook', failedKey: string) => {
     if (inFlightRef.current) return;
     setErrorMsg('');
     if (!supabase) {
@@ -902,26 +1007,38 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     setIsLoading(true);
     try {
       const { error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
+        provider,
         options: {
-          redirectTo: window.location.origin
-        }
+          redirectTo: buildOAuthRedirectUrl(),
+          // Force the account chooser so a merchant signed into a personal
+          // Google account can still pick the address the store belongs to.
+          ...(provider === 'google' ? { queryParams: { prompt: 'select_account' } } : {}),
+          // Request the fields we persist into the merchant profile on callback.
+          ...(provider === 'facebook'
+            ? { scopes: 'email,public_profile' }
+            : { scopes: 'openid email profile' }),
+        },
       });
       if (error) {
-        setErrorMsg(error.message || 'auth_err_google_failed');
-        toast.error(error.message || t('auth_err_google_failed'));
+        const key = /cancel|denied|closed/i.test(error.message || '') ? 'auth_err_google_cancelled' : failedKey;
+        setErrorMsg(error.message || key);
+        toast.error(error.message || t(key));
       }
       // On success Supabase navigates the browser to the OAuth URL, so the
       // component unmounts and the loading state below is never seen.
     } catch (err: any) {
-      console.error('Google sign-in error:', err);
-      setErrorMsg('auth_err_google_failed');
-      toast.error(t('auth_err_google_failed'));
+      console.error(`${provider} sign-in error:`, err);
+      setErrorMsg(failedKey);
+      toast.error(t(failedKey));
     } finally {
       inFlightRef.current = false;
       setIsLoading(false);
     }
   };
+
+  const handleGoogleSignIn = () => startOAuth('google', 'auth_err_google_failed');
+
+  const handleFacebookSignIn = () => startOAuth('facebook', 'auth_err_facebook_failed');
 
   const handleGoogleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1828,20 +1945,35 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                   <div className="flex-grow border-t border-[#2E3548]"></div>
                 </div>
 
-                {/* Google Login Button */}
-                <button
-                  type="button"
-                  onClick={handleGoogleSignIn}
-                  className="w-full py-3 bg-[#161923] hover:bg-[#202533] border border-[#3A435E] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2.5 transition cursor-pointer shadow-md"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24">
-                    <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
-                    <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.2v3.15C3.21 21.32 7.28 24 12 24z"/>
-                    <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.2C.44 8.14 0 9.99 0 12s.44 3.86 1.2 5.39l4.07-3.15z"/>
-                    <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.28 0 3.21 2.68 1.2 6.61l4.07 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
-                  </svg>
-                  <span>Login with Google</span>
-                </button>
+                {/* Social login providers — Google + Facebook */}
+                <div className="space-y-2.5">
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignIn}
+                    disabled={isLoading}
+                    className="w-full py-3 bg-[#161923] hover:bg-[#202533] border border-[#3A435E] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2.5 transition cursor-pointer shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"/>
+                      <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.13 0-5.78-2.11-6.73-4.96H1.2v3.15C3.21 21.32 7.28 24 12 24z"/>
+                      <path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.2C.44 8.14 0 9.99 0 12s.44 3.86 1.2 5.39l4.07-3.15z"/>
+                      <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.28 0 3.21 2.68 1.2 6.61l4.07 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/>
+                    </svg>
+                    <span>{t('auth_login_google')}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleFacebookSignIn}
+                    disabled={isLoading}
+                    className="w-full py-3 bg-[#1877F2] hover:bg-[#166FE5] border border-[#1877F2] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2.5 transition cursor-pointer shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M24 12.073C24 5.405 18.627 0 12 0S0 5.405 0 12.073C0 18.1 4.388 23.094 10.125 24v-8.437H7.078v-3.49h3.047v-2.66c0-3.026 1.792-4.697 4.533-4.697 1.313 0 2.686.235 2.686.235v2.971H15.83c-1.491 0-1.956.93-1.956 1.886v2.265h3.328l-.532 3.49h-2.796V24C19.612 23.094 24 18.1 24 12.073z"/>
+                    </svg>
+                    <span>{t('auth_login_facebook')}</span>
+                  </button>
+                </div>
 
                 <div className="pt-2 text-center text-xs text-slate-400 space-y-3">
                   <div>

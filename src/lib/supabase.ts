@@ -78,9 +78,17 @@ export function getSupabaseClient(): SupabaseClient | null {
   try {
     _client = createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
+        // Session persistence + URL detection are ON so the OAuth redirect back
+        // from Google/Facebook is parsed for the `?code=`/`#access_token` pair.
+        // With these off, the provider round-trip returned a valid session that
+        // the client silently discarded — the merchant landed on the login form
+        // again and reported "Google login is broken".
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        // PKCE keeps the auth code exchange safe for a SPA without a server
+        // secret; both providers share this flow.
+        flowType: 'pkce',
       },
       realtime: {
         params: { eventsPerSecond: 10 },
