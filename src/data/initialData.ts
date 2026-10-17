@@ -82,8 +82,18 @@ export const initialMerchant: MerchantProfile = {
     footerAboutText: 'A simple store powered by Zid Multi-Tenant SaaS Engine.',
     footerLinksTitle: 'Quick Links',
     footerLinks: ['About Us', 'Shipping Policy', 'Return Policy', 'Track Order'],
-    contactPhone: '+8801700000000',
-    dhakaAddress: 'Dhaka, Bangladesh',
+    // contactPhone / dhakaAddress were previously seeded here as
+    // '+8801700000000' / 'Dhaka, Bangladesh'. Those demo values WON over the
+    // merchant's real profile fields (the footer read `resolvedTheme`), so a
+    // merchant who entered their own number in registration or Settings still
+    // saw a fake number on their live storefront.
+    //
+    // Left EMPTY on purpose: the storefront footer now resolves contact details
+    // from the merchant profile first (phone/supportPhone, address/pickupAddress)
+    // and falls back to theme config. Seeding a placeholder here would only
+    // reintroduce the same shadowing bug.
+    contactPhone: '',
+    dhakaAddress: '',
     announcementText: 'Welcome to our store!'
   }
 };

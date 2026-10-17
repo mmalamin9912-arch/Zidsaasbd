@@ -777,10 +777,100 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     footerAboutText: (typeof merchantThemeConfig.footerAboutText === 'string' && merchantThemeConfig.footerAboutText) || '',
     footerLinksTitle: (typeof merchantThemeConfig.footerLinksTitle === 'string' && merchantThemeConfig.footerLinksTitle) || 'Quick Links',
     footerLinks: Array.isArray(merchantThemeConfig.footerLinks) ? (merchantThemeConfig.footerLinks as string[]) : [],
-    contactPhone: (typeof merchantThemeConfig.contactPhone === 'string' && merchantThemeConfig.contactPhone) || '',
-    contactEmail: (typeof merchantThemeConfig.contactEmail === 'string' && merchantThemeConfig.contactEmail) || '',
-    dhakaAddress: (typeof merchantThemeConfig.dhakaAddress === 'string' && merchantThemeConfig.dhakaAddress) || ''
+    // ── Contact details: PROFILE first, theme config second. ────────────────
+    //
+    // The storefront footer renders `resolvedTheme.contactPhone` / `.dhakaAddress`.
+    // Those used to come ONLY from `themeConfig`, which the demo seed populated
+    // with '+8801700000000' / 'Dhaka, Bangladesh' — so a merchant's real profile
+    // number (entered at registration or in Settings) was shadowed by the demo
+    // value and never appeared on their live store.
+    //
+    // The profile is the authoritative source now, because that is where
+    // onboarding/settings actually write: `phone` (registration) and
+    // `pickupAddress` (onboarding), with the store-record spellings tolerated so
+    // a Supabase-first row resolves too. Theme config remains a valid override
+    // for a merchant who deliberately set a different public contact number.
+    contactPhone: pickContact(storefrontMerchant, ['supportPhone', 'phone', 'mobile'], ['contactPhone']),
+    contactEmail: pickContact(storefrontMerchant, ['supportEmail', 'email'], ['contactEmail']),
+    dhakaAddress: pickContact(
+      storefrontMerchant,
+      ['pickupAddress', 'address', 'storeAddress', 'businessAddress', 'store_address'],
+      ['dhakaAddress', 'contactAddress', 'address']
+    )
   };
+  /**
+   * Map a footer Quick Link label to the storefront route it should open.
+   *
+   * The footer is driven by merchant-editable labels (`themeConfig.footerLinks`
+   * plus auto-injected policy links), so matching has to be tolerant: labels
+   * are lowercased and stripped of punctuation before comparison, which makes
+   * "Return & Refund Policy" and "Return Policy" land on the same page.
+   *
+   * Returns '' for a label we cannot map. The caller renders such a label as
+   * plain text rather than a dead link — better a non-link than a link to
+   * nowhere.
+   */
+  function resolveFooterLinkHref(label: string): string {
+    const key = String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!key) return '';
+
+    // Order/parcel tracking is its own flow, not a static page.
+    if (key.includes('track')) return '/track-order';
+
+    if (key.includes('about')) return '/pages/about-us';
+    if (key.includes('shipping') || key.includes('delivery')) return '/pages/shipping-policy';
+    if (key.includes('return') || key.includes('refund')) return '/pages/return-policy';
+    if (key.includes('privacy')) return '/pages/privacy-policy';
+    if (key.includes('term')) return '/pages/terms-of-service';
+    if (key.includes('faq') || key.includes('question')) return '/pages/faq';
+    if (key.includes('contact')) return '/pages/contact-us';
+
+    return '';
+  }
+
+  /**
+   * Navigate the SPA without a full page reload.
+   *
+   * The storefront is client-routed from `window.location.pathname` (App.tsx),
+   * so a `pushState` plus a `popstate` dispatch is enough to swap the view —
+   * the same mechanism the app's own back/forward handling relies on. A full
+   * reload is used only as a fallback if history is unavailable, so a click is
+   * never a no-op.
+   */
+  function navigateStorefront(href: string) {
+    try {
+      window.history.pushState({}, '', href);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch {
+      window.location.href = href;
+    }
+  }
+
+  /**
+   * First non-empty value among the merchant's OWN fields, else the theme's.
+   *
+   * Separate field lists for profile and theme (not one merged list) so the
+   * precedence is explicit: a phone the merchant saved in Settings always beats
+   * a theme-config value, and a theme value is only consulted when the profile
+   * has nothing. Values are trimmed and whitespace-only is treated as absent.
+   */
+  function pickContact(
+    source: Record<string, any>,
+    profileKeys: string[],
+    themeKeys: string[]
+  ): string {
+    for (const key of profileKeys) {
+      const value = source?.[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    for (const key of themeKeys) {
+      const value = merchantThemeConfig?.[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return '';
+  }
+
   // Header bar colour lives in `headerBgColor` (writer's own pick) instead of
   // the hard-coded `#0f172a`. The picker's text field accepts ANY valid CSS
   // colour (hex, rgb(), ...), so `resolveHeaderPalette` derives a single
@@ -5084,9 +5174,39 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               <div className="pt-2" data-testid="storefront-footer-links">
                 <h5 className="text-[10px] font-black uppercase tracking-widest text-slate-300 mb-2">{resolvedTheme.footerLinksTitle}</h5>
                 <ul className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
-                  {allLinks.map((linkLabel, i) => (
-                    <li key={`flink-${i}`} className="text-[11px] text-slate-400 hover:text-amber-400 transition cursor-pointer">{linkLabel}</li>
-                  ))}
+                  {allLinks.map((linkLabel, i) => {
+                    // These were plain <li> text with no handler at all, so
+                    // "About Us" / "Shipping Policy" / "Return Policy" /
+                    // "Track Order" looked clickable and did nothing.
+                    //
+                    // Each now maps to a real storefront route. Policies and
+                    // About resolve through /pages/<slug>, which renders the
+                    // merchant's own text when they wrote it and a fallback
+                    // template when they have not — so a click never lands on a
+                    // blank or broken page.
+                    const target = resolveFooterLinkHref(linkLabel);
+                    if (!target) {
+                      return (
+                        <li key={`flink-${i}`} className="text-[11px] text-slate-400">{linkLabel}</li>
+                      );
+                    }
+                    return (
+                      <li key={`flink-${i}`}>
+                        <a
+                          href={target}
+                          onClick={(e) => {
+                            // In-app navigation without a full reload; the
+                            // storefront is a client-routed SPA.
+                            e.preventDefault();
+                            navigateStorefront(target);
+                          }}
+                          className="text-[11px] text-slate-400 hover:text-amber-400 transition cursor-pointer"
+                        >
+                          {linkLabel}
+                        </a>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             );
@@ -5126,6 +5246,10 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             <ShieldCheck className="w-4 h-4 text-[var(--primary-accent)]" />
             <span>Secure 256-bit SSL Checkout</span>
           </div>
+          {/* Merchant's real contact details. Rendered only when the profile or
+              theme actually supplies one — an empty row is not printed, so a
+              store with no saved contact details shows nothing rather than the
+              old demo placeholder. */}
         </div>
 
         <div className="pt-4 border-t border-slate-800/80 text-center text-[10px] text-slate-500">

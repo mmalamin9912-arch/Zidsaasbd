@@ -35,6 +35,7 @@ import { Sidebar } from './components/Sidebar';
 import { SubscriptionModal } from './components/SubscriptionModal';
 import { StorefrontPreviewModal } from './components/StorefrontPreviewModal';
 import { TenantStorefrontView } from './components/TenantStorefrontView';
+import { StorefrontPageView } from './components/StorefrontPageView';
 import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
@@ -2083,6 +2084,42 @@ export default function App() {
       }).catch(err => console.error('Error updating orders in DB:', err));
     }
   };
+
+  // ── Tenant informational pages (`/store/<slug>/pages/about-us`, `/track-order`).
+  //
+  // These live INSIDE the store path, so they must be matched before the
+  // storefront branch below — which would otherwise hand the whole path to
+  // TenantStorefrontView as the store slug. The merchant's own page content
+  // wins when present; StorefrontPageView renders a fallback template when it
+  // is not, so a footer link is never a blank page.
+  const storePagesMatch = currentPath.match(/^\/store\/([^/]+)\/(pages\/([^/]+)|track-order)\/?$/);
+  if (storePagesMatch) {
+    const pageStoreSlug = storePagesMatch[1];
+    const isTrackOrder = storePagesMatch[2] === 'track-order';
+
+    let pageMerchant: Record<string, any> | null = null;
+    try {
+      const customStoreDataStr = localStorage.getItem(`ZID_MERCHANT_STORE_DATA_${pageStoreSlug}`);
+      if (customStoreDataStr) {
+        pageMerchant = JSON.parse(customStoreDataStr)?.merchant || null;
+      }
+    } catch {
+      pageMerchant = null;
+    }
+    if (!pageMerchant && merchant?.storeSlug === pageStoreSlug) pageMerchant = merchant;
+
+    return (
+      <StorefrontPageView
+        slug={isTrackOrder ? 'track-order' : storePagesMatch[3] || ''}
+        storeName={pageMerchant?.storeName || pageMerchant?.name || storePagesMatch[1]}
+        merchant={pageMerchant}
+        onNavigateHome={() => {
+          window.history.pushState({}, '', `/store/${pageStoreSlug}`);
+          setCurrentPath(`/store/${pageStoreSlug}`);
+        }}
+      />
+    );
+  }
 
   if (currentPath.startsWith('/store/') || currentPath.startsWith('/e/')) {
     const isE = currentPath.startsWith('/e/');
