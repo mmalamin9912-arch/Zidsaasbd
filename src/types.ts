@@ -72,7 +72,15 @@ export type SettingsSubTab =
   | 'comm_email'
   | 'store_details'
   | 'store_domains'
-  | 'store_policies';
+  | 'store_policies'
+  /**
+   * Dedicated Social & Chat setup panel.
+   *
+   * Split out of `store_details` because the social links were buried at the
+   * bottom of a long form — F-commerce merchants had to hunt for the one
+   * section they use daily. The sidebar now links straight here.
+   */
+  | 'store_social';
 
 export type ProductType = 'single' | 'grouped' | 'voucher' | 'digital' | 'bundle';
 

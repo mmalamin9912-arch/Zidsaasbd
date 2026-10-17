@@ -2532,6 +2532,9 @@ onPlaceOrder={async (newOrder) => {
           onOpenAdminLogin={() => setIsAdminLoginModalOpen(true)}
           isDarkMode={isDarkMode}
           platformSettings={platformSettings}
+          // Drives the "social links configured" dot on the Social & Chat Setup
+          // entry. The platform config cannot answer that for one store.
+          merchant={merchant}
         />
 
         {/* Main Content Area */}

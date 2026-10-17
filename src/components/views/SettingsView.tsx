@@ -35,7 +35,13 @@ import {
   Copy,
   RefreshCw,
   Monitor,
-  Laptop
+  Laptop,
+  // Social & Chat setup panel icons.
+  Share2,
+  Facebook,
+  Instagram,
+  Music,
+  MessageCircle
 } from 'lucide-react';
 
 interface SettingsViewProps {
@@ -1767,6 +1773,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   ];
 
   const storeSettingsItems: { id: SettingsSubTab; label: string; icon: React.ElementType; isPro?: boolean }[] = [
+    // Social first: it is the panel F-commerce merchants open most often, and
+    // it is also the target of the sidebar's "Social & Chat Setup" entry.
+    { id: 'store_social', label: 'Social & Chat Setup', icon: Share2 },
     { id: 'store_details', label: 'Store details', icon: Store },
     { id: 'store_domains', label: 'Custom domains', icon: Link, isPro: true },
     { id: 'store_policies', label: 'Legal policies', icon: BookOpen },
@@ -2017,7 +2026,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
 
               <div className="pt-4 border-t border-[#272F45]">
-                <h3 className="text-sm font-bold text-white mb-4">Social Media & Business Links</h3>
+                <div className="flex items-start justify-between gap-3 mb-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Social Media & Business Links</h3>
+                    <p className="text-xs text-slate-400 mt-1">
+                      এই লিংকগুলো আপনার স্টোরফ্রন্টে স্বয়ংক্রিয়ভাবে দেখানো হবে। যে ঘর ফাঁকা রাখবেন, সেই আইকন স্টোরে দেখাবে না।
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveSubTab('store_social')}
+                    className="shrink-0 text-[11px] font-bold text-[#00D68F] hover:underline cursor-pointer whitespace-nowrap"
+                  >
+                    আলাদা পেজে খুলুন →
+                  </button>
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5">WhatsApp Number (For Instant Chat)</label>
@@ -2025,9 +2048,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       type="text"
                       value={whatsappNumber}
                       onChange={(e) => setWhatsappNumber(e.target.value)}
-                      placeholder="+8801..."
+                      placeholder="017xxxxxxxx"
                       className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
                     />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      গ্রাহকরা সরাসরি চ্যাট করার জন্য এই নম্বরে ক্লিক করবে।
+                    </p>
                   </div>
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5">Facebook Page URL</label>
@@ -2035,9 +2061,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       type="text"
                       value={facebookUrl}
                       onChange={(e) => setFacebookUrl(e.target.value)}
-                      placeholder="https://facebook.com/..."
+                      placeholder="https://www.facebook.com/yourpage"
                       className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
                     />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      আপনার অফিশিয়াল ফেসবুক পেজের সম্পূর্ণ লিংক বা m.me লিংক এখানে দিন।
+                    </p>
                   </div>
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5">Instagram Profile</label>
@@ -2045,9 +2074,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       type="text"
                       value={instagramUrl}
                       onChange={(e) => setInstagramUrl(e.target.value)}
-                      placeholder="https://instagram.com/..."
+                      placeholder="https://www.instagram.com/yourprofile"
                       className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
                     />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      আপনার ইনস্টাগ্রাম প্রোফাইলের লিংক দিন (যেমন: @yourbrand)। শুধু ইউজারনেম দিলেও কাজ করবে।
+                    </p>
                   </div>
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5">TikTok Link</label>
@@ -2055,10 +2087,140 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       type="text"
                       value={tiktokUrl}
                       onChange={(e) => setTiktokUrl(e.target.value)}
-                      placeholder="https://tiktok.com/@..."
+                      placeholder="https://www.tiktok.com/@yourbrand"
                       className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
                     />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      আপনার টিকটক প্রোফাইলের লিংক দিন। শুধু @ইউজারনেম দিলেও কাজ করবে।
+                    </p>
                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Social & Chat setup (dedicated panel) ─────────────
+              Reached directly from the sidebar's "Social & Chat Setup" item.
+              Holds the same four fields as the Store details section, with the
+              fuller guidance a merchant needs when setting them up the first
+              time. Saves through the same `handleSave` as Store details, so the
+              two panels can never disagree. */}
+          {activeSubTab === 'store_social' && (
+            <div className="space-y-6">
+              <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-5">
+                <div>
+                  <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
+                    <Share2 className="w-5 h-5 text-[#00D68F]" />
+                    Social &amp; Chat Setup
+                  </h3>
+                  <p className="text-sm text-slate-400 leading-relaxed">
+                    আপনার সোশ্যাল মিডিয়া ও চ্যাট লিংক এখানে যোগ করুন। এগুলো আপনার স্টোরফ্রন্টের ফুটারে ও ফ্লোটিং বাটনে স্বয়ংক্রিয়ভাবে যুক্ত হবে।
+                    যে ঘর ফাঁকা রাখবেন, সেই আইকন স্টোরে দেখাবে না।
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">WhatsApp Number (For Instant Chat)</label>
+                    <input
+                      type="text"
+                      value={whatsappNumber}
+                      onChange={(e) => setWhatsappNumber(e.target.value)}
+                      placeholder="017xxxxxxxx"
+                      className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      গ্রাহকরা সরাসরি চ্যাট করার জন্য এই নম্বরে ক্লিক করবে।
+                      দেশি ফরম্যাটে লিখুন (যেমন: 01712345678) — সিস্টেম নিজেই আন্তর্জাতিক ফরম্যাটে রূপান্তর করবে।
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">Facebook Page URL</label>
+                    <input
+                      type="text"
+                      value={facebookUrl}
+                      onChange={(e) => setFacebookUrl(e.target.value)}
+                      placeholder="https://www.facebook.com/yourpage"
+                      className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      আপনার অফিশিয়াল ফেসবুক পেজের সম্পূর্ণ লিংক বা m.me লিংক এখানে দিন।
+                      (m.me লিংক দিলে গ্রাহক সরাসরি মেসেঞ্জার চ্যাটে চলে যাবে।)
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">Instagram Profile</label>
+                    <input
+                      type="text"
+                      value={instagramUrl}
+                      onChange={(e) => setInstagramUrl(e.target.value)}
+                      placeholder="https://www.instagram.com/yourprofile"
+                      className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      আপনার ইনস্টাগ্রাম প্রোফাইলের লিংক দিন (যেমন: https://www.instagram.com/yourprofile)।
+                      শুধু ইউজারনেম লিখলেও (যেমন: @yourbrand) সিস্টেম নিজে লিংক বানিয়ে নেবে।
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">TikTok Link</label>
+                    <input
+                      type="text"
+                      value={tiktokUrl}
+                      onChange={(e) => setTiktokUrl(e.target.value)}
+                      placeholder="https://www.tiktok.com/@yourbrand"
+                      className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      আপনার টিকটক প্রোফাইলের লিংক দিন (যেমন: https://www.tiktok.com/@yourbrand)।
+                      শুধু @ইউজারনেম দিলেও কাজ করবে।
+                    </p>
+                  </div>
+                </div>
+
+                {/* Live preview of exactly which icons will appear, so the
+                    merchant can confirm the setup before publishing. */}
+                <div className="pt-4 border-t border-[#272F45]">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">
+                    আপনার স্টোরে যেভাবে দেখাবে
+                  </p>
+                  <div className="flex items-center justify-center gap-3 flex-wrap">
+                    {facebookUrl.trim() ? (
+                      <span className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#1877F2]/15 border border-[#1877F2]/30 text-[#4d9fff] text-xs font-bold">
+                        <Facebook className="w-4 h-4" /> Facebook
+                      </span>
+                    ) : (
+                      <span className="px-3 py-2 rounded-xl bg-[#181B26] border border-dashed border-[#2E3852] text-slate-600 text-xs">Facebook নেই</span>
+                    )}
+                    {instagramUrl.trim() ? (
+                      <span className="flex items-center gap-2 px-3 py-2 rounded-xl bg-pink-500/15 border border-pink-500/30 text-pink-400 text-xs font-bold">
+                        <Instagram className="w-4 h-4" /> Instagram
+                      </span>
+                    ) : (
+                      <span className="px-3 py-2 rounded-xl bg-[#181B26] border border-dashed border-[#2E3852] text-slate-600 text-xs">Instagram নেই</span>
+                    )}
+                    {whatsappNumber.trim() ? (
+                      <span className="flex items-center gap-2 px-3 py-2 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+                        <MessageCircle className="w-4 h-4" /> WhatsApp
+                      </span>
+                    ) : (
+                      <span className="px-3 py-2 rounded-xl bg-[#181B26] border border-dashed border-[#2E3852] text-slate-600 text-xs">WhatsApp নেই</span>
+                    )}
+                    {tiktokUrl.trim() ? (
+                      <span className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-500/15 border border-slate-500/30 text-slate-200 text-xs font-bold">
+                        <Music className="w-4 h-4" /> TikTok
+                      </span>
+                    ) : (
+                      <span className="px-3 py-2 rounded-xl bg-[#181B26] border border-dashed border-[#2E3852] text-slate-600 text-xs">TikTok নেই</span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-3 text-center leading-relaxed">
+                    ছবি/নাম যোগ করুন, তারপর নিচের <strong className="text-slate-400">Save</strong> বাটনে ক্লিক করুন।
+                    পরিবর্তন সাথে সাথেই আপনার লাইভ স্টোরে দেখা যাবে।
+                  </p>
                 </div>
               </div>
             </div>

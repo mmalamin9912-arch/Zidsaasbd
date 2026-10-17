@@ -69,6 +69,15 @@ interface SidebarProps {
   onOpenAdminLogin?: () => void;
   isDarkMode?: boolean;
   platformSettings?: any;
+  /**
+   * The signed-in merchant profile.
+   *
+   * Used only to derive the "social links configured" dot beside the Social &
+   * Chat Setup entry. The platform config cannot answer that question — it
+   * describes the PLATFORM, not this store — so the merchant's own profile is
+   * the only correct source.
+   */
+  merchant?: any;
 }
 
 interface NavItem {
@@ -99,6 +108,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenAdminLogin,
   isDarkMode = true,
   platformSettings,
+  merchant,
 }) => {
   const [isProductsExpanded, setIsProductsExpanded] = useState(true);
   const [isCustomersExpanded, setIsCustomersExpanded] = useState(true);
@@ -167,6 +177,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
     onCloseMobile();
   };
 
+  /**
+   * Has this merchant configured ANY social channel?
+   *
+   * Drives the "configured" dot next to the Social & Chat Setup entry. Reads
+   * the merchant profile's four URL fields (the same source the storefront
+   * uses), so the indicator is true exactly when the storefront would show at
+   * least one icon. A whitespace-only value counts as empty.
+   */
+  const hasAnySocialLink = Boolean(
+    String(merchant?.whatsappNumber || '').trim() ||
+    String(merchant?.facebookUrl || '').trim() ||
+    String(merchant?.instagramUrl || '').trim() ||
+    String(merchant?.tiktokUrl || '').trim()
+  );
+
   const navItems: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'orders', label: 'Orders', icon: ShoppingBag, badge: ordersBadgeCount ?? undefined, badgeLoading: ordersBadgeCount === null },
@@ -182,6 +207,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'channels', label: 'Channels', icon: Share2 },
     { id: 'settings', label: 'Settings', icon: Sliders },
   ];
+
+  /**
+   * "Social & Chat Setup" — a DIRECT link to the social configuration panel.
+   *
+   * WHY THIS IS NOT PART OF `navItems`
+   * ----------------------------------
+   * It is the same `settings` TAB, not a new route: clicking it opens Settings
+   * with the `store_social` sub-tab already selected. Keeping it out of
+   * `navItems` means the Settings entry's own active/expanded state is not
+   * disturbed by a sibling that shares its tab id.
+   *
+   * Bangladeshi F-commerce merchants set these four links once and then live in
+   * them daily. Previously the fields sat at the bottom of a long "Store
+   * details" form, so the panel was effectively hidden. This puts it one click
+   * from the top level of the sidebar.
+   */
+  const socialSetupItem = {
+    label: 'Social & Chat Setup',
+    icon: Share2,
+    subTab: 'store_social' as SettingsSubTab,
+  };
 
   const productSubItems: { id: ProductSubTab; label: string; icon: React.ElementType }[] = [
     { id: 'all_products', label: 'All products', icon: Boxes },
@@ -517,6 +563,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </div>
               );
             })}
+
+            {/* ── Social & Chat Setup ─────────────────────────────
+                A direct, top-level entry so merchants do not have to dig
+                through Settings → Store details to reach the four links they
+                use every day. It selects the `store_social` sub-tab, so the
+                Settings tab opens straight on the focused panel. */}
+            <button
+              type="button"
+              onClick={() => handleSettingsSubTabClick(socialSetupItem.subTab)}
+              className={`
+                w-full flex items-center justify-between px-3 py-2.5 rounded-xl font-medium text-xs sm:text-sm transition-all cursor-pointer
+                ${activeTab === 'settings' && settingsSubTab === socialSetupItem.subTab
+                  ? 'bg-gradient-to-r from-[#D4AF37]/20 to-[#D4AF37]/5 text-[#E6C587] border-l-4 border-[#D4AF37] font-semibold shadow-sm'
+                  : 'text-slate-300 hover:text-white hover:bg-[#202533]'
+                }
+              `}
+            >
+              <div className="flex items-center gap-3">
+                <socialSetupItem.icon
+                  className={`w-4 h-4 ${
+                    activeTab === 'settings' && settingsSubTab === socialSetupItem.subTab
+                      ? 'text-[#E6C587]'
+                      : 'text-slate-400'
+                  }`}
+                />
+                <span>{socialSetupItem.label}</span>
+              </div>
+              {/* A live dot when at least one channel is configured, so the
+                  merchant can see at a glance that their store is wired up.
+                  Derived from the MERCHANT's own saved values — a platform
+                  setting cannot know whether this particular store filled in
+                  its links. */}
+              {hasAnySocialLink && (
+                <span className="w-1.5 h-1.5 rounded-full bg-[#00D68F]" title="Social links configured" />
+              )}
+            </button>
           </nav>
         </div>
 
