@@ -916,6 +916,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     customerName: '',
     customerPhone: '',
     customerCity: '',
+    customCity: '',
     deliveryZone: 'Inside Dhaka' as 'Inside Dhaka' | 'Outside Dhaka' | 'Sub Dhaka',
     address: '',
     itemTitle: '',
@@ -923,6 +924,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     unitPriceBDT: 0,
     paymentMethod: 'COD' as any,
     courierName: '',
+    customCourier: '',
   });
 
   // Calculate status counts
@@ -1672,6 +1674,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setManualOrderError(null);
 
     const orderNumber = `72200${Math.floor(800 + Math.random() * 199)}`;
+    // "Others" resolution: when the merchant picks "Others" the typed custom
+    // value wins; a blank custom field falls back to "Others" itself so the
+    // saved order never carries an empty city/courier.
+    const resolvedCity = manualForm.customerCity === 'Others'
+      ? (manualForm.customCity.trim() || 'Others')
+      : manualForm.customerCity;
+    const resolvedCourier = manualForm.courierName === 'Others'
+      ? (manualForm.customCourier.trim() || 'Others')
+      : manualForm.courierName;
     const newOrd: Order = {
       id: `ord-${Date.now()}`,
       orderNumber: `#${orderNumber}`,
@@ -1681,7 +1692,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       isManual: true,
       customerName: manualForm.customerName,
       customerPhone: manualForm.customerPhone,
-      customerCity: manualForm.customerCity,
+      customerCity: resolvedCity,
       deliveryZone: manualForm.deliveryZone,
       address: manualForm.address,
       platform: 'POS',
@@ -1692,7 +1703,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       paymentStatus: manualForm.paymentMethod === 'COD' ? 'Unpaid' : 'Paid',
       fulfillmentStatus: 'Unfulfilled',
       status: 'New',
-      courierName: manualForm.courierName,
+      courierName: resolvedCourier,
       trackingCode: `SF-BD-${Math.floor(100000 + Math.random() * 900000)}`,
       tags: ['Manual Order', 'POS'],
       createdAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
@@ -1738,9 +1749,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       onUpdateOrders([newOrd, ...orders]);
       setIsManualModalOpen(false);
       setManualForm({
-        customerName: '', customerPhone: '', customerCity: 'Dhaka',
+        customerName: '', customerPhone: '', customerCity: 'Dhaka', customCity: '',
         deliveryZone: 'Inside Dhaka', address: '', itemTitle: '',
-        quantity: 1, unitPriceBDT: 0, paymentMethod: 'COD', courierName: 'Steadfast Courier',
+        quantity: 1, unitPriceBDT: 0, paymentMethod: 'COD', courierName: 'Steadfast Courier', customCourier: '',
       });
 
       // The order is committed, so the invoice share is safe to offer.
@@ -3541,7 +3552,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   <label className="block text-slate-300 font-semibold mb-1">City / Division</label>
                   <select
                     value={manualForm.customerCity}
-                    onChange={(e) => setManualForm({ ...manualForm, customerCity: e.target.value })}
+                    onChange={(e) => setManualForm({ ...manualForm, customerCity: e.target.value, customCity: e.target.value === 'Others' ? manualForm.customCity : '' })}
                     className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-white"
                   >
                     <option value="Dhaka">Dhaka</option>
@@ -3549,7 +3560,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <option value="Sylhet">Sylhet</option>
                     <option value="Rajshahi">Rajshahi</option>
                     <option value="Khulna">Khulna</option>
+                    <option value="Others">Others</option>
                   </select>
+                  {manualForm.customerCity === 'Others' && (
+                    <input
+                      type="text"
+                      required
+                      value={manualForm.customCity}
+                      onChange={(e) => setManualForm({ ...manualForm, customCity: e.target.value })}
+                      placeholder="Enter custom city/district"
+                      className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-white mt-2"
+                    />
+                  )}
                 </div>
               </div>
 
@@ -3606,7 +3628,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   <label className="block text-slate-300 font-semibold mb-1">Courier Partner</label>
                   <select
                     value={manualForm.courierName}
-                    onChange={(e) => setManualForm({ ...manualForm, courierName: e.target.value })}
+                    onChange={(e) => setManualForm({ ...manualForm, courierName: e.target.value, customCourier: e.target.value === 'Others' ? manualForm.customCourier : '' })}
                     className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-white"
                   >
                     <option value="Steadfast Courier">Steadfast Courier</option>
@@ -3614,7 +3636,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <option value="Pathao Courier">Pathao Courier</option>
                     <option value="RedX Logistics">RedX Logistics</option>
                     <option value="Paperfly">Paperfly</option>
+                    <option value="Others">Others</option>
                   </select>
+                  {manualForm.courierName === 'Others' && (
+                    <input
+                      type="text"
+                      required
+                      value={manualForm.customCourier}
+                      onChange={(e) => setManualForm({ ...manualForm, customCourier: e.target.value })}
+                      placeholder="Enter custom courier name"
+                      className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-white mt-2"
+                    />
+                  )}
                 </div>
               </div>
 
