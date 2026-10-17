@@ -12,7 +12,7 @@ import { fetchStoreByRef, storeIdFromRecord } from '../lib/storeApi';
 import { LanguageToggle } from './LanguageToggle';
 import SafeImage from './SafeImage';
 import { useStorefrontTracking } from '../hooks/useStorefrontTracking';
-import { MessengerChatWidget } from './MessengerChatWidget';
+import { MessengerChatWidget, resolveMessengerHref } from './MessengerChatWidget';
 import {
   EMPTY_MODULES,
   applyStoreSeo,
@@ -5477,31 +5477,31 @@ The render below must not guess. A merchant may paste
       </footer>
       </div>
 
-      {/* Facebook Messenger floating chat button — ALWAYS visible when the
-          merchant saved a numeric Page ID (Settings → API) OR a Facebook Page
-          URL (Settings → Social Media). Pinned fixed bottom-6 right-6 with
-          z-[9999] so it sits above footers, sticky bars and theme layers.
-          Clicking opens the Messenger / Facebook URL in a new tab. */}
-      <MessengerChatWidget pageId={messengerPageId} pageUrl={resolvedTheme.facebookHandle} />
-
-      {/* Floating WhatsApp chat button.
-          Driven by the merchant profile's `whatsappNumber` (Settings → Social
-          Media). Renders ONLY when a usable number resolved, so a store that
-          never set one shows no button. Positioned above the Messenger bubble
-          (the SDK's own bubble sits bottom-right by default) so the two never
-          overlap. */}
-      {resolvedTheme.showWhatsapp && resolvedTheme.whatsappNumber && (
-        <a
-          href={`https://wa.me/${resolvedTheme.whatsappNumber}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Chat on WhatsApp"
-          aria-label="Chat on WhatsApp"
-          className="fixed bottom-24 right-6 z-[9998] flex h-12 w-12 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg shadow-black/30 transition hover:scale-110"
-        >
-          <MessageCircle className="h-6 w-6" />
-        </a>
-      )}
+      {/* SINGLE primary floating chat button (Messenger first, WhatsApp second).
+          Only ONE floats at a time to keep the storefront look clean — the
+          social-links section still shows every configured channel. */}
+      {(() => {
+        const messengerHref = resolveMessengerHref(messengerPageId, resolvedTheme.facebookHandle);
+        if (messengerHref) {
+          return <MessengerChatWidget pageId={messengerPageId} pageUrl={resolvedTheme.facebookHandle} />;
+        }
+        if (resolvedTheme.showWhatsapp && resolvedTheme.whatsappNumber) {
+          return (
+            <a
+              href={`https://wa.me/${resolvedTheme.whatsappNumber}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Chat on WhatsApp"
+              aria-label="Chat on WhatsApp"
+              data-testid="floating-whatsapp-widget"
+              className="fixed bottom-6 right-6 z-[9999] flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-2xl shadow-black/40 ring-1 ring-white/20 transition hover:scale-110"
+            >
+              <MessageCircle className="h-7 w-7" />
+            </a>
+          );
+        }
+        return null;
+      })()}
     </div>
   );
 };

@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { MerchantProfile, SettingsSubTab } from '../../types';
 import { isPaidSubscriptionActive } from '../../utils/subscriptionUtils';
 import SafeImage from '../SafeImage';
+import { useToast } from '../ToastProvider';
 import {
   Settings as SettingsIcon,
   User,
@@ -81,6 +82,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [currency, setCurrency] = useState(merchant?.currency || 'BDT');
   const [language, setLanguage] = useState(merchant?.language || 'en-US');
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const { info: toastInfo } = useToast();
+  // Tracks whether the single-floating-button toast already fired for the
+  // current "both chats configured" state — re-fires only when the merchant
+  // edits the fields into that state again (not on every keystroke/render).
+  const dualChatToastedRef = useRef(false);
   // Locale persistence state (currency + default language).
   const [localeSaving, setLocaleSaving] = useState(false);
   const [localeNotice, setLocaleNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
@@ -1494,6 +1500,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     </div>
   );
 
+  // Toast the merchant the moment BOTH primary instant-chat options become
+  // configured simultaneously (Facebook/Messenger + WhatsApp): only the 1st
+  // (Messenger) will float on the storefront. Resets when either is cleared
+  // so editing back into the dual state notifies again.
+  const hasMessengerChat = Boolean(
+    facebookUrl.trim() || facebookPageId.trim() || (merchant as any)?.integrationsConfig?.facebookPageId?.trim?.()
+  );
+  const hasWhatsappChat = Boolean(whatsappNumber.trim());
+  useEffect(() => {
+    if (activeSubTab !== 'store_social') return;
+    if (hasMessengerChat && hasWhatsappChat) {
+      if (!dualChatToastedRef.current) {
+        dualChatToastedRef.current = true;
+        toastInfo('নোট: স্টোরফ্রন্টের লুক সুন্দর রাখতে শুধুমাত্র ১ম প্রাথমিক চ্যাট বাটনটি (মেসেঞ্জার/হোয়াটসঅ্যাপ) ফ্লোটিং দেখাবে।');
+      }
+    } else {
+      dualChatToastedRef.current = false;
+    }
+  }, [activeSubTab, hasMessengerChat, hasWhatsappChat, toastInfo]);
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     const updatedThemeConfig = merchant.themeConfig ? {
@@ -2183,6 +2209,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
                 {/* Live preview of exactly which icons will appear, so the
                     merchant can confirm the setup before publishing. */}
+                {/* Single-floating-button notice: when BOTH primary instant-chat
+                    options (Facebook/Messenger + WhatsApp) are configured, only
+                    the FIRST (Messenger) floats — keeps the storefront clean. */}
+                {(facebookUrl.trim() || (merchant as any)?.integrationsConfig?.facebookPageId || facebookPageId.trim()) && whatsappNumber.trim() ? (
+                  <div
+                    data-testid="single-chat-notice"
+                    className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs font-medium text-amber-300 leading-relaxed"
+                  >
+                    নোট: স্টোরফ্রন্টের লুক সুন্দর রাখতে শুধুমাত্র ১ম প্রাথমিক চ্যাট বাটনটি (মেসেঞ্জার/হোয়াটসঅ্যাপ) ফ্লোটিং দেখাবে।
+                  </div>
+                ) : null}
                 <div className="pt-4 border-t border-[#272F45]">
                   <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">
                     আপনার স্টোরে যেভাবে দেখাবে
