@@ -62,7 +62,10 @@ interface SidebarProps {
   onSelectSettingsSubTab?: (subTab: SettingsSubTab) => void;
   isOpenMobile: boolean;
   onCloseMobile: () => void;
-  ordersBadgeCount?: number;
+  /** Live orders count for the sidebar badge.
+   *  `null` (the default) means the count is still being fetched — the badge
+   *  renders a pulsing placeholder instead of a misleading `0`. */
+  ordersBadgeCount?: number | null;
   onOpenAdminLogin?: () => void;
   isDarkMode?: boolean;
   platformSettings?: any;
@@ -73,6 +76,9 @@ interface NavItem {
   label: string;
   icon: React.ElementType;
   badge?: string | number;
+  /** True while the badge count is still resolving (e.g. orders hydrating) —
+   *  renders a subtle pulse instead of a number. */
+  badgeLoading?: boolean;
   highlight?: boolean;
 }
 
@@ -89,7 +95,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectSettingsSubTab,
   isOpenMobile,
   onCloseMobile,
-  ordersBadgeCount = 4,
+  ordersBadgeCount = null,
   onOpenAdminLogin,
   isDarkMode = true,
   platformSettings,
@@ -163,7 +169,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const navItems: NavItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'orders', label: 'Orders', icon: ShoppingBag, badge: ordersBadgeCount },
+    { id: 'orders', label: 'Orders', icon: ShoppingBag, badge: ordersBadgeCount ?? undefined, badgeLoading: ordersBadgeCount === null },
     { id: 'products', label: 'Products', icon: Package },
     { id: 'customers', label: 'Customers', icon: Users },
     { id: 'marketing', label: 'Marketing', icon: Megaphone },
@@ -362,7 +368,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
-                      {item.badge && (
+                      {/* Orders count still hydrating: pulsing placeholder so
+                          the badge never flashes a misleading `0` on login. */}
+                      {item.badgeLoading && (
+                        <span
+                          className="animate-pulse bg-[#D4AF37]/25 text-[#E6C587] text-[10px] font-bold px-2 py-0.5 rounded-full min-w-[26px] text-center"
+                          aria-label="Loading order count"
+                          aria-busy="true"
+                        >
+                          …
+                        </span>
+                      )}
+
+                      {/* Explicit null/undefined guard: the old `item.badge &&`
+                          check rendered a bare, unstyled `0` for an empty
+                          store because `0 && …` evaluates to `0`. */}
+                      {!item.badgeLoading && item.badge !== undefined && item.badge !== null && (
                         <span className="bg-[#D4AF37] text-slate-950 text-[10px] font-bold px-2 py-0.5 rounded-full">
                           {item.badge}
                         </span>

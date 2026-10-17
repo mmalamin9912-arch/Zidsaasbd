@@ -38,6 +38,9 @@ import { useToast } from '../ToastProvider';
 interface DashboardViewProps {
   merchant: MerchantProfile;
   orders: Order[];
+  /** False while the first /api/orders response is still in flight — the
+   *  "Total Store Orders" KPI shows a pulsing placeholder instead of `0`. */
+  ordersHydrated?: boolean;
   products: Product[];
   onNavigateTab: (tab: any) => void;
   onOpenSubscriptionModal: () => void;
@@ -46,6 +49,7 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({
   merchant,
   orders,
+  ordersHydrated = true,
   products,
   onNavigateTab,
   onOpenSubscriptionModal,
@@ -517,7 +521,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <span>Total Store Orders</span>
             <span className="text-amber-400 font-bold text-[10px] bg-amber-500/10 px-2 py-0.5 rounded">Real-time</span>
           </div>
-          <div className="text-2xl font-black text-white">{orders.length}</div>
+          <div className="text-2xl font-black text-white">
+            {ordersHydrated ? (
+              orders.length
+            ) : (
+              <span className="animate-pulse text-slate-500" aria-label="Loading order count" aria-busy="true">…</span>
+            )}
+          </div>
           <p className="text-[11px] text-slate-400 mt-1">100% fulfillable via Steadfast</p>
         </div>
 

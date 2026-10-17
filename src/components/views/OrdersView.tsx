@@ -111,6 +111,14 @@ interface OrdersViewProps {
    * callers that don't pass it behave exactly as before.
    */
   onSyncOrders?: (orders: Order[]) => void;
+  /**
+   * Hydration gate from App: false while the first /api/orders request for the
+   * current store is still in flight. Status-tab count pills render a pulsing
+   * `…` instead of `0` during that window, so a fresh login never flashes an
+   * "empty" orders page before the first real count lands.
+   * Defaults to `true` (counts ready) for callers that don't track hydration.
+   */
+  ordersHydrated?: boolean;
 }
 
 export type OrderSubMenu = 'all' | 'manual' | 'abandoned' | 'returns';
@@ -210,6 +218,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   storeSlug,
   openReturnsSignal,
   onSyncOrders,
+  ordersHydrated = true,
 }) => {
   const toast = useToast();
   const channelRef = useRef<any>(null);
@@ -1960,8 +1969,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <span>{tab}</span>
                     <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                       isActive ? 'bg-slate-950/20 text-slate-950' : 'bg-[#181B26] text-slate-400 border border-[#2E3548]'
-                    }`}>
-                      {count}
+                    }${ordersHydrated ? '' : ' animate-pulse'}`}>
+                      {ordersHydrated ? count : '…'}
                     </span>
                   </button>
                 );

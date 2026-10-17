@@ -552,6 +552,11 @@ export default function App() {
   // guard, the effect re-runs on every state update it triggers, producing the
   // 300+ request infinite fetch loop.
   const storeIdentityKey = React.useRef<string>('');
+  // Identity of the store whose order count is currently rendered by the
+  // sidebar badge / dashboard widgets. Used to drop back to the loading
+  // placeholder when the merchant actually switches stores (see the hydration
+  // gate inside the data-load effect below).
+  const lastOrdersStoreKeyRef = React.useRef<string>('');
   const pendingIdentity = [merchant?.id, merchant?.storeCode, merchant?.storeSlug, activeTab].join('|');
 
   // Fetch data from DB on mount, storeSlug change, or tab switch.
@@ -567,6 +572,17 @@ export default function App() {
     const merchantId = merchant?.id || merchant?.storeCode || merchant?.storeSlug || 'default';
     const storeSlug = merchant?.storeSlug || merchant?.id || 'default';
     let isMounted = true;
+
+    // ── Orders hydration gate ─────────────────────────────────────────────
+    // When the PERMANENT store identity changes (new login / merchant id
+    // swap) the count currently shown belongs to another store, so fall back
+    // to the loading placeholder until the fresh /api/orders response lands.
+    // Tab switches share the same identity and must NOT re-flash it.
+    const ordersStoreKey = [merchant?.id, merchant?.storeCode, merchant?.storeSlug].join('|');
+    if (lastOrdersStoreKeyRef.current && lastOrdersStoreKeyRef.current !== ordersStoreKey) {
+      setOrdersHydrated(false);
+    }
+    lastOrdersStoreKeyRef.current = ordersStoreKey;
 
     // Safe helper to fetch JSON. `cache: 'no-store'` mirrors the API's own
     // no-store response headers (force-dynamic equivalent): the dashboard must
@@ -678,14 +694,21 @@ export default function App() {
     if (merchant?.id) ordersQuery.set('merchant_id', String(merchant.id));
     if (merchant?.storeSlug) ordersQuery.set('store_slug', String(merchant.storeSlug));
     if (!merchant?.id && !merchant?.storeSlug && merchantId) ordersQuery.set('storeRef', String(merchantId));
-    safeFetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`).then(data => {
-      if (isMounted && Array.isArray(data)) {
-        // API rows are raw Mongo documents (total_price / created_at / items as
-        // a JSON string). Normalize them into the UI `Order` shape so the
-        // dashboard never renders `.toLocaleString()` on an undefined field.
-        setOrders(normalizeOrders(data));
-      }
-    });
+    safeFetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`)
+      .then(data => {
+        if (isMounted && Array.isArray(data)) {
+          // API rows are raw Mongo documents (total_price / created_at / items as
+          // a JSON string). Normalize them into the UI `Order` shape so the
+          // dashboard never renders `.toLocaleString()` on an undefined field.
+          setOrders(normalizeOrders(data));
+        }
+      })
+      .finally(() => {
+        // Settle the hydration gate even when the request failed (safeFetch
+        // never rejects): an endless pulsing placeholder would be worse than
+        // showing the last known / cached count on a network error.
+        if (isMounted) setOrdersHydrated(true);
+      });
 
     return () => {
       isMounted = false;
@@ -814,21 +837,43 @@ export default function App() {
     return [];
   });
 
-  const [orders, setOrders] = useState<Order[]>(() => {
+  // Reads this merchant's cached orders from localStorage — the same cache the
+  // auto-save effect below writes on every orders change. Returns null when
+  // nothing is cached yet so callers can tell "no cache" from "cached: empty".
+  const readCachedOrders = (): Order[] | null => {
     try {
       const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) return JSON.parse(saved).orders || [];
+      if (saved) {
+        const parsed = JSON.parse(saved).orders;
+        if (Array.isArray(parsed)) return parsed;
+      }
     } catch (e) {
       console.error(e);
     }
     try {
       const saved2 = localStorage.getItem(`ZID_MERCHANT_STORE_DATA_${(merchant as any)?.storeSlug || 'bd'}`);
-      if (saved2) return JSON.parse(saved2).orders || [];
+      if (saved2) {
+        const parsed = JSON.parse(saved2).orders;
+        if (Array.isArray(parsed)) return parsed;
+      }
     } catch (e) {
       console.error(e);
     }
-    return [];
-  });
+    return null;
+  };
+
+
+  const [orders, setOrders] = useState<Order[]>(() => readCachedOrders() ?? []);
+
+  // Orders hydration gate for the sidebar badge and every order-count widget.
+  //
+  // Starts TRUE only when localStorage already holds ≥1 order: a returning
+  // merchant sees their cached count instantly (no flash), while a fresh
+  // login starts on the loading placeholder instead of a misleading `0` until
+  // the first authoritative /api/orders response resolves.
+  const [ordersHydrated, setOrdersHydrated] = useState<boolean>(
+    () => (readCachedOrders()?.length ?? 0) > 0
+  );
 
   const [themes, setThemes] = useState<ThemeConfig[]>(() => {
     try {
@@ -1822,7 +1867,13 @@ export default function App() {
         if (parsed.codConfig) setCodConfig(parsed.codConfig);
         // Courier connection state + credentials (secrets re-hydrate from Mongo).
         if (Array.isArray(parsed.couriers) && parsed.couriers.length > 0) setCouriers(parsed.couriers);
-        if (parsed.orders) setOrders(normalizeOrders(parsed.orders));
+        if (Array.isArray(parsed.orders)) {
+          const restoredOrders = normalizeOrders(parsed.orders);
+          setOrders(restoredOrders);
+          // Cached rows are real data — render them right away. An empty cache
+          // keeps the loading placeholder until Mongo answers (count may truly be 0).
+          setOrdersHydrated(restoredOrders.length > 0);
+        }
         if (parsed.themes) setThemes(parsed.themes);
       } else {
         // Fallback or fresh merchant setup
@@ -1832,6 +1883,9 @@ export default function App() {
         setCodConfig(initialCodConfig);
         setCouriers(initialCouriers);
         setOrders([]);
+        // Fresh workspace: nothing cached — show the loading placeholder until
+        // the first /api/orders response resolves instead of flashing `0`.
+        setOrdersHydrated(false);
         setThemes([]);
       }
     } catch (e) {
@@ -2350,7 +2404,9 @@ onPlaceOrder={async (newOrder) => {
           onSelectSettingsSubTab={setSettingsSubTab}
           isOpenMobile={isMobileSidebarOpen}
           onCloseMobile={() => setIsMobileSidebarOpen(false)}
-          ordersBadgeCount={orders.length}
+          // `null` = orders still hydrating → the Sidebar renders a subtle
+          // pulsing placeholder instead of a flashing `0` counter.
+          ordersBadgeCount={ordersHydrated ? orders.length : null}
           onOpenAdminLogin={() => setIsAdminLoginModalOpen(true)}
           isDarkMode={isDarkMode}
           platformSettings={platformSettings}
@@ -2387,6 +2443,7 @@ onPlaceOrder={async (newOrder) => {
               <DashboardView
                 merchant={merchant}
                 orders={orders}
+                ordersHydrated={ordersHydrated}
                 products={products}
                 onNavigateTab={setActiveTab}
                 onOpenSubscriptionModal={() => setIsSubscriptionModalOpen(true)}
@@ -2396,6 +2453,7 @@ onPlaceOrder={async (newOrder) => {
             {activeTab === 'orders' && (
               <OrdersView
                 orders={orders}
+                ordersHydrated={ordersHydrated}
                 onUpdateOrders={handleUpdateOrders}
                 // Background polls sync state ONLY — never POST the list back
                 // (see OrdersViewProps.onSyncOrders for the loop this breaks).
