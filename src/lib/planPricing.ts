@@ -235,7 +235,7 @@ export function derivePlanFeatures(plan: SubscriptionPlan): string[] {
   else derived.push('Standard themes only');
 
   if (flags.customDomain) derived.push('Custom domain integration (.com)');
-  else if (flags.freeSubdomain) derived.push('Free subdomain (.zidbd.com)');
+  else if (flags.freeSubdomain) derived.push('Free subdomain (.zidbdsaas.com)');
 
   if (flags.metaPixels && flags.googleAnalytics) derived.push('Meta Pixel & Google Analytics tracking');
   else if (flags.metaPixels) derived.push('Meta Pixel & TikTok tracking');
@@ -263,7 +263,7 @@ export function derivePlanFeatures(plan: SubscriptionPlan): string[] {
  * set — a flag shown in the editor can never be missing from the card text.
  */
 export const FEATURE_FLAG_LABELS: Array<{ key: keyof PlanFeatureFlags; label: string }> = [
-  { key: 'freeSubdomain', label: 'Free .zidbd.com subdomain' },
+  { key: 'freeSubdomain', label: 'Free .zidbdsaas.com subdomain' },
   { key: 'customDomain', label: 'Custom .com domain' },
   { key: 'premiumThemes', label: 'Premium theme library' },
   { key: 'cssCustomizer', label: 'CSS / color customizer' },

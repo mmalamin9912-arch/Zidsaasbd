@@ -177,6 +177,42 @@ export const Header: React.FC<HeaderProps> = ({
     m.email?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // ── Canonical storefront link ──────────────────────────────────────────────
+  //
+  // Now that host-based routing exists (see middleware.ts), a merchant's public
+  // URL is their OWN subdomain — `storename.zidbdsaas.com` — not a hardcoded
+  // `.vercel.app/e/<slug>` path. The label used to hardcode the deployment
+  // host, so a rebrand or a custom domain left every merchant sharing a stale
+  // preview URL.
+  //
+  // The subdomain is derived from the CURRENT hostname's root so the link is
+  // correct on production, on a preview deployment, and on a custom platform
+  // domain. If the slug is missing or not a valid subdomain label, we fall back
+  // to the path form the SPA always understands.
+  const storefrontUrl = React.useMemo(() => {
+    const slug = String(merchant?.storeSlug || '').trim().toLowerCase();
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    // A slug that is not a legal DNS label cannot be a subdomain.
+    if (!slug || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug)) {
+      return `${origin}/e/${slug}`;
+    }
+    try {
+      const host = window.location.hostname.toLowerCase();
+      // Strip an existing store subdomain so we never build `a.b.zidbdsaas.com`.
+      const parts = host.split('.');
+      const root = parts.length >= 3 ? parts.slice(-3).join('.') : parts.slice(-2).join('.');
+      const proto = window.location.protocol || 'https:';
+      // A localhost / IP host has no meaningful root — use the path form.
+      if (/^(localhost|\d+\.\d+\.\d+\.\d+)$/.test(root)) return `${origin}/e/${slug}`;
+      return `${proto}//${slug}.${root}`;
+    } catch {
+      return `${origin}/e/${slug}`;
+    }
+  }, [merchant?.storeSlug]);
+
+  /** Host + path only, for the visible label under the store name. */
+  const storefrontUrlLabel = storefrontUrl.replace(/^https?:\/\//, '');
+
   const [aiResponses, setAiResponses] = useState<Array<{ sender: 'user' | 'ai'; text: string }>>(() => {
     // Persist the Zid AI chat stream so the merchant can hold a multi-turn
     // conversation across modal open/close and page reloads.
@@ -1301,18 +1337,26 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="hidden xl:block text-left">
               <div className="text-xs font-bold text-white leading-tight">{merchant?.storeName || 'My Store'}</div>
               <div className="flex items-center gap-2">
+                {/*
+                  The canonical storefront URL is now the merchant's OWN
+                  subdomain (`storename.zidbdsaas.com`), which middleware.ts
+                  routes to the storefront. The old `…vercel.app/e/<slug>` path
+                  form is kept as the fallback for a deployment without
+                  middleware (or a store whose slug is not yet a live subdomain),
+                  so the link is never broken.
+                */}
                 <a
-                  href={`https://zidbdsaas2026.vercel.app/e/${merchant?.storeSlug || ''}`}
+                  href={storefrontUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-[10px] text-[#E6C587] font-mono leading-tight hover:underline cursor-pointer"
                 >
-                  zidbdsaas2026.vercel.app/e/{merchant?.storeSlug || ''}
+                  {storefrontUrlLabel}
                 </a>
                 <button
                   onClick={(e) => {
                     e.preventDefault();
-                    navigator.clipboard.writeText(`https://zidbdsaas2026.vercel.app/e/${merchant?.storeSlug || ''}`);
+                    navigator.clipboard.writeText(storefrontUrl);
                     toast.success('Store link copied to clipboard!');
                   }}
                   className="p-0.5 text-slate-500 hover:text-white transition-colors"

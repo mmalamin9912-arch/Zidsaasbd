@@ -143,6 +143,50 @@ function isBareStorePath(path: string): boolean {
 // `POST /api/admin/verify-pin` — with a graceful legacy fallback for
 // deployments that still set `VITE_SUPER_ADMIN_PASSCODE`.
 
+/**
+ * Merchant subdomain routing — CLIENT-SIDE SAFETY NET.
+ *
+ * The primary host→storefront rewrite lives in `/middleware.ts` (Vercel Edge),
+ * which runs before this bundle loads. This helper is the belt-and-braces
+ * fallback for a deployment where middleware is absent (a self-hosted Node
+ * build, a static host, or a Vercel plan that skipped it). Without it, a
+ * merchant URL such as `storename.zidbdsaas.com/` arrives with path `/`, which
+ * every branch below treats as the platform landing page — so the shop was
+ * never reachable from its own domain.
+ *
+ * Only a host that is unambiguously a merchant host qualifies:
+ *   • one label under the platform root (`storename.zidbdsaas.com`), and
+ *   • not the apex, not `www`, and not any reserved infrastructure subdomain.
+ * Custom domains are deliberately NOT inferred here: their slug cannot be
+ * derived from the host without a server lookup, and guessing would render a
+ * stranger's shop. `middleware.ts` resolves those via `/api/storefront`.
+ */
+const STOREFRONT_ROOT_DOMAIN = String(
+  (import.meta as any)?.env?.VITE_STOREFRONT_ROOT_DOMAIN || 'zidbdsaas.com'
+).toLowerCase();
+
+/** Subdomains that belong to the platform's own infrastructure, never a store. */
+const RESERVED_SUBDOMAINS = new Set([
+  'www', 'app', 'api', 'admin', 'dashboard', 'mail', 'smtp', 'ftp', 'cdn',
+  'assets', 'static', 'img', 'images', 'docs', 'support', 'help', 'status',
+  'staging', 'preview', 'dev', 'test', 'beta', 'edge', 'store', 'e',
+]);
+
+/**
+ * The merchant slug encoded in the current hostname, or '' for the platform.
+ * Read once at module scope: the hostname cannot change without a full reload.
+ */
+function storeSlugFromHost(hostname: string): string {
+  const host = String(hostname || '').toLowerCase().split(':')[0];
+  if (!host || !host.endsWith(`.${STOREFRONT_ROOT_DOMAIN}`)) return '';
+
+  const sub = host.slice(0, -(STOREFRONT_ROOT_DOMAIN.length + 1));
+  // Apex ('' ), a reserved label, or a multi-level host is not a store slug.
+  if (!sub || sub.includes('.') || RESERVED_SUBDOMAINS.has(sub)) return '';
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(sub)) return '';
+  return sub;
+}
+
 export default function App() {
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
@@ -272,6 +316,26 @@ export default function App() {
       }
 
       if (path.startsWith('/store/') || path.startsWith('/e/')) {
+        setIsAuthChecking(false);
+        return;
+      }
+
+      // ── Merchant subdomain (`storename.zidbdsaas.com/…`).
+      //
+      // `/middleware.ts` normally rewrites this to `/store/<slug>` before the
+      // bundle runs, and the `/store/` branch above would then catch it. This
+      // handles the case where middleware did NOT run (self-hosted Node, a
+      // static host): the host still identifies the store, so rewrite the URL
+      // in place — exactly the same self-heal used for a bare `/slug` path.
+      // A popstate listener keeps deep links (`/products`) working on the way
+      // in, and every in-app navigation continues to use path routing.
+      const hostSlug = storeSlugFromHost(window.location.hostname);
+      if (hostSlug) {
+        const subPath = path.replace(/^\/+/, '');
+        const target = `/store/${hostSlug}${subPath ? `/${subPath}` : ''}${window.location.search}`;
+        window.history.replaceState({}, '', target);
+        setCurrentPath(`/store/${hostSlug}${subPath ? `/${subPath}` : ''}`);
+        setShowLanding(false);
         setIsAuthChecking(false);
         return;
       }

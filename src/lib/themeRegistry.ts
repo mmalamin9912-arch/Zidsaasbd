@@ -354,7 +354,7 @@ export const SAMPLE_STORE = {
     storeName: 'Demo Store',
     storeSlug: 'demo-store',
     ownerName: 'Demo Merchant',
-    email: 'demo@zidbd.com',
+    email: 'demo@zidbdsaas.com',
     phone: '+8801700000',
     subscriptionPlan: 'growth_plan',
     logoUrl: '',

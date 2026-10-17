@@ -122,6 +122,32 @@ import { sanitizeImagePayload, formatBytes, approximateSize, MAX_PAYLOAD_BYTES }
 // broadcast and automation-trigger email goes through `sendEmail` so delivery
 // attempts and failures produce one consistent, greppable log line.
 import { sendEmail, isEmailConfigured, buildBrandedEmailHtml, escapeHtml, paragraphsFromText } from './emailService.js';
+// Local BD SMS gateway dispatch (Greenweb / SSL Wireless / Bulk SMS BD / Alpha).
+// The merchant's saved SMS settings were previously persisted but never acted
+// on — nothing in the codebase sent an SMS. See lib/smsService.ts.
+import {
+  sendSms,
+  resolveSmsProvider,
+  platformSmsKey,
+  maskPhone,
+  SMS_PROVIDERS,
+} from './smsService.js';
+import type { SmsProvider, SmsTriggerKey } from './smsService.js';
+// Live payment-gateway execution (SSLCommerz / Shurjopay). Saved gateway
+// credentials previously had no route that could actually charge a customer.
+import {
+  initiateSslcommerz,
+  validateSslcommerz,
+  initiateShurjopay,
+  verifyShurjopay,
+  verifySslcommerzNonce,
+  normalizeGateway,
+  buildTransactionId,
+  amountsMatch,
+  platformGatewayCredentials,
+  type PaymentGateway,
+  type GatewayCredentials,
+} from './paymentGateway.js';
 
 // ── Broadcast & automation email dispatch ─────────────────────────────────────
 /**
@@ -9518,6 +9544,703 @@ app.post('/api/store/communication-settings', async (req, res) => {
   }
 });
 
+// ── SMS dispatch ────────────────────────────────────────────────────────────
+//
+// THE BUG THIS FIXES
+// ------------------
+// `communicationConfig.sms` was saved faithfully — enabled flag, sender id,
+// the four trigger toggles, per-trigger templates — and then never read by
+// anything. There was no send call anywhere in the codebase, and the stored
+// `smsApiKey` had no consumer. Turning on "SMS on order confirmation" was a
+// no-op. These helpers are the missing consumer.
+
+/**
+ * Resolve the SMS credentials for a store, preferring the store's own saved
+ * key and falling back to a platform-level env var.
+ *
+ * `smsApiKey` lives in the integration-properties config; `senderId` can come
+ * from either the communication config (Settings → Communications) or the
+ * integration config. Secrets never leave the server.
+ */
+async function resolveStoreSmsCredentials(
+  storeRef: string,
+  commConfig?: Record<string, any>
+): Promise<{ provider: SmsProvider | ''; apiKey: string; senderId: string; enabled: boolean }> {
+  const comm = commConfig || (await readCommunicationConfig(storeRef));
+  const sms = (comm?.sms && typeof comm.sms === 'object') ? comm.sms : {};
+
+  let integration: Record<string, any> = {};
+  try {
+    // NOTE: 'integrations' (plural) is the registered config key — see the
+    // /api/store/integration-properties route below.
+    integration = ((await readStoreConfig('integrations', storeRef)) || {}) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[SMS] integration config read warning:', err?.message || err);
+  }
+
+  const provider = resolveSmsProvider(sms.provider || integration.smsProvider);
+  const apiKey = String(integration.smsApiKey || '').trim() || (provider ? platformSmsKey(provider) : '');
+  const senderId = String(sms.senderId || integration.smsSenderId || '').trim();
+
+  return { provider, apiKey, senderId, enabled: sms.enabled === true };
+}
+
+/**
+ * Send one template-driven SMS for a store. NEVER throws and NEVER blocks the
+ * caller's response: it is invoked fire-and-forget from the order path.
+ *
+ * Returns a shaped result so `/api/store/test-sms` can report the real outcome
+ * to the merchant instead of a bare "sent".
+ */
+async function dispatchStoreSms(args: {
+  storeRef: string;
+  trigger: SmsTriggerKey;
+  to: string;
+  /** Ordered {placeholder: value} pairs substituted into the template. */
+  vars?: Record<string, string>;
+  /** Built-in body used when the merchant has not written a template. */
+  fallbackText?: string;
+  /** Skip the per-store trigger toggle (used by the explicit test route). */
+  ignoreTriggerToggle?: boolean;
+  /** Use these credentials instead of re-reading config (test route). */
+  override?: { provider: SmsProvider | ''; apiKey: string; senderId: string };
+}): Promise<SmsDispatchResultLike> {
+  try {
+    const creds = args.override
+      ? { ...args.override, enabled: true }
+      : await resolveStoreSmsCredentials(args.storeRef);
+
+    if (!creds.enabled && !args.override) {
+      return { ok: false, sent: false, skipped: true, message: 'SMS is switched off for this store.' };
+    }
+    if (!creds.provider) {
+      return {
+        ok: false,
+        sent: false,
+        message: 'No SMS gateway selected. Choose Greenweb BD, SSL Wireless, Bulk SMS BD or Alpha SMS.',
+      };
+    }
+    if (!creds.apiKey) {
+      return {
+        ok: false,
+        sent: false,
+        provider: creds.provider,
+        message: 'No SMS API key saved. Add your gateway token in Settings → Integrations.',
+      };
+    }
+
+    // Honour the per-trigger toggle unless the caller explicitly overrides it.
+    let text = '';
+    if (!args.override) {
+      const comm = await readCommunicationConfig(args.storeRef);
+      const sms = (comm?.sms && typeof comm.sms === 'object')
+        ? (comm.sms as Record<string, any>)
+        : {} as Record<string, any>;
+      const triggers = (sms.triggers && typeof sms.triggers === 'object') ? sms.triggers : {};
+      if (!args.ignoreTriggerToggle && triggers[args.trigger] !== true) {
+        return { ok: false, sent: false, skipped: true, message: `The "${args.trigger}" SMS trigger is switched off.` };
+      }
+      const templates = (sms.templates && typeof sms.templates === 'object') ? sms.templates : {};
+      text = String(templates[args.trigger] || '').trim();
+    }
+
+    // Fall back to a built-in body when the merchant wrote no template, so the
+    // trigger is still useful out of the box.
+    if (!text) text = String(args.fallbackText || '').trim();
+
+    // Substitute {placeholders}. Unknown placeholders are left verbatim rather
+    // than blanked, so a typo in a template is visible instead of silent.
+    for (const [key, value] of Object.entries(args.vars || {})) {
+      text = text.split(`{${key}}`).join(String(value ?? ''));
+    }
+
+    if (!text) {
+      return { ok: false, sent: false, provider: creds.provider, message: 'The SMS template is empty and no default body is available.' };
+    }
+
+    const result = await sendSms({
+      provider: creds.provider,
+      apiKey: creds.apiKey,
+      senderId: creds.senderId,
+      to: args.to,
+      text,
+    });
+
+    return {
+      ok: result.ok,
+      sent: result.sent,
+      provider: result.provider || creds.provider,
+      message: result.message,
+      messageId: result.messageId,
+    };
+  } catch (err: any) {
+    // A dispatch bug must never propagate into the order path.
+    console.warn('[SMS] dispatch warning:', err?.message || err);
+    return { ok: false, sent: false, message: 'The SMS could not be dispatched.' };
+  }
+}
+
+/** Shape shared by the dispatch helper and the test route's response. */
+interface SmsDispatchResultLike {
+  ok: boolean;
+  sent: boolean;
+  message: string;
+  provider?: string;
+  messageId?: string;
+  skipped?: boolean;
+}
+
+/**
+ * POST /api/store/test-sms — verify a merchant's SMS gateway credentials.
+ *
+ * Body: { store_slug, to, provider?, apiKey?, senderId?, text? }
+ *
+ * Explicit credentials in the body take precedence over the saved ones, so the
+ * Settings UI can test a key BEFORE the merchant commits to saving it. When no
+ * recipient is supplied we fall back to `to` from the body only — we never send
+ * to a customer address from a test action.
+ */
+app.post('/api/store/test-sms', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, sent: false, error: 'store_slug is required.' });
+    }
+
+    const to = String(body.to || body.phone || '').trim();
+    if (!to) {
+      return res.status(400).json({ ok: false, sent: false, error: 'A recipient phone number is required.' });
+    }
+
+    // Preview credentials from the request win; otherwise use the saved ones.
+    const saved = await resolveStoreSmsCredentials(storeRef);
+    const provider = resolveSmsProvider(body.provider) || saved.provider;
+    const apiKey = String(body.apiKey || '').trim() || saved.apiKey;
+    const senderId = String(body.senderId || '').trim() || saved.senderId;
+
+    if (!provider) {
+      return res.status(200).json({
+        ok: false,
+        sent: false,
+        error: 'Choose an SMS gateway (Greenweb BD, SSL Wireless, Bulk SMS BD or Alpha SMS) before testing.',
+      });
+    }
+
+    const result = await sendSms({
+      provider,
+      apiKey,
+      senderId,
+      to,
+      text: String(body.text || '').trim() || 'Zid BD test message: your SMS gateway is connected correctly.',
+    });
+
+    // Log the attempt (masked) so a merchant's "it says sent" report can be
+    // checked against what the gateway actually answered.
+    console.log(
+      `[SMS] test-sms store=${storeRef} provider=${provider} to=${maskPhone(to)} sent=${result.sent}`
+    );
+
+    return res.status(200).json({
+      ok: result.ok,
+      sent: result.sent,
+      provider: result.provider || provider,
+      messageId: result.messageId,
+      message: result.message,
+      error: result.ok ? null : result.message,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/test-sms error:', err);
+    // A gateway failure is a RESULT, not a server fault — answer 200.
+    return res.status(200).json({ ok: false, sent: false, error: err?.message || 'Could not send the test SMS.' });
+  }
+});
+
+/**
+ * GET /api/store/sms-providers — the gateway catalogue the UI renders.
+ * Reports which providers the SERVER can reach and whether a platform-level
+ * key exists, so the merchant knows if they must bring their own token.
+ */
+app.get('/api/store/sms-providers', (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const providers = SMS_PROVIDERS.map((key) => ({
+    id: key,
+    label: key === 'sslwireless' ? 'SSL Wireless' : key === 'bulksmsbd' ? 'Bulk SMS BD' : key === 'alpha' ? 'Alpha SMS' : 'Greenweb BD',
+    platformKeyConfigured: Boolean(platformSmsKey(key)),
+  }));
+  return res.status(200).json({ ok: true, providers });
+});
+
+// ── Live payment gateway (SSLCommerz / Shurjopay) ───────────────────────────
+//
+// THE BUG THIS FIXES
+// ------------------
+// `gatewayConfig.gateway` let a merchant choose SSLCommerz or Shurjopay and the
+// checkout UI promised "Customer will be redirected to {gateway} secure payment
+// portal" — but no route could initiate a payment, receive the callback, or
+// verify a signature. Every payment was the manual TrxID path. These routes are
+// the missing execution layer; the manual flow is untouched and still works.
+
+/**
+ * Resolve gateway credentials for a store, falling back to platform env vars.
+ * Secrets are never returned to the client by any route below.
+ */
+async function resolveGatewayCredentials(storeRef: string): Promise<{
+  gateway: PaymentGateway | '';
+  credentials: GatewayCredentials;
+  liveCheckoutEnabled: boolean;
+}> {
+  let config: Record<string, any> = {};
+  try {
+    config = (await readStoreConfig('payments', storeRef)) as Record<string, any>;
+  } catch (err: any) {
+    console.warn('[Gateway] payments config read warning:', err?.message || err);
+  }
+
+  const gateway = normalizeGateway(config.gateway);
+  const sandbox = config.sandbox !== false; // default to sandbox when unset
+
+  if (gateway === 'SSLCommerz') {
+    const env = platformGatewayCredentials('SSLCommerz');
+    return {
+      gateway,
+      liveCheckoutEnabled: config.liveCheckoutEnabled === true,
+      credentials: {
+        storeId: String(config.sslcommerzStoreId || env.storeId || '').trim(),
+        storePassword: String(config.sslcommerzStorePassword || env.storePassword || ''),
+        merchantPrefix: String(config.shurjopayPrefix || env.merchantPrefix || '').trim(),
+        sandbox,
+      },
+    };
+  }
+
+  if (gateway === 'Shurjopay') {
+    const env = platformGatewayCredentials('Shurjopay');
+    return {
+      gateway,
+      liveCheckoutEnabled: config.liveCheckoutEnabled === true,
+      credentials: {
+        storeId: String(config.shurjopayUsername || env.storeId || '').trim(),
+        storePassword: String(config.shurjopayPassword || env.storePassword || ''),
+        merchantPrefix: String(config.shurjopayPrefix || env.merchantPrefix || 'ZID').trim(),
+        sandbox,
+      },
+    };
+  }
+
+  return {
+    gateway: '',
+    liveCheckoutEnabled: false,
+    credentials: { storeId: '', storePassword: '', merchantPrefix: '', sandbox },
+  };
+}
+
+/**
+ * Absolute base URL for callbacks.
+ *
+ * Built from the REQUEST, not a hardcoded domain, so the same code works on a
+ * preview deployment, a custom domain and localhost. An explicit
+ * PUBLIC_APP_URL env var wins when the proxy does not forward the host.
+ */
+function callbackBaseUrl(req: any): string {
+  const configured = String(process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
+  if (configured) return configured;
+  const proto = String(req.headers?.['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+  const host = String(req.headers?.['x-forwarded-host'] || req.get?.('host') || '').split(',')[0].trim();
+  return `${proto}://${host}`;
+}
+
+/**
+ * GET /api/store/payment-gateway — read the gateway configuration (redacted).
+ * Secrets are reported as a presence boolean, never echoed.
+ */
+app.get('/api/store/payment-gateway', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const config = (await readStoreConfig('payments', storeRef)) as Record<string, any>;
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      paymentGateway: {
+        gateway: normalizeGateway(config.gateway) || 'SSLCommerz',
+        sandbox: config.sandbox !== false,
+        liveCheckoutEnabled: config.liveCheckoutEnabled === true,
+        sslcommerzStoreId: String(config.sslcommerzStoreId || ''),
+        hasSslcommerzPassword: Boolean(config.sslcommerzStorePassword),
+        shurjopayUsername: String(config.shurjopayUsername || ''),
+        hasShurjopayPassword: Boolean(config.shurjopayPassword),
+        shurjopayPrefix: String(config.shurjopayPrefix || ''),
+      },
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/payment-gateway error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load the gateway settings.' });
+  }
+});
+
+/**
+ * POST /api/store/payment-gateway — save the gateway config.
+ *
+ * A blank password field means "leave the stored secret alone" rather than
+ * "erase it": the UI only ever receives a presence flag, so it cannot echo the
+ * real value back, and treating blank as a delete would wipe a working
+ * integration every time the merchant saved an unrelated toggle.
+ */
+app.post('/api/store/payment-gateway', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const patch = { ...(body.paymentGateway || body) };
+    delete patch.store_slug;
+    delete patch.storeSlug;
+    delete patch.storeId;
+
+    // Preserve stored secrets when the client sends a blank value.
+    const current = (await readStoreConfig('payments', storeRef)) as Record<string, any>;
+    if (patch.sslcommerzStorePassword !== undefined && !String(patch.sslcommerzStorePassword)) {
+      patch.sslcommerzStorePassword = current.sslcommerzStorePassword || '';
+    }
+    if (patch.shurjopayPassword !== undefined && !String(patch.shurjopayPassword)) {
+      patch.shurjopayPassword = current.shurjopayPassword || '';
+    }
+
+    const next = await writeStoreConfig('payments', storeRef, patch);
+    return res.status(200).json({
+      ok: true,
+      store_slug: storeRef,
+      paymentGateway: {
+        gateway: normalizeGateway((next as any).gateway) || 'SSLCommerz',
+        sandbox: (next as any).sandbox !== false,
+        liveCheckoutEnabled: (next as any).liveCheckoutEnabled === true,
+        sslcommerzStoreId: String((next as any).sslcommerzStoreId || ''),
+        hasSslcommerzPassword: Boolean((next as any).sslcommerzStorePassword),
+        shurjopayUsername: String((next as any).shurjopayUsername || ''),
+        hasShurjopayPassword: Boolean((next as any).shurjopayPassword),
+        shurjopayPrefix: String((next as any).shurjopayPrefix || ''),
+      },
+      message: 'Payment gateway settings saved.',
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/payment-gateway error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save the gateway settings.' });
+  }
+});
+
+/**
+ * POST /api/payment/initiate — start a live payment for a storefront order.
+ *
+ * Body: { store_slug, orderId, orderNumber?, amount, customer:{...}, gateway? }
+ * Answers `{ ok, redirectUrl, transactionId }`. The customer is then sent to
+ * `redirectUrl`.
+ *
+ * The amount is taken from the REQUEST and recorded on the order; the callback
+ * later re-checks it against the gateway's own figure before marking paid.
+ */
+app.post('/api/payment/initiate', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+
+    const amount = Number(body.amount ?? body.amountBDT ?? body.total);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'A positive payment amount is required.' });
+    }
+
+    const resolved = await resolveGatewayCredentials(storeRef);
+    // An explicit gateway in the body lets the checkout offer both gateways;
+    // otherwise the merchant's configured one is used.
+    const gateway = normalizeGateway(body.gateway) || resolved.gateway;
+    if (!gateway) {
+      return res.status(200).json({
+        ok: false,
+        error: 'No live payment gateway is configured for this store. Enable SSLCommerz or Shurjopay in Settings → Payments.',
+      });
+    }
+
+    const transactionId = buildTransactionId(String(body.orderNumber || body.orderId || 'ORD'));
+    const base = callbackBaseUrl(req);
+    const customer = body.customer || {};
+
+    let result;
+    if (gateway === 'SSLCommerz') {
+      result = await initiateSslcommerz({
+        credentials: resolved.credentials,
+        transactionId,
+        amount,
+        successUrl: `${base}/api/payment/sslcommerz/success`,
+        failUrl: `${base}/api/payment/sslcommerz/fail`,
+        cancelUrl: `${base}/api/payment/sslcommerz/cancel`,
+        // The IPN is what actually settles the order if the customer closes
+        // the browser after paying but before the redirect back.
+        ipnUrl: `${base}/api/payment/sslcommerz/ipn`,
+        customer: {
+          name: customer.name, email: customer.email, phone: customer.phone,
+          address: customer.address, city: customer.city, postcode: customer.postcode,
+        },
+        // Passthrough so the callback maps back to our order with no lookup.
+        valueA: storeRef,
+        valueB: String(body.orderId || body.orderNumber || ''),
+        productName: body.productName || 'Order',
+      });
+    } else {
+      result = await initiateShurjopay({
+        credentials: resolved.credentials,
+        transactionId,
+        amount,
+        returnUrl: `${base}/api/payment/shurjopay/callback`,
+        cancelUrl: `${base}/api/payment/shurjopay/cancel`,
+        customer: { name: customer.name, email: customer.email, phone: customer.phone, address: customer.address, city: customer.city },
+      });
+    }
+
+    if (!result.ok || !result.redirectUrl) {
+      console.warn(`[Gateway] ${gateway} initiate failed for ${storeRef}: ${result.message}`);
+      return res.status(200).json({ ok: false, gateway, error: result.message });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      gateway,
+      redirectUrl: result.redirectUrl,
+      transactionId: result.transactionId || transactionId,
+      sandbox: resolved.credentials.sandbox,
+      message: result.message,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/payment/initiate error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not start the payment.' });
+  }
+});
+
+/**
+ * POST /api/payment/sslcommerz/ipn — Instant Payment Notification.
+ *
+ * THE SECURITY MODEL, IN ORDER:
+ *  1. Authenticate the nonce (verify_sign over verify_key's fields).
+ *  2. Re-validate server-to-server (validateSslcommerz) — the POST body is
+ *     attacker-controlled and a forged "status=VALID" must not be trusted.
+ *  3. Compare the gateway's amount with the amount we recorded at initiate.
+ * Only then is the payment treated as settled.
+ *
+ * Always answers 200: SSLCommerz retries a non-200, and a retry storm against a
+ * permanently-invalid payload helps nobody. The body carries the real outcome.
+ */
+const handleSslcommerzIpn = async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body || {}) as Record<string, any>;
+    const storeRef = cleanStoreRef(body.value_a || body.store_slug);
+    const orderRef = String(body.value_b || body.tran_id || '').trim();
+
+    const status = String(body.status || '').toUpperCase();
+    if (status === 'FAILED' || status === 'CANCELLED') {
+      console.log(`[Gateway] SSLCommerz ${status} for ${orderRef}`);
+      return res.status(200).json({ ok: true, settled: false, status, message: `Transaction ${status.toLowerCase()}.` });
+    }
+
+    if (!storeRef) {
+      console.warn('[Gateway] SSLCommerz IPN missing value_a (store ref).');
+      return res.status(200).json({ ok: false, settled: false, message: 'The callback did not identify a store.' });
+    }
+
+    const resolved = await resolveGatewayCredentials(storeRef);
+
+    // ── 1. Nonce. A mismatch here is a forged or tampered payload.
+    if (!verifySslcommerzNonce(body, resolved.credentials.storePassword)) {
+      console.warn(`[Gateway] SSLCommerz IPN nonce FAILED for ${orderRef}`);
+      return res.status(200).json({ ok: false, settled: false, message: 'The callback signature did not match.' });
+    }
+
+    // ── 2. Independent server-to-server validation.
+    const valId = String(body.val_id || '');
+    const verified = await validateSslcommerz({ credentials: resolved.credentials, valId });
+    if (!verified.ok) {
+      console.warn(`[Gateway] SSLCommerz validation failed for ${orderRef}: ${verified.message}`);
+      return res.status(200).json({ ok: false, settled: false, message: verified.message });
+    }
+
+    // ── 3. Amount must match what the gateway confirms.
+    if (!amountsMatch(body.amount, verified.amount)) {
+      console.warn(
+        `[Gateway] SSLCommerz AMOUNT MISMATCH for ${orderRef}: callback=${body.amount} validated=${verified.amount}`
+      );
+      return res.status(200).json({
+        ok: false,
+        settled: false,
+        message: 'The paid amount did not match the order amount. The payment was not applied.',
+      });
+    }
+
+    // ── 4. Settle. `updateOrderFields` is the same path the dashboard uses, so
+    //      the badge and the read model stay consistent.
+    const paymentRef = verified.gatewayRef || valId;
+    await updateOrderFields(orderRef, {
+      payment_status: 'Paid',
+      paymentStatus: 'Paid',
+      transaction_id: paymentRef,
+      payment_method: 'SSLCommerz',
+    }, { store_slug: storeRef });
+
+    console.log(`[Gateway] SSLCommerz PAID order=${orderRef} amount=${verified.amount} ref=${paymentRef}`);
+    return res.status(200).json({ ok: true, settled: true, status: verified.status, orderRef, transactionId: paymentRef });
+  } catch (err: any) {
+    console.error('[Server] SSLCommerz IPN error:', err);
+    return res.status(200).json({ ok: false, settled: false, message: 'The callback could not be processed.' });
+  }
+};
+
+app.post('/api/payment/sslcommerz/ipn', handleSslcommerzIpn);
+app.post('/api/payment/sslcommerz/ipn/', handleSslcommerzIpn);
+
+/**
+ * Customer-facing SSLCommerz redirect endpoints.
+ *
+ * These receive the SAME fields as the IPN and run the SAME verification, then
+ * send the customer back to the storefront with a readable status. A merchant
+ * therefore gets a settled order even if the IPN is slow or blocked, and the
+ * customer always lands back on their own store rather than an API JSON blob.
+ */
+const handleSslcommerzReturn = (outcome: 'success' | 'fail' | 'cancel') => async (req: any, res: any) => {
+  const body = (req.body || {}) as Record<string, any>;
+  const storeRef = cleanStoreRef(body.value_a || '');
+  const orderRef = String(body.value_b || body.tran_id || '').trim();
+
+  let settled = false;
+  if (outcome === 'success') {
+    try {
+      // Reuse the IPN logic by invoking the same verifier, so there is exactly
+      // ONE place where a payment is declared paid.
+      const resolved = await resolveGatewayCredentials(storeRef);
+      const nonceOk = verifySslcommerzNonce(body, resolved.credentials.storePassword);
+      if (nonceOk) {
+        const verified = await validateSslcommerz({ credentials: resolved.credentials, valId: String(body.val_id || '') });
+        if (verified.ok && amountsMatch(body.amount, verified.amount)) {
+          await updateOrderFields(orderRef, {
+            payment_status: 'Paid',
+            paymentStatus: 'Paid',
+            transaction_id: verified.gatewayRef || String(body.val_id || ''),
+            payment_method: 'SSLCommerz',
+          }, { store_slug: storeRef });
+          settled = true;
+        } else {
+          console.warn(`[Gateway] SSLCommerz return not settled for ${orderRef}: ${verified.message}`);
+        }
+      } else {
+        console.warn(`[Gateway] SSLCommerz return nonce FAILED for ${orderRef}`);
+      }
+    } catch (err: any) {
+      console.warn('[Gateway] SSLCommerz return verification warning:', err?.message || err);
+    }
+  }
+
+  // Send the customer back to the storefront. The query flag is cosmetic — the
+  // order's real state is whatever the verification above decided.
+  const slug = storeRef || 'bd';
+  const target = `${callbackBaseUrl(req)}/store/${encodeURIComponent(slug)}?payment=${settled || outcome !== 'success' ? outcome : 'pending'}&order=${encodeURIComponent(orderRef)}`;
+  return res.redirect(302, target);
+};
+
+app.post('/api/payment/sslcommerz/success', handleSslcommerzReturn('success'));
+app.post('/api/payment/sslcommerz/fail', handleSslcommerzReturn('fail'));
+app.post('/api/payment/sslcommerz/cancel', handleSslcommerzReturn('cancel'));
+// SSLCommerz may also reach these by GET depending on the merchant profile.
+app.get('/api/payment/sslcommerz/success', handleSslcommerzReturn('success'));
+app.get('/api/payment/sslcommerz/fail', handleSslcommerzReturn('fail'));
+app.get('/api/payment/sslcommerz/cancel', handleSslcommerzReturn('cancel'));
+
+/**
+ * POST /api/payment/shurjopay/callback — Shurjopay returns the customer here.
+ * The POST body is untrusted, so the order id is re-verified at the gateway
+ * before the order is marked paid (same three-step model as SSLCommerz).
+ */
+app.post('/api/payment/shurjopay/callback', async (req: any, res: any) => {
+  const body = (req.body || {}) as Record<string, any>;
+  const orderRef = String(body.customer_order_id || body.order_id || '').trim();
+  const storeRef = cleanStoreRef(body.value_a || body.store_slug || '');
+
+  let settled = false;
+  try {
+    if (storeRef && orderRef) {
+      const resolved = await resolveGatewayCredentials(storeRef);
+      const verified = await verifyShurjopay({ credentials: resolved.credentials, orderId: orderRef });
+      if (verified.ok && amountsMatch(body.amount, verified.amount)) {
+        await updateOrderFields(orderRef, {
+          payment_status: 'Paid',
+          paymentStatus: 'Paid',
+          transaction_id: verified.gatewayRef || orderRef,
+          payment_method: 'Shurjopay',
+        }, { store_slug: storeRef });
+        settled = true;
+      } else {
+        console.warn(`[Gateway] Shurjopay callback not settled for ${orderRef}: ${verified.message}`);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Gateway] Shurjopay callback warning:', err?.message || err);
+  }
+
+  if (storeRef) {
+    return res.redirect(302, `${callbackBaseUrl(req)}/store/${encodeURIComponent(storeRef)}?payment=${settled ? 'success' : 'failed'}`);
+  }
+  return res.status(200).json({ ok: settled, settled });
+});
+
+app.post('/api/payment/shurjopay/cancel', (req: any, res: any) => {
+  const storeRef = cleanStoreRef((req.body || {}).value_a || (req.body || {}).store_slug || 'bd');
+  return res.redirect(302, `${callbackBaseUrl(req)}/store/${encodeURIComponent(storeRef)}?payment=cancelled`);
+});
+
+/**
+ * POST /api/payment/verify — verify a transaction on demand.
+ * Body: { store_slug, transactionId, gateway? }
+ * Used by the dashboard's "Re-check payment" action when a merchant believes a
+ * payment succeeded but the order is still marked unpaid (e.g. the IPN was
+ * blocked by a firewall).
+ */
+app.post('/api/payment/verify', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    const transactionId = String(body.transactionId || body.val_id || body.orderId || '').trim();
+    if (!storeRef || !transactionId) {
+      return res.status(400).json({ ok: false, error: 'store_slug and transactionId are required.' });
+    }
+
+    const resolved = await resolveGatewayCredentials(storeRef);
+    const gateway = normalizeGateway(body.gateway) || resolved.gateway;
+    if (!gateway) {
+      return res.status(200).json({ ok: false, error: 'No live payment gateway is configured for this store.' });
+    }
+
+    const verified = gateway === 'SSLCommerz'
+      ? await validateSslcommerz({ credentials: resolved.credentials, valId: transactionId })
+      : await verifyShurjopay({ credentials: resolved.credentials, orderId: transactionId });
+
+    return res.status(200).json({
+      ok: verified.ok,
+      gateway,
+      status: verified.status,
+      amount: verified.amount,
+      transactionId: verified.transactionId,
+      gatewayRef: verified.gatewayRef,
+      message: verified.message,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/payment/verify error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not verify the transaction.' });
+  }
+});
+
 /**
  * POST /api/store/test-email — dispatch a test email for a template.
  * Best-effort: if SMTP is not configured the endpoint reports a clear, non-500
@@ -9582,7 +10305,7 @@ app.post('/api/store/test-email', async (req, res) => {
 /** The A/AAAA target every custom domain must point at. */
 const DOMAIN_A_TARGET = process.env.CUSTOM_DOMAIN_A_TARGET || '76.76.21.21';
 /** The CNAME target for `www` / subdomains. */
-const DOMAIN_CNAME_TARGET = process.env.CUSTOM_DOMAIN_CNAME_TARGET || 'cname.zidbd.app';
+const DOMAIN_CNAME_TARGET = process.env.CUSTOM_DOMAIN_CNAME_TARGET || 'cname.zidbdsaas.com';
 
 type DomainStatus = 'pending' | 'verified' | 'failed';
 
@@ -10448,6 +11171,38 @@ function normalizeCourierConfig(raw: any, fallback: Record<string, any> = {}) {
 }
 
 /**
+ * Live payment-gateway credentials (SSLCommerz / Shurjopay) for a store.
+ *
+ * Mirrors the other config normalizers: every field is coerced, secrets are
+ * kept as plain strings on the record (never echoed to the browser — the route
+ * layer redacts them), and `sandbox` defaults to TRUE so a merchant who has
+ * not deliberately gone live can never take a real payment by accident.
+ */
+function normalizePaymentsConfig(raw: any, fallback: Record<string, any> = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const pick = (key: string, fb: any = '') => (src[key] !== undefined ? src[key] : (fallback as any)[key] ?? fb);
+
+  const gateway = normalizeGateway(pick('gateway', fallback.gateway)) || 'SSLCommerz';
+  const asBool = (v: any, fb: boolean) => (typeof v === 'boolean' ? v : v === 'true' ? true : v === 'false' ? false : fb);
+
+  return {
+    gateway,
+    // SSLCommerz
+    sslcommerzStoreId: String(pick('sslcommerzStoreId', '') || '').trim(),
+    sslcommerzStorePassword: String(pick('sslcommerzStorePassword', '') || ''),
+    // Shurjopay
+    shurjopayUsername: String(pick('shurjopayUsername', '') || '').trim(),
+    shurjopayPassword: String(pick('shurjopayPassword', '') || ''),
+    shurjopayPrefix: String(pick('shurjopayPrefix', '') || '').trim(),
+    // Environment. Sandbox by default — going live must be deliberate.
+    sandbox: asBool(pick('sandbox', true), true),
+    // When true, digital payment is offered at checkout alongside manual TrxID.
+    liveCheckoutEnabled: asBool(pick('liveCheckoutEnabled', false), false),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
  * Generic per-store config store. Each entry declares how to read/write one key
  * on the store record, so gift/invoice/NBR share the same tested code path as
  * the checkout settings instead of duplicating the Mongo dance three times.
@@ -10493,6 +11248,15 @@ const storeConfigs = {
     cache: new Map<string, Record<string, any>>(),
     normalize: normalizeGrowthConfig,
     settingsKey: 'growth_tools',
+  },
+  // Live payment-gateway credentials (SSLCommerz / Shurjopay). These were
+  // previously only reachable through the loosely-typed `gatewayConfig` blob on
+  // the merchant payload, with no server route able to act on them.
+  payments: {
+    key: 'paymentGatewayConfig',
+    legacyKeys: ['payment_config', 'paymentConfig'],
+    cache: new Map<string, Record<string, any>>(),
+    normalize: normalizePaymentsConfig,
   },
 } as const;
 
@@ -13132,17 +13896,53 @@ app.post('/api/orders', async (req, res) => {
       // Write through the native driver so the record always lands in
       // zidbdsaas.orders regardless of the connection string's default DB.
       // Each insert is isolated so one malformed order can never fail the batch.
+      let persisted = false;
       try {
         const db = await getMongoDb(ORDERS_DB_NAME);
         if (db) {
           const result = await db.collection(ORDERS_COLLECTION).insertOne({ ...record });
           inserted.push({ _id: result.insertedId, ...record });
+          persisted = true;
         } else {
           const doc = await Order.create(record);
           inserted.push(doc);
+          persisted = true;
         }
       } catch (insertErr: any) {
         console.warn('[Server] POST /api/orders insert warning:', insertErr?.message || insertErr);
+      }
+
+      // ── Order-confirmation SMS ───────────────────────────────────────────
+      // Fired ONLY after the order is durably written (we never tell a customer
+      // about an order that did not save), and ONLY for storefront orders — a
+      // merchant keying in their own manual/POS order does not need a customer
+      // confirmation, and would otherwise text their own counter customers.
+      //
+      // Deliberately NOT awaited: SMS is a side-effect of checkout, and a slow
+      // gateway must never hold up the response the customer is waiting on.
+      // `dispatchStoreSms` catches everything internally, and the extra `.catch`
+      // guards the floating promise itself.
+      if (persisted && !isManual && record.customer_phone) {
+        void dispatchStoreSms({
+          storeRef: slug,
+          trigger: 'order_confirmation',
+          to: record.customer_phone,
+          vars: {
+            customer_name: record.customer_name,
+            order_number: record.order_number,
+            order_id: record.order_number,
+            total: String(record.total_price),
+            amount: String(record.total_price),
+            payment_method: String(record.payment_method || ''),
+            store_name: String(order.storeName || order.store_name || slug),
+          },
+          // Used when the merchant has not written a template yet.
+          fallbackText:
+            'Dear {customer_name}, your order {order_number} has been received. ' +
+            'Total: BDT {total}. We will contact you shortly to confirm delivery.',
+        }).catch((smsErr: any) => {
+          console.warn('[SMS] order_confirmation trigger warning:', smsErr?.message || smsErr);
+        });
       }
     }
 
@@ -13328,12 +14128,63 @@ const handleOrderUpdate = async (req: any, res: any) => {
       });
     }
 
+    const freshOrder = normalizeOrderRow(result.order);
+
+    // ── Status-change SMS triggers ───────────────────────────────────────
+    //
+    // `order_shipped` and `delivery_success` are the other two customer-facing
+    // triggers the Communications panel exposes. They fire here rather than at
+    // booking time because this is the single place a merchant moves an order
+    // through its lifecycle — whether by the Status dropdown, a bulk action, or
+    // the courier auto-sync.
+    //
+    // Fire-and-forget (`void`, with its own catch): the merchant's status change
+    // must never be delayed or failed by an SMS gateway. Only the NEW status is
+    // considered, so re-saving an already-shipped order does not re-text the
+    // customer.
+    if (freshOrder?.customer_phone) {
+      const smsTrigger: SmsTriggerKey | '' =
+        status === 'Delivered' ? 'delivery_success'
+          : status === 'In delivery' ? 'order_shipped'
+            : '';
+
+      if (smsTrigger) {
+        const orderRef = String(
+          req.query.store_slug || req.query.storeSlug || body.store_slug ||
+          body.storeSlug || (freshOrder as any).store_slug || (freshOrder as any).storeSlug || ''
+        ).trim();
+
+        if (orderRef) {
+          void dispatchStoreSms({
+            storeRef: orderRef,
+            trigger: smsTrigger,
+            to: String(freshOrder.customer_phone),
+            vars: {
+              customer_name: String((freshOrder as any).customer_name || 'Customer'),
+              order_number: String((freshOrder as any).order_number || id),
+              order_id: String((freshOrder as any).order_number || id),
+              tracking_code: String((freshOrder as any).tracking_code || ''),
+              courier_name: String((freshOrder as any).courier_name || ''),
+              total: String((freshOrder as any).total_price ?? ''),
+            },
+            fallbackText: smsTrigger === 'order_shipped'
+              ? 'Dear {customer_name}, your order {order_number} has been shipped. ' +
+                'Your tracking code is {tracking_code}. Thank you for shopping with us.'
+              : 'Dear {customer_name}, your order {order_number} has been delivered. ' +
+                'Thank you for shopping with us!',
+          }).catch((smsErr: any) => {
+            console.warn(`[SMS] ${smsTrigger} trigger warning:`, smsErr?.message || smsErr);
+          });
+        }
+      }
+    }
+
     return res.status(200).json({
       ok: true,
       updated: result.updated,
       // The UI applies this document directly, so the badge changes without a
       // manual reload.
-      order: normalizeOrderRow(result.order),
+      order: freshOrder,
     });
   } catch (err: any) {
     console.error('[Server] PUT /api/orders/:id error:', err);

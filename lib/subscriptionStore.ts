@@ -108,7 +108,7 @@ export const DEFAULT_PLANS: Record<string, any>[] = [
     },
     features: [
       '10 Products',
-      'Free .zidbd.com Subdomain',
+      'Free .zidbdsaas.com Subdomain',
       'Standard Themes',
       'Limited Dashboard',
     ],

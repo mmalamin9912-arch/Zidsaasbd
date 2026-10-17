@@ -526,7 +526,7 @@ export type BillingCycle = 'monthly' | 'yearly';
  * could not express that, and every card ended up claiming the same bullets.
  */
 export interface PlanFeatureFlags {
-  /** Free platform subdomain, e.g. `yourstore.zidbd.com`. Every tier gets one. */
+  /** Free platform subdomain, e.g. `yourstore.zidbdsaas.com`. Every tier gets one. */
   freeSubdomain: boolean;
   /** Bring-your-own `.com` domain. */
   customDomain: boolean;

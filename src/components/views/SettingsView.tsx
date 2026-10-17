@@ -295,7 +295,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Backend-synced domain config (Pro/Enterprise only).
   const [connectedDomain, setConnectedDomain] = useState('');
   const [domainStatus, setDomainStatus] = useState<'pending' | 'verified' | 'failed' | ''>('');
-  const [dnsTargets, setDnsTargets] = useState<{ a: string; cname: string }>({ a: '76.76.21.21', cname: 'cname.zidbd.app' });
+  const [dnsTargets, setDnsTargets] = useState<{ a: string; cname: string }>({ a: '76.76.21.21', cname: 'cname.zidbdsaas.com' });
   const [domainLoading, setDomainLoading] = useState(false);
   const [domainBusy, setDomainBusy] = useState<string>('');
   const [domainNotice, setDomainNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
