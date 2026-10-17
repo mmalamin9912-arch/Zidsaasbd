@@ -292,6 +292,14 @@ export interface MerchantProfile {
     // Meta / Facebook tracking
     fbPixelId?: string;
     fbCapiToken?: string;
+    /**
+     * Facebook Page ID for the storefront Messenger chat widget.
+     *
+     * Public (not a secret): the same numeric ID is embedded in the widget
+     * snippet on the live storefront, so it is returned unredacted on read.
+     * When empty the widget is simply not rendered.
+     */
+    facebookPageId?: string;
     // Google Analytics 4
     ga4MeasurementId?: string;
     ga4ApiSecret?: string;

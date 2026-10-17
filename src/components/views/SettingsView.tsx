@@ -270,6 +270,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [courierApiKey, setCourierApiKey] = useState('');
   const [courierSecret, setCourierSecret] = useState('');
   const [fbPixelId, setFbPixelId] = useState(intCfg?.fbPixelId || '');
+  const [facebookPageId, setFacebookPageId] = useState(intCfg?.facebookPageId || '');
   const [fbCapiToken, setFbCapiToken] = useState('');
   const [ga4Id, setGa4Id] = useState(intCfg?.ga4MeasurementId || '');
   const [smsApiKey, setSmsApiKey] = useState('');
@@ -1084,6 +1085,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     if (!cfg || typeof cfg !== 'object') return;
     setCourierProvider(cfg.courierProvider || 'Steadfast Courier');
     setFbPixelId(typeof cfg.fbPixelId === 'string' ? cfg.fbPixelId : '');
+    setFacebookPageId(typeof cfg.facebookPageId === 'string' ? cfg.facebookPageId : '');
     setGa4Id(typeof cfg.ga4MeasurementId === 'string' ? cfg.ga4MeasurementId : '');
     setSmsSenderId(typeof cfg.smsSenderId === 'string' ? cfg.smsSenderId : '');
     setWebhookUrl(typeof cfg.orderWebhookUrl === 'string' ? cfg.orderWebhookUrl : '');
@@ -1338,6 +1340,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const payload: Record<string, unknown> = {
       courierProvider,
       fbPixelId: fbPixelId.trim(),
+      facebookPageId: facebookPageId.trim(),
       ga4MeasurementId: ga4Id.trim(),
       smsSenderId: smsSenderId.trim(),
       orderWebhookUrl: trimmedWebhook,
@@ -3641,6 +3644,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       placeholder="যেমন: 123456789012345"
                       className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500 font-mono"
                     />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Facebook Messenger Page ID</label>
+                    <input
+                      type="text"
+                      disabled={!hasProAccess}
+                      data-testid="facebook-page-id"
+                      value={facebookPageId}
+                      onChange={(e) => setFacebookPageId(e.target.value)}
+                      placeholder="যেমন: 102938475610293"
+                      className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none placeholder:text-slate-500 font-mono"
+                    />
+                    <p className="text-xs text-slate-500 mt-1.5">
+                      আপনার Facebook Page-এর ID দিন। এটি সেট করলে স্টোরফ্রন্টে Messenger চ্যাট উইজেট দেখাবে।
+                    </p>
                   </div>
                   <div>
                     <label className="block text-slate-300 font-bold mb-1.5 text-sm">Facebook Conversions API Token</label>

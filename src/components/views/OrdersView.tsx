@@ -6,6 +6,13 @@ import { useToast } from '../ToastProvider';
 import { loadCourierConfig } from '../../lib/logisticsApi';
 // A4 print template + shared token/QR helpers (see components/orders/PrintLabel.tsx).
 import { buildA4InvoiceHtml, resolvePrintStoreInfo, getOrderToken, generateQRCodeSVG } from '../orders/PrintLabel';
+// F-commerce share helpers: invoice/tracking links + Messenger message builder.
+import {
+  buildMessengerOrderMessage,
+  buildOrderInvoiceUrl,
+  openMessengerChat,
+  copyToClipboard,
+} from '../../lib/orderShareLinks';
 import {
   ShoppingBag,
   Search,
@@ -86,6 +93,15 @@ interface OrdersViewProps {
    * "empty" orders page before the first real count lands.
    * Defaults to `true` (counts ready) for callers that don't track hydration.
    */
+  /**
+   * Messenger Page ID for the merchant's page, when one is configured.
+   *
+   * Used by the "Share to Messenger" action: the invoice text is always copied
+   * to the clipboard, and when this id is present the chat is opened directly so
+   * the merchant can paste it with one tap. Optional — the share still works as
+   * copy-only when absent.
+   */
+  facebookPageId?: string;
   ordersHydrated?: boolean;
 }
 
@@ -185,6 +201,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   storeSlug,
   openReturnsSignal,
   onSyncOrders,
+  facebookPageId,
   ordersHydrated = true,
 }) => {
   const toast = useToast();
@@ -1595,8 +1612,61 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    * manual `source`), paints optimistically so the UI stays instant, and reports
    * a real failure instead of silently dropping the order.
    */
+  /**
+   * F-commerce share: build the invoice + tracking text for one order, copy it
+   * to the clipboard, and — when the merchant saved a Messenger Page ID — open
+   * the chat so it can be pasted with one tap.
+   *
+   * The message is generated locally (no server round-trip) because the invoice
+   * URL is deterministic: the same order token the A4 receipt prints is encoded
+   * in the link, so the customer opens the exact document the merchant has.
+   */
+  const handleShareToMessenger = async (ord: Order) => {
+    const message = buildMessengerOrderMessage(storeSlug, ord, ord.customerName);
+    const copied = await copyToClipboard(message);
+
+    const pageId = String(facebookPageId || '').trim();
+    const opened = openMessengerChat(pageId);
+
+    if (copied && opened) {
+      toast.success('Message copied — paste it into the Messenger chat that just opened.');
+    } else if (copied) {
+      toast.success('Invoice & tracking message copied to clipboard.');
+    } else if (opened) {
+      toast.success('Messenger chat opened. Copy the message from the order row to paste it.');
+    } else {
+      // Last resort: show the text so the merchant can select and copy it.
+      window.prompt('Copy this message to send on Messenger:', message);
+    }
+  };
+
   const handleCreateManualOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    await saveManualOrder({ sendInvoice: false });
+  };
+
+  /**
+   * "Create & Send Invoice" — save the manual order, then hand the merchant a
+   * ready-to-paste invoice + tracking message.
+   *
+   * The order is saved FIRST and the share only happens on success, so a failed
+   * save never leaves the merchant sharing a link to an order that does not
+   * exist. The A4 receipt is available from the order row as before.
+   */
+  const handleCreateAndSendInvoice = async () => {
+    await saveManualOrder({ sendInvoice: true });
+  };
+
+  /**
+   * Shared save path for both manual-order buttons.
+   *
+   * WHY A SHARED PATH
+   * -----------------
+   * The two buttons differ only in what happens AFTER a successful save. Keeping
+   * one save routine means validation, the optimistic paint, the server POST and
+   * the error handling can never drift between them.
+   */
+  const saveManualOrder = async ({ sendInvoice }: { sendInvoice: boolean }) => {
     if (isCreatingManualOrder) return;
     setIsCreatingManualOrder(true);
     setManualOrderError(null);
@@ -1672,6 +1742,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         deliveryZone: 'Inside Dhaka', address: '', itemTitle: '',
         quantity: 1, unitPriceBDT: 0, paymentMethod: 'COD', courierName: 'Steadfast Courier',
       });
+
+      // The order is committed, so the invoice share is safe to offer.
+      if (sendInvoice) {
+        await handleShareToMessenger(newOrd);
+      }
     } catch (err: any) {
       // Do NOT paint an order that does not exist in the database — the next
       // poll would erase it and the merchant would think it saved.
@@ -2562,6 +2637,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                         <MessageSquare className="w-3.5 h-3.5" />
                                         <span>WhatsApp Customer</span>
                                       </a>
+
+                                      {/* F-commerce: copy the invoice + tracking text
+                                          and (when a Page ID is saved) jump straight
+                                          into the merchant's Messenger chat. */}
+                                      <button
+                                        onClick={() => handleShareToMessenger(ord)}
+                                        title="Copy invoice & tracking text for Messenger"
+                                        className="bg-[#1877F2]/20 text-[#6BA9FF] border border-[#1877F2]/40 px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1 hover:bg-[#1877F2]/35 cursor-pointer transition"
+                                      >
+                                        <Send className="w-3.5 h-3.5" />
+                                        <span>Share to Messenger</span>
+                                      </button>
 
                                       <button
                                         onClick={() => setSelectedOrderForCourier(ord)}
@@ -3550,6 +3637,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 rounded-xl font-extrabold cursor-pointer"
                 >
                   {isCreatingManualOrder ? 'Saving…' : 'Create Order'}
+                </button>
+                {/* Create the order AND hand back a ready-to-send invoice:
+                    saves, then copies the invoice + tracking message so the
+                    merchant can paste it straight into Messenger. */}
+                <button
+                  type="button"
+                  onClick={handleCreateAndSendInvoice}
+                  disabled={isCreatingManualOrder}
+                  className="px-5 py-2 bg-[#1877F2] hover:bg-[#166FE5] disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl font-extrabold cursor-pointer flex items-center gap-2"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{isCreatingManualOrder ? 'Saving…' : 'Create & Send Invoice'}</span>
                 </button>
               </div>
             </form>

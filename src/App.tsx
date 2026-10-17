@@ -2582,6 +2582,9 @@ onPlaceOrder={async (newOrder) => {
                 onSyncOrders={setOrders}
                 merchantId={merchant?.id}
                 storeSlug={merchant?.storeSlug}
+                // Page ID powers "Share to Messenger": the chat opens directly
+                // when set; the invoice text is copied either way.
+                facebookPageId={merchant?.integrationsConfig?.facebookPageId}
                 openReturnsSignal={ordersReturnsSignal}
               />
             )}

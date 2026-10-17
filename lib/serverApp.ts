@@ -10931,6 +10931,11 @@ function normalizeIntegrationsConfig(raw: any, fallback: Record<string, any> = {
 
     fbPixelId: cfgStr(src.fbPixelId, fallback.fbPixelId),
     fbCapiToken: cfgStr(src.fbCapiToken, fallback.fbCapiToken),
+    // Public value — the Messenger widget's Page ID. Digits only; anything
+    // else (a pasted URL, a page username) is dropped rather than injected.
+    facebookPageId: /^\d{5,25}$/.test(cfgStr(src.facebookPageId, fallback.facebookPageId))
+      ? cfgStr(src.facebookPageId, fallback.facebookPageId)
+      : '',
     tiktokPixelId: cfgStr(src.tiktokPixelId, fallback.tiktokPixelId),
     ga4MeasurementId: cfgStr(src.ga4MeasurementId, fallback.ga4MeasurementId),
     ga4ApiSecret: cfgStr(src.ga4ApiSecret, fallback.ga4ApiSecret),

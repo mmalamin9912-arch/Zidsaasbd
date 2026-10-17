@@ -12,6 +12,7 @@ import { fetchStoreByRef, storeIdFromRecord } from '../lib/storeApi';
 import { LanguageToggle } from './LanguageToggle';
 import SafeImage from './SafeImage';
 import { useStorefrontTracking } from '../hooks/useStorefrontTracking';
+import { MessengerChatWidget } from './MessengerChatWidget';
 import {
   EMPTY_MODULES,
   applyStoreSeo,
@@ -1180,6 +1181,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
 
   // Injects Meta Pixel + GA4 once the IDs are known.
   useStorefrontTracking(integrationsConfig);
+  // Floating Messenger button — renders nothing unless the merchant saved a
+  // numeric Facebook Page ID in Settings → API.
+  const messengerPageId = integrationsConfig?.facebookPageId;
   const hideOutOfStock = inventoryConfig?.hideOutOfStock === true;
   const merchantAllowPreOrder = inventoryConfig?.allowPreOrder === true;
   const minOrderQty = Number(inventoryConfig?.minOrderQty) || 1;
@@ -5257,6 +5261,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         </div>
       </footer>
       </div>
+
+      {/* Facebook Messenger Customer Chat — floating "Message us" button.
+          Renders nothing unless the merchant saved a numeric Page ID in
+          Settings → API. Placed last so its fixed-position bubble sits above
+          every storefront layer, including the mobile bottom bar. */}
+      <MessengerChatWidget pageId={messengerPageId} />
     </div>
   );
 };
