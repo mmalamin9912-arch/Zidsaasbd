@@ -694,19 +694,40 @@ export default function App() {
     if (merchant?.id) ordersQuery.set('merchant_id', String(merchant.id));
     if (merchant?.storeSlug) ordersQuery.set('store_slug', String(merchant.storeSlug));
     if (!merchant?.id && !merchant?.storeSlug && merchantId) ordersQuery.set('storeRef', String(merchantId));
-    safeFetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`)
-      .then(data => {
-        if (isMounted && Array.isArray(data)) {
-          // API rows are raw Mongo documents (total_price / created_at / items as
-          // a JSON string). Normalize them into the UI `Order` shape so the
-          // dashboard never renders `.toLocaleString()` on an undefined field.
-          setOrders(normalizeOrders(data));
-        }
+    fetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`, { cache: 'no-store' })
+      .then(async res => {
+        if (!isMounted || !res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (!isMounted || !Array.isArray(data)) return;
+        // ── Authority guard ───────────────────────────────────────────────
+        // GET /api/orders answers 200 + [] BOTH for "this store has no rows"
+        // AND for a DEGRADED database (a Mongo connect failure returns []
+        // WITHOUT the X-Orders-* headers). This effect re-runs on every tab
+        // switch (pendingIdentity includes activeTab), so applying that empty
+        // list blanked the sidebar badge and flashed "No orders found" across
+        // the whole table. Keep the previous data unless the answer is
+        // confirmed authoritative: non-empty, or the DB headers prove the
+        // database was actually read.
+        const authoritative =
+          data.length > 0 ||
+          res.headers.get('X-Orders-Source') === 'mongodb' ||
+          res.headers.get('X-Orders-Count') !== null;
+        if (!authoritative) return;
+        // API rows are raw Mongo documents (total_price / created_at / items as
+        // a JSON string). Normalize them into the UI `Order` shape so the
+        // dashboard never renders `.toLocaleString()` on an undefined field.
+        const normalized = normalizeOrders(data);
+        setOrders(prev =>
+          // Keep the previous array identity when nothing changed — the
+          // keep-previous-data behaviour that stops tab switches from
+          // re-rendering (and flickering) the whole table.
+          JSON.stringify(prev) === JSON.stringify(normalized) ? prev : normalized
+        );
       })
       .finally(() => {
-        // Settle the hydration gate even when the request failed (safeFetch
-        // never rejects): an endless pulsing placeholder would be worse than
-        // showing the last known / cached count on a network error.
+        // Settle the hydration gate even when the request failed: an endless
+        // pulsing placeholder would be worse than showing the last known /
+        // cached count on a network error.
         if (isMounted) setOrdersHydrated(true);
       });
 

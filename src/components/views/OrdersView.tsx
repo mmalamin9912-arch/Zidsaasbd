@@ -125,17 +125,16 @@ const RETURN_BADGE: Record<ReturnRequest['status'], string> = {
 /**
  * Background poll cadence for the Orders page (ms).
  *
- * The old 4s (orders) / 5s (returns) ticks were far below the 15–30s floor for
- * dashboard polling: every tick re-fetched BOTH endpoints regardless of change,
- * and — because the orders poll used to WRITE the fetched list straight back
- * through `onUpdateOrders` (see `onSyncOrders` below) — it produced a
- * GET → POST → GET ping-pong several times a minute even when nothing happened.
- * Explicit merchant actions (status changes, courier booking, bulk edits) and
- * the tab-count probe still refresh immediately; these timers only cover the
- * "another device / storefront placed an order" case.
+ * 30s sits inside the requested 30–60s band: fast enough for an order placed
+ * from another device / the storefront to surface promptly, slow enough that
+ * the Network tab is not a continuous stream of `orders?merchant_id=…`
+ * requests. Every tick is read-only and NO-OPs (no setState, no re-render)
+ * when the payload matches the last synced signature, so a quiet minute
+ * costs nothing. Explicit merchant actions (status changes, courier booking,
+ * deletes) and the tab-count probe still refresh immediately.
  */
-const ORDERS_POLL_MS = 20000;
-const RETURNS_POLL_MS = 20000;
+const ORDERS_POLL_MS = 30000;
+const RETURNS_POLL_MS = 30000;
 
 export type StatusTab =
   | 'All'
@@ -356,6 +355,23 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         const data = await res.json();
         if (!Array.isArray(data)) return;
 
+        // ── Authority guard ─────────────────────────────────────────────────
+        // GET /api/orders answers 200 + [] BOTH for "this store truly has no
+        // rows" AND for a DEGRADED database (a Mongo connect failure returns
+        // [] WITHOUT the X-Orders-* headers). Applying that empty list is what
+        // made the table flicker to "No orders found" and back every time the
+        // API hiccuped. Keep the previous data — the equivalent of SWR's
+        // keepPreviousData — unless the answer is confirmed authoritative:
+        // non-empty, or the DB headers prove the database was actually read.
+        const authoritative =
+          data.length > 0 ||
+          res.headers.get('X-Orders-Source') === 'mongodb' ||
+          res.headers.get('X-Orders-Count') !== null;
+        if (!authoritative) {
+          console.warn('Orders poll returned a non-authoritative empty list — keeping the current orders.');
+          return;
+        }
+
         const signature = JSON.stringify(data);
         // Reconcile on every tick while a write is in flight or a previous
         // write failed: the merge keeps optimistically painted rows and lets
@@ -380,8 +396,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
     };
     void fetchLiveOrders();
-    // 20s cadence (within the 15–30s floor for dashboard polling). Explicit
-    // merchant actions and the tab-count probe still refresh immediately.
+    // 30s cadence (the requested 30–60s band). Explicit merchant actions and
+    // the tab-count probe still refresh immediately.
     const timer = setInterval(fetchLiveOrders, ORDERS_POLL_MS);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -428,7 +444,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
     };
     void fetchReturns();
-    // 20s cadence — same 15–30s polling floor as the orders tick above.
+    // 30s cadence — same band as the orders tick above.
     const timer = setInterval(fetchReturns, RETURNS_POLL_MS);
     return () => { cancelled = true; clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -522,6 +538,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // The route returns a plain array; the count header tells us the real
         // number even when we only asked for the first row.
         const header = res.headers.get('X-Orders-Count');
+        if (header === null && Array.isArray(data) && data.length === 0) {
+          // Degraded answer: no X-Orders-* headers means the database was NOT
+          // read. Treating that as "0 matching rows" is what made the yellow
+          // "database reports N orders but the loaded list shows none" hint
+          // flip in and out — an inconclusive probe must stay null.
+          if (!cancelled) setServerTabCount(null);
+          return;
+        }
         const count = header !== null ? Number(header) : Array.isArray(data) ? data.length : null;
         if (count !== null && Number.isFinite(count)) setServerTabCount(count);
       } catch {
@@ -543,7 +567,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [activeMenu, setActiveMenu] = useState<{ id: string; type: 'payment' | 'status' } | null>(null);
 
   // ── Order deletion ─────────────────────────────────────────────────────────
-  // Ids with a delete in flight OR already committed this session. The 20s
+  // Ids with a delete in flight OR already committed this session. The 30s
   // background poll masks them (see `mergeServerOrders`) so a response that
   // raced the DELETE request cannot resurrect a removed row.
   const deletingIdsRef = useRef<Set<string>>(new Set());
@@ -2355,7 +2379,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         {serverTabCount !== null && serverTabCount > 0 && (
                           <p className="text-[11px] text-amber-400 mt-2 font-semibold">
                             The database reports {serverTabCount} matching order{serverTabCount === 1 ? '' : 's'} for this tab,
-                            but the loaded list shows none. The order list may be out of date — it refreshes every few seconds.
+                            but the loaded list shows none. The order list may be out of date — it refreshes every 30 seconds.
                           </p>
                         )}
                         {subMenu === 'manual' && serverTabCount === 0 && orders.length > 0 && (
