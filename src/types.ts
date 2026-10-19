@@ -708,6 +708,8 @@ export interface Order {
   paymentMethod: 'bKash' | 'Nagad' | 'Rocket' | 'Bank Transfer' | 'COD';
   paymentStatus: 'Paid' | 'Partially paid' | 'Unpaid' | 'Voided' | 'Pending Verification';
   transactionId?: string;
+  /** Sender's mobile number used for the mobile-banking transaction (bKash/Nagad/Rocket). */
+  senderMobile?: string;
   fulfillmentStatus: 'Unfulfilled' | 'Assigned Courier' | 'In Transit' | 'Delivered' | 'Cancelled';
   status?: 'New' | 'Preparing' | 'Ready' | 'In delivery' | 'Completed' | 'Cancelled' | 'Processing reverse' | 'Partially Reversed' | 'Reversed';
   courierName?: string;

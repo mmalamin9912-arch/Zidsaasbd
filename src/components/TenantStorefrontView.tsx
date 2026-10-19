@@ -1709,6 +1709,7 @@ The render below must not guess. A merchant may paste
   const [shippingArea, setShippingArea] = useState<'inside' | 'outside'>('inside');
   const [custAddress, setCustAddress] = useState('');
   const [custTxId, setCustTxId] = useState('');
+  const [custSenderPhone, setCustSenderPhone] = useState('');
   const [confirmedOrderNum, setConfirmedOrderNum] = useState('');
   const [codAdvanceProvider, setCodAdvanceProvider] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [copiedNum, setCopiedNum] = useState(false);
@@ -2269,6 +2270,9 @@ The render below must not guess. A merchant may paste
       paymentMethod: payMethod === 'bkash' ? 'bKash' : payMethod === 'nagad' ? 'Nagad' : payMethod === 'bank' ? 'Bank Transfer' : 'COD',
       paymentStatus: payMethod === 'cod' ? 'Unpaid' : 'Pending Verification',
       transactionId: custTxId || undefined,
+      ...(['bkash', 'nagad', 'rocket'].includes(payMethod)
+        ? { senderMobile: custSenderPhone || undefined }
+        : {}),
       fulfillmentStatus: 'Unfulfilled',
       status: 'New',
       courierName: 'Steadfast Courier',
@@ -4343,6 +4347,21 @@ The render below must not guess. A merchant may paste
                         placeholder={`e.g. ${payMethod === 'bkash' ? 'BK' : payMethod === 'nagad' ? 'NG' : 'RO'}9X2810L9`}
                         value={custTxId}
                         onChange={(e) => setCustTxId(e.target.value)}
+                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-white focus:outline-none focus:ring-2 focus:ring-pink-500 font-bold"
+                      />
+                    </div>
+
+                    {/* Sender Mobile Number */}
+                    <div>
+                      <label className="block mb-1 font-bold text-xs text-slate-800">
+                        Sender {selectedMobileMethod.provider.toUpperCase()} Mobile Number *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="e.g. 01712345678"
+                        value={custSenderPhone}
+                        onChange={(e) => setCustSenderPhone(e.target.value)}
                         className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-white focus:outline-none focus:ring-2 focus:ring-pink-500 font-bold"
                       />
                     </div>
