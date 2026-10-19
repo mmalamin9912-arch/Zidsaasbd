@@ -27,8 +27,8 @@ interface PaymentsViewProps {
   mobileBanking: MobileBankingConfig[];
   codConfig: CodConfig;
   gatewayConfig: PaymentGatewayConfig;
-  onUpdateBankAccounts: (accounts: BankAccount[]) => void;
-  onUpdateMobileBanking: (configs: MobileBankingConfig[]) => void;
+  onUpdateBankAccounts: (accounts: BankAccount[]) => void | Promise<boolean>;
+  onUpdateMobileBanking: (configs: MobileBankingConfig[]) => void | Promise<boolean>;
   onUpdateCodConfig: (config: CodConfig) => void;
   onUpdateGatewayConfig: (config: PaymentGatewayConfig) => void;
 }
@@ -152,8 +152,25 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
     setMobileConfigs(updated);
   };
 
-  const handleSaveMobileSettings = () => {
-    onUpdateMobileBanking(mobileConfigs);
+  const [isSavingMobile, setIsSavingMobile] = useState(false);
+  const handleSaveMobileSettings = async () => {
+    if (isSavingMobile) return;
+    setIsSavingMobile(true);
+    try {
+      // `onUpdateMobileBanking` updates local state AND (in App.tsx) persists
+      // the accounts to the database. Await it so the toast reports what
+      // really happened instead of claiming a save that never left the
+      // browser — the public storefront reads the DB, not localStorage.
+      const result = onUpdateMobileBanking(mobileConfigs);
+      const saved = result instanceof Promise ? await result : true;
+      if (saved) {
+        toast.success('Payment settings saved — bKash / Nagad / Rocket are now live on your storefront checkout.');
+      } else {
+        toast.error('Payment settings updated locally, but the database save failed. Please try again.');
+      }
+    } finally {
+      setIsSavingMobile(false);
+    }
   };
 
   const handleSaveCod = (e: React.FormEvent) => {
@@ -421,10 +438,11 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           <div className="flex justify-end pt-4 border-t border-[#2E3548]">
             <button
               onClick={handleSaveMobileSettings}
-              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-8 py-3 rounded-xl text-sm transition shadow-lg shadow-[#00D68F]/20 flex items-center gap-2"
+              disabled={isSavingMobile}
+              className="bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 disabled:cursor-wait text-slate-950 font-black px-8 py-3 rounded-xl text-sm transition shadow-lg shadow-[#00D68F]/20 flex items-center gap-2"
             >
               <CheckCircle2 className="w-5 h-5" />
-              <span>Save Payment Settings</span>
+              <span>{isSavingMobile ? 'Saving…' : 'Save Payment Settings'}</span>
             </button>
           </div>
         </div>

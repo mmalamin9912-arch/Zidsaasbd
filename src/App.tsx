@@ -1998,6 +1998,44 @@ export default function App() {
     }));
   };
 
+  // ── Merchant Payment Accounts Setup persistence ──────────────────────────
+  //
+  // The Payments panel used to call the raw `setMobileBanking` /
+  // `setBankAccounts` setters, which only wrote localStorage — but the PUBLIC
+  // storefront reads the database (`/api/storefront/:slug`), so active toggles
+  // and account numbers saved in the dashboard never reached a customer's
+  // device. These wrappers keep the instant local update AND push the same
+  // payload to `/api/store/payment-accounts` (MongoDB authoritative, Supabase
+  // + local-payload mirrors). Fire-and-forget: a failed write is logged and
+  // surfaced through the returned promise, never thrown at the merchant.
+  const persistPaymentAccounts = (patch: {
+    mobileBanking?: MobileBankingConfig[];
+    bankAccounts?: BankAccount[];
+  }): Promise<boolean> => {
+    const slug = String((merchant as any)?.storeSlug || '').trim();
+    if (!slug) return Promise.resolve(true);
+    return fetch('/api/store/payment-accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ store_slug: slug, ...patch }),
+    })
+      .then((res) => res.ok)
+      .catch((err) => {
+        console.warn('[App] payment-accounts save warning:', err);
+        return false;
+      });
+  };
+
+  const handleUpdateMobileBanking = (configs: MobileBankingConfig[]): Promise<boolean> => {
+    setMobileBanking(configs);
+    return persistPaymentAccounts({ mobileBanking: configs });
+  };
+
+  const handleUpdateBankAccounts = (accounts: BankAccount[]): Promise<boolean> => {
+    setBankAccounts(accounts);
+    return persistPaymentAccounts({ bankAccounts: accounts });
+  };
+
   const handleConfirmSubscription = async (
     planId: string,
     paymentMethod: string,
@@ -2662,8 +2700,8 @@ onPlaceOrder={async (newOrder) => {
                 mobileBanking={mobileBanking}
                 codConfig={codConfig}
                 gatewayConfig={gatewayConfig}
-                onUpdateBankAccounts={setBankAccounts}
-                onUpdateMobileBanking={setMobileBanking}
+                onUpdateBankAccounts={handleUpdateBankAccounts}
+                onUpdateMobileBanking={handleUpdateMobileBanking}
                 onUpdateCodConfig={setCodConfig}
                 onUpdateGatewayConfig={setGatewayConfig}
               />

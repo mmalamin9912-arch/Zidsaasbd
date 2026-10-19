@@ -424,6 +424,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         let apiStoreRecord: any = null;
         let apiBankAccounts: any[] = [];
         let apiMobileBanking: any[] = [];
+        // Set once /api/storefront answers with payment-account keys. The DB
+        // copy is then authoritative EVEN WHEN both arrays are empty (merchant
+        // disabled every wallet / never configured any), so a stale
+        // localStorage / demo array can never re-surface inactive methods on
+        // the checkout.
+        let apiPaymentAccountsAnswered = false;
 
         // Load full storefront payload from Express API — NEVER browser-cached
         // (no-store) so a published paid theme renders instantly, but guarded by
@@ -452,6 +458,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           apiStoreRecord = payload.merchant || null;
           apiBankAccounts = Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [];
           apiMobileBanking = Array.isArray(payload.mobileBanking) ? payload.mobileBanking : [];
+          // The endpoint always answers BOTH keys (an empty array when the
+          // merchant has none configured) — an older server that omits them
+          // leaves the flag false and the legacy length-gated merge applies.
+          if (Array.isArray(payload.mobileBanking) || Array.isArray(payload.bankAccounts)) {
+            apiPaymentAccountsAnswered = true;
+          }
 
           // Online Store modules travel in the same payload, so the storefront
           // needs no second round-trip to render the menus, FAQs and SEO tags.
@@ -469,6 +481,18 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             });
           }
         }
+
+        // Payment-account snapshot merged into the cached store data below.
+        // When the endpoint answered, its arrays are authoritative EVEN IF
+        // EMPTY (all wallets disabled / none configured yet) so a stale
+        // localStorage copy can never re-surface inactive methods on checkout.
+        const paymentAccountsMerge: { bankAccounts?: any[]; mobileBanking?: any[] } =
+          apiPaymentAccountsAnswered
+            ? { bankAccounts: apiBankAccounts, mobileBanking: apiMobileBanking }
+            : {
+                ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
+                ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
+              };
 
         // Load the merchant's saved themeConfig from the store payload
         try {
@@ -512,8 +536,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               // the checkout's zone prices are always the merchant's live values.
               ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
               ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
-              ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
-              ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
+              ...paymentAccountsMerge,
             };
             writeZidStoreData(mergedTheme as unknown as ZidStoreData, storeSlug);
             setLiveStoreData(mergedTheme as unknown as ZidStoreData);
@@ -533,8 +556,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
             ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
             ...(apiStoreRecord ? { merchant: { ...(existing?.merchant || {}), ...apiStoreRecord } } : {}),
-            ...(apiBankAccounts.length > 0 ? { bankAccounts: apiBankAccounts } : {}),
-            ...(apiMobileBanking.length > 0 ? { mobileBanking: apiMobileBanking } : {}),
+            ...paymentAccountsMerge,
           };
           writeZidStoreData(merged as ZidStoreData, storeSlug);
           setLiveStoreData(merged as ZidStoreData);

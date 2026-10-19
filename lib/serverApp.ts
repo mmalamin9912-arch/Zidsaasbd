@@ -5990,6 +5990,17 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       readModuleSafe('seo'),
     ]);
 
+    // ── Merchant payment accounts (bKash / Nagad / Rocket + bank accounts) ──
+    // Resolved through readPaymentAccounts (Mongo authoritative, Supabase +
+    // local payload mirrors; camelCase AND snake_case keys accepted) so the
+    // public checkout — served to a device with NO localStorage — always sees
+    // the merchant's ACTIVE methods, exactly as saved in Merchant Payment
+    // Accounts Setup.
+    const paymentAccounts = await readPaymentAccounts(slug, merchantRecord).catch((paErr: any) => {
+      console.warn('[Server] storefront paymentAccounts warning:', paErr?.message || paErr);
+      return null;
+    });
+
     const storefront = {
       merchant: storefrontMerchant,
       products: storeProducts,
@@ -6005,12 +6016,8 @@ app.get('/api/storefront/:slug?', async (req, res) => {
         category: (storefrontMerchant as any)?.activeThemeCategory || (storefrontMerchant as any)?.active_theme_category,
         layout: (storefrontMerchant as any)?.activeThemeLayout || (storefrontMerchant as any)?.active_theme_layout,
       },
-      bankAccounts: Array.isArray(merchantRecord?.bankAccounts)
-        ? merchantRecord.bankAccounts
-        : (Array.isArray(payload.bankAccounts) ? payload.bankAccounts : []),
-      mobileBanking: Array.isArray(merchantRecord?.mobileBanking)
-        ? merchantRecord.mobileBanking
-        : (Array.isArray(payload.mobileBanking) ? payload.mobileBanking : []),
+      bankAccounts: paymentAccounts?.bankAccounts || [],
+      mobileBanking: paymentAccounts?.mobileBanking || [],
       codConfig,
       shippingConfig,
       // Public storefront modules. Only published pages/posts are exposed.
@@ -9335,6 +9342,256 @@ async function writeCheckoutConfig(storeRef: string, patch: any) {
 
   return next;
 }
+
+/**
+ * Merchant payment accounts (bKash / Nagad / Rocket + checkout bank accounts)
+ * for a store, resolved from every mirror the platform keeps.
+ *
+ * The dashboard's "Save Payment Settings" writes MongoDB first (authoritative),
+ * then mirrors to Supabase (`mobile_banking` / `bank_accounts` jsonb columns,
+ * snake case — migration 0011) and to the local payload file. A store row can
+ * exist in ONE mirror without the others (a Supabase row created before
+ * migration 0011 has no payment columns at all), so each source is probed with
+ * BOTH key spellings until an array is found.
+ *
+ * Returns empty arrays when nothing is configured — never null — so callers
+ * can hand the value straight to the storefront payload.
+ */
+async function readPaymentAccounts(
+  storeRef: string,
+  recordHint?: Record<string, unknown> | null,
+): Promise<{ mobileBanking: any[]; bankAccounts: any[] }> {
+  const slug = cleanStoreRef(storeRef);
+  const found: { mobileBanking: any[]; bankAccounts: any[] } = {
+    mobileBanking: [],
+    bankAccounts: [],
+  };
+  if (!slug) return found;
+
+  const pick = (src: any): { mobileBanking?: any[]; bankAccounts?: any[] } | null => {
+    if (!src || typeof src !== 'object') return null;
+    const mobileBanking = Array.isArray(src.mobileBanking)
+      ? src.mobileBanking
+      : Array.isArray(src.mobile_banking)
+        ? src.mobile_banking
+        : null;
+    const bankAccounts = Array.isArray(src.bankAccounts)
+      ? src.bankAccounts
+      : Array.isArray(src.bank_accounts)
+        ? src.bank_accounts
+        : null;
+    if (!mobileBanking && !bankAccounts) return null;
+    return {
+      ...(mobileBanking ? { mobileBanking } : {}),
+      ...(bankAccounts ? { bankAccounts } : {}),
+    };
+  };
+  const apply = (next: { mobileBanking?: any[]; bankAccounts?: any[] } | null) => {
+    if (!next) return;
+    if (!found.mobileBanking.length && next.mobileBanking) found.mobileBanking = next.mobileBanking;
+    if (!found.bankAccounts.length && next.bankAccounts) found.bankAccounts = next.bankAccounts;
+  };
+
+  // 1. The record the caller already resolved (Supabase row / Mongo doc /
+  //    local file merchant). Camel case (Mongo) and snake case (Supabase)
+  //    are both accepted by `pick`.
+  apply(pick(recordHint));
+
+  // 2. MongoDB — where the dashboard's save lands first. Probed INDEPENDENTLY
+  //    so a Supabase row that is MISSING the payment columns (pre-migration
+  //    deploy) can never mask data that only exists here.
+  if (!found.mobileBanking.length || !found.bankAccounts.length) {
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        const orClauses: any[] = [
+          { store_slug: slug },
+          { storeSlug: slug },
+          { store_code: { $in: [slug, slug.toUpperCase()] } },
+        ];
+        if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+        const storeDoc = await (mongoose.connection.db.collection('stores') as any)
+          .findOne({ $or: orClauses });
+        const merchDoc = storeDoc
+          ? null
+          : await (mongoose.connection.db.collection('merchants') as any)
+              .findOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] });
+        apply(pick(storeDoc || merchDoc));
+      }
+    } catch (err: any) {
+      console.warn('[Server] readPaymentAccounts mongo warning:', err?.message || err);
+    }
+  }
+
+  // 3. Local payload mirror (merchant record + top-level keys) — covers a
+  //    fresh serverless instance whose Mongo connection failed.
+  if (!found.mobileBanking.length || !found.bankAccounts.length) {
+    try {
+      const payload = await readStorePayload();
+      apply(pick(payload.merchant));
+      apply(pick(payload));
+    } catch (err: any) {
+      console.warn('[Server] readPaymentAccounts payload warning:', err?.message || err);
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Persist the Merchant Payment Accounts Setup edits (bKash / Nagad / Rocket
+ * toggles + numbers, checkout-visible bank accounts) for a store.
+ *
+ * Mirrors `writeCheckoutConfig`: MongoDB is the durable copy the public
+ * storefront reads, Supabase is PATCHed best-effort (snake_case jsonb columns
+ * from migration 0011 — `postgrestWrite` drops them instead of failing when
+ * the deployed table predates it), and the local payload file keeps BOTH its
+ * merchant record and its top-level keys in step, matching the fallbacks in
+ * GET /api/storefront/:slug.
+ */
+async function writePaymentAccounts(storeRef: string, patch: any) {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return null;
+
+  const current = await readPaymentAccounts(slug);
+  const next = {
+    mobileBanking: Array.isArray(patch?.mobileBanking) ? patch.mobileBanking : current.mobileBanking,
+    bankAccounts: Array.isArray(patch?.bankAccounts) ? patch.bankAccounts : current.bankAccounts,
+    updatedAt: new Date().toISOString(),
+  };
+
+  // 1. Durable copy on the store record (MongoDB authoritative).
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+
+      const update = {
+        $set: {
+          mobileBanking: next.mobileBanking,
+          bankAccounts: next.bankAccounts,
+          updated_at: next.updatedAt,
+        },
+      };
+      const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
+        .updateOne({ $or: orClauses }, update);
+
+      if (!storesResult?.matchedCount) {
+        await (mongoose.connection.db.collection('merchants') as any)
+          .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] payment-accounts mongo persist warning:', err?.message || err);
+  }
+
+  // 2. Best-effort Supabase mirror — snake_case jsonb columns on `stores`.
+  //    PATCH never creates a row (a store that exists only in Mongo stays
+  //    that way), and postgrestWrite survives a table that predates
+  //    migration 0011 by dropping the unknown columns instead of 400ing.
+  try {
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    if (isConfigured) {
+      const sbResult = await postgrestWrite(
+        supabaseUrl,
+        supabaseKey,
+        `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`,
+        {
+          method: 'PATCH',
+          body: {
+            mobile_banking: next.mobileBanking,
+            bank_accounts: next.bankAccounts,
+            updated_at: next.updatedAt,
+          },
+        },
+      );
+      if (!sbResult.ok) {
+        console.warn(
+          '[Server] payment-accounts Supabase mirror warning:',
+          sbResult.status,
+          String(sbResult.detail || '').slice(0, 300),
+        );
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] payment-accounts Supabase warning:', err?.message || err);
+  }
+
+  // 3. Best-effort mirror into the local payload file — BOTH the merchant
+  //    record and the top-level keys the storefront route falls back to.
+  try {
+    const payload = await readStorePayload();
+    if (payload.merchant) {
+      payload.merchant.mobileBanking = next.mobileBanking;
+      payload.merchant.bankAccounts = next.bankAccounts;
+    }
+    payload.mobileBanking = next.mobileBanking;
+    payload.bankAccounts = next.bankAccounts;
+    await writeStorePayload(payload);
+  } catch { /* read-only FS on serverless — Mongo remains the source of truth */ }
+
+  return {
+    ok: true,
+    store_slug: slug,
+    mobileBanking: next.mobileBanking,
+    bankAccounts: next.bankAccounts,
+    updatedAt: next.updatedAt,
+  };
+}
+
+/**
+ * GET /api/store/payment-accounts?store_slug=…
+ *
+ * Read back the checkout-visible payment accounts for a store — lets the
+ * merchant dashboard verify exactly what customers will see at checkout.
+ */
+app.get('/api/store/payment-accounts', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(req.query.store_slug || req.query.slug || req.query.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const accounts = await readPaymentAccounts(storeRef);
+    return res.status(200).json({ ok: true, store_slug: storeRef, ...accounts });
+  } catch (err: any) {
+    console.error('[Server] GET /api/store/payment-accounts error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load payment accounts.' });
+  }
+});
+
+/**
+ * POST /api/store/payment-accounts — save the Merchant Payment Accounts Setup
+ * (bKash / Nagad / Rocket active toggles + account numbers, bank accounts).
+ *
+ * Called by the dashboard's "Save Payment Settings" button. MongoDB is the
+ * authoritative copy; Supabase and the local payload mirror it so the PUBLIC
+ * storefront — served to a device with no localStorage — renders the same
+ * active methods.
+ */
+app.post('/api/store/payment-accounts', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    if (!storeRef) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.' });
+    }
+    const saved = await writePaymentAccounts(storeRef, body);
+    if (!saved) {
+      return res.status(400).json({ ok: false, store_slug: storeRef, error: 'Could not save payment accounts.' });
+    }
+    return res.status(200).json({ ...saved, message: 'Payment accounts saved.' });
+  } catch (err: any) {
+    console.error('[Server] POST /api/store/payment-accounts error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not save payment accounts.' });
+  }
+});
 
 /** GET /api/store/checkout-settings?store_slug=… */
 app.get('/api/store/checkout-settings', async (req, res) => {
