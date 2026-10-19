@@ -3940,86 +3940,24 @@ The render below must not guess. A merchant may paste
 
         {/* Checkout Flow */}
         {checkoutStep === 'checkout' && (
-           <div className="w-full px-3.5 py-6 space-y-6">
-            <button
-              onClick={() => { setCheckoutStep('catalog'); setMobileTab('home'); }}
-              className="text-xs flex items-center gap-1.5 cursor-pointer text-slate-400 hover:text-amber-400 font-extrabold transition"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" /> Return to Catalog
-            </button>
+           <div className="px-3.5 py-6">
+             <div className="max-w-[1000px] mx-auto space-y-6">
+              <button
+                onClick={() => { setCheckoutStep('catalog'); setMobileTab('home'); }}
+                className="text-xs flex items-center gap-1.5 cursor-pointer text-slate-400 hover:text-amber-400 font-extrabold transition"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" /> Return to Catalog
+              </button>
 
-            <div className="bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-800/80 p-4 shadow-2xl space-y-6 text-slate-100">
-
-              <div>
-                <h3 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
-                  <ShieldCheck className="w-5 h-5 text-amber-400" />
-                  Express Checkout
-                </h3>
-                <p className="text-xs mt-0.5 text-slate-400">Provide your delivery details below.</p>
-              </div>
-
-              {/* Order Summary Items */}
-              <div className="bg-slate-950 rounded-xl p-3 border border-slate-800/80 space-y-3">
-                <h4 className="text-[10px] font-black text-amber-400 uppercase tracking-wider">Order Summary</h4>
-
-                {cart.length > 0 ? (
-                  cart.map((item, idx) => (
-                    <div key={idx} className="flex items-center gap-3 py-1">
-                      <SafeImage src={item.product.image} alt={item.product.title} className="w-12 h-12 object-cover rounded-lg border border-slate-800 shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <h4 className="font-semibold text-xs text-slate-100 truncate">{item.product.title}</h4>
-                        <div className="text-[10px] text-slate-400">Qty: {item.quantity}</div>
-                      </div>
-                      <div className="text-xs font-black text-amber-400 shrink-0">৳{((item.product.priceBDT ?? 0) * item.quantity).toLocaleString()}</div>
+              <form onSubmit={handleCheckoutSubmit} className="grid lg:grid-cols-2 gap-8 items-start space-y-6">
+                <div className="lg:col-span-8 space-y-6">
+                  <div className="bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-800/80 p-6 shadow-2xl text-slate-100 space-y-5">
+                    <div className="flex items-center gap-2 mb-2">
+                      <User className="w-5 h-5 text-amber-400" />
+                      <h3 className="text-lg font-black text-white tracking-tight">Customer Details</h3>
                     </div>
-                  ))
-                ) : selectedProduct ? (
-                  <div className="flex items-center gap-3 py-1">
-                    <SafeImage src={selectedProduct.image} alt={selectedProduct.title} className="w-12 h-12 object-cover rounded-lg border border-slate-800 shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-semibold text-xs text-slate-100 truncate">{selectedProduct.title}</h4>
-                    </div>
-                    <div className="text-xs font-black text-amber-400 shrink-0">৳{(selectedProduct.priceBDT ?? 0).toLocaleString()}</div>
-                  </div>
-                ) : null}
 
-                <div className="border-t border-slate-800 pt-2 space-y-1.5 text-xs">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">
-                      Delivery — {shippingArea === 'inside' ? 'Inside City' : 'Outside City'}
-                    </span>
-                    <span className="font-bold text-slate-200">
-                      {(shippingArea === 'inside' ? insideConfigured : outsideConfigured)
-                        ? `৳${shippingFee.toLocaleString()}`
-                        : 'To be confirmed'}
-                    </span>
-                  </div>
-                  {giftWrapFee > 0 && (
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-400">Gift Wrapping</span>
-                      <span className="font-bold text-slate-200">+৳{giftWrapFee.toLocaleString()}</span>
-                    </div>
-                  )}
-                  {taxPercent > 0 && (
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-400">VAT ({taxPercent}%)</span>
-                      <span className="font-bold text-slate-200">
-                        {taxIncludedInPrices ? 'Included' : `+৳${taxAmount.toLocaleString()}`}
-                      </span>
-                    </div>
-                  )}
-                  <div className="flex justify-between items-center pt-1">
-                    <span className="font-bold text-slate-400">Total Payable:</span>
-                    {/* Recomputes on every delivery-zone switch: `shippingFee`,
-                        the VAT base and the mobile cash-out fee all derive from
-                        `shippingArea`, so the header, the breakdown and the
-                        submit button always quote the same number. */}
-                    <span data-testid="checkout-summary-total" className="text-base font-black text-amber-400">
-                      ৳{totalAmount.toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-              </div>
+              
 
               {/* Merchant announcement (Settings -> Checkout) */}
               {storeCheckoutConfig?.announcement && (
@@ -4052,8 +3990,7 @@ The render below must not guess. A merchant may paste
                 </div>
               )}
 
-              <form onSubmit={handleCheckoutSubmit} className="space-y-4">
-                <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block mb-1 font-bold text-xs text-slate-300">Full Name</label>
                     <input
@@ -4174,6 +4111,12 @@ The render below must not guess. A merchant may paste
                     />
                   </div>
                 </div>
+                  </div>
+                  <div className="bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-800/80 p-6 shadow-2xl text-slate-100 space-y-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <CreditCard className="w-5 h-5 text-amber-400" />
+                      <h3 className="text-lg font-black text-white tracking-tight">Payment Method</h3>
+                    </div>
 
                 {/* Payment Options */}
                 <div className="pt-3 border-t border-slate-800">
@@ -4491,9 +4434,74 @@ The render below must not guess. A merchant may paste
                     }
                   </button>
                 </div>
-              </form>
-            </div>
+                </div>
+              </div>
+              {/* Order Review (Right Column) */}
+              <div className="lg:col-span-4">
+                <div className="bg-slate-950 rounded-xl border border-slate-800/80 p-5 shadow-xl sticky top-6">
+                  <div className="flex items-center gap-2 mb-3">
+                    <ShoppingBag className="w-5 h-5 text-amber-400" />
+                    <h4 className="text-base font-black text-white tracking-tight uppercase flex items-center gap-2">
+                      Order Review
+                    </h4>
+                  </div>
+                  <div className="bg-slate-900/80 rounded-xl p-3 border border-slate-800 space-y-2">
+                    {cart.length > 0 ? (
+                      cart.map((item, idx) => (
+                        <div key={idx} className="flex items-center gap-3 py-2">
+                          <SafeImage src={item.product.image} alt={item.product.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <h4 className="font-semibold text-xs text-slate-100 truncate leading-tight">{item.product.title}</h4>
+                            <div className="text-[10px] text-slate-400">Qty: {item.quantity}</div>
+                          </div>
+                          <div className="text-xs font-black text-amber-400 shrink-0 leading-tight">৳{((item.product.priceBDT ?? 0) * item.quantity).toLocaleString()}</div>
+                        </div>
+                      ))
+                    ) : selectedProduct ? (
+                      <div className="flex items-center gap-3 py-2">
+                        <SafeImage src={selectedProduct.image} alt={selectedProduct.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-semibold text-xs text-slate-100 truncate leading-tight">{selectedProduct.title}</h4>
+                        </div>
+                        <div className="text-xs font-black text-amber-400 shrink-0 leading-tight">৳{(selectedProduct.priceBDT ?? 0).toLocaleString()}</div>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="border-t border-slate-800 pt-3 space-y-2 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Delivery — {shippingArea === 'inside' ? 'Inside City' : 'Outside City'}</span>
+                      <span className="font-bold text-slate-200">
+                        {(shippingArea === 'inside' ? insideConfigured : outsideConfigured)
+                          ? `৳${shippingFee.toLocaleString()}`
+                          : 'To be confirmed'}
+                      </span>
+                    </div>
+                    {giftWrapFee > 0 && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Gift Wrapping</span>
+                        <span className="font-bold text-slate-200">+৳{giftWrapFee.toLocaleString()}</span>
+                      </div>
+                    )}
+                    {taxPercent > 0 && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">VAT ({taxPercent}%)</span>
+                        <span className="font-bold text-slate-200">
+                          {taxIncludedInPrices ? 'Included' : `+৳${taxAmount.toLocaleString()}`}
+                        </span>
+                      </div>
+                    )}
+                    <div className="border-t border-slate-800 pt-1 flex justify-between items-center pt-1">
+                      <span className="font-bold text-slate-400">Total Payable:</span>
+                      <span data-testid="checkout-summary-total" className="text-sm font-black text-amber-400">
+                        ৳{totalAmount.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </form>
           </div>
+        </div>
         )}
 
         {/* Success View */}
