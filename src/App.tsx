@@ -2123,17 +2123,27 @@ export default function App() {
     }
   };
 
-  // ── Tenant informational pages (`/store/<slug>/pages/about-us`, `/track-order`).
+  // ── Tenant informational pages.
+  //
+  // SECURITY FIX (2026-10-20) — separate PUBLIC storefront policy routing from
+  // the merchant dashboard. Public shapes (ALL store-scoped, never /dashboard):
+  //   /store/<slug>/pages/<key>   (classic)
+  //   /store/<slug>/<key>         (short alias: about, shipping-policy, …)
+  //   /e/<slug>/about | /e/<slug>/shipping-policy | /e/<slug>/return-policy
+  //   /e/<slug>/track-order | /e/<slug>/pages/<key> | /e/<slug>/<key>
   //
   // These live INSIDE the store path, so they must be matched before the
   // storefront branch below — which would otherwise hand the whole path to
   // TenantStorefrontView as the store slug. The merchant's own page content
   // wins when present; StorefrontPageView renders a fallback template when it
-  // is not, so a footer link is never a blank page.
-  const storePagesMatch = currentPath.match(/^\/store\/([^/]+)\/(pages\/([^/]+)|track-order)\/?$/);
+  // is not, so a footer link is never a blank page and NEVER /dashboard.
+  const storePagesMatch = currentPath.match(/^\/(store|e)\/([^/]+)\/(?:pages\/([^/]+)|about|about-us|shipping-policy|return-policy|track-order|privacy-policy|terms-of-service|faq|contact-us)\/?$/);
   if (storePagesMatch) {
-    const pageStoreSlug = storePagesMatch[1];
-    const isTrackOrder = storePagesMatch[2] === 'track-order';
+    const pageStoreSlug = storePagesMatch[2];
+    const rawTail = currentPath.replace(/^\/(store|e)\/[^/]+\//, '').replace(/^pages\//, '').replace(/\/+$/, '');
+    const tailKey = rawTail.toLowerCase();
+    const isTrackOrder = tailKey === 'track-order';
+    const pageSlug = isTrackOrder ? 'track-order' : (storePagesMatch[3] || rawTail || '');
 
     let pageMerchant: Record<string, any> | null = null;
     try {
@@ -2148,8 +2158,9 @@ export default function App() {
 
     return (
       <StorefrontPageView
-        slug={isTrackOrder ? 'track-order' : storePagesMatch[3] || ''}
-        storeName={pageMerchant?.storeName || pageMerchant?.name || storePagesMatch[1]}
+        slug={pageSlug}
+        storeSlug={pageStoreSlug}
+        storeName={pageMerchant?.storeName || pageMerchant?.name || pageStoreSlug}
         merchant={pageMerchant}
         onNavigateHome={() => {
           window.history.pushState({}, '', `/store/${pageStoreSlug}`);

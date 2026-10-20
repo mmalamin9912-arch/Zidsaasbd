@@ -868,33 +868,80 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     )
   };
   /**
-   * Map a footer Quick Link label to the storefront route it should open.
+   * Map a footer Quick Link label to a CANONICAL storefront page key.
    *
-   * The footer is driven by merchant-editable labels (`themeConfig.footerLinks`
-   * plus auto-injected policy links), so matching has to be tolerant: labels
-   * are lowercased and stripped of punctuation before comparison, which makes
-   * "Return & Refund Policy" and "Return Policy" land on the same page.
+   * SECURITY FIX (2026-10-20): the old helper returned ABSOLUTE paths like
+   * `/pages/shipping-policy` with no store scope. Nothing in App.tsx matches a
+   * bare `/pages/*` route, so the SPA fell through to the unauthenticated
+   * branch (AuthFlow -> `/dashboard` redirect) — a public shopper clicking a
+   * footer link was bounced toward the merchant dashboard / login screen.
+   *
+   * This returns only the page KEY (e.g. `shipping-policy`). The caller builds
+   * a store-scoped href via `buildStoreScopedHref()` and opens a client-side
+   * modal, so a footer click NEVER navigates to `/dashboard` or a bare
+   * `/pages/*` path.
    *
    * Returns '' for a label we cannot map. The caller renders such a label as
-   * plain text rather than a dead link — better a non-link than a link to
-   * nowhere.
+   * plain text rather than a dead link.
    */
-  function resolveFooterLinkHref(label: string): string {
+  function resolveFooterPageKey(label: string): string {
     const key = String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     if (!key) return '';
 
     // Order/parcel tracking is its own flow, not a static page.
-    if (key.includes('track')) return '/track-order';
+    if (key.includes('track')) return 'track-order';
 
-    if (key.includes('about')) return '/pages/about-us';
-    if (key.includes('shipping') || key.includes('delivery')) return '/pages/shipping-policy';
-    if (key.includes('return') || key.includes('refund')) return '/pages/return-policy';
-    if (key.includes('privacy')) return '/pages/privacy-policy';
-    if (key.includes('term')) return '/pages/terms-of-service';
-    if (key.includes('faq') || key.includes('question')) return '/pages/faq';
-    if (key.includes('contact')) return '/pages/contact-us';
+    if (key.includes('about')) return 'about';
+    if (key.includes('shipping') || key.includes('delivery')) return 'shipping-policy';
+    if (key.includes('return') || key.includes('refund')) return 'return-policy';
+    if (key.includes('privacy')) return 'privacy-policy';
+    if (key.includes('term')) return 'terms-of-service';
+    if (key.includes('faq') || key.includes('question')) return 'faq';
+    if (key.includes('contact')) return 'contact-us';
 
     return '';
+  }
+
+  /**
+   * Legacy wrapper kept for any external caller: now returns a STORE-SCOPED
+   * public URL, never `/dashboard` and never a bare `/pages/*`.
+   * Canonical shapes:
+   *   /store/<slug>/pages/<key>   (classic storefront)
+   *   /e/<slug>/<key>             (short public storefront, incl. about)
+   */
+  function resolveFooterLinkHref(label: string): string {
+    const pageKey = resolveFooterPageKey(label);
+    if (!pageKey) return '';
+    return buildStoreScopedHref(pageKey);
+  }
+
+  /** Base path preserving the current storefront mount (`/e/` vs `/store/`). */
+  function getStoreBasePath(): string {
+    try {
+      const slug = (effectiveStoreSlug || storeSlug || '').trim().toLowerCase() || 'bd';
+      const path = typeof window !== 'undefined' ? window.location.pathname || '' : '';
+      if (path.startsWith('/e/')) return `/e/${slug}`;
+      return `/store/${slug}`;
+    } catch {
+      return `/store/${(storeSlug || 'bd').toLowerCase()}`;
+    }
+  }
+
+  /**
+   * Build a store-scoped public href for a footer page key.
+   * NEVER returns `/dashboard`, `/pages/*` (bare) or any admin route.
+   */
+  function buildStoreScopedHref(pageKey: string): string {
+    const base = getStoreBasePath();
+    if (pageKey === 'track-order') return `${base}/track-order`;
+    // Short canonical (`/e/<slug>/about`) for /e/ mounts, `/pages/` form for
+    // /store/ mounts — App.tsx accepts BOTH shapes on BOTH prefixes.
+    if (base.startsWith('/e/')) {
+      if (pageKey === 'about') return `${base}/about`;
+      return `${base}/${pageKey}`;
+    }
+    const slugPart = pageKey === 'about' ? 'about-us' : pageKey;
+    return `${base}/pages/${slugPart}`;
   }
 
   /**
@@ -1147,6 +1194,12 @@ The render below must not guess. A merchant may paste
   // Legal policies (set in Settings → Legal policies). When `showInFooter` is on,
   // links to the policies the merchant filled in are auto-injected into the
   // storefront footer, so the footer adapts dynamically without manual editing.
+  //
+  // SECURITY FIX (2026-10-20): policy text is ALSO the content source for the
+  // public footer modal, fetched here from the merchant's store settings
+  // (`/api/store/policies` → Supabase) and rendered in-place. Empty fields
+  // fall back to "Information will be updated soon" inside the modal — never
+  // a redirect to /dashboard or /pages/*.
   const [storefrontPolicies, setStorefrontPolicies] = useState<{
     privacyPolicy?: string;
     termsOfService?: string;
@@ -1154,6 +1207,101 @@ The render below must not guess. A merchant may paste
     shippingPolicy?: string;
     showInFooter?: boolean;
   }>({});
+
+  /**
+   * Public policy modal state. Footer links open this IN PLACE on the
+   * storefront — no navigation at all, so there is no route that could leak
+   * to `/dashboard` or an admin page. `pageKey` is the canonical key from
+   * `resolveFooterPageKey()` (e.g. `shipping-policy`, `about`, `track-order`).
+   */
+  const [policyModalKey, setPolicyModalKey] = useState<string | null>(null);
+
+  // Close the policy modal on Escape so keyboard shoppers can dismiss it.
+  useEffect(() => {
+    if (!policyModalKey) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPolicyModalKey(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [policyModalKey]);
+
+  /**
+   * Resolve the modal's title + body for a page key.
+   * Priority: (1) merchant's saved store settings, (2) saved custom page,
+   * (3) graceful "Information will be updated soon" placeholder.
+   */
+  function resolvePolicyModalContent(pageKey: string): { title: string; body: string; contactHint: boolean } {
+    const FALLBACK = 'Information will be updated soon';
+    const pick = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+    const customPageText = (slug: string): string => {
+      try {
+        const pages = Array.isArray(storeModules?.customPages) ? storeModules.customPages : [];
+        const norm = (s: string) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        const hit = pages.find((p: any) => norm(p?.slug || p?.title || '') === norm(slug));
+        if (hit && String((hit as any)?.status || '').toLowerCase() !== 'draft') return pick((hit as any)?.content);
+      } catch { /* fall through to placeholder */ }
+      return '';
+    };
+    const merchantRec: any = (liveStoreData?.merchant as any) || (merchant as any) || {};
+    const aboutText =
+      pick((merchantRec as any)?.storeDescription) ||
+      pick(resolvedTheme.footerAboutText) ||
+      customPageText('about-us') || customPageText('about');
+
+    switch (pageKey) {
+      case 'about':
+        return { title: 'About Us', body: aboutText || FALLBACK, contactHint: !aboutText };
+      case 'shipping-policy':
+        return {
+          title: 'Shipping Policy',
+          body: pick(storefrontPolicies.shippingPolicy) || customPageText('shipping-policy') || FALLBACK,
+          contactHint: !(pick(storefrontPolicies.shippingPolicy) || customPageText('shipping-policy')),
+        };
+      case 'return-policy':
+        return {
+          title: 'Return Policy',
+          body: pick(storefrontPolicies.returnRefundPolicy) || customPageText('return-policy') || FALLBACK,
+          contactHint: !(pick(storefrontPolicies.returnRefundPolicy) || customPageText('return-policy')),
+        };
+      case 'track-order':
+        return {
+          title: 'Track Your Order',
+          body: 'Use your order number and the phone number from checkout on this store to follow your parcel. Delivery updates are sent when your order is confirmed, handed to the courier, and out for delivery.',
+          contactHint: false,
+        };
+      case 'privacy-policy':
+        return {
+          title: 'Privacy Policy',
+          body: pick(storefrontPolicies.privacyPolicy) || customPageText('privacy-policy') || FALLBACK,
+          contactHint: !(pick(storefrontPolicies.privacyPolicy) || customPageText('privacy-policy')),
+        };
+      case 'terms-of-service':
+        return {
+          title: 'Terms of Service',
+          body: pick(storefrontPolicies.termsOfService) || customPageText('terms-of-service') || FALLBACK,
+          contactHint: !(pick(storefrontPolicies.termsOfService) || customPageText('terms-of-service')),
+        };
+      case 'faq':
+        return {
+          title: 'Frequently Asked Questions',
+          body: (() => {
+            try {
+              const faqs = Array.isArray(storeModules?.faqs) ? storeModules.faqs : [];
+              if (faqs.length > 0) {
+                return faqs.slice(0, 8).map((f: any) => `Q: ${String(f?.question || '').trim()}\nA: ${String(f?.answer || '').trim()}`).join('\n\n');
+              }
+            } catch { /* placeholder below */ }
+            return '';
+          })() || customPageText('faq') || FALLBACK,
+          contactHint: true,
+        };
+      case 'contact-us':
+        return { title: 'Contact Us', body: '', contactHint: true };
+      default:
+        return { title: 'Information', body: FALLBACK, contactHint: true };
+    }
+  }
 
   // Storefront policies (Settings → Legal policies). Keyed ONLY on stable
   // primitives — the `merchant` OBJECT is intentionally excluded: its identity
@@ -5443,30 +5591,32 @@ The render below must not guess. A merchant may paste
                 <h5 className="text-[10px] font-black uppercase tracking-widest text-slate-300 mb-2">{resolvedTheme.footerLinksTitle}</h5>
                 <ul className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
                   {allLinks.map((linkLabel, i) => {
-                    // These were plain <li> text with no handler at all, so
-                    // "About Us" / "Shipping Policy" / "Return Policy" /
-                    // "Track Order" looked clickable and did nothing.
-                    //
-                    // Each now maps to a real storefront route. Policies and
-                    // About resolve through /pages/<slug>, which renders the
-                    // merchant's own text when they wrote it and a fallback
-                    // template when they have not — so a click never lands on a
-                    // blank or broken page.
-                    const target = resolveFooterLinkHref(linkLabel);
-                    if (!target) {
+                    // SECURITY FIX (2026-10-20): footer links open a client-side
+                    // modal IN PLACE — never pushState/navigate to `/dashboard`
+                    // or a bare `/pages/*` path. The `href` below is a
+                    // store-scoped PUBLIC url (`/store/<slug>/pages/<key>` or
+                    // `/e/<slug>/<key>`) for SEO / copy-link only; the click is
+                    // always intercepted (preventDefault) and shows the modal
+                    // with the merchant's saved policy text, or "Information
+                    // will be updated soon" when empty.
+                    const pageKey = resolveFooterPageKey(linkLabel);
+                    if (!pageKey) {
                       return (
                         <li key={`flink-${i}`} className="text-[11px] text-slate-400">{linkLabel}</li>
                       );
                     }
+                    const target = buildStoreScopedHref(pageKey);
                     return (
                       <li key={`flink-${i}`}>
                         <a
                           href={target}
                           onClick={(e) => {
-                            // In-app navigation without a full reload; the
-                            // storefront is a client-routed SPA.
                             e.preventDefault();
-                            navigateStorefront(target);
+                            e.stopPropagation();
+                            // Belt-and-braces: never let a footer click leave
+                            // the public storefront for an admin route.
+                            if (/^\/(dashboard|admin|super-admin|pages\/|login|signin)/i.test(target)) return;
+                            setPolicyModalKey(pageKey);
                           }}
                           className="text-[11px] text-slate-400 hover:text-amber-400 transition cursor-pointer"
                         >
@@ -5524,6 +5674,81 @@ The render below must not guess. A merchant may paste
           © {new Date().getFullYear()} {resolvedTheme.footerLogoText || (storefrontMerchant.storeName === 'My Zid Store' ? 'SlateBD' : storefrontMerchant.storeName || 'SlateBD')}. All rights reserved.
         </div>
       </footer>
+
+      {/* PUBLIC POLICY MODAL — storefront-only. Footer links open this in place
+          so a shopper NEVER navigates to /dashboard or an admin route. Content
+          comes from the merchant's store settings (Supabase via
+          /api/store/policies); empty fields show "Information will be updated
+          soon". */}
+      {policyModalKey && (() => {
+        const content = resolvePolicyModalContent(policyModalKey);
+        return (
+          <div
+            className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+            data-testid="storefront-policy-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={content.title}
+            onClick={() => setPolicyModalKey(null)}
+          >
+            <div
+              className="w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+                <h2 className="text-base font-black text-slate-900">{content.title}</h2>
+                <button
+                  type="button"
+                  onClick={() => setPolicyModalKey(null)}
+                  aria-label="Close"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-900 hover:bg-slate-100 transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="px-5 py-4 max-h-[60vh] overflow-y-auto">
+                {policyModalKey === 'contact-us' ? (
+                  <div className="space-y-2 text-sm text-slate-700">
+                    {resolvedTheme.contactPhone && (
+                      <div className="flex items-center gap-2"><Phone className="w-4 h-4 text-slate-400" /><a href={`tel:${String(resolvedTheme.contactPhone).replace(/\D/g, '')}`} className="hover:underline">{resolvedTheme.contactPhone}</a></div>
+                    )}
+                    {resolvedTheme.contactEmail && (
+                      <div className="flex items-center gap-2"><Globe className="w-4 h-4 text-slate-400" /><a href={`mailto:${resolvedTheme.contactEmail}`} className="hover:underline">{resolvedTheme.contactEmail}</a></div>
+                    )}
+                    {resolvedTheme.dhakaAddress && (
+                      <div className="flex items-center gap-2"><MapPin className="w-4 h-4 text-slate-400" /><span>{resolvedTheme.dhakaAddress}</span></div>
+                    )}
+                    {!resolvedTheme.contactPhone && !resolvedTheme.contactEmail && !resolvedTheme.dhakaAddress && (
+                      <p className="text-sm text-slate-500">Information will be updated soon</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">{content.body}</p>
+                )}
+                {content.contactHint && policyModalKey !== 'contact-us' && (resolvedTheme.contactPhone || resolvedTheme.contactEmail) && (
+                  <div className="mt-4 pt-3 border-t border-slate-100 space-y-1">
+                    {resolvedTheme.contactPhone && (
+                      <div className="flex items-center gap-2 text-xs text-slate-600"><Phone className="w-3.5 h-3.5 text-slate-400" /><span>{resolvedTheme.contactPhone}</span></div>
+                    )}
+                    {resolvedTheme.contactEmail && (
+                      <div className="flex items-center gap-2 text-xs text-slate-600"><Globe className="w-3.5 h-3.5 text-slate-400" /><span>{resolvedTheme.contactEmail}</span></div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="px-5 py-3 bg-slate-50 border-t border-slate-100 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setPolicyModalKey(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-700 transition cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       </div>
 
       {/* SINGLE primary floating chat button (Messenger first, WhatsApp second).

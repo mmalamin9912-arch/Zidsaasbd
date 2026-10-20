@@ -34,6 +34,8 @@ import { resolveActiveStoreSlug } from '../lib/activeStore';
 export interface StorefrontPageViewProps {
   /** Slug from the URL, e.g. `shipping-policy` (no `/pages/` prefix). */
   slug: string;
+  /** Store slug from the URL — used to load THIS store's pages/policies. */
+  storeSlug?: string;
   /** Store name for branding/fallback copy; falls back to a generic name. */
   storeName?: string;
   /** Live merchant record, used for the contact block and store branding. */
@@ -193,6 +195,9 @@ const NOT_FOUND_PAGE: FallbackPage = {
 
 /** Trim and normalise a slug for comparison. */
 function normalizeSlug(value: string): string {
+  const raw = String(value || '').toLowerCase().trim();
+  // Short public alias: /e/<slug>/about and /store/<slug>/about are the About Us page.
+  if (raw === 'about' || raw === 'about-us' || raw === 'pages/about-us' || raw === '/about' || raw === 'pages/about') return 'about-us';
   return String(value || '')
     .toLowerCase()
     .replace(/^\/?pages\//, '')
@@ -207,6 +212,7 @@ function isPublished(page: CustomPage): boolean {
 
 export function StorefrontPageView({
   slug,
+  storeSlug,
   storeName,
   merchant,
   onNavigateHome,
@@ -214,7 +220,9 @@ export function StorefrontPageView({
   const target = normalizeSlug(slug);
   const displayName = String(storeName || 'our store').trim() || 'our store';
 
-  const storeRef = resolveActiveStoreSlug(null);
+  // Prefer the store slug from the URL (deep link) so THIS store's
+  // pages/policies load — never another merchant's cached session slug.
+  const storeRef = resolveActiveStoreSlug(storeSlug || null);
 
   // Load the merchant's saved pages so their own text wins over the fallback.
   // The load is async (it hits /api/storefront/<slug>), so the fallback renders
@@ -222,6 +230,10 @@ export function StorefrontPageView({
   // sees a blank frame, and a network failure simply leaves the fallback in
   // place, which is the safe outcome.
   const [savedPages, setSavedPages] = useState<CustomPage[]>([]);
+  // Live legal-policy texts from the merchant's store settings (Supabase via
+  // /api/store/policies). Direct-link pages (/e/<slug>/shipping-policy, …)
+  // prefer these over the generic template; empty => placeholder below.
+  const [livePolicies, setLivePolicies] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!storeRef) return;
@@ -237,6 +249,20 @@ export function StorefrontPageView({
           console.warn('[StorefrontPageView] page load failed:', e?.message || e);
         }
       });
+
+    // Policy texts live outside customPages (Settings → Legal policies).
+    fetch(`/api/store/policies?store_slug=${encodeURIComponent(storeRef)}`)
+      .then((r) => r.json().catch(() => null))
+      .then((data: any) => {
+        if (cancelled || !data?.ok || !data.policies) return;
+        setLivePolicies({
+          'privacy-policy': String(data.policies.privacyPolicy || '').trim(),
+          'terms-of-service': String(data.policies.termsOfService || '').trim(),
+          'return-policy': String(data.policies.returnRefundPolicy || '').trim(),
+          'shipping-policy': String(data.policies.shippingPolicy || '').trim(),
+        });
+      })
+      .catch(() => { /* placeholder fallback stays */ });
 
     // Guard against a stale response overwriting a newer slug's result.
     return () => {
@@ -254,8 +280,16 @@ export function StorefrontPageView({
   // A saved "track-order" page is accepted too, but the canonical key is
   // `track-order`, so a merchant page saved as "Track Order" still matches.
   const fallback = FALLBACK_PAGES[target] || NOT_FOUND_PAGE;
-  const hasMerchantContent = Boolean(savedPage && String(savedPage.content || '').trim());
-  const title = savedPage?.title || fallback.title;
+  // Merchant policy text (Supabase) wins for the four legal pages when the
+  // merchant actually filled it in; otherwise the custom page; otherwise the
+  // "Information will be updated soon" placeholder template.
+  const policyTextForTarget = livePolicies[target] || '';
+  const merchantBody = policyTextForTarget || (savedPage ? String(savedPage.content || '').trim() : '');
+  const hasMerchantContent = Boolean(merchantBody);
+  const title =
+    target === 'about-us' && (merchant as any)?.storeDescription
+      ? 'About Us'
+      : savedPage?.title || fallback.title;
   const phone = String(merchant?.supportPhone || merchant?.phone || '').trim();
   const email = String(merchant?.supportEmail || merchant?.email || '').trim();
 
@@ -288,15 +322,18 @@ export function StorefrontPageView({
           </h1>
 
           {hasMerchantContent ? (
-            // Merchant-authored copy. Rendered as preformatted text so the
-            // paragraphs and line breaks they typed in the dashboard survive.
+            // Merchant-authored copy (Supabase policy text wins, else the saved
+            // custom page). Rendered as preformatted text so the paragraphs and
+            // line breaks they typed in the dashboard survive.
             <div className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
-              {savedPage?.content}
+              {target === 'about-us' && !merchantBody
+                ? String((merchant as any)?.storeDescription || '').trim()
+                : merchantBody || savedPage?.content}
             </div>
           ) : (
             <div className="space-y-6">
               <p className="text-sm leading-relaxed text-slate-700">
-                Welcome to {displayName}. {fallback.intro}
+                Information will be updated soon
               </p>
 
               {fallback.sections.map((section, i) => (
@@ -310,7 +347,7 @@ export function StorefrontPageView({
               <div className="flex items-start gap-2 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3">
                 <ShieldCheck className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
                 <p className="text-[11px] leading-relaxed text-amber-800">
-                  Our official policy details will be updated here shortly. For anything urgent,
+                  Information will be updated soon. For anything urgent,
                   please contact {displayName} directly.
                 </p>
               </div>
