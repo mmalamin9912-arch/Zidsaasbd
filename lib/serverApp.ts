@@ -6020,6 +6020,14 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       mobileBanking: paymentAccounts?.mobileBanking || [],
       codConfig,
       shippingConfig,
+      // ── Cash on Delivery — canonical, DB-shaped keys ─────────────────────
+      // `enabled` is the merchant's MASTER COD switch (`is_cod_enabled` in
+      // Supabase / the "Cash on Delivery Configuration" toggle). When it is
+      // off the checkout must not offer COD at all, no matter what an older
+      // `codConfig.isEnabled` copy happens to say.
+      cod: {
+        enabled: resolveCodEnabled(codConfig, shippingConfig, merchantRecord),
+      },
       // ── Advance delivery charge — canonical, DB-shaped keys ──────────────
       // The checkout reads these FIRST so the value the merchant saved (in
       // Merchant Payment Accounts Setup → COD, persisted as
@@ -11791,6 +11799,57 @@ const storeConfigs = {
 type StoreConfigName = keyof typeof storeConfigs;
 
 /**
+ * Is Cash on Delivery offered at all? The merchant's MASTER COD switch.
+ *
+ * Accepted spellings (a store row may carry any of them):
+ *   is_cod_enabled / isCodEnabled / cod_enabled   — dedicated column / panel
+ *   cod.is_enabled / cod.enabled                  — nested config object
+ *   codConfig.isEnabled / is_enabled              — legacy codConfig
+ *   paymentMethods.cod                            — older store record
+ *
+ * An explicit false DISABLES COD. When nothing is configured anywhere the
+ * legacy default is "on" (COD has always been available), except when a
+ * dedicated `is_cod_enabled` column exists and says false.
+ */
+function resolveCodEnabled(...sources: any[]): boolean {
+  const asBool = (v: any): boolean | undefined => {
+    if (v === true || v === 'true' || v === 1 || v === '1') return true;
+    if (v === false || v === 'false' || v === 0 || v === '0') return false;
+    return undefined;
+  };
+  // Master switches first — they outrank the legacy `codConfig.isEnabled`.
+  const MASTER_KEYS = ['is_cod_enabled', 'isCodEnabled', 'cod_enabled', 'codEnabled'];
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const key of MASTER_KEYS) {
+      const resolved = asBool(source[key]);
+      if (resolved !== undefined) return resolved;
+    }
+    const nestedCod = source.cod;
+    if (nestedCod && typeof nestedCod === 'object') {
+      for (const key of ['is_enabled', 'isEnabled', 'enabled']) {
+        const resolved = asBool(nestedCod[key]);
+        if (resolved !== undefined) return resolved;
+      }
+    }
+  }
+  // Then the legacy switches, in the same order of preference.
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const key of ['isEnabled', 'is_enabled']) {
+      const resolved = asBool(source[key]);
+      if (resolved !== undefined) return resolved;
+    }
+    const paymentMethods = source.paymentMethods;
+    if (paymentMethods && typeof paymentMethods === 'object') {
+      const resolved = asBool(paymentMethods.cod);
+      if (resolved !== undefined) return resolved;
+    }
+  }
+  return true;
+}
+
+/**
  * Is the merchant collecting an ADVANCE DELIVERY CHARGE on COD?
  *
  * Only an explicit true enables it. The flag has lived under several names:
@@ -11977,6 +12036,9 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
           {
             method: 'PATCH',
             body: {
+              // Master COD switch — read back by the storefront to HIDE the COD
+              // option entirely when the merchant turns it off.
+              is_cod_enabled: shippingNext.isEnabled !== false,
               advance_delivery_charge_enabled: shippingNext.requestAdvanceDeliveryCharge === true,
               advance_amount: shippingNext.advanceDeliveryChargeAmount ?? null,
               shipping_config: shippingNext,
@@ -11991,6 +12053,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
             headers: { Prefer: 'resolution=merge-duplicates' },
             body: {
               store_slug: slug,
+              is_cod_enabled: shippingNext.isEnabled !== false,
               advance_delivery_charge_enabled: shippingNext.requestAdvanceDeliveryCharge === true,
               advance_amount: shippingNext.advanceDeliveryChargeAmount ?? null,
               updated_at: new Date().toISOString(),

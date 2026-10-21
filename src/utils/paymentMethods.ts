@@ -287,3 +287,57 @@ export function readAdvanceChargeAmount(
 
   return 0;
 }
+
+/**
+ * Is Cash on Delivery offered at all? The merchant's MASTER COD switch
+ * (`is_cod_enabled` in Supabase, the "Cash on Delivery Configuration" toggle).
+ *
+ * Nested `{ enabled }` blocks (the storefront payload's `cod`) are read first,
+ * then the dedicated column spellings, then the legacy `codConfig.isEnabled` /
+ * `paymentMethods.cod`. An explicit `false` from ANY of them disables COD.
+ *
+ * Defaults to TRUE when nothing is configured: COD has always been available
+ * to stores that never touched the setting, and hiding it for every such store
+ * would silently remove their only payment option.
+ */
+export function readCodEnabled(
+  ...sources: Array<Record<string, any> | null | undefined>
+): boolean {
+  const asBool = (value: unknown): boolean | undefined => {
+    if (value === true || value === 'true' || value === 1 || value === '1') return true;
+    if (value === false || value === 'false' || value === 0 || value === '0') return false;
+    return undefined;
+  };
+
+  // 1. Master switches — these outrank the legacy isEnabled flag.
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const key of ['is_cod_enabled', 'isCodEnabled', 'cod_enabled', 'codEnabled']) {
+      const resolved = asBool(source[key]);
+      if (resolved !== undefined) return resolved;
+    }
+    const nestedCod = source.cod;
+    if (nestedCod && typeof nestedCod === 'object') {
+      for (const key of ['is_enabled', 'isEnabled', 'enabled']) {
+        const resolved = asBool(nestedCod[key]);
+        if (resolved !== undefined) return resolved;
+      }
+    }
+  }
+
+  // 2. Legacy switches.
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const key of ['isEnabled', 'is_enabled']) {
+      const resolved = asBool(source[key]);
+      if (resolved !== undefined) return resolved;
+    }
+    const paymentMethods = source.paymentMethods;
+    if (paymentMethods && typeof paymentMethods === 'object') {
+      const resolved = asBool(paymentMethods.cod);
+      if (resolved !== undefined) return resolved;
+    }
+  }
+
+  return true;
+}

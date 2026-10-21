@@ -12,6 +12,11 @@
 --     advance_delivery_charge_enabled  boolean  (default false = OFF)
 --     advance_amount                   numeric  (৳ BDT, default 0)
 --
+--   is_cod_enabled is the MASTER Cash on Delivery switch ("Cash on Delivery
+--   Configuration" toggle). When false the storefront hides the COD option
+--   entirely. It defaults to TRUE so stores that predate the column keep the
+--   payment method they have always had.
+--
 --   The checkout renders the advance box ONLY when
 --   `advance_delivery_charge_enabled = true AND advance_amount > 0`.
 --   Otherwise it shows "Nothing to pay now — 0 BDT".
@@ -27,7 +32,8 @@ BEGIN;
 
 ALTER TABLE IF EXISTS public.stores
   ADD COLUMN IF NOT EXISTS advance_delivery_charge_enabled boolean NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS advance_amount numeric NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS advance_amount numeric NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS is_cod_enabled boolean NOT NULL DEFAULT true;
 
 NOTIFY pgrst, 'reload schema';
 

@@ -27,6 +27,7 @@ import {
   isWalletProvider,
   readAdvanceChargeEnabled,
   readAdvanceChargeAmount,
+  readCodEnabled,
 } from '../utils/paymentMethods';
 import {
   TRACKING_STEPS,
@@ -429,6 +430,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         let apiCodConfig: any = null;
         let apiShippingConfig: any = null;
         let apiAdvanceCharge: any = null;
+        let apiCod: any = null;
         let apiStoreRecord: any = null;
         let apiBankAccounts: any[] = [];
         let apiMobileBanking: any[] = [];
@@ -448,8 +450,23 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           cache: 'no-store',
           headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
           signal: controller.signal,
+        }).catch((netErr: any) => {
+          // A dropped connection / offline device must not abort the whole load:
+          // the local cache below still renders every section (including the
+          // payment options) instead of the page going blank.
+          if (netErr?.name !== 'AbortError') {
+            console.warn('[TenantStorefrontView] storefront payload network error:', netErr?.message || netErr);
+          }
+          return null;
         });
-        const storefrontData = await storefrontRes.json().catch(() => null);
+        // Never let a non-JSON error page (a 500 HTML page, an offline proxy)
+        // reject here: that used to abandon the whole merge and leave the
+        // checkout rendered from a half-populated cache. A failed fetch simply
+        // falls through to the local cache, which still renders every section.
+        if (storefrontRes && !storefrontRes.ok) {
+          console.warn('[TenantStorefrontView] storefront payload HTTP', storefrontRes.status);
+        }
+        const storefrontData = storefrontRes ? await storefrontRes.json().catch(() => null) : null;
 
         if (storefrontData && storefrontData.storefront) {
           const payload = storefrontData.storefront;
@@ -469,6 +486,11 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           apiAdvanceCharge =
             payload.advanceDeliveryCharge && typeof payload.advanceDeliveryCharge === 'object'
               ? payload.advanceDeliveryCharge
+              : null;
+          // Canonical COD master switch (`is_cod_enabled`).
+          apiCod =
+            payload.cod && typeof payload.cod === 'object'
+              ? payload.cod
               : null;
           apiStoreRecord = payload.merchant || null;
           apiBankAccounts = Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [];
@@ -563,6 +585,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
               ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
               ...(apiAdvanceCharge ? { advanceDeliveryCharge: apiAdvanceCharge } : {}),
+              ...(apiCod ? { cod: apiCod } : {}),
               ...paymentAccountsMerge,
             };
             writeZidStoreData(mergedTheme as unknown as ZidStoreData, storeSlug);
@@ -583,6 +606,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
             ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
             ...(apiAdvanceCharge ? { advanceDeliveryCharge: apiAdvanceCharge } : {}),
+            ...(apiCod ? { cod: apiCod } : {}),
             ...(apiStoreRecord ? { merchant: { ...(existing?.merchant || {}), ...apiStoreRecord } } : {}),
             ...paymentAccountsMerge,
           };
@@ -1418,10 +1442,20 @@ The render below must not guess. A merchant may paste
 
       // 1. Fetch categories and products from Express API (abortable, so a
       // superseded call settles as AbortError instead of hanging [pending]).
+      // A request that never answers would otherwise leave `isLoadingSupabase`
+      // true forever and the storefront stuck on "Fetching products…" with no
+      // products and — once the customer reaches checkout — no payment methods.
+      // 12s is well past a healthy Supabase round-trip and well short of a
+      // customer's patience.
+      const catalogTimeout = new AbortController();
+      const timeoutId = setTimeout(() => catalogTimeout.abort(), 12000);
+      const signal = AbortSignal.any
+        ? AbortSignal.any([controller.signal, catalogTimeout.signal])
+        : controller.signal;
       try {
         const [catRes, prodRes] = await Promise.all([
-          fetch(`/api/categories?store_slug=${encodeURIComponent(slug)}`, { signal: controller.signal }).then(r => r.json().catch(() => null)),
-          fetch(`/api/products?store_slug=${encodeURIComponent(slug)}`, { signal: controller.signal }).then(r => r.json().catch(() => null)),
+          fetch(`/api/categories?store_slug=${encodeURIComponent(slug)}`, { signal }).then(r => r.json().catch(() => null)),
+          fetch(`/api/products?store_slug=${encodeURIComponent(slug)}`, { signal }).then(r => r.json().catch(() => null)),
         ]);
 
         if (catRes && Array.isArray(catRes.categories)) {
@@ -1433,9 +1467,17 @@ The render below must not guess. A merchant may paste
           prodData.push(...prodRes);
         }
       } catch (e: any) {
-        if (e?.name === 'AbortError') return;
-        console.warn('Catalog API fetch warning:', e?.message || e);
+        if (e?.name === 'AbortError') {
+          // A deliberate unmount still returns; a TIMEOUT must fall through to
+          // the local cache so the catalogue renders instead of hanging.
+          if (!active) return;
+          console.warn('[TenantStorefrontView] catalog fetch timed out — using local cache');
+        } else {
+          console.warn('Catalog API fetch warning:', e?.message || e);
+        }
         if (active) setCatalogLoadFailed(true);
+      } finally {
+        clearTimeout(timeoutId);
       }
 
         // Check localStorage fallbacks — only THIS store's keys, never the mock
@@ -1938,6 +1980,20 @@ The render below must not guess. A merchant may paste
   const [codAdvanceProvider, setCodAdvanceProvider] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [copiedNum, setCopiedNum] = useState(false);
 
+  /**
+   * Delegates to the shared master-switch reader; declared as a function so it
+   * is evaluated AFTER `storefrontCodConfig` / `storefrontShippingConfig`
+   * (defined further down) rather than during the first render pass above them.
+   */
+  const readCodMasterSwitch = () => readCodEnabled(
+    (liveStoreData as any).cod,
+    (liveStoreData as any).codConfig,
+    liveStoreData.merchant as Record<string, any> | undefined,
+    storefrontMerchant as any,
+    liveStoreData.codConfig as Record<string, any> | undefined,
+    (liveStoreData as any).shippingConfig as Record<string, any> | undefined,
+  );
+
   const handleCopyNumber = (num: string) => {
     if (!num) return;
     navigator.clipboard.writeText(num);
@@ -1945,13 +2001,7 @@ The render below must not guess. A merchant may paste
     setTimeout(() => setCopiedNum(false), 2000);
   };
 
-  // Cash on Delivery is available unless the merchant explicitly switched it
-  // off: `paymentMethods.cod === false` (Settings) OR `codConfig.isEnabled ===
-  // false` (Merchant Payment Accounts Setup -> COD tab). An ABSENT flag means
-  // "never configured", which keeps the original default-on behaviour.
-  const codEnabled =
-    storefrontMerchant.paymentMethods?.cod !== false &&
-    (liveStoreData.codConfig as CodConfig | undefined)?.isEnabled !== false;
+  const codEnabled = readCodMasterSwitch();
 
   useEffect(() => {
     // bKash / Nagad / Rocket (only those the merchant activated), then COD.
@@ -2222,11 +2272,26 @@ The render below must not guess. A merchant may paste
     (liveStoreData as any).checkoutConfig,
   ];
   const advanceChargeEnabled = readAdvanceChargeEnabled(...advanceSources);
-  const advanceDeliveryFeeAmount = readAdvanceChargeAmount(...advanceSources);
+  const advanceChargeAmount = readAdvanceChargeAmount(...advanceSources);
 
-  // A COD order only asks for an advance when the merchant enabled it AND a
-  // positive amount was configured. A ৳0 advance = plain COD (nothing upfront).
+  // ── How much is collected upfront on COD? ─────────────────────────────────
+  //   toggle OFF                → ৳0 ("Nothing to pay now")
+  //   toggle ON, amount > 0     → that EXACT fixed amount (e.g. ৳100)
+  //   toggle ON, amount empty/0 → the SELECTED delivery-zone fee (Inside vs
+  //                               Outside City), i.e. the customer pre-pays the
+  //                               actual delivery charge for their zone.
+  // The zone fee is `shippingFee` — already resolved from the chosen area,
+  // with per-product overrides and the free-shipping threshold applied.
+  const advanceDeliveryFeeAmount = advanceChargeAmount > 0
+    ? advanceChargeAmount
+    : (advanceChargeEnabled ? Math.max(0, shippingFee) : 0);
+
+  // A COD order collects an advance only when the merchant enabled it and there
+  // is an amount to collect (a ৳0 zone fee means nothing is due upfront).
   const requiresAdvanceFee = payMethod === 'cod' && advanceChargeEnabled && advanceDeliveryFeeAmount > 0;
+  // True when the advance equals the zone delivery fee because no fixed amount
+  // was configured — the panel tells the customer which zone it came from.
+  const advanceUsesZoneFee = advanceChargeEnabled && advanceChargeAmount <= 0;
 
   const selectedAdvConfig = advanceMethodsAvailable.find(m => m.provider === codAdvanceProvider) || advanceMethodsAvailable[0] || enabledMobileMethods[0];
 
@@ -4469,7 +4534,14 @@ The render below must not guess. A merchant may paste
 
                 {/* Payment Options — a compact radio list. Each row names the
                     method and, at most, ONE short subtitle; the fee maths lives
-                    in the selected method's panel below, never in the list. */}
+                    in the selected method's panel below, never in the list.
+
+                    Every row uses the panel's DARK palette. They used to be
+                    `bg-white` cards with `text-slate-700`/`bg-slate-50` hovers
+                    inside a `bg-slate-900` panel — the exact cause of the
+                    "options turn white / look unstyled" bug: `bg-slate-50`
+                    barely differs from `bg-white`, and the light text tokens
+                    disappeared on the dark card. */}
                 <div className="pt-3 border-t border-slate-800">
                   <label className="block mb-2 font-bold text-xs text-white">Select Payment Method</label>
                   <div className="grid grid-cols-1 gap-2" role="radiogroup" aria-label="Select Payment Method">
@@ -4477,10 +4549,10 @@ The render below must not guess. A merchant may paste
                       const isSelected = payMethod === method.provider;
                       const label = WALLET_LABELS[method.provider as keyof typeof WALLET_LABELS] || method.provider;
                       const accent = method.provider === 'bkash'
-                        ? { border: 'border-pink-500', bg: 'bg-pink-50', text: 'text-pink-700', icon: 'text-pink-500' }
+                        ? { border: 'border-pink-500', bg: 'bg-pink-500/15', text: 'text-pink-200', icon: 'text-pink-400', dot: 'bg-pink-400' }
                         : method.provider === 'nagad'
-                          ? { border: 'border-orange-500', bg: 'bg-orange-50', text: 'text-orange-700', icon: 'text-orange-500' }
-                          : { border: 'border-purple-500', bg: 'bg-purple-50', text: 'text-purple-700', icon: 'text-purple-500' };
+                          ? { border: 'border-orange-500', bg: 'bg-orange-500/15', text: 'text-orange-200', icon: 'text-orange-400', dot: 'bg-orange-400' }
+                          : { border: 'border-purple-500', bg: 'bg-purple-500/15', text: 'text-purple-200', icon: 'text-purple-400', dot: 'bg-purple-400' };
                       return (
                         <button
                           key={method.id}
@@ -4492,21 +4564,21 @@ The render below must not guess. A merchant may paste
                           className={`w-full p-3 rounded-xl border text-left text-xs font-bold transition flex items-center gap-3 cursor-pointer ${
                             isSelected
                               ? `${accent.border} ${accent.bg} ${accent.text}`
-                              : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                              : 'border-slate-700 bg-slate-950 text-slate-200 hover:bg-slate-800/70'
                           }`}
                         >
                           <span
                             aria-hidden="true"
                             className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${
-                              isSelected ? accent.border : 'border-slate-300'
+                              isSelected ? accent.border : 'border-slate-600'
                             }`}
                           >
-                            {isSelected && <span className={`w-2 h-2 rounded-full ${method.provider === 'bkash' ? 'bg-pink-500' : method.provider === 'nagad' ? 'bg-orange-500' : 'bg-purple-500'}`} />}
+                            {isSelected && <span className={`w-2 h-2 rounded-full ${accent.dot}`} />}
                           </span>
                           <Smartphone className={`w-4 h-4 shrink-0 ${accent.icon}`} />
                           <span className="flex-1 min-w-0">
                             <span className="block truncate">Pay with {label}</span>
-                            <span className="block text-[10px] font-medium text-slate-500 truncate">
+                            <span className="block text-[10px] font-medium text-slate-400 truncate">
                               Full payment to merchant {method.number}
                             </span>
                           </span>
@@ -4522,19 +4594,21 @@ The render below must not guess. A merchant may paste
                         data-testid="pay-method-bank"
                         onClick={() => setPayMethod('bank')}
                         className={`w-full p-3 rounded-xl border text-left text-xs font-bold transition flex items-center gap-3 cursor-pointer ${
-                          payMethod === 'bank' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                          payMethod === 'bank'
+                            ? 'border-indigo-500 bg-indigo-500/15 text-indigo-200'
+                            : 'border-slate-700 bg-slate-950 text-slate-200 hover:bg-slate-800/70'
                         }`}
                       >
                         <span
                           aria-hidden="true"
-                          className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${payMethod === 'bank' ? 'border-indigo-500' : 'border-slate-300'}`}
+                          className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${payMethod === 'bank' ? 'border-indigo-400' : 'border-slate-600'}`}
                         >
-                          {payMethod === 'bank' && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
+                          {payMethod === 'bank' && <span className="w-2 h-2 rounded-full bg-indigo-400" />}
                         </span>
-                        <Building2 className="w-4 h-4 shrink-0 text-indigo-500" />
+                        <Building2 className="w-4 h-4 shrink-0 text-indigo-400" />
                         <span className="flex-1 min-w-0">
                           <span className="block truncate">Bank Transfer</span>
-                          <span className="block text-[10px] font-medium text-slate-500 truncate">{visibleBankAccount.bankName}</span>
+                          <span className="block text-[10px] font-medium text-slate-400 truncate">{visibleBankAccount.bankName}</span>
                         </span>
                       </button>
                     )}
@@ -4547,14 +4621,16 @@ The render below must not guess. A merchant may paste
                         data-testid="pay-method-cod"
                         onClick={() => setPayMethod('cod')}
                         className={`w-full p-3 rounded-xl border text-left text-xs font-bold transition flex items-center gap-3 cursor-pointer ${
-                          payMethod === 'cod' ? 'border-[var(--primary-accent)] bg-emerald-50 text-[#00A16B]' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                          payMethod === 'cod'
+                            ? 'border-emerald-500 bg-emerald-500/15 text-emerald-200'
+                            : 'border-slate-700 bg-slate-950 text-slate-200 hover:bg-slate-800/70'
                         }`}
                       >
                         <span
                           aria-hidden="true"
-                          className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${payMethod === 'cod' ? 'border-[var(--primary-accent)]' : 'border-slate-300'}`}
+                          className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${payMethod === 'cod' ? 'border-emerald-400' : 'border-slate-600'}`}
                         >
-                          {payMethod === 'cod' && <span className="w-2 h-2 rounded-full bg-[var(--primary-accent)]" />}
+                          {payMethod === 'cod' && <span className="w-2 h-2 rounded-full bg-emerald-400" />}
                         </span>
                         <Building2 className={`w-4 h-4 shrink-0 ${payMethod === 'cod' ? 'text-[var(--primary-accent)]' : 'text-slate-400'}`} />
                         <span className="flex-1 min-w-0">
@@ -4581,30 +4657,30 @@ The render below must not guess. A merchant may paste
 
                 {/* Direct Mobile Payment Details (bKash, Nagad, Rocket) */}
                 {(['bkash', 'nagad', 'rocket'] as const).includes(payMethod as any) && selectedMobileMethod && (
-                  <div className={`border p-3.5 rounded-xl space-y-3 bg-white ${payMethod === 'bkash' ? 'border-pink-300' : payMethod === 'nagad' ? 'border-orange-300' : 'border-purple-300'
+                  <div className={`border p-3.5 rounded-xl space-y-3 bg-slate-950 ${payMethod === 'bkash' ? 'border-pink-500/50' : payMethod === 'nagad' ? 'border-orange-500/50' : 'border-purple-500/50'
                   }`}>
                     <div className="flex items-center justify-between">
                       <div className={`text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${
-                        payMethod === 'bkash' ? 'text-pink-600' : payMethod === 'nagad' ? 'text-orange-600' : 'text-purple-600'
+                        payMethod === 'bkash' ? 'text-pink-300' : payMethod === 'nagad' ? 'text-orange-300' : 'text-purple-300'
                       }`}>
                         <Smartphone className="w-4 h-4" /> {selectedMobileMethod.displayName} Payment Instructions
                       </div>
-                      <span className="text-[10px] font-bold bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
+                      <span className="text-[10px] font-bold bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-200">
                         {selectedMobileMethod.accountType}
                       </span>
                     </div>
 
                     {/* Merchant Number + Account Type Display */}
-                    <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
+                    <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-[10px] font-bold text-slate-400 uppercase">
                           Merchant {WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider.toUpperCase()} Number
                         </div>
-                        <div data-testid="merchant-wallet-number" className="font-mono text-base font-black text-slate-900 break-all">
+                        <div data-testid="merchant-wallet-number" className="font-mono text-base font-black text-white break-all">
                           {selectedMobileMethod.number}
                         </div>
                         <div className="mt-1">
-                          <span className="text-[10px] font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200">
+                          <span className="text-[10px] font-bold bg-slate-800 text-slate-200 px-2 py-0.5 rounded border border-slate-700">
                             {selectedMobileMethod.accountType} Account
                           </span>
                         </div>
@@ -4612,9 +4688,9 @@ The render below must not guess. A merchant may paste
                       <button
                         type="button"
                         onClick={() => handleCopyNumber(selectedMobileMethod.number)}
-                        className="shrink-0 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
+                        className="shrink-0 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-100 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
                       >
-                        {copiedNum ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                        {copiedNum ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                         <span>{copiedNum ? 'Copied!' : 'Copy'}</span>
                       </button>
                     </div>
@@ -4622,16 +4698,16 @@ The render below must not guess. A merchant may paste
                     {/* One breakdown, one total. The cash-out line appears ONLY
                         when the merchant configured a fee, and states the exact
                         percentage + amount. */}
-                    <div className="bg-white p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
-                      <div className="flex justify-between text-slate-600">
+                    <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 text-xs space-y-1.5">
+                      <div className="flex justify-between text-slate-400">
                         <span>Items Subtotal:</span>
-                        <span className="font-semibold text-slate-900">৳{itemsSubtotal.toLocaleString()}</span>
+                        <span className="font-semibold text-slate-100">৳{itemsSubtotal.toLocaleString()}</span>
                       </div>
-                      <div className="flex justify-between text-slate-600">
+                      <div className="flex justify-between text-slate-400">
                         <span>Shipping Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'}):</span>
                         {/* Only print a price when one was actually saved for the
                             selected zone; an unconfigured zone must not read "৳0". */}
-                        <span className="font-semibold text-slate-900">
+                        <span className="font-semibold text-slate-100">
                           {(shippingArea === 'inside' ? insideConfigured : outsideConfigured)
                             ? `৳${shippingFee.toLocaleString()}`
                             : 'To be confirmed'}
@@ -4641,16 +4717,16 @@ The render below must not guess. A merchant may paste
                       {showTaxBreakdown && taxPercent > 0 && (
                         <div
                           data-testid="store-tax-line"
-                          className="flex justify-between text-slate-600"
+                          className="flex justify-between text-slate-400"
                         >
                           <span>VAT ({taxPercent}%):</span>
-                          <span className="font-semibold text-slate-900">
+                          <span className="font-semibold text-slate-100">
                             {taxIncludedInPrices ? `৳${taxAmount.toLocaleString()} (included)` : `+৳${taxAmount.toLocaleString()}`}
                           </span>
                         </div>
                       )}
                       {giftWrapFee > 0 && (
-                        <div className="flex justify-between text-emerald-600 font-medium">
+                        <div className="flex justify-between text-emerald-400 font-medium">
                           <span>Gift Wrapping:</span>
                           <span className="font-bold">+৳{giftWrapFee.toLocaleString()}</span>
                         </div>
@@ -4658,30 +4734,30 @@ The render below must not guess. A merchant may paste
                       {mobileChargePercent > 0 && (
                         <div
                           data-testid="wallet-cash-out-line"
-                          className="flex justify-between text-pink-700 font-medium"
+                          className="flex justify-between text-pink-300 font-medium"
                         >
                           <span>Cash-out charge ({mobileChargePercent}%):</span>
                           <span className="font-bold">+৳{mobileCashOutFee.toLocaleString()}</span>
                         </div>
                       )}
-                      <div className="border-t border-slate-200 pt-1.5 flex justify-between font-black text-slate-900 text-sm">
+                      <div className="border-t border-slate-700 pt-1.5 flex justify-between font-black text-white text-sm">
                         <span>Total payable via {WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider}</span>
-                        <span data-testid="wallet-payable-total" className="text-pink-700 font-mono">৳{finalPayableMobile.toLocaleString()}</span>
+                        <span data-testid="wallet-payable-total" className="text-pink-300 font-mono">৳{finalPayableMobile.toLocaleString()}</span>
                       </div>
                     </div>
 
                     {selectedMobileMethod.instructions && (
-                      <p className="text-xs text-slate-700 bg-white/80 p-2.5 rounded-lg border border-slate-200 leading-relaxed">
-                        <strong className="text-slate-900">Note:</strong> {selectedMobileMethod.instructions}
+                      <p className="text-xs text-slate-300 bg-slate-900 p-2.5 rounded-lg border border-slate-800 leading-relaxed">
+                        <strong className="text-white">Note:</strong> {selectedMobileMethod.instructions}
                       </p>
                     )}
 
-                    <p className="text-[11px] font-bold text-slate-800">
+                    <p className="text-[11px] font-bold text-slate-200">
                       Send exactly ৳{finalPayableMobile.toLocaleString()} to the number above, then enter the details below.
                     </p>
 
                     <div>
-                      <label htmlFor="checkout-trx-id" className="block mb-1 font-bold text-xs text-slate-800">
+                      <label htmlFor="checkout-trx-id" className="block mb-1 font-bold text-xs text-slate-300">
                         Transaction ID (TrxID) *
                       </label>
                       <input
@@ -4691,9 +4767,9 @@ The render below must not guess. A merchant may paste
                         placeholder={`e.g. ${payMethod === 'bkash' ? 'BK' : payMethod === 'nagad' ? 'NG' : 'RO'}9X2810L9`}
                         value={custTxId}
                         onChange={(e) => setCustTxId(e.target.value.toUpperCase().replace(/\s+/g, ''))}
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-white focus:outline-none focus:ring-2 focus:ring-pink-500 font-bold"
+                        className="w-full border border-slate-700 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-slate-900 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-500 font-bold"
                       />
-                      <p className="mt-1 text-[10px] text-slate-500">
+                      <p className="mt-1 text-[10px] text-slate-400">
                         Find it in the confirmation SMS / app message after sending the money.
                       </p>
                     </div>
@@ -4701,7 +4777,7 @@ The render below must not guess. A merchant may paste
                     {/* Sender Mobile Number — paid-from account, used by the
                         merchant to reconcile the deposit. */}
                     <div>
-                      <label htmlFor="checkout-sender-mobile" className="block mb-1 font-bold text-xs text-slate-800">
+                      <label htmlFor="checkout-sender-mobile" className="block mb-1 font-bold text-xs text-slate-300">
                         Sender Mobile Number *
                       </label>
                       <input
@@ -4713,9 +4789,9 @@ The render below must not guess. A merchant may paste
                         placeholder="e.g. 01712345678"
                         value={custSenderPhone}
                         onChange={(e) => setCustSenderPhone(e.target.value.replace(/[^0-9+]/g, ''))}
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-xs bg-white focus:outline-none focus:ring-2 focus:ring-pink-500 font-bold"
+                        className="w-full border border-slate-700 rounded-xl px-3.5 py-2.5 font-mono text-xs bg-slate-900 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-500 font-bold"
                       />
-                      <p className="mt-1 text-[10px] text-slate-500">
+                      <p className="mt-1 text-[10px] text-slate-400">
                         The {WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider} number you sent the money from.
                       </p>
                     </div>
@@ -4736,22 +4812,27 @@ The render below must not guess. A merchant may paste
                     Advance Delivery Charge, shown at face value. No cash-out fee,
                     no VAT and no other line is applied to the product balance. */}
                 {payMethod === 'cod' && requiresAdvanceFee && (
-                  <div data-testid="cod-advance-panel" className="border border-amber-300 bg-white p-4 rounded-xl space-y-3 shadow-sm">
-                    <div className="flex items-center gap-2 text-amber-800 font-bold text-xs">
-                      <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
+                  <div data-testid="cod-advance-panel" className="border border-amber-500/50 bg-slate-950 p-4 rounded-xl space-y-3">
+                    <div className="flex items-center gap-2 text-amber-300 font-bold text-xs">
+                      <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0" />
                       <span>Advance Delivery Charge</span>
                     </div>
-                    <p className="text-xs text-slate-700 leading-relaxed">
-                      Pay <strong className="text-slate-900">৳{advanceDeliveryFeeAmount.toLocaleString()}</strong>{' '}
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      Pay <strong className="text-white">৳{advanceDeliveryFeeAmount.toLocaleString()}</strong>{' '}
                       now via mobile banking to confirm this COD order. The remaining{' '}
-                      <strong className="text-slate-900">৳{remainingCodBalance.toLocaleString()}</strong>{' '}
+                      <strong className="text-white">৳{remainingCodBalance.toLocaleString()}</strong>{' '}
                       is paid in cash on delivery.
+                      {advanceUsesZoneFee && (
+                        <span className="block mt-1 text-[10px] text-slate-400">
+                          This is the {shippingArea === 'inside' ? 'Inside City' : 'Outside City'} delivery fee for your zone.
+                        </span>
+                      )}
                     </p>
 
                     {/* Provider Selector for Advance Delivery Payment */}
                     {advanceMethodsAvailable.length > 0 && (
                       <div className="space-y-1.5">
-                        <label className="block text-[11px] font-bold text-slate-700 uppercase">Pay advance with:</label>
+                        <label className="block text-[11px] font-bold text-slate-300 uppercase">Pay advance with:</label>
                         <div className="flex flex-wrap gap-2">
                           {advanceMethodsAvailable.map((adv) => (
                             <button
@@ -4760,8 +4841,8 @@ The render below must not guess. A merchant may paste
                               onClick={() => setCodAdvanceProvider(adv.provider as any)}
                               className={`px-3 py-1.5 rounded-lg border text-xs font-bold cursor-pointer transition ${
                                 selectedAdvConfig?.provider === adv.provider
-                                  ? 'border-amber-500 bg-amber-500 text-slate-950 shadow-sm'
-                                  : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+                                  ? 'border-amber-400 bg-amber-400 text-slate-950 shadow-sm'
+                                  : 'border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800'
                               }`}
                             >
                               {WALLET_LABELS[adv.provider as keyof typeof WALLET_LABELS] || adv.displayName}
@@ -4773,16 +4854,16 @@ The render below must not guess. A merchant may paste
 
                     {/* Merchant Number & Instructions */}
                     {selectedAdvConfig && (
-                      <div className="bg-white p-3 rounded-xl border border-slate-200 space-y-2">
+                      <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 space-y-2">
                         <div className="flex items-center justify-between text-xs">
                           <div>
                             <div className="text-[10px] font-bold text-slate-400 uppercase">Send the advance to</div>
-                            <div className="font-mono text-base font-black text-slate-900">{selectedAdvConfig.number}</div>
+                            <div className="font-mono text-base font-black text-white">{selectedAdvConfig.number}</div>
                           </div>
                           <button
                             type="button"
                             onClick={() => handleCopyNumber(selectedAdvConfig.number)}
-                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded text-slate-700 text-xs font-bold cursor-pointer"
+                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-100 text-xs font-bold cursor-pointer"
                           >
                             {copiedNum ? 'Copied!' : 'Copy'}
                           </button>
@@ -4790,19 +4871,19 @@ The render below must not guess. A merchant may paste
 
                         {/* Two lines, no fee maths: what is paid now, what is
                             paid on delivery. */}
-                        <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs space-y-1">
-                          <div className="flex justify-between font-black text-slate-900">
+                        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 text-xs space-y-1">
+                          <div className="flex justify-between font-black text-white">
                             <span>Advance Delivery Charge (upfront):</span>
-                            <span data-testid="cod-advance-amount" className="text-amber-800 font-mono">৳{totalAdvancePayable.toLocaleString()}</span>
+                            <span data-testid="cod-advance-amount" className="text-amber-300 font-mono">৳{totalAdvancePayable.toLocaleString()}</span>
                           </div>
-                          <div className="flex justify-between text-emerald-700 font-bold text-[11px] pt-1 border-t border-slate-200">
+                          <div className="flex justify-between text-emerald-300 font-bold text-[11px] pt-1 border-t border-slate-800">
                             <span>Balance due in cash on delivery:</span>
                             <span data-testid="cod-balance-amount">৳{remainingCodBalance.toLocaleString()}</span>
                           </div>
                         </div>
 
                         {selectedAdvConfig.instructions && (
-                          <p className="text-[11px] text-slate-600 italic">
+                          <p className="text-[11px] text-slate-400 italic">
                             Note: {selectedAdvConfig.instructions}
                           </p>
                         )}
@@ -4811,7 +4892,7 @@ The render below must not guess. A merchant may paste
 
                     {/* TrxID Input for Advance Delivery Payment */}
                     <div>
-                      <label htmlFor="checkout-advance-trx-id" className="block mb-1 font-bold text-xs text-slate-800">
+                      <label htmlFor="checkout-advance-trx-id" className="block mb-1 font-bold text-xs text-slate-300">
                         Advance Payment Transaction ID (TrxID) *
                       </label>
                       <input
@@ -4821,7 +4902,7 @@ The render below must not guess. A merchant may paste
                         placeholder="e.g. BK8X991029"
                         value={custTxId}
                         onChange={(e) => setCustTxId(e.target.value.toUpperCase().replace(/\s+/g, ''))}
-                        className="w-full border border-amber-300 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
+                        className="w-full border border-amber-500/50 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-slate-900 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400 font-bold"
                       />
                     </div>
                   </div>
@@ -4830,12 +4911,12 @@ The render below must not guess. A merchant may paste
                 {/* Plain COD (merchant's advance-charge toggle is OFF, or the
                     amount is 0): nothing is collected upfront. */}
                 {payMethod === 'cod' && !requiresAdvanceFee && (
-                  <div data-testid="cod-no-advance-panel" className="border border-emerald-300 bg-white p-3.5 rounded-xl shadow-sm">
-                    <div className="flex items-center gap-2 text-emerald-800 font-bold text-xs">
-                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <div data-testid="cod-no-advance-panel" className="border border-emerald-500/50 bg-slate-950 p-3.5 rounded-xl">
+                    <div className="flex items-center gap-2 text-emerald-300 font-bold text-xs">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
                       <span>Nothing to pay now — ৳0 BDT</span>
                     </div>
-                    <p data-testid="cod-pay-on-delivery-note" className="mt-1 text-xs text-slate-700 leading-relaxed">
+                    <p data-testid="cod-pay-on-delivery-note" className="mt-1 text-xs text-slate-300 leading-relaxed">
                       Pay total amount to the courier delivery person upon receiving your order.
                     </p>
                   </div>
