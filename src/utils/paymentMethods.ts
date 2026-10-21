@@ -200,6 +200,13 @@ export function readAdvanceChargeEnabled(
 
   for (const source of sources) {
     if (!source || typeof source !== 'object') continue;
+    // A canonical `{ enabled, amount }` block (the shape the storefront payload
+    // now returns) speaks for itself — trust it before looking at older keys.
+    const nestedEnabled = asBool((source as any).enabled);
+    if (nestedEnabled !== undefined && 'amount' in (source as Record<string, unknown>)) {
+      return nestedEnabled;
+    }
+
     // A nested `shippingConfig` / `codConfig` may carry a newer value than the
     // parent record, so look there first for each source.
     const candidates: Array<Record<string, any>> = [];
@@ -217,4 +224,66 @@ export function readAdvanceChargeEnabled(
   }
 
   return false;
+}
+
+/**
+ * The merchant's configured ADVANCE DELIVERY CHARGE amount, resolved from the
+ * same sources (and the same key spellings) as the toggle.
+ *
+ *   advanceDeliveryChargeAmount      camel — codConfig / shippingConfig (Mongo)
+ *   advance_delivery_charge_amount   snake — Supabase mirror
+ *   advance_amount                   the column/name used by the SQL setup
+ *   advanceDeliveryAmount            older dashboard builds
+ *
+ * An explicit 0 is returned as 0 (no upfront charge). `undefined` means "not
+ * configured anywhere"; the caller then treats it as 0 too, so a missing field
+ * can never invent a charge.
+ */
+export function readAdvanceChargeAmount(
+  ...sources: Array<Record<string, any> | null | undefined>
+): number {
+  const KEYS = [
+    'advanceDeliveryChargeAmount',
+    'advance_delivery_charge_amount',
+    'advance_amount',
+    'advanceDeliveryAmount',
+  ] as const;
+
+  const asNumber = (value: unknown): number | undefined => {
+    if (value === null || value === undefined) return undefined;
+    if (typeof value === 'string' && value.trim() === '') return undefined;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return n;
+  };
+
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    // Canonical `{ enabled, amount }` block — read its amount directly.
+    if ('amount' in (source as Record<string, unknown>)) {
+      const direct = asNumber((source as any).amount);
+      if (direct !== undefined) return direct;
+    }
+
+    // Nested configs may hold the freshest value; check them before the parent.
+    const candidates: Array<Record<string, any>> = [];
+    for (const nested of [
+      source.shippingConfig,
+      source.codConfig,
+      source.advanceDeliveryCharge,
+      source.advance_delivery_charge,
+    ]) {
+      if (nested && typeof nested === 'object') candidates.push(nested);
+    }
+    candidates.push(source);
+
+    for (const candidate of candidates) {
+      for (const key of KEYS) {
+        const resolved = asNumber(candidate[key]);
+        if (resolved !== undefined) return resolved;
+      }
+    }
+  }
+
+  return 0;
 }

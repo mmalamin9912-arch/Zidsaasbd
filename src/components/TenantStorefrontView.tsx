@@ -26,6 +26,7 @@ import {
   normalizeMobileBanking,
   isWalletProvider,
   readAdvanceChargeEnabled,
+  readAdvanceChargeAmount,
 } from '../utils/paymentMethods';
 import {
   TRACKING_STEPS,
@@ -427,6 +428,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         let apiProducts: any[] = [];
         let apiCodConfig: any = null;
         let apiShippingConfig: any = null;
+        let apiAdvanceCharge: any = null;
         let apiStoreRecord: any = null;
         let apiBankAccounts: any[] = [];
         let apiMobileBanking: any[] = [];
@@ -461,6 +463,13 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           // Persisted to MongoDB from Logistics → Shipping settings; the store
           // record is authoritative over any stale localStorage copy.
           apiShippingConfig = payload.shippingConfig || null;
+          // Canonical advance-charge block. Carried explicitly so the checkout
+          // reads the merchant's CURRENT toggle + amount straight from the DB
+          // payload rather than inferring them from any older config shape.
+          apiAdvanceCharge =
+            payload.advanceDeliveryCharge && typeof payload.advanceDeliveryCharge === 'object'
+              ? payload.advanceDeliveryCharge
+              : null;
           apiStoreRecord = payload.merchant || null;
           apiBankAccounts = Array.isArray(payload.bankAccounts) ? payload.bankAccounts : [];
           apiMobileBanking = Array.isArray(payload.mobileBanking) ? payload.mobileBanking : [];
@@ -553,6 +562,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
               // the checkout's zone prices are always the merchant's live values.
               ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
               ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
+              ...(apiAdvanceCharge ? { advanceDeliveryCharge: apiAdvanceCharge } : {}),
               ...paymentAccountsMerge,
             };
             writeZidStoreData(mergedTheme as unknown as ZidStoreData, storeSlug);
@@ -572,6 +582,7 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
             // server's value must win over a stale localStorage copy.
             ...(apiCodConfig ? { codConfig: apiCodConfig } : {}),
             ...(apiShippingConfig ? { shippingConfig: apiShippingConfig } : {}),
+            ...(apiAdvanceCharge ? { advanceDeliveryCharge: apiAdvanceCharge } : {}),
             ...(apiStoreRecord ? { merchant: { ...(existing?.merchant || {}), ...apiStoreRecord } } : {}),
             ...paymentAccountsMerge,
           };
@@ -2190,47 +2201,28 @@ The render below must not guess. A merchant may paste
 
   const advanceMethodsAvailable = enabledMobileMethods.filter(m => m.canPayAdvanceCharge && m.number);
 
-  // Is the merchant charging an advance delivery fee at all? The configured
-  // `advanceDeliveryChargeAmount` is honoured VERBATIM:
-  //   • a value such as 400 → ৳400 upfront
-  //   • an explicit 0      → NO advance (plain COD), never a silent fallback
-  //                          to the full shipping fee
-  //   • unset              → no advance either; only the merchant's own
-  //                          "request advance" toggle decides whether a COD
-  //                          order needs one, and with no amount there is
-  //                          nothing to collect upfront.
-  // The old `Number(x) || shippingFee` made it impossible to offer COD with
-  // ৳0 upfront — that is the bug this replaces.
-  const advanceDeliveryFeeAmount = Math.max(
-    0,
-    Number(storefrontCodConfig?.advanceDeliveryChargeAmount) || 0,
-  );
-
-  // ── Is COD collecting an upfront advance? ─────────────────────────────────
+  // ── Advance delivery charge (COD) ─────────────────────────────────────────
   //
-  // The MERCHANT'S TOGGLE is the single authority here
-  // (Logistics → Shipping → "Request advance delivery charge", persisted as
-  // `requestAdvanceDeliveryCharge` on the shipping/cod config and as
-  // `advance_delivery_charge_enabled` in Supabase/Dashboard rows).
-  //
-  // This used to be:
-  //     advanceMethodsAvailable.length > 0 || !!cfg.requestAdvanceDeliveryCharge
-  // The `||` meant that merely having a bKash account with "allow advance"
-  // configured switched the advance box ON even when the merchant's toggle was
-  // OFF — customers were forced to send an upfront payment and a TrxID for an
-  // order that should have been plain pay-on-delivery. Only the toggle counts
-  // now; the available wallets merely decide WHICH method is offered once the
-  // merchant has enabled the charge.
-  // Sources in order of authority. The COD config is checked FIRST because the
-  // Payments → COD tab writes it directly, while `shippingConfig` is a mirror
-  // that can lag behind on a device that saved the other panel. If neither
-  // carries the flag we fall back to the store record / checkout config.
-  const advanceChargeEnabled = readAdvanceChargeEnabled(
+  // Toggle + amount are read from EVERY place the dashboard may have written
+  // them, so a merchant who saves in any panel sees it on the checkout:
+  //   • Merchant Payment Accounts Setup → COD  → shippingConfig (Mongo) /
+  //     advance_delivery_charge_enabled + advance_amount on the stores row
+  //   • Logistics → Shipping                    → shippingConfig / codConfig
+  // The first source that carries a RECOGNISED value wins. An explicit OFF is
+  // honoured (it must not be treated as "unknown" and skipped), so a stale
+  // ON elsewhere can never resurrect the charge.
+  const advanceSources = [
+    // Canonical block from /api/storefront/:slug (DB-shaped keys).
+    (liveStoreData as any).advanceDeliveryCharge,
+    (liveStoreData as any).advance_delivery_charge,
     storefrontCodConfig,
     storefrontShippingConfig as Record<string, any> | undefined,
     liveStoreData.merchant as Record<string, any> | undefined,
+    (liveStoreData.merchant as any)?.codConfig,
     (liveStoreData as any).checkoutConfig,
-  );
+  ];
+  const advanceChargeEnabled = readAdvanceChargeEnabled(...advanceSources);
+  const advanceDeliveryFeeAmount = readAdvanceChargeAmount(...advanceSources);
 
   // A COD order only asks for an advance when the merchant enabled it AND a
   // positive amount was configured. A ৳0 advance = plain COD (nothing upfront).

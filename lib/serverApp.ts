@@ -6020,6 +6020,16 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       mobileBanking: paymentAccounts?.mobileBanking || [],
       codConfig,
       shippingConfig,
+      // ── Advance delivery charge — canonical, DB-shaped keys ──────────────
+      // The checkout reads these FIRST so the value the merchant saved (in
+      // Merchant Payment Accounts Setup → COD, persisted as
+      // `advance_delivery_charge_enabled` + `advance_amount`) always wins over
+      // any older camelCase mirror. `readAdvanceCharge*` on the client still
+      // falls back to codConfig/shippingConfig when these are absent.
+      advanceDeliveryCharge: {
+        enabled: resolveAdvanceChargeEnabled(codConfig, shippingConfig, merchantRecord),
+        amount: resolveAdvanceChargeAmount(codConfig, shippingConfig, merchantRecord),
+      },
       // Public storefront modules. Only published pages/posts are exposed.
       brandConfig,
       navigationMenus,
@@ -11780,6 +11790,72 @@ const storeConfigs = {
 
 type StoreConfigName = keyof typeof storeConfigs;
 
+/**
+ * Is the merchant collecting an ADVANCE DELIVERY CHARGE on COD?
+ *
+ * Only an explicit true enables it. The flag has lived under several names:
+ *   requestAdvanceDeliveryCharge / request_advance_delivery_charge
+ *   advanceDeliveryChargeEnabled  / advance_delivery_charge_enabled
+ *   (+ `advanceDeliveryCharge.enabled` nested object)
+ * A missing/false value means OFF — never invent an upfront charge.
+ */
+function resolveAdvanceChargeEnabled(...sources: any[]): boolean {
+  const asBool = (v: any): boolean | undefined => {
+    if (v === true || v === 'true' || v === 1 || v === '1') return true;
+    if (v === false || v === 'false' || v === 0 || v === '0') return false;
+    return undefined;
+  };
+  const KEYS = [
+    'requestAdvanceDeliveryCharge', 'request_advance_delivery_charge',
+    'advanceDeliveryChargeEnabled', 'advance_delivery_charge_enabled',
+  ];
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    const candidates = [source.shippingConfig, source.codConfig, source.advanceDeliveryCharge, source.advance_delivery_charge]
+      .filter((c) => c && typeof c === 'object');
+    candidates.push(source);
+    for (const candidate of candidates) {
+      for (const key of KEYS) {
+        const resolved = asBool((candidate as any)[key]);
+        if (resolved !== undefined) return resolved;
+      }
+      const nested = (candidate as any).enabled;
+      const nestedResolved = asBool(nested);
+      if (nestedResolved !== undefined && typeof (candidate as any).amount !== 'undefined') return nestedResolved;
+    }
+  }
+  return false;
+}
+
+/** The configured advance amount (৳ BDT). 0 when unset / not configured. */
+function resolveAdvanceChargeAmount(...sources: any[]): number {
+  const asNum = (v: any): number | undefined => {
+    if (v === null || v === undefined) return undefined;
+    if (typeof v === 'string' && v.trim() === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const KEYS = [
+    'advanceDeliveryChargeAmount', 'advance_delivery_charge_amount',
+    'advance_amount', 'advanceDeliveryAmount',
+  ];
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    const candidates = [source.shippingConfig, source.codConfig, source.advanceDeliveryCharge, source.advance_delivery_charge]
+      .filter((c) => c && typeof c === 'object');
+    candidates.push(source);
+    for (const candidate of candidates) {
+      for (const key of KEYS) {
+        const resolved = asNum((candidate as any)[key]);
+        if (resolved !== undefined) return resolved;
+      }
+      const nested = asNum((candidate as any).amount);
+      if (nested !== undefined) return nested;
+    }
+  }
+  return 0;
+}
+
 /** Every storage key a config may live under, canonical first. */
 function configKeys(name: StoreConfigName): string[] {
   const entry = storeConfigs[name] as { key: string; legacyKeys?: readonly string[] };
@@ -11878,6 +11954,59 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
       }
     } catch (settingsErr: any) {
       console.warn(`[Server] store_settings.${settingsKey} mirror warning:`, settingsErr?.message || settingsErr);
+    }
+  }
+
+  // 1c. Supabase mirror — the snake_case `advance_delivery_charge_enabled` /
+  //     `advance_amount` columns on `stores`, which the storefront payload and
+  //     any external reader use. Saved from Merchant Payment Accounts Setup →
+  //     COD ("Save COD Rules") and from Logistics → Shipping. Mongo above is
+  //     still the durable copy; this keeps Supabase in step so a refresh shows
+  //     the new value immediately. Unknown columns are dropped by
+  //     `postgrestWrite` when the deployed table predates the migration.
+  if (name === 'shipping') {
+    // `next` is a union of every config shape; narrow once for the COD fields.
+    const shippingNext = next as Record<string, any>;
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (isConfigured) {
+        const sbResult = await postgrestWrite(
+          supabaseUrl,
+          supabaseKey,
+          `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`,
+          {
+            method: 'PATCH',
+            body: {
+              advance_delivery_charge_enabled: shippingNext.requestAdvanceDeliveryCharge === true,
+              advance_amount: shippingNext.advanceDeliveryChargeAmount ?? null,
+              shipping_config: shippingNext,
+              updated_at: new Date().toISOString(),
+            },
+          },
+        );
+        if (!sbResult.ok && (sbResult.status === 404 || !sbResult.droppedColumns.length)) {
+          // No row for this slug yet → insert just the advance columns.
+          await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
+            method: 'POST',
+            headers: { Prefer: 'resolution=merge-duplicates' },
+            body: {
+              store_slug: slug,
+              advance_delivery_charge_enabled: shippingNext.requestAdvanceDeliveryCharge === true,
+              advance_amount: shippingNext.advanceDeliveryChargeAmount ?? null,
+              updated_at: new Date().toISOString(),
+            },
+            conflictPatchPath: `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`,
+          }).catch(() => undefined);
+        } else if (!sbResult.ok) {
+          console.warn(
+            '[Server] shipping Supabase mirror warning:',
+            sbResult.status,
+            String(sbResult.detail || '').slice(0, 200),
+          );
+        }
+      }
+    } catch (sbErr: any) {
+      console.warn('[Server] shipping Supabase mirror warning:', sbErr?.message || sbErr);
     }
   }
 

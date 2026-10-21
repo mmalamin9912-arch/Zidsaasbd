@@ -41,6 +41,7 @@ import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
 import { mergeStoredWallets } from './utils/paymentMethods';
+import { loadShippingConfig } from './lib/logisticsApi';
 import { writeZidStoreData } from './lib/storeData';
 import { verifySuperAdminPin } from './lib/adminAuth';
 import { isStoreCode, isUuid } from './lib/storeId';
@@ -1988,6 +1989,25 @@ export default function App() {
             setMobileBanking((prev) => mergeStoredWallets(body.mobileBanking, prev));
           }
           if (Array.isArray(body.bankAccounts)) setBankAccounts(body.bankAccounts);
+        }
+
+        // COD rules (advance toggle + amount) come from the SAME database the
+        // storefront reads. Without this the form could open on stale defaults
+        // and "Save COD Rules" would write those defaults back over the
+        // merchant's real advance setting.
+        const shipping = await loadShippingConfig(slug);
+        if (shipping) {
+          setCodConfig((prev) => ({
+            ...prev,
+            isEnabled: shipping.isEnabled !== false,
+            insideDhakaFee: shipping.insideDhakaFee ?? prev.insideDhakaFee,
+            outsideDhakaFee: shipping.outsideDhakaFee ?? prev.outsideDhakaFee,
+            subDhakaFee: shipping.subDhakaFee ?? prev.subDhakaFee,
+            freeShippingThreshold: shipping.freeShippingThreshold ?? prev.freeShippingThreshold,
+            maxOrderLimit: shipping.maxOrderLimit ?? prev.maxOrderLimit,
+            requestAdvanceDeliveryCharge: shipping.requestAdvanceDeliveryCharge === true,
+            advanceDeliveryChargeAmount: shipping.advanceDeliveryChargeAmount ?? '',
+          }));
         }
       }
     } catch (dbErr) {
