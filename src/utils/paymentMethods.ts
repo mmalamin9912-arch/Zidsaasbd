@@ -161,3 +161,60 @@ export function mergeStoredWallets(
   }
   return ordered;
 }
+
+/**
+ * Is the merchant collecting an ADVANCE DELIVERY CHARGE on Cash on Delivery?
+ *
+ * The dashboard's Logistics → Shipping toggle ("Request advance delivery
+ * charge") is the single authority. Depending on the panel and the storage
+ * layer it has been persisted under several names:
+ *
+ *   requestAdvanceDeliveryCharge   camel — codConfig / shippingConfig (Mongo)
+ *   request_advance_delivery_charge snake — Supabase mirror
+ *   advanceDeliveryChargeEnabled    older dashboard builds
+ *   advance_delivery_charge_enabled snake — Supabase / SQL rows
+ *
+ * An EXPLICIT true is required. A missing key, `false`, `0` or `''` all mean
+ * OFF — the checkout must never invent an upfront charge the merchant did not
+ * turn on (that bug forced every COD customer with a configured bKash number
+ * to send money and a TrxID before they could order).
+ *
+ * Sources are checked in order of authority: the dedicated shipping config,
+ * then the COD config, then the store record and finally the checkout config.
+ */
+export function readAdvanceChargeEnabled(
+  ...sources: Array<Record<string, any> | null | undefined>
+): boolean {
+  const KEYS = [
+    'requestAdvanceDeliveryCharge',
+    'request_advance_delivery_charge',
+    'advanceDeliveryChargeEnabled',
+    'advance_delivery_charge_enabled',
+  ] as const;
+
+  const asBool = (value: unknown): boolean | undefined => {
+    if (value === true || value === 'true' || value === 1 || value === '1') return true;
+    if (value === false || value === 'false' || value === 0 || value === '0') return false;
+    return undefined;
+  };
+
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    // A nested `shippingConfig` / `codConfig` may carry a newer value than the
+    // parent record, so look there first for each source.
+    const candidates: Array<Record<string, any>> = [];
+    for (const nested of [source.shippingConfig, source.codConfig]) {
+      if (nested && typeof nested === 'object') candidates.push(nested);
+    }
+    candidates.push(source);
+
+    for (const candidate of candidates) {
+      for (const key of KEYS) {
+        const resolved = asBool(candidate[key]);
+        if (resolved !== undefined) return resolved;
+      }
+    }
+  }
+
+  return false;
+}

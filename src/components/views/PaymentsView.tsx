@@ -1,19 +1,20 @@
 import React, { useState } from 'react';
 import { BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig } from '../../types';
-import {  useToast } from '../ToastProvider';
+import { useToast } from '../ToastProvider';
+import { saveShippingConfig } from '../../lib/logisticsApi';
 import {
-  CreditCard, 
-  Building2, 
-  Smartphone, 
-  DollarSign, 
-  Plus, 
-  Trash2, 
-  Edit3, 
-  CheckCircle2, 
-  Eye, 
-  EyeOff, 
-  Link as LinkIcon, 
-  QrCode, 
+  CreditCard,
+  Building2,
+  Smartphone,
+  DollarSign,
+  Plus,
+  Trash2,
+  Edit3,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  Link as LinkIcon,
+  QrCode,
   SmartphoneNfc,
   Sparkles,
   Info,
@@ -27,6 +28,8 @@ interface PaymentsViewProps {
   mobileBanking: MobileBankingConfig[];
   codConfig: CodConfig;
   gatewayConfig: PaymentGatewayConfig;
+  /** Store whose settings are being edited — used to persist COD changes. */
+  storeSlug?: string;
   onUpdateBankAccounts: (accounts: BankAccount[]) => void | Promise<boolean>;
   onUpdateMobileBanking: (configs: MobileBankingConfig[]) => void | Promise<boolean>;
   onUpdateCodConfig: (config: CodConfig) => void;
@@ -38,6 +41,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   mobileBanking,
   codConfig,
   gatewayConfig,
+  storeSlug,
   onUpdateBankAccounts,
   onUpdateMobileBanking,
   onUpdateCodConfig,
@@ -189,10 +193,40 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
     }
   };
 
-  const handleSaveCod = (e: React.FormEvent) => {
+  const [isSavingCod, setIsSavingCod] = useState(false);
+  const handleSaveCod = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingCod) return;
+    setIsSavingCod(true);
+    // Update local state first so the UI feels instant.
     onUpdateCodConfig(codForm);
-    toast.success('Cash on Delivery (COD) settings saved successfully!');
+    try {
+      // This tab edits the SAME advance-delivery toggle the Logistics panel owns,
+      // so it must be written to the SAME `shippingConfig` the storefront reads.
+      // Without this the toggle looked saved here but reverted on the next load —
+      // and the checkout kept asking for an advance the merchant had switched off.
+      const saved = await saveShippingConfig(storeSlug, {
+        requestAdvanceDeliveryCharge: codForm.requestAdvanceDeliveryCharge === true,
+        advanceDeliveryChargeAmount: codForm.advanceDeliveryChargeAmount ?? '',
+        insideDhakaFee: codForm.insideDhakaFee ?? '',
+        outsideDhakaFee: codForm.outsideDhakaFee ?? '',
+        subDhakaFee: codForm.subDhakaFee ?? '',
+        freeShippingThreshold: codForm.freeShippingThreshold ?? '',
+        maxOrderLimit: codForm.maxOrderLimit ?? '',
+        isEnabled: codForm.isEnabled !== false,
+      });
+      if (saved) {
+        toast.success(
+          saved.requestAdvanceDeliveryCharge
+            ? 'Cash on Delivery settings saved — advance delivery charge is ON.'
+            : 'Cash on Delivery settings saved — no advance payment required at checkout.',
+        );
+      } else {
+        toast.error('Cash on Delivery settings could not be saved to the database. Please try again.');
+      }
+    } finally {
+      setIsSavingCod(false);
+    }
   };
 
   const handleGenerateLink = (e: React.FormEvent) => {
@@ -962,8 +996,13 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         const simBaseTotal = simSubtotal + simShippingFee;
 
         const advanceMethods = mobileConfigs.filter(m => m.isEnabled && m.canPayAdvanceCharge && m.number);
-        const isAdvanceRequired = simSelectedMethod === 'cod' && (advanceMethods.length > 0 || codForm.requestAdvanceDeliveryCharge);
-        const advanceFee = Number(codForm.advanceDeliveryChargeAmount) || simShippingFee;
+        // Mirror the storefront rule exactly: ONLY the merchant's toggle decides
+        // whether a COD order needs an upfront advance. Having a bKash account
+        // with "allow advance" configured must not switch the charge on — that
+        // `||` was the shop-facing bug this simulator was also reproducing.
+        const advanceFee = Math.max(0, Number(codForm.advanceDeliveryChargeAmount) || 0);
+        const isAdvanceRequired =
+          simSelectedMethod === 'cod' && codForm.requestAdvanceDeliveryCharge === true && advanceFee > 0;
         const advCfg = advanceMethods.find(m => m.provider === simAdvProvider) || advanceMethods[0] || mobileConfigs[0];
         const advChargePercent = advCfg?.chargePercentage || 0;
         const advCashOutFee = Math.round(advanceFee * (advChargePercent / 100));

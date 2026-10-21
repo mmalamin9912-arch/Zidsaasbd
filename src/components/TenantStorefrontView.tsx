@@ -25,6 +25,7 @@ import {
   WALLET_LABELS,
   normalizeMobileBanking,
   isWalletProvider,
+  readAdvanceChargeEnabled,
 } from '../utils/paymentMethods';
 import {
   TRACKING_STEPS,
@@ -2205,13 +2206,35 @@ The render below must not guess. A merchant may paste
     Number(storefrontCodConfig?.advanceDeliveryChargeAmount) || 0,
   );
 
-  const advanceEnabledByMerchant =
-    advanceMethodsAvailable.length > 0 || !!storefrontCodConfig?.requestAdvanceDeliveryCharge;
+  // ── Is COD collecting an upfront advance? ─────────────────────────────────
+  //
+  // The MERCHANT'S TOGGLE is the single authority here
+  // (Logistics → Shipping → "Request advance delivery charge", persisted as
+  // `requestAdvanceDeliveryCharge` on the shipping/cod config and as
+  // `advance_delivery_charge_enabled` in Supabase/Dashboard rows).
+  //
+  // This used to be:
+  //     advanceMethodsAvailable.length > 0 || !!cfg.requestAdvanceDeliveryCharge
+  // The `||` meant that merely having a bKash account with "allow advance"
+  // configured switched the advance box ON even when the merchant's toggle was
+  // OFF — customers were forced to send an upfront payment and a TrxID for an
+  // order that should have been plain pay-on-delivery. Only the toggle counts
+  // now; the available wallets merely decide WHICH method is offered once the
+  // merchant has enabled the charge.
+  // Sources in order of authority. The COD config is checked FIRST because the
+  // Payments → COD tab writes it directly, while `shippingConfig` is a mirror
+  // that can lag behind on a device that saved the other panel. If neither
+  // carries the flag we fall back to the store record / checkout config.
+  const advanceChargeEnabled = readAdvanceChargeEnabled(
+    storefrontCodConfig,
+    storefrontShippingConfig as Record<string, any> | undefined,
+    liveStoreData.merchant as Record<string, any> | undefined,
+    (liveStoreData as any).checkoutConfig,
+  );
 
-  // A COD order only asks for an advance when the merchant enabled it AND the
-  // amount is above zero. A ৳0 advance = plain COD (nothing upfront).
-  const requiresAdvanceFee =
-    payMethod === 'cod' && advanceEnabledByMerchant && advanceDeliveryFeeAmount > 0;
+  // A COD order only asks for an advance when the merchant enabled it AND a
+  // positive amount was configured. A ৳0 advance = plain COD (nothing upfront).
+  const requiresAdvanceFee = payMethod === 'cod' && advanceChargeEnabled && advanceDeliveryFeeAmount > 0;
 
   const selectedAdvConfig = advanceMethodsAvailable.find(m => m.provider === codAdvanceProvider) || advanceMethodsAvailable[0] || enabledMobileMethods[0];
 
@@ -4812,16 +4835,16 @@ The render below must not guess. A merchant may paste
                   </div>
                 )}
 
-                {/* Plain COD (advance of 0): reassure the customer nothing is due now. */}
+                {/* Plain COD (merchant's advance-charge toggle is OFF, or the
+                    amount is 0): nothing is collected upfront. */}
                 {payMethod === 'cod' && !requiresAdvanceFee && (
                   <div data-testid="cod-no-advance-panel" className="border border-emerald-300 bg-white p-3.5 rounded-xl shadow-sm">
                     <div className="flex items-center gap-2 text-emerald-800 font-bold text-xs">
                       <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span>Nothing to pay now</span>
+                      <span>Nothing to pay now — ৳0 BDT</span>
                     </div>
-                    <p className="mt-1 text-xs text-slate-700 leading-relaxed">
-                      Pay <strong className="text-slate-900">৳{baseTotalAmount.toLocaleString()}</strong> in cash when the courier delivers your order.
-                      No advance payment, no cash-out charge.
+                    <p data-testid="cod-pay-on-delivery-note" className="mt-1 text-xs text-slate-700 leading-relaxed">
+                      Pay total amount to the courier delivery person upon receiving your order.
                     </p>
                   </div>
                 )}

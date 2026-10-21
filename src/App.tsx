@@ -2745,6 +2745,7 @@ onPlaceOrder={async (newOrder) => {
 
             {activeTab === 'payments' && (
               <PaymentsView
+                storeSlug={(merchant as any)?.storeSlug || (merchant as any)?.store_slug || ''}
                 bankAccounts={bankAccounts}
                 mobileBanking={mobileBanking}
                 codConfig={codConfig}
