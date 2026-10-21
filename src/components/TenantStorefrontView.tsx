@@ -2174,26 +2174,48 @@ The render below must not guess. A merchant may paste
   // ── Cash-out charge ───────────────────────────────────────────────────────
   //
   // The merchant's `chargePercentage` is the cost of CASHING OUT a wallet
-  // payment, so it may only ever be charged on money that actually moves
-  // through the wallet. Three distinct cases:
+  // payment. It therefore has exactly ONE legitimate application:
   //
-  //   • Full wallet payment (bKash / Nagad / Rocket) → charged on the ENTIRE
+  //   • Full wallet payment (bKash / Nagad / Rocket) → charged on the entire
   //     payable (goods + delivery + VAT).
-  //   • COD with an upfront advance delivery fee → charged ONLY on that
-  //     advance amount. The product balance is collected in cash by the
-  //     courier, so it must carry 0% cash-out — this is the bug that used to
-  //     inflate a ৳400 advance into ৳406 *and* quote a cash-out fee on the
-  //     whole order total.
-  //   • Plain COD → 0% cash-out on everything.
+  //
+  // Cash on Delivery never carries it:
+  //   • The product balance is handed to the courier in CASH, so there is no
+  //     cash-out, no charge and no VAT added to it → strictly 0%.
+  //   • The advance delivery fee is a fixed amount the merchant chose. It is
+  //     shown as "Advance Delivery Charge" and NOTHING else is added on top,
+  //     so ৳0 configured really means ৳0 upfront.
   const isWalletPaymentSelected = ['bkash', 'nagad', 'rocket'].includes(payMethod);
 
   const advanceMethodsAvailable = enabledMobileMethods.filter(m => m.canPayAdvanceCharge && m.number);
-  const requiresAdvanceFee = (payMethod === 'cod') && (advanceMethodsAvailable.length > 0 || !!storefrontCodConfig?.requestAdvanceDeliveryCharge);
-  const advanceDeliveryFeeAmount = Number(storefrontCodConfig?.advanceDeliveryChargeAmount) || shippingFee;
-  const selectedAdvConfig = advanceMethodsAvailable.find(m => m.provider === codAdvanceProvider) || advanceMethodsAvailable[0] || enabledMobileMethods[0];
-  const advChargePercent = selectedAdvConfig?.chargePercentage || 0;
 
-  // Percent that applies to THIS checkout's wallet movement — 0 for COD.
+  // Is the merchant charging an advance delivery fee at all? The configured
+  // `advanceDeliveryChargeAmount` is honoured VERBATIM:
+  //   • a value such as 400 → ৳400 upfront
+  //   • an explicit 0      → NO advance (plain COD), never a silent fallback
+  //                          to the full shipping fee
+  //   • unset              → no advance either; only the merchant's own
+  //                          "request advance" toggle decides whether a COD
+  //                          order needs one, and with no amount there is
+  //                          nothing to collect upfront.
+  // The old `Number(x) || shippingFee` made it impossible to offer COD with
+  // ৳0 upfront — that is the bug this replaces.
+  const advanceDeliveryFeeAmount = Math.max(
+    0,
+    Number(storefrontCodConfig?.advanceDeliveryChargeAmount) || 0,
+  );
+
+  const advanceEnabledByMerchant =
+    advanceMethodsAvailable.length > 0 || !!storefrontCodConfig?.requestAdvanceDeliveryCharge;
+
+  // A COD order only asks for an advance when the merchant enabled it AND the
+  // amount is above zero. A ৳0 advance = plain COD (nothing upfront).
+  const requiresAdvanceFee =
+    payMethod === 'cod' && advanceEnabledByMerchant && advanceDeliveryFeeAmount > 0;
+
+  const selectedAdvConfig = advanceMethodsAvailable.find(m => m.provider === codAdvanceProvider) || advanceMethodsAvailable[0] || enabledMobileMethods[0];
+
+  // Percent applied to THIS checkout's wallet movement. COD is always 0%.
   const mobileChargePercent = isWalletPaymentSelected ? (selectedMobileMethod?.chargePercentage || 0) : 0;
   // Full wallet payment: fee on the whole payable.
   const mobileCashOutFee = isWalletPaymentSelected
@@ -2201,20 +2223,16 @@ The render below must not guess. A merchant may paste
     : 0;
   const finalPayableMobile = baseTotalAmount + mobileCashOutFee;
 
-  // COD advance: fee strictly on the delivery fee the customer sends upfront.
-  const advCashOutFee = requiresAdvanceFee
-    ? Math.round(advanceDeliveryFeeAmount * (advChargePercent / 100))
-    : 0;
-  const totalAdvancePayable = advanceDeliveryFeeAmount + advCashOutFee;
-  const remainingCodBalance = Math.max(0, baseTotalAmount - advanceDeliveryFeeAmount);
+  // COD: the advance is collected exactly as configured. No fee, no VAT and no
+  // cash-out charge is stacked on top of it, so a merchant-configured ৳0 really
+  // means ৳0 due upfront.
+  const totalAdvancePayable = requiresAdvanceFee ? advanceDeliveryFeeAmount : 0;
+  const remainingCodBalance = Math.max(0, baseTotalAmount - totalAdvancePayable);
 
-  // What the customer pays for the GOODS portion of a COD order: the total
-  // minus the delivery fee they already paid upfront, with NO cash-out charge.
+  // Product balance of a COD order never accrues a cash-out charge.
   const codProductCashOutFee = 0;
 
-  const totalAmount = isWalletPaymentSelected
-    ? finalPayableMobile
-    : baseTotalAmount;
+  const totalAmount = isWalletPaymentSelected ? finalPayableMobile : baseTotalAmount;
 
   // The signed-in customer's orders: our live MongoDB fetch merged with any
   // orders the parent passed in (preview/dashboard), de-duplicated by id and
@@ -2536,9 +2554,9 @@ The render below must not guess. A merchant may paste
 
     // ── Recorded money ────────────────────────────────────────────────────
     //   wallet  → goods + delivery + VAT + cash-out (exactly `totalAmount`)
-    //   COD     → goods + delivery + VAT. A cash-out fee is NEVER added to the
-    //             collected-by-courier balance; it only exists on the upfront
-    //             advance delivery fee (recorded separately below).
+    //   COD     → goods + delivery + VAT. No cash-out is ever added to the
+    //             product balance; the only money collected upfront is the
+    //             merchant's Advance Delivery Charge, recorded verbatim.
     const total = isWalletPaymentSelected ? finalPayableMobile : baseTotalAmount;
     const codAdvancePaidUpfront = requiresAdvanceFee && payMethod === 'cod' ? totalAdvancePayable : 0;
     const paymentMethodLabel: Order['paymentMethod'] =
@@ -2579,7 +2597,8 @@ The render below must not guess. A merchant may paste
       // mobile banking, and the cash balance still due on delivery.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ...({
-        cashOutFeeBDT: isWalletPaymentSelected ? mobileCashOutFee : advCashOutFee,
+        // Wallet payments record their cash-out fee; COD records 0 by design.
+        cashOutFeeBDT: isWalletPaymentSelected ? mobileCashOutFee : 0,
         ...(payMethod === 'cod'
           ? {
               advanceDeliveryPaidBDT: codAdvancePaidUpfront,
@@ -4433,33 +4452,49 @@ The render below must not guess. A merchant may paste
                       <h3 className="text-lg font-black text-white tracking-tight">Payment Method</h3>
                     </div>
 
-                {/* Payment Options */}
+                {/* Payment Options — a compact radio list. Each row names the
+                    method and, at most, ONE short subtitle; the fee maths lives
+                    in the selected method's panel below, never in the list. */}
                 <div className="pt-3 border-t border-slate-800">
                   <label className="block mb-2 font-bold text-xs text-white">Select Payment Method</label>
-                  <div className="grid grid-cols-1 gap-2">
+                  <div className="grid grid-cols-1 gap-2" role="radiogroup" aria-label="Select Payment Method">
                     {enabledMobileMethods.map((method) => {
                       const isSelected = payMethod === method.provider;
-                      const chgPercent = method.chargePercentage || 0;
+                      const label = WALLET_LABELS[method.provider as keyof typeof WALLET_LABELS] || method.provider;
+                      const accent = method.provider === 'bkash'
+                        ? { border: 'border-pink-500', bg: 'bg-pink-50', text: 'text-pink-700', icon: 'text-pink-500' }
+                        : method.provider === 'nagad'
+                          ? { border: 'border-orange-500', bg: 'bg-orange-50', text: 'text-orange-700', icon: 'text-orange-500' }
+                          : { border: 'border-purple-500', bg: 'bg-purple-50', text: 'text-purple-700', icon: 'text-purple-500' };
                       return (
                         <button
                           key={method.id}
                           type="button"
+                          role="radio"
+                          aria-checked={isSelected}
+                          data-testid={`pay-method-${method.provider}`}
                           onClick={() => setPayMethod(method.provider as any)}
-                          className={`p-3 rounded-xl border text-xs font-bold transition flex items-center justify-between cursor-pointer ${
+                          className={`w-full p-3 rounded-xl border text-left text-xs font-bold transition flex items-center gap-3 cursor-pointer ${
                             isSelected
-                              ? method.provider === 'bkash' ? 'border-pink-500 bg-pink-50 text-pink-700' : method.provider === 'nagad' ? 'border-orange-500 bg-orange-50 text-orange-700' : 'border-purple-500 bg-purple-50 text-purple-700'
-                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                              ? `${accent.border} ${accent.bg} ${accent.text}`
+                              : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                           }`}
                         >
-                          <div className="flex items-center gap-2.5">
-                            <Smartphone className={`w-4 h-4 shrink-0 ${method.provider === 'bkash' ? 'text-pink-500' : method.provider === 'nagad' ? 'text-orange-500' : 'text-purple-500'}`} />
-                            <span>{method.displayName} ({method.accountType})</span>
-                          </div>
-                          {chgPercent > 0 && (
-                            <span className="text-[10px] font-semibold bg-slate-100 px-2 py-0.5 rounded text-slate-600">
-                              +{chgPercent}% cash-out fee
+                          <span
+                            aria-hidden="true"
+                            className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${
+                              isSelected ? accent.border : 'border-slate-300'
+                            }`}
+                          >
+                            {isSelected && <span className={`w-2 h-2 rounded-full ${method.provider === 'bkash' ? 'bg-pink-500' : method.provider === 'nagad' ? 'bg-orange-500' : 'bg-purple-500'}`} />}
+                          </span>
+                          <Smartphone className={`w-4 h-4 shrink-0 ${accent.icon}`} />
+                          <span className="flex-1 min-w-0">
+                            <span className="block truncate">Pay with {label}</span>
+                            <span className="block text-[10px] font-medium text-slate-500 truncate">
+                              Full payment to merchant {method.number}
                             </span>
-                          )}
+                          </span>
                         </button>
                       );
                     })}
@@ -4467,33 +4502,52 @@ The render below must not guess. A merchant may paste
                     {visibleBankAccount && (
                       <button
                         type="button"
+                        role="radio"
+                        aria-checked={payMethod === 'bank'}
+                        data-testid="pay-method-bank"
                         onClick={() => setPayMethod('bank')}
-                        className={`p-3 rounded-xl border text-xs font-bold transition flex items-center gap-2.5 cursor-pointer ${
-                          payMethod === 'bank' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                        className={`w-full p-3 rounded-xl border text-left text-xs font-bold transition flex items-center gap-3 cursor-pointer ${
+                          payMethod === 'bank' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                         }`}
                       >
+                        <span
+                          aria-hidden="true"
+                          className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${payMethod === 'bank' ? 'border-indigo-500' : 'border-slate-300'}`}
+                        >
+                          {payMethod === 'bank' && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
+                        </span>
                         <Building2 className="w-4 h-4 shrink-0 text-indigo-500" />
-                        <span>Bank Transfer ({visibleBankAccount.bankName})</span>
+                        <span className="flex-1 min-w-0">
+                          <span className="block truncate">Bank Transfer</span>
+                          <span className="block text-[10px] font-medium text-slate-500 truncate">{visibleBankAccount.bankName}</span>
+                        </span>
                       </button>
                     )}
 
                     {codEnabled && (
                       <button
                         type="button"
+                        role="radio"
+                        aria-checked={payMethod === 'cod'}
+                        data-testid="pay-method-cod"
                         onClick={() => setPayMethod('cod')}
-                        className={`p-3 rounded-xl border text-xs font-bold transition flex items-center justify-between cursor-pointer ${
-                          payMethod === 'cod' ? 'border-[var(--primary-accent)] bg-emerald-50 text-[#00A16B]' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                        className={`w-full p-3 rounded-xl border text-left text-xs font-bold transition flex items-center gap-3 cursor-pointer ${
+                          payMethod === 'cod' ? 'border-[var(--primary-accent)] bg-emerald-50 text-[#00A16B]' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                         }`}
                       >
-                        <div className="flex items-center gap-2.5">
-                          <Building2 className={`w-4 h-4 shrink-0 ${payMethod === 'cod' ? 'text-[var(--primary-accent)]' : 'text-slate-400'}`} />
-                          <span>Cash on Delivery (COD)</span>
-                        </div>
-                        {requiresAdvanceFee && (
-                          <span className="text-[10px] font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded border border-amber-300/50">
-                            Advance Delivery Fee Required
+                        <span
+                          aria-hidden="true"
+                          className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center ${payMethod === 'cod' ? 'border-[var(--primary-accent)]' : 'border-slate-300'}`}
+                        >
+                          {payMethod === 'cod' && <span className="w-2 h-2 rounded-full bg-[var(--primary-accent)]" />}
+                        </span>
+                        <Building2 className={`w-4 h-4 shrink-0 ${payMethod === 'cod' ? 'text-[var(--primary-accent)]' : 'text-slate-400'}`} />
+                        <span className="flex-1 min-w-0">
+                          <span className="block truncate">Cash on Delivery (COD)</span>
+                          <span className="block text-[10px] font-medium text-slate-500 truncate">
+                            Pay cash when your order arrives
                           </span>
-                        )}
+                        </span>
                       </button>
                     )}
 
@@ -4512,8 +4566,7 @@ The render below must not guess. A merchant may paste
 
                 {/* Direct Mobile Payment Details (bKash, Nagad, Rocket) */}
                 {(['bkash', 'nagad', 'rocket'] as const).includes(payMethod as any) && selectedMobileMethod && (
-                  <div className={`border p-3.5 rounded-xl space-y-3 ${
-                    payMethod === 'bkash' ? 'border-pink-200 bg-pink-50/50' : payMethod === 'nagad' ? 'border-orange-200 bg-orange-50/50' : 'border-purple-200 bg-purple-50/50'
+                  <div className={`border p-3.5 rounded-xl space-y-3 bg-white ${payMethod === 'bkash' ? 'border-pink-300' : payMethod === 'nagad' ? 'border-orange-300' : 'border-purple-300'
                   }`}>
                     <div className="flex items-center justify-between">
                       <div className={`text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${
@@ -4535,15 +4588,10 @@ The render below must not guess. A merchant may paste
                         <div data-testid="merchant-wallet-number" className="font-mono text-base font-black text-slate-900 break-all">
                           {selectedMobileMethod.number}
                         </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <div className="mt-1">
                           <span className="text-[10px] font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200">
                             {selectedMobileMethod.accountType} Account
                           </span>
-                          {mobileChargePercent > 0 && (
-                            <span className="text-[10px] font-bold bg-pink-50 text-pink-700 px-2 py-0.5 rounded border border-pink-200">
-                              Cash-out charge: {mobileChargePercent}%
-                            </span>
-                          )}
                         </div>
                       </div>
                       <button
@@ -4556,18 +4604,9 @@ The render below must not guess. A merchant may paste
                       </button>
                     </div>
 
-                    {/* Cash-out charge note — spells out why the payable total
-                        is higher than the cart, so it is never a surprise. */}
-                    <p className="text-[11px] text-slate-600 bg-white/80 p-2.5 rounded-lg border border-slate-200 leading-relaxed">
-                      Send <strong className="text-slate-900">৳{finalPayableMobile.toLocaleString()}</strong> via{' '}
-                      <strong className="text-slate-900">{WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider}</strong>
-                      {' '}to the merchant number above.
-                      {mobileChargePercent > 0
-                        ? ` The merchant's ${selectedMobileMethod.accountType} account carries a ${mobileChargePercent}% cash-out charge (৳${mobileCashOutFee.toLocaleString()}), already included in this total.`
-                        : ' No cash-out charge applies to this account.'}
-                    </p>
-
-                    {/* Price Breakdown including Cash-out Fee */}
+                    {/* One breakdown, one total. The cash-out line appears ONLY
+                        when the merchant configured a fee, and states the exact
+                        percentage + amount. */}
                     <div className="bg-white p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
                       <div className="flex justify-between text-slate-600">
                         <span>Items Subtotal:</span>
@@ -4585,27 +4624,15 @@ The render below must not guess. A merchant may paste
                       </div>
                       {/* Tax breakdown (Settings -> Tax) */}
                       {showTaxBreakdown && taxPercent > 0 && (
-                        <>
-                          {taxIncludedInPrices && (
-                            <div className="flex justify-between text-slate-600">
-                              <span>Net (VAT exclusive):</span>
-                              <span className="font-semibold text-slate-900">
-                                ৳{(displayNetGoods + (taxOnDelivery ? extraCharges - giftWrapFee : 0)).toLocaleString()}
-                              </span>
-                            </div>
-                          )}
-                          <div
-                            data-testid="store-tax-line"
-                            className="flex justify-between text-slate-600"
-                          >
-                            <span>
-                              VAT ({taxPercent}%{taxOnDelivery ? ' incl. delivery' : ''}):
-                            </span>
-                            <span className="font-semibold text-slate-900">
-                              {taxIncludedInPrices ? 'Included — ' : '+'}৳{taxAmount.toLocaleString()}
-                            </span>
-                          </div>
-                        </>
+                        <div
+                          data-testid="store-tax-line"
+                          className="flex justify-between text-slate-600"
+                        >
+                          <span>VAT ({taxPercent}%):</span>
+                          <span className="font-semibold text-slate-900">
+                            {taxIncludedInPrices ? `৳${taxAmount.toLocaleString()} (included)` : `+৳${taxAmount.toLocaleString()}`}
+                          </span>
+                        </div>
                       )}
                       {giftWrapFee > 0 && (
                         <div className="flex justify-between text-emerald-600 font-medium">
@@ -4614,14 +4641,17 @@ The render below must not guess. A merchant may paste
                         </div>
                       )}
                       {mobileChargePercent > 0 && (
-                        <div className="flex justify-between text-pink-600 font-medium">
-                          <span>Cash-out / Charge Fee ({mobileChargePercent}%):</span>
-                          <span className="font-bold">+৳{mobileCashOutFee}</span>
+                        <div
+                          data-testid="wallet-cash-out-line"
+                          className="flex justify-between text-pink-700 font-medium"
+                        >
+                          <span>Cash-out charge ({mobileChargePercent}%):</span>
+                          <span className="font-bold">+৳{mobileCashOutFee.toLocaleString()}</span>
                         </div>
                       )}
                       <div className="border-t border-slate-200 pt-1.5 flex justify-between font-black text-slate-900 text-sm">
-                        <span>Total Payable to Merchant:</span>
-                        <span className="text-pink-600 font-mono">৳{finalPayableMobile.toLocaleString()} BDT</span>
+                        <span>Total payable via {WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider}</span>
+                        <span data-testid="wallet-payable-total" className="text-pink-700 font-mono">৳{finalPayableMobile.toLocaleString()}</span>
                       </div>
                     </div>
 
@@ -4630,6 +4660,10 @@ The render below must not guess. A merchant may paste
                         <strong className="text-slate-900">Note:</strong> {selectedMobileMethod.instructions}
                       </p>
                     )}
+
+                    <p className="text-[11px] font-bold text-slate-800">
+                      Send exactly ৳{finalPayableMobile.toLocaleString()} to the number above, then enter the details below.
+                    </p>
 
                     <div>
                       <label htmlFor="checkout-trx-id" className="block mb-1 font-bold text-xs text-slate-800">
@@ -4683,26 +4717,27 @@ The render below must not guess. A merchant may paste
                   </div>
                 )}
 
-                {/* Cash on Delivery with Mandatory Advance Delivery Charge */}
+                {/* Cash on Delivery — the ONLY upfront cost is the merchant's
+                    Advance Delivery Charge, shown at face value. No cash-out fee,
+                    no VAT and no other line is applied to the product balance. */}
                 {payMethod === 'cod' && requiresAdvanceFee && (
-                  <div className="border border-amber-200 bg-amber-50/50 p-4 rounded-xl space-y-3">
+                  <div data-testid="cod-advance-panel" className="border border-amber-300 bg-white p-4 rounded-xl space-y-3 shadow-sm">
                     <div className="flex items-center gap-2 text-amber-800 font-bold text-xs">
                       <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
-                      <span>Upfront Advance Delivery Charge Mandatory</span>
+                      <span>Advance Delivery Charge</span>
                     </div>
                     <p className="text-xs text-slate-700 leading-relaxed">
-                      To confirm your Cash on Delivery (COD) order, please pay only the{' '}
-                      <strong className="text-slate-900">৳{advanceDeliveryFeeAmount} Delivery Fee</strong>{' '}
-                      upfront via Mobile Banking. The remaining{' '}
-                      <strong className="text-slate-900">৳{remainingCodBalance.toLocaleString()} product balance</strong>{' '}
-                      is paid in cash to the courier on delivery — <strong className="text-slate-900">no cash-out charge is added to it (0%)</strong>.
+                      Pay <strong className="text-slate-900">৳{advanceDeliveryFeeAmount.toLocaleString()}</strong>{' '}
+                      now via mobile banking to confirm this COD order. The remaining{' '}
+                      <strong className="text-slate-900">৳{remainingCodBalance.toLocaleString()}</strong>{' '}
+                      is paid in cash on delivery.
                     </p>
 
                     {/* Provider Selector for Advance Delivery Payment */}
                     {advanceMethodsAvailable.length > 0 && (
                       <div className="space-y-1.5">
-                        <label className="block text-[11px] font-bold text-slate-700 uppercase">Select Advance Payment Method:</label>
-                        <div className="flex gap-2">
+                        <label className="block text-[11px] font-bold text-slate-700 uppercase">Pay advance with:</label>
+                        <div className="flex flex-wrap gap-2">
                           {advanceMethodsAvailable.map((adv) => (
                             <button
                               key={adv.id}
@@ -4714,7 +4749,7 @@ The render below must not guess. A merchant may paste
                                   : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
                               }`}
                             >
-                              {adv.displayName}
+                              {WALLET_LABELS[adv.provider as keyof typeof WALLET_LABELS] || adv.displayName}
                             </button>
                           ))}
                         </div>
@@ -4726,7 +4761,7 @@ The render below must not guess. A merchant may paste
                       <div className="bg-white p-3 rounded-xl border border-slate-200 space-y-2">
                         <div className="flex items-center justify-between text-xs">
                           <div>
-                            <div className="text-[10px] font-bold text-slate-400 uppercase">Send Money to {selectedAdvConfig.displayName}</div>
+                            <div className="text-[10px] font-bold text-slate-400 uppercase">Send the advance to</div>
                             <div className="font-mono text-base font-black text-slate-900">{selectedAdvConfig.number}</div>
                           </div>
                           <button
@@ -4738,34 +4773,16 @@ The render below must not guess. A merchant may paste
                           </button>
                         </div>
 
-                        {/* Breakdown for Advance Delivery */}
+                        {/* Two lines, no fee maths: what is paid now, what is
+                            paid on delivery. */}
                         <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs space-y-1">
-                          <div className="flex justify-between text-slate-600">
-                            <span>Advance Delivery Charge:</span>
-                            <span className="font-bold text-slate-900">৳{advanceDeliveryFeeAmount}</span>
+                          <div className="flex justify-between font-black text-slate-900">
+                            <span>Advance Delivery Charge (upfront):</span>
+                            <span data-testid="cod-advance-amount" className="text-amber-800 font-mono">৳{totalAdvancePayable.toLocaleString()}</span>
                           </div>
-                          {advCashOutFee > 0 ? (
-                            <div className="flex justify-between text-amber-700 font-medium">
-                              <span>Cash-out Charge ({advChargePercent}% on delivery fee only):</span>
-                              <span className="font-bold">+৳{advCashOutFee}</span>
-                            </div>
-                          ) : (
-                            <div className="flex justify-between text-emerald-700">
-                              <span>Cash-out Charge (mobile banking):</span>
-                              <span className="font-bold">৳0</span>
-                            </div>
-                          )}
-                          <div className="border-t border-slate-200 pt-1 flex justify-between font-black text-slate-900">
-                            <span>Total Upfront Payable:</span>
-                            <span className="text-amber-800 font-mono">৳{totalAdvancePayable} BDT</span>
-                          </div>
-                          <div className="flex justify-between text-[var(--primary-accent)] font-bold text-[11px] pt-1 border-t border-slate-200">
-                            <span>Remaining COD Balance Due on Delivery:</span>
-                            <span>৳{remainingCodBalance.toLocaleString()} BDT</span>
-                          </div>
-                          <div data-testid="cod-cash-out-note" className="flex justify-between text-slate-500 text-[10px] pt-1 border-t border-dashed border-slate-200">
-                            <span>Cash-out charge on product balance:</span>
-                            <span className="font-bold">0% (৳0)</span>
+                          <div className="flex justify-between text-emerald-700 font-bold text-[11px] pt-1 border-t border-slate-200">
+                            <span>Balance due in cash on delivery:</span>
+                            <span data-testid="cod-balance-amount">৳{remainingCodBalance.toLocaleString()}</span>
                           </div>
                         </div>
 
@@ -4779,18 +4796,33 @@ The render below must not guess. A merchant may paste
 
                     {/* TrxID Input for Advance Delivery Payment */}
                     <div>
-                      <label className="block mb-1 font-bold text-xs text-slate-800">
-                        Enter Advance Payment Transaction ID (TrxID) *
+                      <label htmlFor="checkout-advance-trx-id" className="block mb-1 font-bold text-xs text-slate-800">
+                        Advance Payment Transaction ID (TrxID) *
                       </label>
                       <input
+                        id="checkout-advance-trx-id"
                         type="text"
                         required
                         placeholder="e.g. BK8X991029"
                         value={custTxId}
-                        onChange={(e) => setCustTxId(e.target.value)}
+                        onChange={(e) => setCustTxId(e.target.value.toUpperCase().replace(/\s+/g, ''))}
                         className="w-full border border-amber-300 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-white focus:outline-none focus:ring-2 focus:ring-amber-500 font-bold"
                       />
                     </div>
+                  </div>
+                )}
+
+                {/* Plain COD (advance of 0): reassure the customer nothing is due now. */}
+                {payMethod === 'cod' && !requiresAdvanceFee && (
+                  <div data-testid="cod-no-advance-panel" className="border border-emerald-300 bg-white p-3.5 rounded-xl shadow-sm">
+                    <div className="flex items-center gap-2 text-emerald-800 font-bold text-xs">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Nothing to pay now</span>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-700 leading-relaxed">
+                      Pay <strong className="text-slate-900">৳{baseTotalAmount.toLocaleString()}</strong> in cash when the courier delivers your order.
+                      No advance payment, no cash-out charge.
+                    </p>
                   </div>
                 )}
 
@@ -4799,6 +4831,7 @@ The render below must not guess. A merchant may paste
                     type="submit"
                     data-testid="checkout-submit"
                     aria-busy={isPlacingOrder}
+                    aria-live="polite"
                     aria-disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
                     disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
                     className="w-full py-3.5 bg-[var(--primary-accent)] text-slate-950 font-black rounded-xl text-sm hover:bg-[var(--primary-accent)]/90 disabled:opacity-70 disabled:cursor-not-allowed transition cursor-pointer shadow-lg flex items-center justify-center gap-2"
@@ -4825,11 +4858,11 @@ The render below must not guess. A merchant may paste
                               • COD    → the full payable for the selected zone. */}
                         <span>
                           {`${isBn ? 'অর্ডার নিশ্চিত করুন' : 'Confirm Order'} • ৳${
-                            isWalletPaymentSelected
-                              ? totalAmount.toLocaleString()
-                              : payMethod === 'cod' && requiresAdvanceFee
+                            payMethod === 'cod' && requiresAdvanceFee
                               ? `${totalAdvancePayable.toLocaleString()} Upfront (৳${remainingCodBalance.toLocaleString()} COD)`
-                              : baseTotalAmount.toLocaleString()
+                              : isWalletPaymentSelected
+                                ? totalAmount.toLocaleString()
+                                : baseTotalAmount.toLocaleString()
                           }`}
                         </span>
                       </>
@@ -4892,12 +4925,27 @@ The render below must not guess. A merchant may paste
                         </span>
                       </div>
                     )}
-                    <div className="border-t border-slate-800 pt-1 flex justify-between items-center pt-1">
+                    {/* Wallet cash-out fee appears here too, so the summary the
+                        customer scans matches the panel above. COD never shows it
+                        because COD never charges it. */}
+                    {isWalletPaymentSelected && mobileChargePercent > 0 && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Cash-out charge ({mobileChargePercent}%)</span>
+                        <span className="font-bold text-pink-400">+৳{mobileCashOutFee.toLocaleString()}</span>
+                      </div>
+                    )}
+                    <div className="border-t border-slate-800 pt-1 flex justify-between items-center">
                       <span className="font-bold text-slate-400">Total Payable:</span>
                       <span data-testid="checkout-summary-total" className="text-sm font-black text-amber-400">
                         ৳{totalAmount.toLocaleString()}
                       </span>
                     </div>
+                    {/* COD split: what is due now vs. what is due on delivery. */}
+                    {payMethod === 'cod' && requiresAdvanceFee && (
+                      <div className="flex justify-between items-center text-[10px] text-slate-400">
+                        <span>Advance now ৳{totalAdvancePayable.toLocaleString()} · cash on delivery ৳{remainingCodBalance.toLocaleString()}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
