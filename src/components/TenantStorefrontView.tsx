@@ -1915,6 +1915,13 @@ The render below must not guess. A merchant may paste
   const [custTxId, setCustTxId] = useState('');
   const [custSenderPhone, setCustSenderPhone] = useState('');
   const [payValidationError, setPayValidationError] = useState('');
+  // True from the moment "Confirm Order" is pressed until the database write
+  // settles. Drives the spinner AND prevents a double-submit (a second click
+  // could otherwise create two orders before React re-renders).
+  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
+  // Synchronous re-entry guard: `setIsPlacingOrder` is async, so two clicks in
+  // the same tick would both pass an `isPlacingOrder` check.
+  const placingOrderRef = React.useRef(false);
   const [confirmedOrderNum, setConfirmedOrderNum] = useState('');
   const [codAdvanceProvider, setCodAdvanceProvider] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [copiedNum, setCopiedNum] = useState(false);
@@ -1949,6 +1956,27 @@ The render below must not guess. A merchant may paste
   useEffect(() => {
     setPayValidationError('');
   }, [payMethod]);
+
+  /**
+   * "Confirm Order" entry point: owns the button's loading lifecycle.
+   *
+   * The ref is the real double-submit guard (state updates are async, so two
+   * clicks in one tick would both pass an `isPlacingOrder` test); the state
+   * only drives the spinner. `finally` always releases both, so a validation
+   * abort or a thrown error can never leave the button stuck on "Processing…".
+   */
+  const handleCheckoutSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (placingOrderRef.current) return;
+    placingOrderRef.current = true;
+    setIsPlacingOrder(true);
+    try {
+      await placeOrder();
+    } finally {
+      placingOrderRef.current = false;
+      setIsPlacingOrder(false);
+    }
+  };
 
   const selectedMobileMethod = (enabledMobileMethods || []).find((method) => method.provider === payMethod);
 
@@ -2143,20 +2171,48 @@ The render below must not guess. A merchant may paste
     ? checkoutMinOrder - itemsSubtotal
     : 0;
 
-  const mobileChargePercent = selectedMobileMethod?.chargePercentage || 0;
-  const mobileCashOutFee = Math.round(baseTotalAmount * (mobileChargePercent / 100));
-  const finalPayableMobile = baseTotalAmount + mobileCashOutFee;
+  // ── Cash-out charge ───────────────────────────────────────────────────────
+  //
+  // The merchant's `chargePercentage` is the cost of CASHING OUT a wallet
+  // payment, so it may only ever be charged on money that actually moves
+  // through the wallet. Three distinct cases:
+  //
+  //   • Full wallet payment (bKash / Nagad / Rocket) → charged on the ENTIRE
+  //     payable (goods + delivery + VAT).
+  //   • COD with an upfront advance delivery fee → charged ONLY on that
+  //     advance amount. The product balance is collected in cash by the
+  //     courier, so it must carry 0% cash-out — this is the bug that used to
+  //     inflate a ৳400 advance into ৳406 *and* quote a cash-out fee on the
+  //     whole order total.
+  //   • Plain COD → 0% cash-out on everything.
+  const isWalletPaymentSelected = ['bkash', 'nagad', 'rocket'].includes(payMethod);
 
   const advanceMethodsAvailable = enabledMobileMethods.filter(m => m.canPayAdvanceCharge && m.number);
   const requiresAdvanceFee = (payMethod === 'cod') && (advanceMethodsAvailable.length > 0 || !!storefrontCodConfig?.requestAdvanceDeliveryCharge);
   const advanceDeliveryFeeAmount = Number(storefrontCodConfig?.advanceDeliveryChargeAmount) || shippingFee;
   const selectedAdvConfig = advanceMethodsAvailable.find(m => m.provider === codAdvanceProvider) || advanceMethodsAvailable[0] || enabledMobileMethods[0];
   const advChargePercent = selectedAdvConfig?.chargePercentage || 0;
-  const advCashOutFee = Math.round(advanceDeliveryFeeAmount * (advChargePercent / 100));
+
+  // Percent that applies to THIS checkout's wallet movement — 0 for COD.
+  const mobileChargePercent = isWalletPaymentSelected ? (selectedMobileMethod?.chargePercentage || 0) : 0;
+  // Full wallet payment: fee on the whole payable.
+  const mobileCashOutFee = isWalletPaymentSelected
+    ? Math.round(baseTotalAmount * (mobileChargePercent / 100))
+    : 0;
+  const finalPayableMobile = baseTotalAmount + mobileCashOutFee;
+
+  // COD advance: fee strictly on the delivery fee the customer sends upfront.
+  const advCashOutFee = requiresAdvanceFee
+    ? Math.round(advanceDeliveryFeeAmount * (advChargePercent / 100))
+    : 0;
   const totalAdvancePayable = advanceDeliveryFeeAmount + advCashOutFee;
   const remainingCodBalance = Math.max(0, baseTotalAmount - advanceDeliveryFeeAmount);
 
-  const totalAmount = ['bkash', 'nagad', 'rocket'].includes(payMethod)
+  // What the customer pays for the GOODS portion of a COD order: the total
+  // minus the delivery fee they already paid upfront, with NO cash-out charge.
+  const codProductCashOutFee = 0;
+
+  const totalAmount = isWalletPaymentSelected
     ? finalPayableMobile
     : baseTotalAmount;
 
@@ -2431,9 +2487,7 @@ The render below must not guess. A merchant may paste
     }).filter(Boolean) as any);
   };
 
-  const handleCheckoutSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
+  const placeOrder = async () => {
     // Enforce the merchant's minimum order rule (Settings -> Checkout).
     if (minOrderShortfall > 0) return;
 
@@ -2480,11 +2534,13 @@ The render below must not guess. A merchant may paste
       image: selectedProduct.image,
     }] : [];
 
-    // `baseTotalAmount` is the goods + charges + VAT. A wallet payment also
-    // carries the merchant's cash-out %, which the customer was quoted on the
-    // checkout — so the recorded total is the same figure, never the lower one.
-    const isWalletPayment = (['bkash', 'nagad', 'rocket'] as string[]).includes(payMethod);
-    const total = isWalletPayment ? finalPayableMobile : baseTotalAmount;
+    // ── Recorded money ────────────────────────────────────────────────────
+    //   wallet  → goods + delivery + VAT + cash-out (exactly `totalAmount`)
+    //   COD     → goods + delivery + VAT. A cash-out fee is NEVER added to the
+    //             collected-by-courier balance; it only exists on the upfront
+    //             advance delivery fee (recorded separately below).
+    const total = isWalletPaymentSelected ? finalPayableMobile : baseTotalAmount;
+    const codAdvancePaidUpfront = requiresAdvanceFee && payMethod === 'cod' ? totalAdvancePayable : 0;
     const paymentMethodLabel: Order['paymentMethod'] =
       payMethod === 'bkash' ? 'bKash'
         : payMethod === 'nagad' ? 'Nagad'
@@ -2515,9 +2571,23 @@ The render below must not guess. A merchant may paste
       paymentMethod: paymentMethodLabel,
       paymentStatus: payMethod === 'cod' ? 'Unpaid' : 'Pending Verification',
       transactionId: custTxId.trim() || undefined,
-      ...(isWalletPayment
+      ...(isWalletPaymentSelected
         ? { senderMobile: custSenderPhone.trim() || undefined }
         : {}),
+      // Explicit money trail so the dashboard never has to re-derive the
+      // cash-out rules: wallet fee (0 for COD), the COD advance paid via
+      // mobile banking, and the cash balance still due on delivery.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ...({
+        cashOutFeeBDT: isWalletPaymentSelected ? mobileCashOutFee : advCashOutFee,
+        ...(payMethod === 'cod'
+          ? {
+              advanceDeliveryPaidBDT: codAdvancePaidUpfront,
+              codBalanceBDT: requiresAdvanceFee ? remainingCodBalance : baseTotalAmount,
+              codProductCashOutFeeBDT: codProductCashOutFee,
+            }
+          : {}),
+      } as any),
       fulfillmentStatus: 'Unfulfilled',
       status: 'New',
       courierName: 'Steadfast Courier',
@@ -4621,7 +4691,11 @@ The render below must not guess. A merchant may paste
                       <span>Upfront Advance Delivery Charge Mandatory</span>
                     </div>
                     <p className="text-xs text-slate-700 leading-relaxed">
-                      To confirm your Cash on Delivery (COD) order, please pay the <strong className="text-slate-900">৳{advanceDeliveryFeeAmount} Delivery Fee</strong> upfront via Mobile Banking. The remaining order balance will be collected upon courier delivery.
+                      To confirm your Cash on Delivery (COD) order, please pay only the{' '}
+                      <strong className="text-slate-900">৳{advanceDeliveryFeeAmount} Delivery Fee</strong>{' '}
+                      upfront via Mobile Banking. The remaining{' '}
+                      <strong className="text-slate-900">৳{remainingCodBalance.toLocaleString()} product balance</strong>{' '}
+                      is paid in cash to the courier on delivery — <strong className="text-slate-900">no cash-out charge is added to it (0%)</strong>.
                     </p>
 
                     {/* Provider Selector for Advance Delivery Payment */}
@@ -4670,10 +4744,15 @@ The render below must not guess. A merchant may paste
                             <span>Advance Delivery Charge:</span>
                             <span className="font-bold text-slate-900">৳{advanceDeliveryFeeAmount}</span>
                           </div>
-                          {advChargePercent > 0 && (
+                          {advCashOutFee > 0 ? (
                             <div className="flex justify-between text-amber-700 font-medium">
-                              <span>Cash-out Charge ({advChargePercent}%):</span>
+                              <span>Cash-out Charge ({advChargePercent}% on delivery fee only):</span>
                               <span className="font-bold">+৳{advCashOutFee}</span>
+                            </div>
+                          ) : (
+                            <div className="flex justify-between text-emerald-700">
+                              <span>Cash-out Charge (mobile banking):</span>
+                              <span className="font-bold">৳0</span>
                             </div>
                           )}
                           <div className="border-t border-slate-200 pt-1 flex justify-between font-black text-slate-900">
@@ -4683,6 +4762,10 @@ The render below must not guess. A merchant may paste
                           <div className="flex justify-between text-[var(--primary-accent)] font-bold text-[11px] pt-1 border-t border-slate-200">
                             <span>Remaining COD Balance Due on Delivery:</span>
                             <span>৳{remainingCodBalance.toLocaleString()} BDT</span>
+                          </div>
+                          <div data-testid="cod-cash-out-note" className="flex justify-between text-slate-500 text-[10px] pt-1 border-t border-dashed border-slate-200">
+                            <span>Cash-out charge on product balance:</span>
+                            <span className="font-bold">0% (৳0)</span>
                           </div>
                         </div>
 
@@ -4715,25 +4798,42 @@ The render below must not guess. A merchant may paste
                   <button
                     type="submit"
                     data-testid="checkout-submit"
-                    disabled={minOrderShortfall > 0 || qtyLimitBreached}
-                    className="w-full py-3.5 bg-[var(--primary-accent)] text-slate-950 font-black rounded-xl text-sm hover:bg-[var(--primary-accent)]/90 disabled:opacity-50 disabled:cursor-not-allowed transition cursor-pointer shadow-lg"
+                    aria-busy={isPlacingOrder}
+                    aria-disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
+                    disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
+                    className="w-full py-3.5 bg-[var(--primary-accent)] text-slate-950 font-black rounded-xl text-sm hover:bg-[var(--primary-accent)]/90 disabled:opacity-70 disabled:cursor-not-allowed transition cursor-pointer shadow-lg flex items-center justify-center gap-2"
                   >
-                    {/* Every branch recomputes when the delivery zone changes:
-                          • mobile  → the goods + the SELECTED zone's fee + VAT +
-                            the wallet cash-out %, i.e. exactly `totalAmount`
-                            (previously it quoted `baseTotalAmount`, which
-                            silently omitted the cash-out fee the customer then
-                            had to pay).
-                          • COD+advance → the upfront delivery fee and the
-                            remaining balance, both of which move with the zone.
-                          • COD    → the full payable for the selected zone. */}
-                    Confirm Order • ৳{
-                      ['bkash', 'nagad', 'rocket'].includes(payMethod)
-                        ? totalAmount.toLocaleString()
-                        : payMethod === 'cod' && requiresAdvanceFee
-                        ? `${totalAdvancePayable.toLocaleString()} Upfront (৳${remainingCodBalance.toLocaleString()} COD)`
-                        : baseTotalAmount.toLocaleString()
-                    }
+                    {isPlacingOrder ? (
+                      <>
+                        {/* Animated spinner — the button is already disabled above,
+                            and `placingOrderRef` blocks a second submit even if
+                            the click somehow lands before this render. */}
+                        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                        <span data-testid="checkout-submit-loading">
+                          {isBn ? 'প্রসেসিং হচ্ছে…' : 'Processing Order...'}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        {/* Every branch recomputes when the delivery zone changes:
+                              • wallet  → the goods + the SELECTED zone's fee + VAT +
+                                the wallet cash-out %, i.e. exactly `totalAmount`.
+                              • COD+advance → the upfront delivery fee (+ cash-out on
+                                that fee only) and the remaining cash balance, both of
+                                which move with the zone. No cash-out on the product
+                                balance.
+                              • COD    → the full payable for the selected zone. */}
+                        <span>
+                          {`${isBn ? 'অর্ডার নিশ্চিত করুন' : 'Confirm Order'} • ৳${
+                            isWalletPaymentSelected
+                              ? totalAmount.toLocaleString()
+                              : payMethod === 'cod' && requiresAdvanceFee
+                              ? `${totalAdvancePayable.toLocaleString()} Upfront (৳${remainingCodBalance.toLocaleString()} COD)`
+                              : baseTotalAmount.toLocaleString()
+                          }`}
+                        </span>
+                      </>
+                    )}
                   </button>
                 </div>
                 </div>
