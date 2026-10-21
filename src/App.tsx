@@ -40,6 +40,8 @@ import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
+import { mergeStoredWallets } from './utils/paymentMethods';
+import { writeZidStoreData } from './lib/storeData';
 import { verifySuperAdminPin } from './lib/adminAuth';
 import { isStoreCode, isUuid } from './lib/storeId';
 import { findThemeById } from './lib/themeRegistry';
@@ -853,24 +855,16 @@ export default function App() {
       const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.mobileBanking && parsed.mobileBanking.length > 0) {
-          const configs: MobileBankingConfig[] = parsed.mobileBanking;
-          // Dynamically check and add Rocket if missing
-          if (!configs.some((c) => c.provider === 'rocket')) {
-            configs.push({
-              id: 'mb-rocket',
-              provider: 'rocket',
-              displayName: 'Rocket Personal / Merchant',
-              accountType: 'Personal',
-              number: '01911223344',
-              isEnabled: false,
-              chargePercentage: 1.0,
-              instructions: 'Send Money to Rocket Personal (01911223344). Enter your sender Rocket number and Transaction ID in checkout.',
-              requireTrxId: true,
-              canPayAdvanceCharge: true
-            });
-          }
-          return configs;
+        const stored = parsed.mobileBanking ?? parsed.mobile_banking;
+        if (Array.isArray(stored) && stored.length > 0) {
+          // Keep every saved wallet (including disabled ones) and make sure the
+          // bKash / Nagad / Rocket cards always exist. Disabled placeholders are
+          // created EMPTY — never pre-filled with a demo number, which would
+          // otherwise be the one the customer is told to pay.
+          return mergeStoredWallets(
+            stored,
+            initialMobileBanking.map((method) => ({ ...method, number: '' })),
+          );
         }
       }
     } catch (e) {
@@ -1896,7 +1890,7 @@ export default function App() {
   // cannot fire two authentication requests.
   const [isVerifyingAdminPin, setIsVerifyingAdminPin] = useState<boolean>(false);
 
-  const handleLoginSuccess = (userProfile: MerchantProfile) => {
+  const handleLoginSuccess = async (userProfile: MerchantProfile) => {
     setStoredSession({
       email: userProfile.email,
       loggedInAt: new Date().toISOString(),
@@ -1977,6 +1971,28 @@ export default function App() {
     } catch (e) {
       console.error('Error restoring merchant workspace:', e);
     }
+
+    // ── Payment accounts: the DATABASE is authoritative ──────────────────
+    // localStorage above is only a cache. A merchant who activated bKash on
+    // another device (or after clearing their browser data) still sees their
+    // real toggles + numbers in "Merchant Payment Accounts Setup", so pressing
+    // Save can never write an empty form back over good data.
+    // `raw=1` returns every configured wallet, including disabled ones.
+    try {
+      const slug = String(userProfile.storeSlug || '').split(':')[0].trim();
+      if (slug) {
+        const res = await fetch(`/api/store/payment-accounts?raw=1&store_slug=${encodeURIComponent(slug)}`);
+        const body = await res.json().catch(() => null);
+        if (body && body.ok !== false) {
+          if (Array.isArray(body.mobileBanking) && body.mobileBanking.length > 0) {
+            setMobileBanking((prev) => mergeStoredWallets(body.mobileBanking, prev));
+          }
+          if (Array.isArray(body.bankAccounts)) setBankAccounts(body.bankAccounts);
+        }
+      }
+    } catch (dbErr) {
+      console.warn('[App] payment accounts hydrate skipped:', dbErr);
+    }
   };
 
   const handleLogout = () => {
@@ -2012,14 +2028,36 @@ export default function App() {
     mobileBanking?: MobileBankingConfig[];
     bankAccounts?: BankAccount[];
   }): Promise<boolean> => {
-    const slug = String((merchant as any)?.storeSlug || '').trim();
-    if (!slug) return Promise.resolve(true);
+    const slug = String((merchant as any)?.storeSlug || (merchant as any)?.store_slug || '').split(':')[0].trim();
+    if (!slug) {
+      console.warn('[App] payment-accounts save skipped: no store slug on the merchant profile yet.');
+      return Promise.resolve(false);
+    }
     return fetch('/api/store/payment-accounts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ store_slug: slug, ...patch }),
     })
-      .then((res) => res.ok)
+      .then(async (res) => {
+        // A 200 with `{ ok: false }` is a FAILED save (validation / DB write
+        // rejected) — checking `res.ok` alone reported it as success.
+        const body = await res.json().catch(() => null);
+        const savedOk = res.ok && body?.ok !== false;
+        if (!savedOk) {
+          console.warn('[App] payment-accounts save rejected:', res.status, body?.error || '');
+          return false;
+        }
+        // Keep every other open tab / the storefront preview in step with the
+        // copy the server just persisted.
+        writeZidStoreData(
+          {
+            ...(Array.isArray(patch.mobileBanking) ? { mobileBanking: patch.mobileBanking } : {}),
+            ...(Array.isArray(patch.bankAccounts) ? { bankAccounts: patch.bankAccounts } : {}),
+          } as any,
+          (merchant as any)?.storeSlug,
+        );
+        return true;
+      })
       .catch((err) => {
         console.warn('[App] payment-accounts save warning:', err);
         return false;

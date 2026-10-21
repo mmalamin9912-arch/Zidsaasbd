@@ -155,6 +155,17 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   const [isSavingMobile, setIsSavingMobile] = useState(false);
   const handleSaveMobileSettings = async () => {
     if (isSavingMobile) return;
+
+    // The checkout only renders an ACTIVE wallet that has a number — saving an
+    // active bKash with an empty number would silently show nothing to the
+    // customer, so block the save and say exactly which card is incomplete.
+    const missingNumber = mobileConfigs.filter((m) => m.isEnabled && !String(m.number || '').trim());
+    if (missingNumber.length > 0) {
+      const labels = missingNumber.map((m) => m.displayName || m.provider.toUpperCase()).join(', ');
+      toast.error(`Add a merchant number for ${labels}, or switch it off before saving.`);
+      return;
+    }
+
     setIsSavingMobile(true);
     try {
       // `onUpdateMobileBanking` updates local state AND (in App.tsx) persists
@@ -164,7 +175,12 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       const result = onUpdateMobileBanking(mobileConfigs);
       const saved = result instanceof Promise ? await result : true;
       if (saved) {
-        toast.success('Payment settings saved — bKash / Nagad / Rocket are now live on your storefront checkout.');
+        const activeCount = mobileConfigs.filter((m) => m.isEnabled && String(m.number || '').trim()).length;
+        toast.success(
+          activeCount > 0
+            ? `Payment settings saved — ${activeCount} mobile payment method${activeCount === 1 ? '' : 's'} now live on your storefront checkout.`
+            : 'Payment settings saved — Cash on Delivery remains available at checkout.',
+        );
       } else {
         toast.error('Payment settings updated locally, but the database save failed. Please try again.');
       }
@@ -435,7 +451,21 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             })}
           </div>
 
-          <div className="flex justify-end pt-4 border-t border-[#2E3548]">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-end pt-4 border-t border-[#2E3548]">
+            {/* Live summary of what the checkout will actually show. */}
+            <p className="text-[11px] text-slate-400 mr-auto" data-testid="active-payments-summary">
+              {(() => {
+                const active = mobileConfigs.filter((m) => m.isEnabled && String(m.number || '').trim());
+                return active.length > 0
+                  ? `Live on checkout: ${active.map((m) => m.provider.toUpperCase()).join(' · ')} · Cash on Delivery`
+                  : 'Live on checkout: Cash on Delivery only';
+              })()}
+            </p>
+            {mobileConfigs.some((m) => m.isEnabled && !String(m.number || '').trim()) && (
+              <p className="text-[11px] font-bold text-amber-400" role="alert">
+                An active method is missing its merchant number.
+              </p>
+            )}
             <button
               onClick={handleSaveMobileSettings}
               disabled={isSavingMobile}

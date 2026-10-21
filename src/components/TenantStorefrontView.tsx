@@ -21,6 +21,12 @@ import {
 } from '../lib/storeModulesApi';
 import { normalizeOrders, safeDate, safeAmount } from '../utils/orderUtils';
 import {
+  WALLET_PROVIDERS,
+  WALLET_LABELS,
+  normalizeMobileBanking,
+  isWalletProvider,
+} from '../utils/paymentMethods';
+import {
   TRACKING_STEPS,
   getOrderStatusBadge,
   getTrackingStepIndex,
@@ -33,7 +39,6 @@ import {
 
 /**
  * Delay between hero background slides, in milliseconds.
- *
  * The "Welcome to Our Store" hero — the merchant's `heroTitle`/`heroSubtitle`
  * rendered over an auto-looping fade carousel of `heroImages` — advances every
  * 4s: fast enough to read as a live slider, slow enough that the headline,
@@ -463,6 +468,15 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
           // leaves the flag false and the legacy length-gated merge applies.
           if (Array.isArray(payload.mobileBanking) || Array.isArray(payload.bankAccounts)) {
             apiPaymentAccountsAnswered = true;
+          } else {
+            // Some payloads carry the wallets only on the merchant record
+            // (Mongo `mobileBanking` / Supabase `mobile_banking`).
+            const merchantWallets =
+              (payload.merchant as any)?.mobileBanking ?? (payload.merchant as any)?.mobile_banking;
+            if (Array.isArray(merchantWallets)) {
+              apiMobileBanking = merchantWallets;
+              apiPaymentAccountsAnswered = true;
+            }
           }
 
           // Online Store modules travel in the same payload, so the storefront
@@ -486,6 +500,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
         // When the endpoint answered, its arrays are authoritative EVEN IF
         // EMPTY (all wallets disabled / none configured yet) so a stale
         // localStorage copy can never re-surface inactive methods on checkout.
+        // The raw arrays are stored (not the filtered view) so a wallet the
+        // merchant later re-enables is still there with its saved number.
         const paymentAccountsMerge: { bankAccounts?: any[]; mobileBanking?: any[] } =
           apiPaymentAccountsAnswered
             ? { bankAccounts: apiBankAccounts, mobileBanking: apiMobileBanking }
@@ -1501,13 +1517,31 @@ The render below must not guess. A merchant may paste
   // we show a skeleton rather than a premature "no products" message.
   const [catalogLoadFailed, setCatalogLoadFailed] = useState<boolean>(false);
 
-  const storefrontMobileBanking = Array.isArray(liveStoreData.mobileBanking)
-    ? liveStoreData.mobileBanking as MobileBankingConfig[]
-    : (Array.isArray(mobileBanking) ? mobileBanking : []);
+  const storefrontMobileBanking: MobileBankingConfig[] = useMemo(() => {
+    // Preference order: the slug-scoped storefront snapshot written by
+    // GET /api/storefront/:slug (DB-authoritative), then the merchant record
+    // inside it, then the prop handed down by App. Every candidate goes through
+    // the SAME normaliser, so an enabled wallet is never filtered out because
+    // of a key-spelling or `number` formatting difference.
+    const fromSnapshot = Array.isArray(liveStoreData.mobileBanking)
+      ? (liveStoreData.mobileBanking as unknown[])
+      : [];
+    if (fromSnapshot.length > 0) return normalizeMobileBanking(fromSnapshot);
+
+    const fromMerchant =
+      (liveStoreData.merchant as any)?.mobileBanking ?? (liveStoreData.merchant as any)?.mobile_banking;
+    const normalizedMerchant = normalizeMobileBanking(fromMerchant);
+    if (normalizedMerchant.length > 0) return normalizedMerchant;
+
+    return normalizeMobileBanking(mobileBanking);
+  }, [liveStoreData.mobileBanking, liveStoreData.merchant, mobileBanking]);
   const storefrontBankAccounts = Array.isArray(liveStoreData.bankAccounts)
     ? liveStoreData.bankAccounts as BankAccount[]
     : (Array.isArray(bankAccounts) ? bankAccounts : []);
-  const enabledMobileMethods = (storefrontMobileBanking || []).filter((method) => method?.isEnabled && method?.number?.trim());
+  // Already normalised (enabled + numbered wallets only), in bKash → Nagad →
+  // Rocket order, so the checkout mirrors what the merchant activated in
+  // "Merchant Payment Accounts Setup".
+  const enabledMobileMethods = storefrontMobileBanking;
   const visibleBankAccount = (storefrontBankAccounts || []).find((account) => account?.isVisibleAtCheckout);
 
   const rawStorefrontCategories = supabaseCategories.length > 0
@@ -1872,7 +1906,7 @@ The render below must not guess. A merchant may paste
   // Checkout Form State
   const [custName, setCustName] = useState('');
   const [custPhone, setCustPhone] = useState('');
-  const [payMethod, setPayMethod] = useState<'bkash' | 'nagad' | 'bank' | 'cod'>('bkash');
+  const [payMethod, setPayMethod] = useState<'bkash' | 'nagad' | 'rocket' | 'bank' | 'cod'>('bkash');
   // `inside` | `outside` rather than a free-text city: the delivery-zone selector
   // is the single control for this, so the shipping area can never drift out of
   // sync with what the customer picked (and the total updates with it).
@@ -1880,6 +1914,7 @@ The render below must not guess. A merchant may paste
   const [custAddress, setCustAddress] = useState('');
   const [custTxId, setCustTxId] = useState('');
   const [custSenderPhone, setCustSenderPhone] = useState('');
+  const [payValidationError, setPayValidationError] = useState('');
   const [confirmedOrderNum, setConfirmedOrderNum] = useState('');
   const [codAdvanceProvider, setCodAdvanceProvider] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [copiedNum, setCopiedNum] = useState(false);
@@ -1891,14 +1926,29 @@ The render below must not guess. A merchant may paste
     setTimeout(() => setCopiedNum(false), 2000);
   };
 
+  // Cash on Delivery is available unless the merchant explicitly switched it
+  // off: `paymentMethods.cod === false` (Settings) OR `codConfig.isEnabled ===
+  // false` (Merchant Payment Accounts Setup -> COD tab). An ABSENT flag means
+  // "never configured", which keeps the original default-on behaviour.
+  const codEnabled =
+    storefrontMerchant.paymentMethods?.cod !== false &&
+    (liveStoreData.codConfig as CodConfig | undefined)?.isEnabled !== false;
+
   useEffect(() => {
+    // bKash / Nagad / Rocket (only those the merchant activated), then COD.
     const available = [
       ...(enabledMobileMethods || []).map((method) => method.provider),
       ...(visibleBankAccount ? ['bank'] : []),
-      ...(storefrontMerchant.paymentMethods?.cod ? ['cod'] : []),
+      ...(codEnabled ? ['cod'] : []),
     ];
     if (!available.includes(payMethod)) setPayMethod((available[0] || 'cod') as typeof payMethod);
-  }, [enabledMobileMethods, visibleBankAccount, storefrontMerchant.paymentMethods?.cod, payMethod]);
+  }, [enabledMobileMethods, visibleBankAccount, codEnabled, payMethod]);
+
+  // A previous wallet's "missing TrxID" warning must not linger after the
+  // customer switches to another method (or back to a valid wallet).
+  useEffect(() => {
+    setPayValidationError('');
+  }, [payMethod]);
 
   const selectedMobileMethod = (enabledMobileMethods || []).find((method) => method.provider === payMethod);
 
@@ -2387,6 +2437,23 @@ The render below must not guess. A merchant may paste
     // Enforce the merchant's minimum order rule (Settings -> Checkout).
     if (minOrderShortfall > 0) return;
 
+    // Wallet payments are only verifiable with the sender number + TrxID, so
+    // neither can be empty. `required` on the inputs covers normal submits;
+    // this guard covers Enter-key submits and autofill oddities.
+    if (['bkash', 'nagad', 'rocket'].includes(payMethod)) {
+      const sender = custSenderPhone.replace(/\D/g, '');
+      const trx = custTxId.trim();
+      if (sender.length < 11 || !trx) {
+        setPayValidationError(
+          !trx
+            ? 'Please enter the Transaction ID (TrxID) from your payment confirmation.'
+            : 'Please enter a valid 11-digit sender mobile number.',
+        );
+        return;
+      }
+      setPayValidationError('');
+    }
+
     // Enforce per-line quantity limits (Settings -> Orders and products
     // properties). The cart is clamped on entry, but a limit tightened after
     // items were added must still block the order.
@@ -2413,9 +2480,17 @@ The render below must not guess. A merchant may paste
       image: selectedProduct.image,
     }] : [];
 
-    // `baseTotalAmount` is already the goods + charges + VAT, so the recorded
-    // total matches exactly what the customer was shown and charged.
-    const total = baseTotalAmount;
+    // `baseTotalAmount` is the goods + charges + VAT. A wallet payment also
+    // carries the merchant's cash-out %, which the customer was quoted on the
+    // checkout — so the recorded total is the same figure, never the lower one.
+    const isWalletPayment = (['bkash', 'nagad', 'rocket'] as string[]).includes(payMethod);
+    const total = isWalletPayment ? finalPayableMobile : baseTotalAmount;
+    const paymentMethodLabel: Order['paymentMethod'] =
+      payMethod === 'bkash' ? 'bKash'
+        : payMethod === 'nagad' ? 'Nagad'
+          : payMethod === 'rocket' ? 'Rocket'
+            : payMethod === 'bank' ? 'Bank Transfer'
+              : 'COD';
 
     // Gift selections are attached to the order so the merchant can fulfil them
     // and the invoice can hide the price when `hideInvoicePriceTag` is set.
@@ -2437,11 +2512,11 @@ The render below must not guess. A merchant may paste
       address: custAddress,
       platform: 'Mobile web',
       totalBDT: total,
-      paymentMethod: payMethod === 'bkash' ? 'bKash' : payMethod === 'nagad' ? 'Nagad' : payMethod === 'bank' ? 'Bank Transfer' : 'COD',
+      paymentMethod: paymentMethodLabel,
       paymentStatus: payMethod === 'cod' ? 'Unpaid' : 'Pending Verification',
-      transactionId: custTxId || undefined,
-      ...(['bkash', 'nagad', 'rocket'].includes(payMethod)
-        ? { senderMobile: custSenderPhone || undefined }
+      transactionId: custTxId.trim() || undefined,
+      ...(isWalletPayment
+        ? { senderMobile: custSenderPhone.trim() || undefined }
         : {}),
       fulfillmentStatus: 'Unfulfilled',
       status: 'New',
@@ -4332,7 +4407,7 @@ The render below must not guess. A merchant may paste
                       </button>
                     )}
 
-                    {storefrontMerchant.paymentMethods?.cod && (
+                    {codEnabled && (
                       <button
                         type="button"
                         onClick={() => setPayMethod('cod')}
@@ -4351,11 +4426,22 @@ The render below must not guess. A merchant may paste
                         )}
                       </button>
                     )}
+
+                    {/* Nothing configured: say so explicitly instead of
+                        leaving the customer with an empty method list. */}
+                    {enabledMobileMethods.length === 0 && !visibleBankAccount && !codEnabled && (
+                      <p
+                        data-testid="no-payment-methods"
+                        className="p-3 rounded-xl border border-dashed border-slate-700 bg-slate-950 text-[11px] text-slate-400"
+                      >
+                        No payment method is available right now. Please contact the store to place your order.
+                      </p>
+                    )}
                   </div>
                 </div>
 
                 {/* Direct Mobile Payment Details (bKash, Nagad, Rocket) */}
-                {['bkash', 'nagad', 'rocket'].includes(payMethod) && selectedMobileMethod && (
+                {(['bkash', 'nagad', 'rocket'] as const).includes(payMethod as any) && selectedMobileMethod && (
                   <div className={`border p-3.5 rounded-xl space-y-3 ${
                     payMethod === 'bkash' ? 'border-pink-200 bg-pink-50/50' : payMethod === 'nagad' ? 'border-orange-200 bg-orange-50/50' : 'border-purple-200 bg-purple-50/50'
                   }`}>
@@ -4370,21 +4456,46 @@ The render below must not guess. A merchant may paste
                       </span>
                     </div>
 
-                    {/* Merchant Number Display */}
-                    <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between">
-                      <div>
-                        <div className="text-[10px] font-bold text-slate-400 uppercase">Merchant {selectedMobileMethod.provider.toUpperCase()} Number</div>
-                        <div className="font-mono text-base font-black text-slate-900">{selectedMobileMethod.number || '01844990011'}</div>
+                    {/* Merchant Number + Account Type Display */}
+                    <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-bold text-slate-400 uppercase">
+                          Merchant {WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider.toUpperCase()} Number
+                        </div>
+                        <div data-testid="merchant-wallet-number" className="font-mono text-base font-black text-slate-900 break-all">
+                          {selectedMobileMethod.number}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200">
+                            {selectedMobileMethod.accountType} Account
+                          </span>
+                          {mobileChargePercent > 0 && (
+                            <span className="text-[10px] font-bold bg-pink-50 text-pink-700 px-2 py-0.5 rounded border border-pink-200">
+                              Cash-out charge: {mobileChargePercent}%
+                            </span>
+                          )}
+                        </div>
                       </div>
                       <button
                         type="button"
-                        onClick={() => handleCopyNumber(selectedMobileMethod.number || '01844990011')}
-                        className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
+                        onClick={() => handleCopyNumber(selectedMobileMethod.number)}
+                        className="shrink-0 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
                       >
                         {copiedNum ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                         <span>{copiedNum ? 'Copied!' : 'Copy'}</span>
                       </button>
                     </div>
+
+                    {/* Cash-out charge note — spells out why the payable total
+                        is higher than the cart, so it is never a surprise. */}
+                    <p className="text-[11px] text-slate-600 bg-white/80 p-2.5 rounded-lg border border-slate-200 leading-relaxed">
+                      Send <strong className="text-slate-900">৳{finalPayableMobile.toLocaleString()}</strong> via{' '}
+                      <strong className="text-slate-900">{WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider}</strong>
+                      {' '}to the merchant number above.
+                      {mobileChargePercent > 0
+                        ? ` The merchant's ${selectedMobileMethod.accountType} account carries a ${mobileChargePercent}% cash-out charge (৳${mobileCashOutFee.toLocaleString()}), already included in this total.`
+                        : ' No cash-out charge applies to this account.'}
+                    </p>
 
                     {/* Price Breakdown including Cash-out Fee */}
                     <div className="bg-white p-3 rounded-xl border border-slate-200 text-xs space-y-1.5">
@@ -4451,33 +4562,54 @@ The render below must not guess. A merchant may paste
                     )}
 
                     <div>
-                      <label className="block mb-1 font-bold text-xs text-slate-800">
-                        Enter {selectedMobileMethod.provider.toUpperCase()} Transaction ID (TrxID) *
+                      <label htmlFor="checkout-trx-id" className="block mb-1 font-bold text-xs text-slate-800">
+                        Transaction ID (TrxID) *
                       </label>
                       <input
+                        id="checkout-trx-id"
                         type="text"
                         required
                         placeholder={`e.g. ${payMethod === 'bkash' ? 'BK' : payMethod === 'nagad' ? 'NG' : 'RO'}9X2810L9`}
                         value={custTxId}
-                        onChange={(e) => setCustTxId(e.target.value)}
+                        onChange={(e) => setCustTxId(e.target.value.toUpperCase().replace(/\s+/g, ''))}
                         className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-white focus:outline-none focus:ring-2 focus:ring-pink-500 font-bold"
                       />
+                      <p className="mt-1 text-[10px] text-slate-500">
+                        Find it in the confirmation SMS / app message after sending the money.
+                      </p>
                     </div>
 
-                    {/* Sender Mobile Number */}
+                    {/* Sender Mobile Number — paid-from account, used by the
+                        merchant to reconcile the deposit. */}
                     <div>
-                      <label className="block mb-1 font-bold text-xs text-slate-800">
-                        Sender {selectedMobileMethod.provider.toUpperCase()} Mobile Number *
+                      <label htmlFor="checkout-sender-mobile" className="block mb-1 font-bold text-xs text-slate-800">
+                        Sender Mobile Number *
                       </label>
                       <input
+                        id="checkout-sender-mobile"
                         type="text"
                         required
+                        inputMode="tel"
+                        autoComplete="tel"
                         placeholder="e.g. 01712345678"
                         value={custSenderPhone}
-                        onChange={(e) => setCustSenderPhone(e.target.value)}
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-white focus:outline-none focus:ring-2 focus:ring-pink-500 font-bold"
+                        onChange={(e) => setCustSenderPhone(e.target.value.replace(/[^0-9+]/g, ''))}
+                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 font-mono text-xs bg-white focus:outline-none focus:ring-2 focus:ring-pink-500 font-bold"
                       />
+                      <p className="mt-1 text-[10px] text-slate-500">
+                        The {WALLET_LABELS[selectedMobileMethod.provider as keyof typeof WALLET_LABELS] || selectedMobileMethod.provider} number you sent the money from.
+                      </p>
                     </div>
+
+                    {payValidationError && (
+                      <p
+                        role="alert"
+                        data-testid="payment-validation-error"
+                        className="text-[11px] font-bold text-red-600 bg-red-50 border border-red-200 rounded-lg px-2.5 py-2"
+                      >
+                        {payValidationError}
+                      </p>
+                    )}
                   </div>
                 )}
 

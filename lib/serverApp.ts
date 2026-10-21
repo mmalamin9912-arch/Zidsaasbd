@@ -9368,6 +9368,53 @@ async function readPaymentAccounts(
   };
   if (!slug) return found;
 
+  /**
+   * Normalise whatever the dashboard stored into the exact shape the checkout
+   * renders. Old rows can carry `enabled` / `active` (instead of `isEnabled`),
+   * a missing `provider`, or a numeric `number`; without this the public
+   * checkout filtered every one of them out and only COD survived.
+   *
+   * A method is only RENDERABLE when it is explicitly enabled AND has a
+   * number — the same rule `enabledMobileMethods` applies client-side — so a
+   * method the merchant switched off can never leak back onto the checkout.
+   */
+  const normalizeMobile = (list: any[]): any[] =>
+    list
+      .filter((m) => m && typeof m === 'object')
+      .map((m, index) => {
+        const provider = String(m.provider || m.method || m.type || m.wallet || '')
+          .trim()
+          .toLowerCase();
+        const normalizedProvider = provider === 'bkash' || provider === 'nagad' || provider === 'rocket'
+          ? provider
+          : '';
+        const enabledRaw = m.isEnabled ?? m.enabled ?? m.active ?? m.isActive;
+        const number = m.number != null ? String(m.number).replace(/[\s-]/g, '').trim() : '';
+        const fallbackNames: Record<string, string> = {
+          bkash: 'bKash Merchant Direct',
+          nagad: 'Nagad Personal / Agent',
+          rocket: 'Rocket Personal / Merchant',
+        };
+        return {
+          ...m,
+          id: m.id || `mb-${normalizedProvider || 'wallet'}-${index}`,
+          provider: normalizedProvider || provider,
+          displayName: m.displayName || m.name || fallbackNames[normalizedProvider] || 'Mobile Banking',
+          accountType: m.accountType || m.account_type || 'Personal',
+          number,
+          // Explicit opt-in only: an absent flag is NOT active.
+          isEnabled: enabledRaw === true || enabledRaw === 'true',
+          chargePercentage: Number(m.chargePercentage ?? m.charge_percentage ?? m.cashOutCharge ?? 0) || 0,
+          instructions: String(m.instructions ?? m.instructionsText ?? m.note ?? ''),
+          requireTrxId: m.requireTrxId ?? m.require_trx_id ?? true,
+          canPayAdvanceCharge: m.canPayAdvanceCharge === true || m.can_pay_advance_charge === true,
+        };
+      })
+      .filter((m) => ['bkash', 'nagad', 'rocket'].includes(String(m.provider)) && m.isEnabled && !!m.number);
+
+  const normalizeBanks = (list: any[]): any[] =>
+    list.filter((b) => b && typeof b === 'object');
+
   const pick = (src: any): { mobileBanking?: any[]; bankAccounts?: any[] } | null => {
     if (!src || typeof src !== 'object') return null;
     const mobileBanking = Array.isArray(src.mobileBanking)
@@ -9382,8 +9429,8 @@ async function readPaymentAccounts(
         : null;
     if (!mobileBanking && !bankAccounts) return null;
     return {
-      ...(mobileBanking ? { mobileBanking } : {}),
-      ...(bankAccounts ? { bankAccounts } : {}),
+      ...(mobileBanking ? { mobileBanking: normalizeMobile(mobileBanking) } : {}),
+      ...(bankAccounts ? { bankAccounts: normalizeBanks(bankAccounts) } : {}),
     };
   };
   const apply = (next: { mobileBanking?: any[]; bankAccounts?: any[] } | null) => {
@@ -9439,6 +9486,149 @@ async function readPaymentAccounts(
 }
 
 /**
+ * RAW stored payment accounts for a store — every method, enabled or not.
+ *
+ * This is the merge base for a partial save (`writePaymentAccounts`) and the
+ * dashboard's settings loader. It deliberately does NOT normalise/filter like
+ * `readPaymentAccounts`, so switching a wallet off in the dashboard is stored
+ * (not dropped) and can be switched back on later.
+ */
+async function readStoredPaymentAccounts(
+  storeRef: string,
+): Promise<{ mobileBanking: any[]; bankAccounts: any[] }> {
+  const slug = cleanStoreRef(storeRef);
+  const found: { mobileBanking: any[]; bankAccounts: any[] } = {
+    mobileBanking: [],
+    bankAccounts: [],
+  };
+  if (!slug) return found;
+
+  const pickRaw = (src: any): { mobileBanking?: any[]; bankAccounts?: any[] } | null => {
+    if (!src || typeof src !== 'object') return null;
+    const mobileBanking = Array.isArray(src.mobileBanking)
+      ? src.mobileBanking
+      : Array.isArray(src.mobile_banking)
+        ? src.mobile_banking
+        : null;
+    const bankAccounts = Array.isArray(src.bankAccounts)
+      ? src.bankAccounts
+      : Array.isArray(src.bank_accounts)
+        ? src.bank_accounts
+        : null;
+    if (!mobileBanking && !bankAccounts) return null;
+    return {
+      ...(mobileBanking ? { mobileBanking } : {}),
+      ...(bankAccounts ? { bankAccounts } : {}),
+    };
+  };
+  const applyRaw = (next: { mobileBanking?: any[]; bankAccounts?: any[] } | null) => {
+    if (!next) return;
+    if (!found.mobileBanking.length && next.mobileBanking) found.mobileBanking = next.mobileBanking;
+    if (!found.bankAccounts.length && next.bankAccounts) found.bankAccounts = next.bankAccounts;
+  };
+
+  // 1. MongoDB (`stores`, then `merchants`) — where the dashboard save lands.
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const orClauses: any[] = [
+        { store_slug: slug },
+        { storeSlug: slug },
+        { store_code: { $in: [slug, slug.toUpperCase()] } },
+      ];
+      if (isUuidLike(slug)) orClauses.push({ id: slug }, { _id: slug });
+      const storeDoc = await (mongoose.connection.db.collection('stores') as any)
+        .findOne({ $or: orClauses });
+      const merchDoc = storeDoc
+        ? null
+        : await (mongoose.connection.db.collection('merchants') as any)
+            .findOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] });
+      applyRaw(pickRaw(storeDoc || merchDoc));
+    }
+  } catch (err: any) {
+    console.warn('[Server] readStoredPaymentAccounts mongo warning:', err?.message || err);
+  }
+
+  // 2. Resolved store record (Supabase row — snake_case columns — or the
+  //    in-memory/local payload mirror).
+  if (!found.mobileBanking.length || !found.bankAccounts.length) {
+    try {
+      const record = await resolveStoreRecordFlexible(slug);
+      applyRaw(pickRaw(record));
+    } catch (err: any) {
+      console.warn('[Server] readStoredPaymentAccounts record warning:', err?.message || err);
+    }
+  }
+
+  // 3. Local payload file mirror.
+  if (!found.mobileBanking.length || !found.bankAccounts.length) {
+    try {
+      const payload = await readStorePayload();
+      applyRaw(pickRaw(payload.merchant));
+      applyRaw(pickRaw(payload));
+    } catch (err: any) {
+      console.warn('[Server] readStoredPaymentAccounts payload warning:', err?.message || err);
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Upsert `mobile_banking` / `bank_accounts` onto the store's Supabase row.
+ *
+ * Uses `Prefer: resolution=merge-duplicates` so an existing row is UPDATED
+ * rather than rejected, and falls back to a PATCH on `store_slug` when the
+ * deployed `stores` table has a uniqueness constraint PostgREST cannot resolve.
+ * Columns the deployed schema does not have yet (pre-migration-0011) are
+ * dropped by `postgrestWrite` instead of failing the whole save.
+ *
+ * Returns true only when Supabase accepted the write.
+ */
+async function upsertPaymentAccountsToSupabase(
+  storeRef: string,
+  accounts: { mobileBanking: any[]; bankAccounts: any[] },
+): Promise<boolean> {
+  const slug = cleanStoreRef(storeRef);
+  if (!slug) return false;
+  const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+  if (!isConfigured) return false;
+
+  const body = {
+    store_slug: slug,
+    mobile_banking: Array.isArray(accounts?.mobileBanking) ? accounts.mobileBanking : [],
+    bank_accounts: Array.isArray(accounts?.bankAccounts) ? accounts.bankAccounts : [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const patchPath = `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`;
+  // 1. Update the existing row first — never creates a partial store row.
+  let result = await postgrestWrite(supabaseUrl, supabaseKey, patchPath, {
+    method: 'PATCH',
+    body,
+  });
+
+  // 2. No row for this slug yet → INSERT it (upsert keeps the natural key).
+  if (!result.ok && (result.status === 404 || !result.droppedColumns.length)) {
+    result = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates' },
+      body,
+      conflictPatchPath: patchPath,
+    });
+  }
+
+  if (!result.ok) {
+    console.warn(
+      '[Server] payment-accounts Supabase upsert warning:',
+      result.status,
+      String(result.detail || '').slice(0, 300),
+    );
+  }
+  return result.ok;
+}
+
+/**
  * Persist the Merchant Payment Accounts Setup edits (bKash / Nagad / Rocket
  * toggles + numbers, checkout-visible bank accounts) for a store.
  *
@@ -9453,10 +9643,18 @@ async function writePaymentAccounts(storeRef: string, patch: any) {
   const slug = cleanStoreRef(storeRef);
   if (!slug) return null;
 
-  const current = await readPaymentAccounts(slug);
+  // What is already stored, RAW. `readPaymentAccounts` returns only the
+  // methods that are enabled + numbered (the public checkout view), so using it
+  // as the merge base silently DELETED every disabled wallet — and the
+  // merchant's saved numbers with it — on a bank-only save.
+  const stored = await readStoredPaymentAccounts(slug);
   const next = {
-    mobileBanking: Array.isArray(patch?.mobileBanking) ? patch.mobileBanking : current.mobileBanking,
-    bankAccounts: Array.isArray(patch?.bankAccounts) ? patch.bankAccounts : current.bankAccounts,
+    mobileBanking: Array.isArray(patch?.mobileBanking)
+      ? patch.mobileBanking
+      : (stored.mobileBanking as any[]),
+    bankAccounts: Array.isArray(patch?.bankAccounts)
+      ? patch.bankAccounts
+      : (stored.bankAccounts as any[]),
     updatedAt: new Date().toISOString(),
   };
 
@@ -9558,6 +9756,13 @@ app.get('/api/store/payment-accounts', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'store_slug is required.' });
     }
     const accounts = await readPaymentAccounts(storeRef);
+    // `?raw=1` is what the DASHBOARD loads: it needs every configured wallet
+    // (disabled ones included) so toggles and numbers survive a reload. The
+    // default stays the checkout-visible list.
+    if (String(req.query.raw || '') === '1' || String(req.query.includeDisabled || '') === 'true') {
+      const stored = await readStoredPaymentAccounts(storeRef);
+      return res.status(200).json({ ok: true, store_slug: storeRef, ...stored });
+    }
     return res.status(200).json({ ok: true, store_slug: storeRef, ...accounts });
   } catch (err: any) {
     console.error('[Server] GET /api/store/payment-accounts error:', err);
@@ -9586,7 +9791,23 @@ app.post('/api/store/payment-accounts', async (req, res) => {
     if (!saved) {
       return res.status(400).json({ ok: false, store_slug: storeRef, error: 'Could not save payment accounts.' });
     }
-    return res.status(200).json({ ...saved, message: 'Payment accounts saved.' });
+    // Supabase explicit upsert: `writePaymentAccounts` PATCHes an EXISTING
+    // stores row, so a merchant whose row was never mirrored to Supabase (or
+    // who signs up through a path that only writes Mongo) had their payment
+    // settings missing there. Upsert by `store_slug` creates the row when
+    // needed and is a no-op PATCH when it already exists. Best-effort: the
+    // durable Mongo copy above has already been written.
+    const supabaseSynced = await upsertPaymentAccountsToSupabase(storeRef, saved).catch((sbErr: any) => {
+      console.warn('[Server] payment-accounts Supabase upsert warning:', sbErr?.message || sbErr);
+      return false;
+    });
+    return res.status(200).json({
+      ...saved,
+      supabaseSynced,
+      message: supabaseSynced
+        ? 'Payment accounts saved to the database.'
+        : 'Payment accounts saved (Supabase mirror pending).',
+    });
   } catch (err: any) {
     console.error('[Server] POST /api/store/payment-accounts error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Could not save payment accounts.' });
