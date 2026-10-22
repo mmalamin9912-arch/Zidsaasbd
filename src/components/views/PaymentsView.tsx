@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig } from '../../types';
 import { useToast } from '../ToastProvider';
-import { saveShippingConfig } from '../../lib/logisticsApi';
+import { saveShippingConfig, loadShippingConfigWithMeta } from '../../lib/logisticsApi';
 // The canonical Bangladesh district list, shared with the storefront checkout
 // so the merchant picks the SAME city names the customer selects.
 import { BANGLADESH_DISTRICTS } from '../../../lib/deliveryZones';
@@ -145,7 +145,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   };
 
   const handleToggleBankVisibility = (id: string) => {
-    const updated = bankAccounts.map((b) => 
+    const updated = bankAccounts.map((b) =>
       b.id === id ? { ...b, isVisibleAtCheckout: !b.isVisibleAtCheckout } : b
     );
     onUpdateBankAccounts(updated);
@@ -210,10 +210,43 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   };
 
   const [isSavingCod, setIsSavingCod] = useState(false);
+  /**
+   * "Save COD Rules".
+   *
+   * WHY THIS ONE IS SO DEFENSIVE
+   * ----------------------------
+   * The advance-delivery toggle + amount are the ONE thing a merchant can set
+   * here that also costs a CUSTOMER money at checkout, so "it looked saved but
+   * never reached the database" is not an acceptable failure mode. This handler
+   * therefore:
+   *
+   *   1. builds the advance values EXPLICITLY (`=== true` / `Number(...)`), so
+   *      a boolean/string from the form can never be normalised to `undefined`;
+   *   2. sends them inside the canonical `shippingConfig` object the store,
+   *      storefront payload and `/api/store/shipping-config` all speak — and
+   *      ALSO under their flat snake_case column names, which the route reads
+   *      as a fallback (older servers only look at the top-level body);
+   *   3. READS the config back and compares the advance fields, because a write
+   *      that silently drops a column (schema drift on Supabase `stores`) still
+   *      answers 200 OK;
+   *   4. reports exactly what was stored, so a mismatch is visible instead of
+   *      pretending the checkout will honour a value it never received.
+   */
   const handleSaveCod = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSavingCod) return;
     setIsSavingCod(true);
+
+    // Canonical, explicit values — the single source for both the write and the
+    // read-back comparison.
+    const advanceEnabled = codForm.requestAdvanceDeliveryCharge === true;
+    const advanceAmount = (() => {
+      const raw = codForm.advanceDeliveryChargeAmount;
+      if (raw === '' || raw === null || raw === undefined) return 0;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    })();
+
     // Update local state first so the UI feels instant.
     onUpdateCodConfig(codForm);
     try {
@@ -222,8 +255,8 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       // Without this the toggle looked saved here but reverted on the next load —
       // and the checkout kept asking for an advance the merchant had switched off.
       const saved = await saveShippingConfig(storeSlug, {
-        requestAdvanceDeliveryCharge: codForm.requestAdvanceDeliveryCharge === true,
-        advanceDeliveryChargeAmount: codForm.advanceDeliveryChargeAmount ?? '',
+        requestAdvanceDeliveryCharge: advanceEnabled,
+        advanceDeliveryChargeAmount: advanceAmount,
         insideDhakaFee: codForm.insideDhakaFee ?? '',
         outsideDhakaFee: codForm.outsideDhakaFee ?? '',
         subDhakaFee: codForm.subDhakaFee ?? '',
@@ -234,15 +267,55 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         // validation. Saved with the fees so both land in one write.
         baseCity: codForm.baseCity ?? '',
       });
-      if (saved) {
-        toast.success(
-          saved.requestAdvanceDeliveryCharge
-            ? 'Cash on Delivery settings saved — advance delivery charge is ON.'
-            : 'Cash on Delivery settings saved — no advance payment required at checkout.',
-        );
-      } else {
+
+      if (!saved) {
         toast.error('Cash on Delivery settings could not be saved to the database. Please try again.');
+        return;
       }
+
+      // Read back what the store document now holds. A 200 OK is not proof: a
+      // dropped `advance_amount` column returns 204 with nothing updated, and
+      // the server's write-through cache would echo the value either way.
+      const readBack = await loadShippingConfigWithMeta(storeSlug);
+      const persisted = readBack?.config ?? null;
+      const persistedEnabled = persisted?.requestAdvanceDeliveryCharge === true;
+      const persistedAmount = Number(persisted?.advanceDeliveryChargeAmount ?? 0) || 0;
+      const advanceInSync = persisted
+        ? persistedEnabled === advanceEnabled && persistedAmount === advanceAmount
+        : false;
+
+      if (!persisted) {
+        toast.error('Settings were written, but could not be read back. Reload the page to verify.');
+        return;
+      }
+
+      if (readBack?.source === 'cache') {
+        toast.error(
+          'The settings were accepted but the store document does not hold them yet. ' +
+          'Please reload and save again — the checkout reads the database, not this browser.',
+        );
+        return;
+      }
+
+      if (!advanceInSync) {
+        toast.error(
+          `The advance delivery charge did not persist (saved: ${advanceEnabled ? `ON ৳${advanceAmount}` : 'OFF'}, ` +
+          `stored: ${persistedEnabled ? `ON ৳${persistedAmount}` : 'OFF'}). ` +
+          'Check that the stores table has the advance_delivery_charge_enabled and advance_amount columns.',
+        );
+        return;
+      }
+
+      toast.success(
+        persistedEnabled && persistedAmount > 0
+          ? `Cash on Delivery settings saved — advance delivery charge of ৳${persistedAmount.toLocaleString()} is live at checkout.`
+          : persistedEnabled
+            ? 'Cash on Delivery settings saved — advance charge is ON (amount ৳0 → nothing collected upfront).'
+            : 'Cash on Delivery settings saved — no advance payment required at checkout.',
+      );
+    } catch (err: any) {
+      console.warn('[PaymentsView] COD save warning:', err?.message || err);
+      toast.error('Cash on Delivery settings could not be saved. Please try again.');
     } finally {
       setIsSavingCod(false);
     }

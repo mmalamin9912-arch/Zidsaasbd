@@ -6,6 +6,8 @@ import { resolveDeliveryCharge, resolveProductDeliveryRates, readMerchantFee, to
 // server so the checkout's zone picker can never disagree with the API.
 import {
   BANGLADESH_DISTRICTS,
+  BANGLADESH_DISTRICT_AREAS,
+  getDistrictAreas,
   resolveDeliveryZoneForCity,
 } from '../../lib/deliveryZones';
 import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera } from 'lucide-react';
@@ -1971,9 +1973,14 @@ The render below must not guess. A merchant may paste
   // is the single control for this, so the shipping area can never drift out of
   // sync with what the customer picked (and the total updates with it).
   const [shippingArea, setShippingArea] = useState<'inside' | 'outside'>('inside');
-  // The customer's own city / district. It is the INPUT that decides the
-  // delivery zone — the merchant's base city decides which zone is legal.
-  const [custCity, setCustCity] = useState('');
+  // The customer's location is collected as TWO fields:
+  //   1. `custDistrict` — District / জেলা (Dhaka, Chattogram, Khulna, …)
+  //   2. `custCityArea` — City / Area / Thana / এলাকা inside it (Uttara, …)
+  // The district is the INPUT that decides the delivery zone — the merchant's
+  // base city decides which zone is legal — and the area is what makes the
+  // address routable (and lets a non-delivery area be filtered out).
+  const [custDistrict, setCustDistrict] = useState('');
+  const [custCityArea, setCustCityArea] = useState('');
   const [custAddress, setCustAddress] = useState('');
   const [custTxId, setCustTxId] = useState('');
   const [custSenderPhone, setCustSenderPhone] = useState('');
@@ -2083,7 +2090,7 @@ The render below must not guess. A merchant may paste
     | undefined;
 
   /**
-   * The districts the "City / District" dropdown lists.
+   * The districts the "District / জেলা" dropdown lists.
    *
    * The server sends the canonical list in the storefront payload; the shared
    * constant is the offline / pre-fetch fallback so the dropdown is never
@@ -2096,6 +2103,35 @@ The render below must not guess. A merchant may paste
     }
     return [...BANGLADESH_DISTRICTS];
   }, [liveStoreData]);
+
+  /**
+   * City / Area / Thana options for the SELECTED district — the dependent
+   * second dropdown. The server sends the full district → areas map; the
+   * shared constant is the offline fallback so the list is populated even
+   * before the payload lands.
+   */
+  const checkoutCityAreas: Record<string, string[]> = useMemo(() => {
+    const fromPayload = (liveStoreData as any).cityAreas;
+    if (fromPayload && typeof fromPayload === 'object' && !Array.isArray(fromPayload)) {
+      const entries = Object.entries(fromPayload as Record<string, unknown>)
+        .filter(([, areas]) => Array.isArray(areas))
+        .map(([district, areas]) => [district, (areas as unknown[]).map(String).filter(Boolean)]);
+      if (entries.length > 0) return Object.fromEntries(entries);
+    }
+    return BANGLADESH_DISTRICT_AREAS as unknown as Record<string, string[]>;
+  }, [liveStoreData]);
+
+  /**
+   * The area options for the district the customer picked. Empty means this
+   * district has no curated list — the checkbox then renders a free-text area
+   * input so the customer is never blocked from ordering.
+   */
+  const areaOptionsForDistrict: string[] = useMemo(() => {
+    if (!custDistrict) return [];
+    const direct = checkoutCityAreas[custDistrict];
+    if (Array.isArray(direct) && direct.length > 0) return direct;
+    return getDistrictAreas(custDistrict);
+  }, [checkoutCityAreas, custDistrict]);
 
   /**
    * The merchant's BASE CITY, read from the storefront payload first and from
@@ -2124,7 +2160,9 @@ The render below must not guess. A merchant may paste
    * • No base city configured            → both remain available.
    */
   const deliveryZoneResolution = resolveDeliveryZoneForCity({
-    city: custCity,
+    // The DISTRICT decides the zone — a city/area ("Uttara") is inside Dhaka,
+    // so matching on the area name alone would misclassify every Dhaka order.
+    city: custDistrict,
     baseCity: merchantBaseCity,
   });
   const insideZoneAllowed = deliveryZoneResolution.insideAllowed;
@@ -2142,7 +2180,10 @@ The render below must not guess. A merchant may paste
    * choice is no longer selectable.
    */
   const handleCustomerCityChange = (city: string) => {
-    setCustCity(city);
+    setCustDistrict(city);
+    // The area belongs to the PREVIOUS district — clear it so a stale "Uttara"
+    // can never be submitted against Khulna.
+    setCustCityArea('');
     const resolution = resolveDeliveryZoneForCity({ city, baseCity: merchantBaseCity });
     if (!resolution.hasBaseCity) return;
     setShippingArea((current) => {
@@ -2395,44 +2436,34 @@ The render below must not guess. A merchant may paste
   const advanceChargeAmount = readAdvanceChargeAmount(...advanceSources);
 
   // ── How much is collected upfront on COD? ─────────────────────────────────
-  //   `advance_delivery_charge_enabled` FALSE → ৳0 ("Nothing to pay now")
-  //   enabled, `advance_amount` > 0           → that EXACT merchant number
-  //   enabled, `advance_amount` 0 / empty    → the SELECTED delivery-zone fee
-  //                                            (Inside vs Outside City), i.e.
-  //                                            the customer pre-pays the
-  //                                            actual delivery charge for the
-  //                                            zone their city maps to.
-  // The zone fee is the SELECTED zone's own fee (`insideAreaFee` /
-  // `outsideAreaFee`) — already resolved from the customer's city-derived zone,
-  // with per-product overrides and the free-shipping threshold applied. Reading
-  // the zone directly keeps the advance correct even if the customer's city has
-  // not been picked yet. There is no hardcoded amount anywhere in this chain.
-  const selectedZoneFeeRaw =
-    effectiveShippingArea === 'inside' ? insideAreaFee : outsideAreaFee;
-  const selectedZoneFee = Math.max(0, selectedZoneFeeRaw);
-  const selectedZoneAdvance = qualifiesForFreeShipping ? 0 : selectedZoneFee;
-  // A zone's fee is "priced" when the merchant saved any number for it — an
-  // explicit ৳0 counts. An unpriced zone must not silently charge *something*
-  // as a "free" advance, so the advance panel is only shown when there is a
-  // real fee or a real configured amount.
-  const selectedZoneConfigured =
-    effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured;
-  const advanceDeliveryFeeAmount = advanceChargeAmount > 0
-    ? advanceChargeAmount
-    : (advanceChargeEnabled ? selectedZoneAdvance : 0);
+  // The merchant's two columns are the WHOLE rule — nothing is inferred:
+  //
+  //   `advance_delivery_charge_enabled` FALSE → ৳0 ("Nothing to pay now — ৳0 BDT")
+  //   enabled, `advance_amount` > 0           → that EXACT amount, shown in the
+  //                                             breakdown, and a bKash/Nagad
+  //                                             TrxID is REQUIRED to order
+  //   enabled, `advance_amount` = 0 / blank   → ৳0. An enabled toggle with a
+  //                                             zero amount means "collect
+  //                                             nothing upfront", NOT "charge
+  //                                             the zone fee instead" — the
+  //                                             amount is never substituted.
+  //
+  // There is no hardcoded amount anywhere in this chain.
+  const advanceDeliveryFeeAmount = advanceChargeEnabled
+    ? Math.max(0, advanceChargeAmount)
+    : 0;
 
-  // A COD order collects an advance only when the merchant enabled it and there
-  // is an amount to collect (a ৳0 zone fee means nothing is due upfront). When
-  // the advance falls back to the zone fee, that fee must actually be priced —
-  // an unpriced zone cannot be invented into a charge.
+  // A COD order collects an advance only when the merchant enabled it AND
+  // configured a positive amount. That is what gates the advance panel AND the
+  // mandatory TrxID input.
   const requiresAdvanceFee =
     payMethod === 'cod'
     && advanceChargeEnabled
-    && advanceDeliveryFeeAmount > 0
-    && (advanceChargeAmount > 0 || selectedZoneConfigured);
-  // True when the advance equals the zone delivery fee because no fixed amount
-  // was configured — the panel tells the customer which zone it came from.
-  const advanceUsesZoneFee = advanceChargeEnabled && advanceChargeAmount <= 0;
+    && advanceDeliveryFeeAmount > 0;
+
+  // The advance never falls back to the zone delivery fee. Kept as a named
+  // constant so the COD panel copy below has one rule to read.
+  const advanceUsesZoneFee = false;
 
   const selectedAdvConfig = advanceMethodsAvailable.find(m => m.provider === codAdvanceProvider) || advanceMethodsAvailable[0] || enabledMobileMethods[0];
 
@@ -2747,6 +2778,18 @@ The render below must not guess. A merchant may paste
       setPayValidationError('');
     }
 
+    // COD with an advance charge is only verifiable with the TrxID of the
+    // advance transfer. `required` on the input covers normal submits; this
+    // guard covers Enter-key submits and autofill oddities — and it is driven
+    // by the SAME `requiresAdvanceFee` flag that renders the panel, so the
+    // rule can never disagree with what the customer is shown.
+    if (payMethod === 'cod' && requiresAdvanceFee && !custTxId.trim()) {
+      setPayValidationError(
+        `Please send the ৳${totalAdvancePayable.toLocaleString()} advance and enter the bKash/Nagad Transaction ID (TrxID).`,
+      );
+      return;
+    }
+
     // Enforce per-line quantity limits (Settings -> Orders and products
     // properties). The cart is clamped on entry, but a limit tightened after
     // items were added must still block the order.
@@ -2802,7 +2845,16 @@ The render below must not guess. A merchant may paste
       source: 'Store',
       customerName: customerSession?.name || custName,
       customerPhone: customerSession?.phone || custPhone,
-      customerCity: custCity || (effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'),
+      // ── Location, saved as TWO columns ──────────────────────────────────
+      //   district  → orders.district   (District / জেলা)
+      //   cityArea  → orders.city_area  (City / Area / Thana)
+      // `customerCity` stays populated for every legacy reader and the courier
+      // sheet, combining the two in the order a postal address uses.
+      district: custDistrict || undefined,
+      cityArea: custCityArea.trim() || undefined,
+      customerCity:
+        [custCityArea.trim(), custDistrict].filter(Boolean).join(', ')
+        || (effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'),
       deliveryZone: effectiveShippingArea === 'inside' ? 'Inside Dhaka' : 'Outside Dhaka',
       address: custAddress,
       platform: 'Mobile web',
@@ -2835,6 +2887,8 @@ The render below must not guess. A merchant may paste
       createdAt: new Date().toLocaleString(),
       storeSlug: effectiveStoreSlug,
       merchantId: (merchant as any)?.id || '',
+      // The stored address line already ends with the district/area the
+      // customer picked; keep it explicit so the parcel label needs no join.
       items,
       // Tax captured at time of order so the receipt stays accurate even if the
       // merchant later changes the rate.
@@ -4569,38 +4623,84 @@ The render below must not guess. A merchant may paste
                 </div>
 
                 <div className="space-y-3">
-                  {/* ── City / District ──────────────────────────────────────
-                      The customer's district is the INPUT that decides the
-                      delivery zone. Combined with the merchant's base city it
-                      makes the cheaper zone impossible to fake. */}
-                  <div>
-                    <label htmlFor="checkout-city" className="block mb-1.5 font-bold text-xs text-slate-300">
-                      City / District *
-                    </label>
-                    <select
-                      id="checkout-city"
-                      data-testid="checkout-city"
-                      required
-                      value={custCity}
-                      onChange={(e) => handleCustomerCityChange(e.target.value)}
-                      className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
-                    >
-                      <option value="">Select your city / district</option>
-                      {checkoutDistricts.map((district) => (
-                        <option key={district} value={district}>{district}</option>
-                      ))}
-                    </select>
-                    {deliveryZoneIsForced && custCity && (
-                      <p
-                        data-testid="checkout-zone-hint"
-                        className="mt-1.5 text-[11px] font-medium text-amber-300"
+                  {/* ── District + City / Area / Thana ───────────────────────
+                      TWO fields, in the order a postal address is read:
+                        1. District / জেলা        — decides the delivery ZONE
+                        2. City / Area / Thana    — decides the ROUTE
+                      The district is the input that makes the cheaper zone
+                      impossible to fake; the area is the dependent dropdown
+                      that tells the courier exactly where to go (and lets a
+                      non-delivery area be filtered out). */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="checkout-district" className="block mb-1.5 font-bold text-xs text-slate-300">
+                        District / জেলা *
+                      </label>
+                      <select
+                        id="checkout-district"
+                        data-testid="checkout-district"
+                        required
+                        value={custDistrict}
+                        onChange={(e) => handleCustomerCityChange(e.target.value)}
+                        className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
                       >
-                        {deliveryZoneResolution.isBaseCity
-                          ? `You selected ${custCity} — our city. Delivery applies the Inside City rate.`
-                          : `You selected ${custCity} — outside our city (${merchantBaseCity}). Delivery applies the Outside City rate.`}
-                      </p>
-                    )}
+                        <option value="">Select district / জেলা</option>
+                        {checkoutDistricts.map((district) => (
+                          <option key={district} value={district}>{district}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="checkout-city-area" className="block mb-1.5 font-bold text-xs text-slate-300">
+                        City / Area / Thana / এলাকা *
+                      </label>
+                      {/* Dependent: only the areas of the district above. When
+                          that district has no curated list we fall back to a
+                          free-text input rather than blocking the order. */}
+                      {areaOptionsForDistrict.length > 0 ? (
+                        <select
+                          id="checkout-city-area"
+                          data-testid="checkout-city-area"
+                          required
+                          disabled={!custDistrict}
+                          value={custCityArea}
+                          onChange={(e) => setCustCityArea(e.target.value)}
+                          className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          <option value="">
+                            {custDistrict ? 'Select area / thana' : 'Select a district first'}
+                          </option>
+                          {areaOptionsForDistrict.map((area) => (
+                            <option key={area} value={area}>{area}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          id="checkout-city-area"
+                          data-testid="checkout-city-area"
+                          type="text"
+                          required
+                          disabled={!custDistrict}
+                          value={custCityArea}
+                          onChange={(e) => setCustCityArea(e.target.value)}
+                          placeholder={custDistrict ? 'Area / Thana / Upazila' : 'Select a district first'}
+                          className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                        />
+                      )}
+                    </div>
                   </div>
+
+                  {deliveryZoneIsForced && custDistrict && (
+                    <p
+                      data-testid="checkout-zone-hint"
+                      className="text-[11px] font-medium text-amber-300"
+                    >
+                      {deliveryZoneResolution.isBaseCity
+                        ? `You selected ${custDistrict} — our city. Delivery applies the Inside City rate.`
+                        : `You selected ${custDistrict} — outside our city (${merchantBaseCity}). Delivery applies the Outside City rate.`}
+                    </p>
+                  )}
 
                   <div>
                     <label className="block mb-1.5 font-bold text-xs text-slate-300">Delivery Zone</label>

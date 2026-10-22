@@ -117,7 +117,15 @@ export function normalizeOrder(raw: any): Order {
     orderNumber: String(order.orderNumber ?? order.order_number ?? order.id ?? ''),
     customerName: String(order.customerName ?? order.customer_name ?? 'Customer'),
     customerPhone: String(order.customerPhone ?? order.customer_phone ?? ''),
-    customerCity: String(order.customerCity ?? order.customer_city ?? ''),
+    // District + City/Area are the canonical location pair written by the
+    // checkout; `customerCity` stays as the single display string so older rows
+    // (and every table that prints one line) keep working.
+    district: String(order.district ?? order.customer_district ?? order.district_name ?? ''),
+    cityArea: String(order.cityArea ?? order.city_area ?? order.customer_area ?? ''),
+    customerCity: String(
+      order.customerCity ?? order.customer_city ??
+      [order.cityArea, order.city_area, order.district].filter(Boolean).join(', '),
+    ),
     deliveryZone: order.deliveryZone ?? 'Inside Dhaka',
     address: String(order.address ?? order.shipping_address ?? ''),
     totalBDT,

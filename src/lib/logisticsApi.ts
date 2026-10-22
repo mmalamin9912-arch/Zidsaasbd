@@ -129,13 +129,31 @@ export async function saveShippingConfig(
 export async function loadShippingConfig(
   storeRef: string | null | undefined,
 ): Promise<ShippingConfig | null> {
+  const result = await loadShippingConfigWithMeta(storeRef);
+  return result?.config ?? null;
+}
+
+/**
+ * Load the delivery-fee rules WITH the layer that answered.
+ *
+ * `source` is `'cache'` when the server could not find the config on the store
+ * document and fell back to its in-process write-through cache. A caller that
+ * is VERIFYING a save must treat `'cache'` as "not proven stored" — the echo of
+ * its own write is exactly what made a never-persisted advance charge look
+ * saved.
+ */
+export async function loadShippingConfigWithMeta(
+  storeRef: string | null | undefined,
+): Promise<{ config: ShippingConfig; source: 'database' | 'cache' } | null> {
   const store_slug = resolveRef(storeRef);
   if (!store_slug) return null;
   try {
     const res = await fetch(`/api/store/shipping-config?store_slug=${encodeURIComponent(store_slug)}`);
     const data = await safeJson<Record<string, any>>(res);
     if (!data || data.ok === false) return null;
-    return normalizeShipping(data.shippingConfig);
+    const config = normalizeShipping(data.shippingConfig);
+    if (!config) return null;
+    return { config, source: data.source === 'cache' ? 'cache' : 'database' };
   } catch (e: any) {
     console.warn('[logisticsApi] shipping load failed:', e?.message || e);
     return null;
@@ -187,6 +205,7 @@ export async function loadCourierConfig(
 export default {
   saveShippingConfig,
   loadShippingConfig,
+  loadShippingConfigWithMeta,
   saveCourierConfig,
   loadCourierConfig,
 };

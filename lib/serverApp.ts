@@ -59,6 +59,7 @@ import {
   resolveMerchantBaseCity,
   resolveDeliveryZoneForCity,
   BANGLADESH_DISTRICTS,
+  BANGLADESH_DISTRICT_AREAS,
 } from './deliveryZones.js';
 // Shared gallery defaults + the Unsplash purge. Kept in its own module so the
 // server AND the browser bundle apply the exact same rule when a saved
@@ -4011,7 +4012,7 @@ app.post('/api/ai/generate-text', async (req, res) => {
     });
   }
 });
- 
+
 /**
  * POST /api/zid-ai (aliases: /api/chat, /api/ai/chat) — multi-turn Zid AI chat.
  *
@@ -4178,11 +4179,11 @@ app.post('/api/ai/broadcast-email', async (req, res) => {
       topic?: string;
       targetAudience?: string;
     };
- 
+
     if (!topic || typeof topic !== 'string' || !topic.trim()) {
       return res.status(400).json({ ok: false, error: 'bad_request', message: 'A non-empty "topic" is required.' });
     }
- 
+
     const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
       return res.status(200).json({
@@ -4192,7 +4193,7 @@ app.post('/api/ai/broadcast-email', async (req, res) => {
         body: `Dear Merchant,\n\n${topic}.\n\nThis message was sent to ${targetAudience || 'All Merchants'}.\n\nBest regards,\nThe Zid Team`,
       });
     }
- 
+
     const prompt = [
       'You are Zid AI, the built-in assistant of the Zid SaaS e-commerce platform for Bangladeshi merchants.',
       'Write a professional broadcast email for platform admins to send to merchants.',
@@ -4206,14 +4207,14 @@ app.post('/api/ai/broadcast-email', async (req, res) => {
       '- Match the language of the topic (Bengali/Banglish/English).',
       '- Do NOT include placeholders like [Merchant Name]; use "Dear Merchant".',
     ].join('\n');
- 
+
     const candidates = ['gemini-2.5-flash', 'gemini-1.5-flash'];
- 
+
     for (const model of candidates) {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000);
- 
+
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
         const providerRes = await fetch(url, {
           method: 'POST',
@@ -4224,9 +4225,9 @@ app.post('/api/ai/broadcast-email', async (req, res) => {
           }),
           signal: controller.signal,
         });
- 
+
         clearTimeout(timeoutId);
- 
+
         if (providerRes.status === 400 || providerRes.status === 403) {
           const detail = await providerRes.json().catch(() => ({}));
           console.warn('[Server] broadcast-email AI provider key error:', detail?.error?.message);
@@ -4253,13 +4254,13 @@ app.post('/api/ai/broadcast-email', async (req, res) => {
           console.warn(`[Server] broadcast-email AI model "${model}" failed (${providerRes.status}); trying next.`);
           continue;
         }
- 
+
         const data = await providerRes.json().catch(() => null);
         const text: string =
           data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('')?.trim() || '';
- 
+
         if (!text) continue;
- 
+
         // Extract first balanced JSON object
         const match = text.match(/\{[\s\S]*\}/);
         if (match) {
@@ -4280,7 +4281,7 @@ app.post('/api/ai/broadcast-email', async (req, res) => {
         }
       }
     }
- 
+
     // All models failed — use clean template fallback
     return res.status(200).json({
       ok: true,
@@ -4298,7 +4299,7 @@ app.post('/api/ai/broadcast-email', async (req, res) => {
     });
   }
 });
- 
+
 // POST /api/ai/suggest-pricing — never turn a provider failure into a 404/500
 // response. The product save flow must be usable even when AI is unavailable.
 app.post('/api/ai/suggest-pricing', async (req, res) => {
@@ -6043,9 +6044,27 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       // `advance_delivery_charge_enabled` + `advance_amount`) always wins over
       // any older camelCase mirror. `readAdvanceCharge*` on the client still
       // falls back to codConfig/shippingConfig when these are absent.
+      //
+      // `merchantRecord` is the Supabase `stores` row (select=*), so its
+      // snake_case COLUMNS are read first and only then the config blobs:
+      //   advance_delivery_charge_enabled  boolean
+      //   advance_amount                   numeric
+      // A column holding an explicit value therefore always beats a stale
+      // JSON mirror; a column that is absent (older schema) leaves the blob in
+      // charge instead of forcing OFF.
       advanceDeliveryCharge: {
-        enabled: resolveAdvanceChargeEnabled(codConfig, shippingConfig, merchantRecord),
-        amount: resolveAdvanceChargeAmount(codConfig, shippingConfig, merchantRecord),
+        enabled: resolveAdvanceChargeEnabled(
+          advanceColumnSource(merchantRecord),
+          codConfig,
+          shippingConfig,
+          merchantRecord,
+        ),
+        amount: resolveAdvanceChargeAmount(
+          advanceColumnSource(merchantRecord),
+          codConfig,
+          shippingConfig,
+          merchantRecord,
+        ),
       },
       // ── Delivery fees + base city — canonical, DB-shaped keys ────────────
       // Every number here is the merchant's OWN saved value, read from the
@@ -6071,8 +6090,12 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       // zone from it: picking this city enables "Inside City", picking any
       // other district forces "Outside City" and blocks the cheaper option.
       baseCity: resolveMerchantBaseCity(merchantRecord, storefrontMerchant),
-      // The district list the checkout's "City / District" dropdown renders.
+      // The district list the checkout's "District / জেলা" dropdown renders.
       districts: BANGLADESH_DISTRICTS,
+      // City / Area / Thana options per district — the dependent second
+      // dropdown (e.g. Uttara, Mirpur, Dhanmondi for Dhaka). A district with no
+      // list here gets a free-text area field at checkout instead.
+      cityAreas: BANGLADESH_DISTRICT_AREAS,
       // Public storefront modules. Only published pages/posts are exposed.
       brandConfig,
       navigationMenus,
@@ -11365,7 +11388,15 @@ app.post('/api/store/policies', async (req, res) => {
 // with an in-memory cache so values survive reads when MONGODB_URI is unset.
 
 /** Shared scalar coercers used by every store config sanitiser. */
-const cfgBool = (v: any, fb: any) => (typeof v === 'boolean' ? v : (typeof fb === 'boolean' ? fb : false));
+// A boolean setting may arrive as a real boolean (JSON) OR as the string the
+// SQL column / form control produced ('true' / 'false' / '1' / '0'). Both are
+// the merchant's explicit intent and must be honoured — coercing only real
+// booleans silently discarded a toggled-ON advance charge.
+const cfgBool = (v: any, fb: any) => {
+  if (v === true || v === 'true' || v === 1 || v === '1') return true;
+  if (v === false || v === 'false' || v === 0 || v === '0') return false;
+  return typeof fb === 'boolean' ? fb : false;
+};
 const cfgStr = (v: any, fb: any) => (typeof v === 'string' ? v : (typeof fb === 'string' ? fb : ''));
 
 /**
@@ -11702,12 +11733,20 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
       return n === 0 ? null : n;
     })(),
     maxOrderLimit: cfgNumOrNull(src.maxOrderLimit, fallback.maxOrderLimit, { min: 0 }),
+    // The toggle accepts EVERY spelling the panels/schema have ever used, so a
+    // save from PaymentsView, LogisticsView or a flat SQL-shaped payload all
+    // land on the same canonical boolean.
     requestAdvanceDeliveryCharge: cfgBool(
-      src.requestAdvanceDeliveryCharge,
+      src.requestAdvanceDeliveryCharge
+        ?? src.request_advance_delivery_charge
+        ?? src.advance_delivery_charge_enabled
+        ?? src.advanceDeliveryChargeEnabled,
       fallback.requestAdvanceDeliveryCharge,
     ),
     advanceDeliveryChargeAmount: cfgNumOrNull(
-      src.advanceDeliveryChargeAmount,
+      src.advanceDeliveryChargeAmount
+        ?? src.advance_delivery_charge_amount
+        ?? src.advance_amount,
       fallback.advanceDeliveryChargeAmount,
       { min: 0 },
     ),
@@ -11944,6 +11983,35 @@ function resolveAdvanceChargeEnabled(...sources: any[]): boolean {
   return false;
 }
 
+/**
+ * Just the DEDICATED advance-charge COLUMNS of a store row, or `null` when the
+ * row does not carry them.
+ *
+ * `advance_delivery_charge_enabled` and `advance_amount` are a real boolean and
+ * numeric column on Supabase `stores` (migrations 0012 / 0013). Reading them as
+ * their own source means:
+ *
+ *   • an explicit column value always wins over a stale JSON mirror, and
+ *   • a column that does NOT exist (older schema — `undefined`) contributes
+ *     nothing, so the resolver falls through to the config blobs instead of
+ *     misreading the store as "advance charge OFF".
+ */
+function advanceColumnSource(store: any): Record<string, any> | null {
+  if (!store || typeof store !== 'object') return null;
+  const enabled =
+    store.advance_delivery_charge_enabled ??
+    // Mongo mirror written alongside the shipping config.
+    (store.shippingConfig && typeof store.shippingConfig === 'object'
+      ? store.shippingConfig.requestAdvanceDeliveryCharge
+      : undefined);
+  const amount = store.advance_amount ?? store.advanceDeliveryChargeAmount;
+  if (enabled === undefined && amount === undefined) return null;
+  return {
+    ...(enabled === undefined ? {} : { advance_delivery_charge_enabled: enabled }),
+    ...(amount === undefined ? {} : { advance_amount: amount }),
+  };
+}
+
 /** The configured advance amount (৳ BDT). 0 when unset / not configured. */
 function resolveAdvanceChargeAmount(...sources: any[]): number {
   const asNum = (v: any): number | undefined => {
@@ -12027,6 +12095,7 @@ async function readStoreConfig(name: StoreConfigName, storeRef: string) {
   const cached = cache.get(slug) || {};
 
   let stored: Record<string, any> = {};
+  let storedFound = false;
   try {
     const record = slug ? await resolveStoreRecordFlexible(slug) : null;
     // Prefer the canonical key; fall back to a legacy one when it is absent.
@@ -12034,6 +12103,7 @@ async function readStoreConfig(name: StoreConfigName, storeRef: string) {
       const value = (record as any)?.[k];
       if (value && typeof value === 'object') {
         stored = value as Record<string, any>;
+        storedFound = true;
         break;
       }
     }
@@ -12043,8 +12113,18 @@ async function readStoreConfig(name: StoreConfigName, storeRef: string) {
 
   const merged = normalize(stored, cached);
   cache.set(slug, merged);
+  // Record where the answer came from. A caller that VERIFIES a write must not
+  // read the write-through cache back as "the database has it".
+  storeConfigSourceCache.set(`${name}:${slug}`, storedFound ? 'database' : 'cache');
   return merged;
 }
+
+/**
+ * Which layer answered the last `readStoreConfig` for `name:storeRef`.
+ * Read by the GET route so the dashboard's post-save verification can tell a
+ * real database value from the in-process cache echo of its own write.
+ */
+const storeConfigSourceCache = new Map<string, 'database' | 'cache'>();
 
 async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: any) {
   const { cache, normalize } = storeConfigs[name];
@@ -12056,6 +12136,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
   const current = await readStoreConfig(name, slug);
   const next = normalize(patch, current);
   cache.set(slug, next);
+  storeConfigSourceCache.set(`${name}:${slug}`, 'cache');
 
   // 1. Durable copy on the store record.
   try {
@@ -12184,11 +12265,18 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
             },
           },
         );
-        if (!sbResult.ok && (sbResult.status === 404 || !sbResult.droppedColumns.length)) {
-          // No row for this slug yet → insert just the advance columns.
-          await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
+        // A PATCH that matches NO row returns 204 (ok) and silently updates
+        // nothing — that is exactly how "Save COD Rules" used to look saved
+        // while `advance_delivery_charge_enabled` never reached Supabase. When
+        // the table has a `store_slug` Promoted column we can detect "0 rows
+        // updated" and fall back to an upsert, so the row is created.
+        const updatedNothing = sbResult.ok && sbResult.status === 204
+          && !sbResult.droppedColumns.length;
+
+        if (!sbResult.ok || updatedNothing) {
+          const upsert = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
             method: 'POST',
-            headers: { Prefer: 'resolution=merge-duplicates' },
+            headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
             body: {
               store_slug: slug,
               is_cod_enabled: codEnabledColumn,
@@ -12201,11 +12289,24 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
             },
             conflictPatchPath: `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`,
           }).catch(() => undefined);
-        } else if (!sbResult.ok) {
+
+          if (!upsert?.ok) {
+            console.warn(
+              '[Server] shipping Supabase mirror warning:',
+              upsert?.status ?? sbResult.status,
+              String(upsert?.detail || sbResult.detail || '').slice(0, 200),
+            );
+          }
+        }
+
+        // A dropped column means the deployed `stores` table predates the
+        // advance-charge / delivery-fee migration. Never fail silently: say so,
+        // because the storefront is then reading a column that does not exist.
+        if (sbResult.droppedColumns.length || updatedNothing) {
           console.warn(
-            '[Server] shipping Supabase mirror warning:',
-            sbResult.status,
-            String(sbResult.detail || '').slice(0, 200),
+            '[Server] shipping Supabase mirror: columns missing on public.stores —',
+            sbResult.droppedColumns.join(', ') || '(row not found, upserted)',
+            '· run supabase/migrations/0012 & 0013 to enable the advance-charge columns.',
           );
         }
       }
@@ -12360,6 +12461,22 @@ for (const route of CONFIG_ROUTES) {
     // No wrapper object — treat the body itself as the config (ignoring the
     // routing fields) so a flat payload still works.
     const { store_slug, storeSlug, storeId, ...rest } = body;
+    // Flat snake_case COLUMN spellings sent alongside the config object ("Save
+    // COD Rules" sends them so an older server still receives the values).
+    // Promote them INTO the config, where they are then normalised together
+    // with everything else — never left as stray top-level keys.
+    const aliases: Record<string, string> = {
+      advance_delivery_charge_enabled: 'requestAdvanceDeliveryCharge',
+      advance_amount: 'advanceDeliveryChargeAmount',
+      inside_dhaka_fee: 'insideDhakaFee',
+      outside_dhaka_fee: 'outsideDhakaFee',
+    };
+    for (const [column, configKey] of Object.entries(aliases)) {
+      if (rest[column] !== undefined && rest[configKey] === undefined) {
+        rest[configKey] = rest[column];
+      }
+      delete rest[column];
+    }
     return rest;
   };
 
@@ -12382,6 +12499,11 @@ for (const route of CONFIG_ROUTES) {
       return res.status(200).json({
         ok: true,
         store_slug: storeRef,
+        // Where this copy came from. `readStoreConfig` falls back to the
+        // in-process write-through cache when the store document holds no
+        // saved config, so a client that wants to VERIFY a write must know
+        // whether it is reading the database or a cache echo.
+        source: storeConfigSourceCache.get(`${name}:${storeRef}`) || 'database',
         // Return the config under both the canonical and any alias key so older
         // clients keep working during the rename.
         ...Object.fromEntries(configKeys(name).map((k) => [k, serialize(config)])),
@@ -14721,7 +14843,28 @@ app.post('/api/orders', async (req, res) => {
         order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
         customer_name: order.customerName || order.customer_name || 'Customer',
         customer_phone: order.customerPhone || order.customer_phone || '',
-        customer_city: order.customerCity || order.customer_city || '',
+        // ── District + City/Area ────────────────────────────────────────────
+        // The checkout collects them as TWO fields (District, then the
+        // City / Area / Thana inside it) so a courier can route the parcel and
+        // a non-delivery area can be filtered out. Persisted under their own
+        // canonical column names AND folded into `customer_city` for every
+        // legacy reader (dashboard tables, CSV export, courier payloads).
+        district: String(order.district || order.district_name || order.districtName || order.customer_district || '').trim(),
+        city_area: String(
+          order.cityArea || order.city_area || order.customer_area || order.area || order.thana || '',
+        ).trim(),
+        customer_district: String(order.district || order.district_name || order.districtName || order.customer_district || '').trim(),
+        customer_area: String(
+          order.cityArea || order.city_area || order.customer_area || order.area || order.thana || '',
+        ).trim(),
+        customer_city: String(
+          order.customerCity || order.customer_city ||
+          [
+            order.cityArea || order.city_area || order.area || order.thana,
+            order.district || order.district_name || order.districtName,
+          ].filter(Boolean).join(', ') ||
+          '',
+        ),
         shipping_address: String(order.address || order.shipping_address || '').trim(),
         // `items` is persisted as a JSON string; keep normalizing here so readers
         // always get a parseable value rather than a raw object/undefined.
@@ -14735,6 +14878,12 @@ app.post('/api/orders', async (req, res) => {
         payment_method: order.paymentMethod || order.payment_method || 'COD',
         payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
         transaction_id: order.transactionId || order.transaction_id || null,
+        // The merchant-configured Advance Delivery Charge actually collected
+        // upfront (0 when the toggle is off), and the cash balance still due on
+        // delivery. Recorded explicitly so the dashboard/reconciliation never
+        // has to re-derive the split.
+        advance_delivery_paid: toNumeric(order.advanceDeliveryPaidBDT ?? order.advance_delivery_paid, 0),
+        cod_balance: toNumeric(order.codBalanceBDT ?? order.cod_balance, 0),
         status: order.status || 'New',
         source,
         order_source: source,

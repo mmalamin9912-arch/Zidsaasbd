@@ -105,6 +105,114 @@ export const BANGLADESH_DISTRICTS: readonly string[] = [
 ];
 
 /**
+ * City / Area / Thana / Upazila options per district.
+ *
+ * The checkout's FIRST dropdown picks the district; the SECOND one lists only
+ * the areas of that district. Dhaka is listed exhaustively (thanas + the
+ * well-known residential areas couriers actually deliver to) because that is
+ * where most Bangladeshi online orders go, and where a non-serviceable area is
+ * most likely to slip through. The other 63 districts use their upazila names,
+ * which is what a courier zone sheet is keyed on.
+ *
+ * Areas are plain strings so they round-trip through Supabase/Mongo unchanged.
+ * A district missing from this map gets a free-text area field on the checkout,
+ * so the customer is never blocked from ordering.
+ */
+export const BANGLADESH_DISTRICT_AREAS: Record<string, readonly string[]> = {
+  Dhaka: [
+    'Adabor', 'Badda', 'Banani', 'Bangshal', 'Cantonment', 'Chawkbazar',
+    'Dakshinkhan', 'Darus Salam', 'Demra', 'Dhanmondi', 'Gendaria',
+    'Gulshan', 'Hazaribagh', 'Jatrabari', 'Kadamtali', 'Kafrul',
+    'Kalabagan', 'Kamrangirchar', 'Khilgaon', 'Khilkhet', 'Kotwali',
+    'Lalbagh', 'Mirpur', 'Mohammadpur', 'Motijheel', 'Mugda', 'New Market',
+    'Pallabi', 'Paltan', 'Ramna', 'Rampura', 'Sabujbagh', 'Shahbagh',
+    'Shah Ali', 'Sher-e-Bangla Nagar', 'Shyampur', 'Sutrapur', 'Tejgaon',
+    'Turag', 'Uttara', 'Uttarkhan', 'Vatara',
+    // Popular residential / commercial areas customers search by name
+    'Bashundhara R/A', 'Baridhara', 'Banasree', 'Aftabnagar', 'Baily Road',
+    'Farmgate', 'Green Road', 'Karwan Bazar', 'Malibagh', 'Manikdi',
+    'Moghbazar', 'Nadda', 'Nikunja', 'Rayer Bazar', 'Shyamoli', 'Siddheshwari',
+  ],
+  Chattogram: [
+    'Anwara', 'Banshkhali', 'Bayezid', 'Boalkhali', 'Chandanaish', 'Chandgaon',
+    'Double Mooring', 'Fatikchhari', 'Halishahar', 'Hathazari', 'Kotwali',
+    'Lohagara', 'Mirsharai', 'Pahartali', 'Panchlaish', 'Patiya', 'Patenga',
+    'Rangunia', 'Raozan', 'Sandwip', 'Satkania', 'Sitakunda',
+  ],
+  Khulna: [
+    'Batiaghata', 'Dacope', 'Daulatpur', 'Dighalia', 'Dumuria', 'Khalishpur',
+    'Khan Jahan Ali', 'Koyra', 'Paikgachha', 'Phultala', 'Rupsha',
+    'Sonadanga', 'Terokhada',
+  ],
+  Rajshahi: [
+    'Bagha', 'Bagmara', 'Boalia', 'Charghat', 'Durgapur', 'Godagari',
+    'Matihar', 'Mohanpur', 'Paba', 'Puthia', 'Rajpara', 'Shah Makhdum', 'Tanore',
+  ],
+  Sylhet: [
+    'Balaganj', 'Beanibazar', 'Bishwanath', 'Companiganj', 'Dakshin Surma',
+    'Fenchuganj', 'Golapganj', 'Gowainghat', 'Jaintiapur', 'Kanaighat',
+    'Osmani Nagar', 'Sylhet Sadar', 'Zakiganj',
+  ],
+  Barishal: [
+    'Agailjhara', 'Babuganj', 'Bakerganj', 'Banaripara', 'Barishal Sadar',
+    'Gaurnadi', 'Hizla', 'Mehendiganj', 'Muladi', 'Wazirpur',
+  ],
+  Rangpur: [
+    'Badarganj', 'Gangachara', 'Kaunia', 'Mithapukur', 'Pirgacha', 'Rangpur Sadar',
+    'Pirganj', 'Taraganj',
+  ],
+  Mymensingh: [
+    'Bhaluka', 'Dhobaura', 'Fulbaria', 'Gaffargaon', 'Gauripur', 'Haluaghat',
+    'Ishwarganj', 'Muktagachha', 'Mymensingh Sadar', 'Nandail', 'Phulpur',
+    'Tarakanda', 'Trishal',
+  ],
+  Cumilla: [
+    'Adarsha Sadar', 'Barura', 'Brahmanpara', 'Burichang', 'Chandina', 'Chauddagram',
+    'Daudkandi', 'Debidwar', 'Homna', 'Laksam', 'Meghna', 'Monohorgonj',
+    'Muradnagar', 'Nangalkot', 'Sadar Dakshin', 'Titas',
+  ],
+  Narayanganj: [
+    'Araihazar', 'Bandar', 'Narayanganj Sadar', 'Rupganj', 'Sonargaon', 'Siddhirganj',
+    'Fatullah', 'Kanchpur',
+  ],
+  Gazipur: [
+    'Gazipur Sadar', 'Kaliakair', 'Kaliganj', 'Kapasia', 'Sreepur', 'Tongi',
+  ],
+  Bogura: [
+    'Adamdighi', 'Bogura Sadar', 'Dhunat', 'Dhupchanchia', 'Gabtali', 'Kahaloo',
+    'Nandigram', 'Sariakandi', 'Shajahanpur', 'Sherpur', 'Shibganj', 'Sonatola',
+  ],
+  Jashore: [
+    'Abhaynagar', 'Bagherpara', 'Chaugachha', 'Jhikargachha', 'Keshabpur',
+    'Jashore Sadar', 'Manirampur', 'Sharsha',
+  ],
+  Dinajpur: [
+    'Birampur', 'Birganj', 'Biral', 'Bochaganj', 'Chirirbandar', 'Phulbari',
+    'Ghoraghat', 'Hakimpur', 'Kaharole', 'Khansama', 'Dinajpur Sadar', 'Nawabganj', 'Parbatipur',
+  ],
+  "Cox's Bazar": [
+    'Chakaria', "Cox's Bazar Sadar", 'Kutubdia', 'Maheshkhali', 'Ramu',
+    'Teknaf', 'Ukhia', 'Pekua',
+  ],
+};
+
+/**
+ * The areas / thanas / upazilas of a district (empty when unknown).
+ *
+ * Matching is alias-aware (`Chittagong` finds the `Chattogram` list) so the
+ * second dropdown is populated no matter which spelling the customer's
+ * district was saved under.
+ */
+export function getDistrictAreas(district: unknown): string[] {
+  const raw = String(district ?? '').trim();
+  if (!raw) return [];
+  for (const [name, areas] of Object.entries(BANGLADESH_DISTRICT_AREAS)) {
+    if (normalizeCityName(name) === normalizeCityName(raw)) return [...areas];
+  }
+  return [];
+}
+
+/**
  * Alternative spellings that mean the SAME district.
  *
  * Bangladesh renamed several districts (Chittagong→Chattogram,
@@ -334,6 +442,8 @@ export function buildDeliveryZoneOptions(
 
 export default {
   BANGLADESH_DISTRICTS,
+  BANGLADESH_DISTRICT_AREAS,
+  getDistrictAreas,
   normalizeCityName,
   findCityInText,
   resolveMerchantBaseCity,

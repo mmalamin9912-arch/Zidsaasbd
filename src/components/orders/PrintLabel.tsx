@@ -235,6 +235,9 @@ function invoiceHeadSection(
           <p class="customer-name">${esc(ord?.customerName)}</p>
           <p class="ship-line">${esc(ord?.customerPhone)}</p>
           <p class="ship-line">${esc(ord?.address)}, ${esc(ord?.customerCity)}${ord?.deliveryZone ? ` (${esc(ord.deliveryZone)})` : ''}</p>
+          ${ord?.district || ord?.cityArea
+            ? `<p class="ship-line">${esc(ord?.cityArea || '')}${ord?.district ? `, ${esc(ord.district)}` : ''}</p>`
+            : ''}
         </div>
         <div>
           <span class="label">Payment &amp; Delivery</span>

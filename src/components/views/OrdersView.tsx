@@ -2708,6 +2708,23 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                         <div className="font-bold text-white">{ord.customerName}</div>
                                         <div className="text-slate-300">{ord.customerPhone}</div>
                                         <div className="text-slate-400 text-[11px] mt-1">{ord.address}, {ord.customerCity} ({ord.deliveryZone})</div>
+                                        {/* District and City/Area are separate columns on the
+                                            order, so each is shown on its own line — this is
+                                            what the courier routes on. */}
+                                        {(ord.district || ord.cityArea) && (
+                                          <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]" data-testid="order-location">
+                                            {ord.district && (
+                                              <span className="px-2 py-0.5 rounded-full bg-[#202533] border border-[#2E3548] text-slate-300">
+                                                District: <span className="font-semibold text-white">{ord.district}</span>
+                                              </span>
+                                            )}
+                                            {ord.cityArea && (
+                                              <span className="px-2 py-0.5 rounded-full bg-[#202533] border border-[#2E3548] text-slate-300">
+                                                Area: <span className="font-semibold text-white">{ord.cityArea}</span>
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
                                       </div>
 
                                       <div className="border-t border-[#2E3548] pt-2">

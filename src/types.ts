@@ -706,7 +706,16 @@ export interface Order {
   isManual?: boolean;
   customerName: string;
   customerPhone: string;
+  /**
+   * The customer's location as ONE display string for legacy readers. New
+   * orders fill it as "<cityArea>, <district>"; the two fields below are the
+   * canonical, filterable values.
+   */
   customerCity: string;
+  /** District / জেলা (Dhaka, Chattogram, Khulna, …) — persisted as `district`. */
+  district?: string;
+  /** City / Area / Thana / এলাকা inside the district (Uttara, Mirpur, …). */
+  cityArea?: string;
   deliveryZone: 'Inside Dhaka' | 'Outside Dhaka' | 'Sub Dhaka';
   address: string;
   platform?: 'Mobile web' | 'iOS App' | 'Android App' | 'Desktop Web' | 'POS';
