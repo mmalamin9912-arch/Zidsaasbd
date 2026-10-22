@@ -222,6 +222,18 @@ export interface MerchantProfile {
   instagramUrl?: string;
   tiktokUrl?: string;
   totalSalesBDT?: number;
+  /**
+   * The merchant's own city / district.
+   *
+   * This is the anchor for the checkout's delivery-zone validation: when the
+   * customer picks this city, "Inside City" is allowed and "Outside City" is
+   * blocked; when they pick any other district, "Outside City" is forced and
+   * the cheaper "Inside City" option is blocked so the delivery fee cannot be
+   * cheated.
+   */
+  baseCity?: string;
+  /** snake_case mirror of {@link baseCity} used by the database row. */
+  base_city?: string;
   activeThemeId?: string;
   themeConfig?: any;
   /**
@@ -639,6 +651,12 @@ export interface CodConfig {
   maxOrderLimit: number | string;
   requestAdvanceDeliveryCharge?: boolean;
   advanceDeliveryChargeAmount?: number | string;
+  /**
+   * The merchant's base city / district, used by the checkout to decide which
+   * delivery zone ("Inside City" / "Outside City") a customer's city belongs
+   * to. Empty means "not configured" — both zones then stay available.
+   */
+  baseCity?: string;
   notes: string;
 }
 

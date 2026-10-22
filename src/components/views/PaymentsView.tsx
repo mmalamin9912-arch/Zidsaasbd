@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig } from '../../types';
 import { useToast } from '../ToastProvider';
 import { saveShippingConfig } from '../../lib/logisticsApi';
+// The canonical Bangladesh district list, shared with the storefront checkout
+// so the merchant picks the SAME city names the customer selects.
+import { BANGLADESH_DISTRICTS } from '../../../lib/deliveryZones';
 import {
   CreditCard,
   Building2,
@@ -34,6 +37,19 @@ interface PaymentsViewProps {
   onUpdateMobileBanking: (configs: MobileBankingConfig[]) => void | Promise<boolean>;
   onUpdateCodConfig: (config: CodConfig) => void;
   onUpdateGatewayConfig: (config: PaymentGatewayConfig) => void;
+}
+
+/**
+ * Coerce a stored fee to a non-negative finite number, or `null`.
+ *
+ * `null` means "this zone was never priced" and is deliberately distinct from
+ * a saved ৳0 (a deliberate "free delivery"). Nothing here invents an amount:
+ * an empty field simply has no price.
+ */
+function toNullableFee(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = typeof value === 'number' ? value : parseFloat(String(value));
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 export const PaymentsView: React.FC<PaymentsViewProps> = ({
@@ -214,6 +230,9 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         freeShippingThreshold: codForm.freeShippingThreshold ?? '',
         maxOrderLimit: codForm.maxOrderLimit ?? '',
         isEnabled: codForm.isEnabled !== false,
+        // The merchant's base city — the anchor for the checkout's zone
+        // validation. Saved with the fees so both land in one write.
+        baseCity: codForm.baseCity ?? '',
       });
       if (saved) {
         toast.success(
@@ -717,6 +736,26 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+            {/* Base City / District — the anchor for the checkout's zone
+                validation. A customer in this city may only pick "Inside
+                City"; anyone else is forced onto "Outside City". */}
+            <div>
+              <label className="block text-slate-300 mb-1 font-semibold">Base City / District</label>
+              <select
+                value={codForm.baseCity ?? ''}
+                onChange={(e) => setCodForm({ ...codForm, baseCity: e.target.value })}
+                className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-white font-bold focus:outline-none focus:border-[#00D68F]"
+              >
+                <option value="">Not set — allow both delivery zones</option>
+                {BANGLADESH_DISTRICTS.map((district) => (
+                  <option key={district} value={district}>{district}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10px] text-slate-500">
+                Your store&apos;s own city. Customers outside it are charged the Outside City rate.
+              </p>
+            </div>
+
             <div>
               <label className="block text-slate-300 mb-1 font-semibold">Inside Dhaka Delivery Fee (৳ BDT)</label>
               <input
@@ -991,7 +1030,12 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
       {/* TAB 6: Checkout Preview Simulator */}
       {activeTab === 'simulator' && (() => {
-        const simShippingFee = simCity === 'Dhaka' ? Number(codForm.insideDhakaFee || 80) : Number(codForm.outsideDhakaFee || 150);
+        // Every amount here comes from the merchant's OWN saved values. There is
+        // no hardcoded fallback fee: an unconfigured zone simply has no price.
+        const simInsideFee = toNullableFee(codForm.insideDhakaFee);
+        const simOutsideFee = toNullableFee(codForm.outsideDhakaFee);
+        const simShippingFee = simCity === 'Dhaka' ? (simInsideFee ?? 0) : (simOutsideFee ?? 0);
+        const simShippingConfigured = simCity === 'Dhaka' ? simInsideFee !== null : simOutsideFee !== null;
         const simSubtotal = 3200;
         const simBaseTotal = simSubtotal + simShippingFee;
 
@@ -1001,13 +1045,20 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         // with "allow advance" configured must not switch the charge on — that
         // `||` was the shop-facing bug this simulator was also reproducing.
         const advanceFee = Math.max(0, Number(codForm.advanceDeliveryChargeAmount) || 0);
+        // Toggle ON with no fixed amount → the customer's zone delivery fee is
+        // the upfront payment. Toggle OFF → strictly ৳0.
         const isAdvanceRequired =
-          simSelectedMethod === 'cod' && codForm.requestAdvanceDeliveryCharge === true && advanceFee > 0;
+          simSelectedMethod === 'cod'
+          && codForm.requestAdvanceDeliveryCharge === true
+          && (advanceFee > 0 || simShippingFee > 0);
+        // The amount actually collected upfront: the merchant's fixed amount
+        // when they set one, otherwise the zone's delivery fee.
+        const effectiveAdvanceFee = advanceFee > 0 ? advanceFee : simShippingFee;
         const advCfg = advanceMethods.find(m => m.provider === simAdvProvider) || advanceMethods[0] || mobileConfigs[0];
         const advChargePercent = advCfg?.chargePercentage || 0;
-        const advCashOutFee = Math.round(advanceFee * (advChargePercent / 100));
-        const totalAdvUpfront = advanceFee + advCashOutFee;
-        const remainingCodBalance = Math.max(0, simBaseTotal - advanceFee);
+        const advCashOutFee = Math.round(effectiveAdvanceFee * (advChargePercent / 100));
+        const totalAdvUpfront = effectiveAdvanceFee + advCashOutFee;
+        const remainingCodBalance = Math.max(0, simBaseTotal - effectiveAdvanceFee);
 
         return (
           <div className="bg-[#1D212E] border border-indigo-500/40 rounded-2xl p-6 space-y-6">
@@ -1030,9 +1081,9 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                   onChange={(e) => setSimCity(e.target.value as any)}
                   className="bg-[#202533] text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-[#3A435E] focus:outline-none"
                 >
-                  <option value="Dhaka">Dhaka (Inside - ৳{codForm.insideDhakaFee || 80})</option>
-                  <option value="Chittagong">Chittagong (Outside - ৳{codForm.outsideDhakaFee || 150})</option>
-                  <option value="Sylhet">Sylhet (Outside - ৳{codForm.outsideDhakaFee || 150})</option>
+                  <option value="Dhaka">Dhaka (Inside{simInsideFee !== null ? ` - ৳${simInsideFee}` : ''})</option>
+                  <option value="Chittagong">Chittagong (Outside{simOutsideFee !== null ? ` - ৳${simOutsideFee}` : ''})</option>
+                  <option value="Sylhet">Sylhet (Outside{simOutsideFee !== null ? ` - ৳${simOutsideFee}` : ''})</option>
                 </select>
               </div>
             </div>
@@ -1217,7 +1268,12 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                           </div>
                           <div className="flex justify-between">
                             <span>Shipping Fee ({simCity}):</span>
-                            <span className="text-white">৳{simShippingFee}</span>
+                            {/* Only print a price when the merchant actually saved
+                                one for this zone — an unconfigured zone must never
+                                read "৳0". */}
+                            <span className="text-white">
+                              {simShippingConfigured ? `৳${simShippingFee}` : 'To be confirmed'}
+                            </span>
                           </div>
                           {chargePercent > 0 && (
                             <div className="flex justify-between text-amber-400 font-bold">
@@ -1263,7 +1319,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                           <span>Mandatory Advance Delivery Charge Required</span>
                         </div>
                         <p className="text-[11px] text-slate-300 leading-relaxed">
-                          Customer must pay <strong className="text-white">৳{advanceFee} Delivery Charge</strong> upfront via Mobile Banking before COD order is placed.
+                          Customer must pay <strong className="text-white">৳{effectiveAdvanceFee} Delivery Charge</strong> upfront via Mobile Banking before COD order is placed.
                         </p>
 
                         {/* Advance Provider Selector */}
@@ -1299,7 +1355,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                             <div className="text-[11px] space-y-1 font-mono text-slate-300 border-t border-white/10 pt-1.5">
                               <div className="flex justify-between">
                                 <span>Advance Delivery Fee:</span>
-                                <span>৳{advanceFee}</span>
+                                <span>৳{effectiveAdvanceFee}</span>
                               </div>
                               {advChargePercent > 0 && (
                                 <div className="flex justify-between text-amber-400">

@@ -42,7 +42,7 @@ export interface DeliveryRates {
 const INSIDE_MATCHERS = [/inside/i, /\bcity\b/i, /dhaka/i, /within/i, /^metro$/i];
 const OUTSIDE_MATCHERS = [/outside/i, /out of/i, /other/i, /sub\s*-?\s*(city|dhaka)/i, /district/i, /upazila/i];
 
-/** Coerce a stored fee to a non-negative finite number, or null. */
+/** Coerce a stored delivery fee to a non-negative finite number, or null. */
 export function toFee(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null;
   const n = typeof value === 'number' ? value : parseFloat(String(value));
@@ -156,6 +156,21 @@ export function resolveProductDeliveryRates(product: any): DeliveryRates {
 }
 
 /**
+ * Read a merchant-set fee from ANY of the shapes the dashboard stores it in.
+ *
+ * The database is the ONLY source of these numbers — there is no default and no
+ * percentage applied here. `null` means the merchant never priced the zone, and
+ * callers must render that as "unpriced" rather than as a ৳0 charge.
+ */
+export function readMerchantFee(...values: Array<unknown>): number | null {
+  for (const value of values) {
+    const fee = toFee(value);
+    if (fee !== null) return fee;
+  }
+  return null;
+}
+
+/**
  * Does a city name count as "inside"?
  *
  * Defaults to inside when the city is unknown, matching the previous behaviour:
@@ -253,4 +268,5 @@ export default {
   buildDeliveryFeeFields,
   isInsideCity,
   toFee,
+  readMerchantFee,
 };

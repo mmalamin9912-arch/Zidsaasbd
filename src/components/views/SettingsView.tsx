@@ -3,6 +3,11 @@ import { MerchantProfile, SettingsSubTab } from '../../types';
 import { isPaidSubscriptionActive } from '../../utils/subscriptionUtils';
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
+// Delivery-fee persistence + the canonical Bangladesh district list, shared
+// with the storefront checkout so the merchant picks the SAME city names the
+// customer selects.
+import { loadShippingConfig, saveShippingConfig } from '../../lib/logisticsApi';
+import { BANGLADESH_DISTRICTS } from '../../../lib/deliveryZones';
 import {
   Settings as SettingsIcon,
   User,
@@ -235,6 +240,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [freeShippingThreshold, setFreeShippingThreshold] = useState('');
   const [disableCodForSale, setDisableCodForSale] = useState(false);
   const [expressMobileBankingOnly, setExpressMobileBankingOnly] = useState(false);
+  // The merchant's base city — the anchor for the checkout's delivery-zone
+  // validation. Persisted with the fees in the shipping config.
+  const [baseCity, setBaseCity] = useState(merchant?.baseCity || '');
+  const [constraintsSaving, setConstraintsSaving] = useState(false);
+  const [constraintsNotice, setConstraintsNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // Tax Tab State — seeded from the store record, saved via the API below.
   const taxCfg = merchant?.taxConfig;
@@ -1550,6 +1560,76 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     });
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
+  };
+
+  // ── COD constraints + shipping rates (Settings → Constraints) ───────────
+  //
+  // These fields used to be component state only: a merchant typed an Inside
+  // City fee here and the checkout kept quoting the old number, because the
+  // value never left the browser. They now load from and save to the SAME
+  // shipping config the checkout reads (`/api/store/shipping-config`).
+
+  /** Hydrate the COD + shipping fields from the database. */
+  const loadConstraints = useCallback(async () => {
+    if (!storeRef) return;
+    try {
+      const stored = await loadShippingConfig(storeRef);
+      if (!stored) return;
+      setEnableCod(stored.isEnabled);
+      setMaxCodValue(stored.maxOrderLimit != null ? String(stored.maxOrderLimit) : '');
+      setRequireAdvance(stored.requestAdvanceDeliveryCharge);
+      setAdvanceFee(stored.advanceDeliveryChargeAmount != null ? String(stored.advanceDeliveryChargeAmount) : '');
+      setInsideCityFee(stored.insideDhakaFee != null ? String(stored.insideDhakaFee) : '');
+      setOutsideCityFee(stored.outsideDhakaFee != null ? String(stored.outsideDhakaFee) : '');
+      setFreeShippingThreshold(stored.freeShippingThreshold != null ? String(stored.freeShippingThreshold) : '');
+      setBaseCity(stored.baseCity || '');
+    } catch (err) {
+      console.warn('[SettingsView] COD constraints load warning:', err);
+    }
+  }, [storeRef]);
+
+  useEffect(() => {
+    if (activeSubTab === 'settings_constraints') void loadConstraints();
+  }, [activeSubTab, loadConstraints]);
+
+  /**
+   * Persist the COD constraints + shipping rates.
+   *
+   * Every number is written EXACTLY as typed. A cleared field is sent as an
+   * empty string, which the server stores as NULL ("never priced") — never as
+   * a fabricated ৳0 and never as a hardcoded default.
+   */
+  const handleSaveConstraints = async () => {
+    if (!storeRef) {
+      setConstraintsNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    setConstraintsSaving(true);
+    // A cleared field is sent as `null` — the server stores it as NULL ("never
+    // priced"), so the checkout shows no fee instead of a fabricated ৳0.
+    const optionalFee = (raw: string): number | null =>
+      raw.trim() === '' ? null : Number(raw);
+    try {
+      const saved = await saveShippingConfig(storeRef, {
+        isEnabled: enableCod,
+        requestAdvanceDeliveryCharge: requireAdvance,
+        advanceDeliveryChargeAmount: optionalFee(advanceFee),
+        insideDhakaFee: optionalFee(insideCityFee),
+        outsideDhakaFee: optionalFee(outsideCityFee),
+        freeShippingThreshold: optionalFee(freeShippingThreshold),
+        maxOrderLimit: optionalFee(maxCodValue),
+        baseCity,
+      });
+      if (!saved) {
+        setConstraintsNotice({ type: 'error', text: 'Delivery settings could not be saved to the database. Please try again.' });
+        return;
+      }
+      setConstraintsNotice({ type: 'ok', text: 'Delivery settings saved — the checkout now uses these exact values.' });
+    } catch (err: any) {
+      setConstraintsNotice({ type: 'error', text: err?.message || 'Delivery settings could not be saved.' });
+    } finally {
+      setConstraintsSaving(false);
+    }
   };
 
   // ── Locale / currency persistence (Languages & currencies) ──
@@ -3362,6 +3442,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <h3 className="text-lg font-bold text-white mb-1">Shipping Rates & Free Delivery Rules</h3>
 
                 <div className="space-y-4">
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5 text-sm">Base City / District</label>
+                    <select
+                      value={baseCity}
+                      onChange={(e) => setBaseCity(e.target.value)}
+                      className="w-full max-w-sm bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
+                    >
+                      <option value="">Not set — allow both delivery zones</option>
+                      {BANGLADESH_DISTRICTS.map((district) => (
+                        <option key={district} value={district}>{district}</option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
+                      আপনার স্টোরের নিজের শহর। এই শহরের গ্রাহকরা শুধু &quot;Inside City&quot; বেছে নিতে পারবে;
+                      অন্য জেলার গ্রাহকদের জন্য &quot;Outside City&quot; ফোরস করা হবে।
+                    </p>
+                  </div>
+
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-slate-300 font-bold mb-1.5 text-sm">Flat Delivery Charge Inside City (৳)</label>

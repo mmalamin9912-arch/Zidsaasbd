@@ -1,7 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig, CodConfig, Order, OrderItem, ThemeConfig } from '../types';
 import { buildCategoryDbPayload, buildProductDbPayload, maxCatalogId, packCatalogItem, toCatalogSlug, ensureCategory, mapApiProduct, mapApiCategory } from '../utils/catalogPayload';
-import { resolveDeliveryCharge, resolveProductDeliveryRates, toFee } from '../utils/deliveryCharges';
+import { resolveDeliveryCharge, resolveProductDeliveryRates, readMerchantFee, toFee } from '../utils/deliveryCharges';
+// The Bangladesh district list + the city → delivery-zone rule, shared with the
+// server so the checkout's zone picker can never disagree with the API.
+import {
+  BANGLADESH_DISTRICTS,
+  resolveDeliveryZoneForCity,
+} from '../../lib/deliveryZones';
 import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera } from 'lucide-react';
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
@@ -1965,6 +1971,9 @@ The render below must not guess. A merchant may paste
   // is the single control for this, so the shipping area can never drift out of
   // sync with what the customer picked (and the total updates with it).
   const [shippingArea, setShippingArea] = useState<'inside' | 'outside'>('inside');
+  // The customer's own city / district. It is the INPUT that decides the
+  // delivery zone — the merchant's base city decides which zone is legal.
+  const [custCity, setCustCity] = useState('');
   const [custAddress, setCustAddress] = useState('');
   const [custTxId, setCustTxId] = useState('');
   const [custSenderPhone, setCustSenderPhone] = useState('');
@@ -2053,8 +2062,100 @@ The render below must not guess. A merchant may paste
         outsideDhakaFee?: number | string | null;
         freeShippingThreshold?: number | string | null;
         isEnabled?: boolean;
+        /** The merchant's base city — the anchor for the zone validation. */
+        baseCity?: string | null;
       }
     | undefined;
+
+  // ── Canonical delivery values (DB-shaped) ────────────────────────────────
+  //
+  // The storefront payload carries the merchant's values under the SAME
+  // column names the database uses, so the checkout reads exactly what was
+  // saved — never a hardcoded ৳80 / ৳150 / ৳60.
+  //
+  //   deliveryFees.inside   → `inside_dhaka_fee`   (null = never priced)
+  //   deliveryFees.outside  → `outside_dhaka_fee`  (null = never priced)
+  //   advanceDeliveryCharge → `advance_delivery_charge_enabled` + `advance_amount`
+  //   cod.enabled           → `is_cod_enabled`
+  //   baseCity              → the merchant's own city / district
+  const storefrontDeliveryFees = (liveStoreData as any).deliveryFees as
+    | { inside?: number | null; outside?: number | null }
+    | undefined;
+
+  /**
+   * The districts the "City / District" dropdown lists.
+   *
+   * The server sends the canonical list in the storefront payload; the shared
+   * constant is the offline / pre-fetch fallback so the dropdown is never
+   * empty.
+   */
+  const checkoutDistricts: string[] = useMemo(() => {
+    const fromPayload = (liveStoreData as any).districts;
+    if (Array.isArray(fromPayload) && fromPayload.length > 0) {
+      return fromPayload.map((district: unknown) => String(district)).filter(Boolean);
+    }
+    return [...BANGLADESH_DISTRICTS];
+  }, [liveStoreData]);
+
+  /**
+   * The merchant's BASE CITY, read from the storefront payload first and from
+   * the store record as a fallback. This is the anchor for the zone decision:
+   * a customer in this city may only pick "Inside City"; a customer in any
+   * other district is forced onto "Outside City".
+   */
+  const merchantBaseCity = String(
+    (liveStoreData as any).baseCity
+    ?? (liveStoreData as any).base_city
+    ?? storefrontShippingConfig?.baseCity
+    ?? (storefrontCodConfig as any)?.baseCity
+    ?? (liveStoreData.merchant as any)?.baseCity
+    ?? (liveStoreData.merchant as any)?.base_city
+    ?? (merchant as any)?.baseCity
+    ?? ''
+  ).trim();
+
+  /**
+   * The zones the customer may choose, given the city they picked.
+   *
+   * • Customer city == merchant base city → "Inside City" allowed,
+   *   "Outside City" BLOCKED.
+   * • Any other district                 → "Outside City" forced,
+   *   "Inside City" BLOCKED (the customer cannot cheat the delivery fee).
+   * • No base city configured            → both remain available.
+   */
+  const deliveryZoneResolution = resolveDeliveryZoneForCity({
+    city: custCity,
+    baseCity: merchantBaseCity,
+  });
+  const insideZoneAllowed = deliveryZoneResolution.insideAllowed;
+  const outsideZoneAllowed = deliveryZoneResolution.outsideAllowed;
+  const deliveryZoneIsForced = deliveryZoneResolution.hasBaseCity;
+
+  /**
+   * Apply a city and move the customer's own zone choice onto a LEGAL one.
+   *
+   * Without this a customer who first opened the checkout (default "inside")
+   * and then picked a different district would leave the radio group pointing
+   * at the blocked Inside zone: the total and the highlighted option would
+   * disagree. Outside City is therefore selected automatically, and a customer
+   * moving back to the merchant's own city falls back to Inside if their held
+   * choice is no longer selectable.
+   */
+  const handleCustomerCityChange = (city: string) => {
+    setCustCity(city);
+    const resolution = resolveDeliveryZoneForCity({ city, baseCity: merchantBaseCity });
+    if (!resolution.hasBaseCity) return;
+    setShippingArea((current) => {
+      const allowed = current === 'inside' ? resolution.insideAllowed : resolution.outsideAllowed;
+      return allowed ? current : resolution.zone;
+    });
+  };
+
+  // The zone actually applied to the order. When the merchant has a base city
+  // the customer's district decides it — never the customer's own choice.
+  const effectiveShippingArea: 'inside' | 'outside' = deliveryZoneIsForced
+    ? deliveryZoneResolution.zone
+    : shippingArea;
 
   // ── Delivery charge ───────────────────────────────────────────────────────
   //
@@ -2078,8 +2179,24 @@ The render below must not guess. A merchant may paste
   // Passed RAW (not `Number(...)`) into resolveDeliveryCharge. `Number('')` is
   // `0`, which is exactly how an empty COD field used to surface as a phantom
   // "৳0" delivery charge; the resolver's `toFee` rejects ''/NaN as "not set".
-  const storeInsideFee = storefrontShippingConfig?.insideDhakaFee ?? storefrontCodConfig?.insideDhakaFee;
-  const storeOutsideFee = storefrontShippingConfig?.outsideDhakaFee ?? storefrontCodConfig?.outsideDhakaFee;
+  //
+  // The canonical `deliveryFees` block wins: it is the merchant's saved
+  // `inside_dhaka_fee` / `outside_dhaka_fee` value (null = never priced).
+  //
+  // A cleared field must NOT stop the lookup — an empty or unparseable value is
+  // skipped so the next source is consulted, and if NOTHING was ever priced the
+  // fee stays `null` (the UI then says "To be confirmed"). It is never coerced
+  // to a hardcoded amount, and never to ৳0.
+  const storeInsideFee = readMerchantFee(
+    storefrontDeliveryFees?.inside,
+    storefrontShippingConfig?.insideDhakaFee,
+    storefrontCodConfig?.insideDhakaFee,
+  );
+  const storeOutsideFee = readMerchantFee(
+    storefrontDeliveryFees?.outside,
+    storefrontShippingConfig?.outsideDhakaFee,
+    storefrontCodConfig?.outsideDhakaFee,
+  );
 
   // Free-shipping offer: when the cart total reaches the merchant's threshold
   // the delivery charge is waived. This threshold was previously saved by three
@@ -2104,7 +2221,7 @@ The render below must not guess. A merchant may paste
     for (const product of chargeProducts) {
       const resolved = resolveDeliveryCharge({
         product,
-        city: shippingArea === 'inside' ? 'dhaka' : 'outside',
+        city: effectiveShippingArea === 'inside' ? 'dhaka' : 'outside',
         storeInsideFee,
         storeOutsideFee,
       });
@@ -2114,7 +2231,7 @@ The render below must not guess. A merchant may paste
     }
     if (chargeProducts.length === 0) {
       const resolved = resolveDeliveryCharge({
-        city: shippingArea === 'inside' ? 'dhaka' : 'outside',
+        city: effectiveShippingArea === 'inside' ? 'dhaka' : 'outside',
         storeInsideFee,
         storeOutsideFee,
       });
@@ -2253,14 +2370,17 @@ The render below must not guess. A merchant may paste
 
   // ── Advance delivery charge (COD) ─────────────────────────────────────────
   //
-  // Toggle + amount are read from EVERY place the dashboard may have written
-  // them, so a merchant who saves in any panel sees it on the checkout:
+  // The toggle + amount are read from EVERY place the dashboard may have
+  // written them, so a merchant who saves in ANY panel sees it on the checkout:
   //   • Merchant Payment Accounts Setup → COD  → shippingConfig (Mongo) /
-  //     advance_delivery_charge_enabled + advance_amount on the stores row
+  //     `advance_delivery_charge_enabled` + `advance_amount` on the stores row
   //   • Logistics → Shipping                    → shippingConfig / codConfig
-  // The first source that carries a RECOGNISED value wins. An explicit OFF is
-  // honoured (it must not be treated as "unknown" and skipped), so a stale
-  // ON elsewhere can never resurrect the charge.
+  //
+  // The FIRST source that carries a RECOGNISED value wins, and the canonical
+  // `{ enabled, amount }` block from /api/storefront/:slug comes first — it is
+  // assembled from the `advance_delivery_charge_enabled` / `advance_amount`
+  // COLUMNS. An explicit OFF is honoured (it must not be treated as "unknown"
+  // and skipped), so a stale ON elsewhere can never resurrect the charge.
   const advanceSources = [
     // Canonical block from /api/storefront/:slug (DB-shaped keys).
     (liveStoreData as any).advanceDeliveryCharge,
@@ -2269,26 +2389,47 @@ The render below must not guess. A merchant may paste
     storefrontShippingConfig as Record<string, any> | undefined,
     liveStoreData.merchant as Record<string, any> | undefined,
     (liveStoreData.merchant as any)?.codConfig,
-    (liveStoreData as any).checkoutConfig,
+    (liveStoreData as any)?.checkoutConfig,
   ];
   const advanceChargeEnabled = readAdvanceChargeEnabled(...advanceSources);
   const advanceChargeAmount = readAdvanceChargeAmount(...advanceSources);
 
   // ── How much is collected upfront on COD? ─────────────────────────────────
-  //   toggle OFF                → ৳0 ("Nothing to pay now")
-  //   toggle ON, amount > 0     → that EXACT fixed amount (e.g. ৳100)
-  //   toggle ON, amount empty/0 → the SELECTED delivery-zone fee (Inside vs
-  //                               Outside City), i.e. the customer pre-pays the
-  //                               actual delivery charge for their zone.
-  // The zone fee is `shippingFee` — already resolved from the chosen area,
-  // with per-product overrides and the free-shipping threshold applied.
+  //   `advance_delivery_charge_enabled` FALSE → ৳0 ("Nothing to pay now")
+  //   enabled, `advance_amount` > 0           → that EXACT merchant number
+  //   enabled, `advance_amount` 0 / empty    → the SELECTED delivery-zone fee
+  //                                            (Inside vs Outside City), i.e.
+  //                                            the customer pre-pays the
+  //                                            actual delivery charge for the
+  //                                            zone their city maps to.
+  // The zone fee is the SELECTED zone's own fee (`insideAreaFee` /
+  // `outsideAreaFee`) — already resolved from the customer's city-derived zone,
+  // with per-product overrides and the free-shipping threshold applied. Reading
+  // the zone directly keeps the advance correct even if the customer's city has
+  // not been picked yet. There is no hardcoded amount anywhere in this chain.
+  const selectedZoneFeeRaw =
+    effectiveShippingArea === 'inside' ? insideAreaFee : outsideAreaFee;
+  const selectedZoneFee = Math.max(0, selectedZoneFeeRaw);
+  const selectedZoneAdvance = qualifiesForFreeShipping ? 0 : selectedZoneFee;
+  // A zone's fee is "priced" when the merchant saved any number for it — an
+  // explicit ৳0 counts. An unpriced zone must not silently charge *something*
+  // as a "free" advance, so the advance panel is only shown when there is a
+  // real fee or a real configured amount.
+  const selectedZoneConfigured =
+    effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured;
   const advanceDeliveryFeeAmount = advanceChargeAmount > 0
     ? advanceChargeAmount
-    : (advanceChargeEnabled ? Math.max(0, shippingFee) : 0);
+    : (advanceChargeEnabled ? selectedZoneAdvance : 0);
 
   // A COD order collects an advance only when the merchant enabled it and there
-  // is an amount to collect (a ৳0 zone fee means nothing is due upfront).
-  const requiresAdvanceFee = payMethod === 'cod' && advanceChargeEnabled && advanceDeliveryFeeAmount > 0;
+  // is an amount to collect (a ৳0 zone fee means nothing is due upfront). When
+  // the advance falls back to the zone fee, that fee must actually be priced —
+  // an unpriced zone cannot be invented into a charge.
+  const requiresAdvanceFee =
+    payMethod === 'cod'
+    && advanceChargeEnabled
+    && advanceDeliveryFeeAmount > 0
+    && (advanceChargeAmount > 0 || selectedZoneConfigured);
   // True when the advance equals the zone delivery fee because no fixed amount
   // was configured — the panel tells the customer which zone it came from.
   const advanceUsesZoneFee = advanceChargeEnabled && advanceChargeAmount <= 0;
@@ -2661,8 +2802,8 @@ The render below must not guess. A merchant may paste
       source: 'Store',
       customerName: customerSession?.name || custName,
       customerPhone: customerSession?.phone || custPhone,
-      customerCity: shippingArea === 'inside' ? 'Inside City' : 'Outside City',
-      deliveryZone: shippingArea === 'inside' ? 'Inside Dhaka' : 'Outside Dhaka',
+      customerCity: custCity || (effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'),
+      deliveryZone: effectiveShippingArea === 'inside' ? 'Inside Dhaka' : 'Outside Dhaka',
       address: custAddress,
       platform: 'Mobile web',
       totalBDT: total,
@@ -4371,7 +4512,7 @@ The render below must not guess. A merchant may paste
                       <h3 className="text-lg font-black text-white tracking-tight">Customer Details</h3>
                     </div>
 
-              
+
 
               {/* Merchant announcement (Settings -> Checkout) */}
               {storeCheckoutConfig?.announcement && (
@@ -4428,32 +4569,79 @@ The render below must not guess. A merchant may paste
                 </div>
 
                 <div className="space-y-3">
+                  {/* ── City / District ──────────────────────────────────────
+                      The customer's district is the INPUT that decides the
+                      delivery zone. Combined with the merchant's base city it
+                      makes the cheaper zone impossible to fake. */}
+                  <div>
+                    <label htmlFor="checkout-city" className="block mb-1.5 font-bold text-xs text-slate-300">
+                      City / District *
+                    </label>
+                    <select
+                      id="checkout-city"
+                      data-testid="checkout-city"
+                      required
+                      value={custCity}
+                      onChange={(e) => handleCustomerCityChange(e.target.value)}
+                      className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400"
+                    >
+                      <option value="">Select your city / district</option>
+                      {checkoutDistricts.map((district) => (
+                        <option key={district} value={district}>{district}</option>
+                      ))}
+                    </select>
+                    {deliveryZoneIsForced && custCity && (
+                      <p
+                        data-testid="checkout-zone-hint"
+                        className="mt-1.5 text-[11px] font-medium text-amber-300"
+                      >
+                        {deliveryZoneResolution.isBaseCity
+                          ? `You selected ${custCity} — our city. Delivery applies the Inside City rate.`
+                          : `You selected ${custCity} — outside our city (${merchantBaseCity}). Delivery applies the Outside City rate.`}
+                      </p>
+                    )}
+                  </div>
+
                   <div>
                     <label className="block mb-1.5 font-bold text-xs text-slate-300">Delivery Zone</label>
                     {/* Two explicit zones. The amount shown is the price the
                         merchant actually saved for this product / store — and
                         when none was saved the zone is shown WITHOUT a price,
-                        never as a phantom "৳0". */}
+                        never as a phantom "৳0".
+
+                        When the merchant has a base city, the zone the customer
+                        is NOT entitled to is DISABLED, so they cannot pick the
+                        cheaper Inside-City rate from another district. */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {([
-                        { value: 'inside', fee: insideAreaFee, configured: insideConfigured },
-                        { value: 'outside', fee: outsideAreaFee, configured: outsideConfigured },
+                        { value: 'inside', fee: insideAreaFee, configured: insideConfigured, allowed: insideZoneAllowed },
+                        { value: 'outside', fee: outsideAreaFee, configured: outsideConfigured, allowed: outsideZoneAllowed },
                       ] as const).map((zone) => {
-                        const checked = shippingArea === zone.value;
+                        const checked = effectiveShippingArea === zone.value;
+                        const blocked = !zone.allowed;
                         return (
                           <label
                             key={zone.value}
-                            className={`flex items-center gap-2.5 rounded-xl px-3.5 py-3 border text-xs font-semibold cursor-pointer transition ${
-                              checked
-                                ? 'bg-amber-400/10 border-amber-400 text-amber-300'
-                                : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                            data-testid={`delivery-zone-${zone.value}`}
+                            aria-disabled={blocked}
+                            title={blocked
+                              ? (zone.value === 'inside'
+                                ? `Inside City is only available in ${merchantBaseCity}.`
+                                : `Outside City is not available in ${merchantBaseCity}.`)
+                              : undefined}
+                            className={`flex items-center gap-2.5 rounded-xl px-3.5 py-3 border text-xs font-semibold transition ${
+                              blocked
+                                ? 'bg-slate-950/60 border-slate-800/60 text-slate-500 cursor-not-allowed opacity-60'
+                                : checked
+                                  ? 'bg-amber-400/10 border-amber-400 text-amber-300 cursor-pointer'
+                                  : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700 cursor-pointer'
                             }`}
                           >
                             <input
                               type="radio"
                               name="delivery-zone"
                               value={zone.value}
-                              data-testid={`delivery-zone-${zone.value}`}
+                              disabled={blocked}
                               checked={checked}
                               onChange={() => setShippingArea(zone.value)}
                               className="w-4 h-4 accent-amber-400"
@@ -4470,6 +4658,11 @@ The render below must not guess. A merchant may paste
                                 ` (৳${zone.fee.toLocaleString()})`
                               ) : (
                                 ''
+                              )}
+                              {blocked && (
+                                <span className="block text-[10px] font-bold text-red-400/80">
+                                  Not available for your city
+                                </span>
                               )}
                             </span>
                           </label>
@@ -4704,11 +4897,11 @@ The render below must not guess. A merchant may paste
                         <span className="font-semibold text-slate-100">৳{itemsSubtotal.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between text-slate-400">
-                        <span>Shipping Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'}):</span>
+                        <span>Shipping Fee ({effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'}):</span>
                         {/* Only print a price when one was actually saved for the
                             selected zone; an unconfigured zone must not read "৳0". */}
                         <span className="font-semibold text-slate-100">
-                          {(shippingArea === 'inside' ? insideConfigured : outsideConfigured)
+                          {(effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured)
                             ? `৳${shippingFee.toLocaleString()}`
                             : 'To be confirmed'}
                         </span>
@@ -4824,7 +5017,7 @@ The render below must not guess. A merchant may paste
                       is paid in cash on delivery.
                       {advanceUsesZoneFee && (
                         <span className="block mt-1 text-[10px] text-slate-400">
-                          This is the {shippingArea === 'inside' ? 'Inside City' : 'Outside City'} delivery fee for your zone.
+                          This is the {effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'} delivery fee for your zone.
                         </span>
                       )}
                     </p>
@@ -5000,9 +5193,9 @@ The render below must not guess. A merchant may paste
                   </div>
                   <div className="border-t border-slate-800 pt-3 space-y-2 text-xs">
                     <div className="flex justify-between items-center">
-                      <span className="text-slate-400">Delivery — {shippingArea === 'inside' ? 'Inside City' : 'Outside City'}</span>
+                      <span className="text-slate-400">Delivery — {effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'}</span>
                       <span className="font-bold text-slate-200">
-                        {(shippingArea === 'inside' ? insideConfigured : outsideConfigured)
+                        {(effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured)
                           ? `৳${shippingFee.toLocaleString()}`
                           : 'To be confirmed'}
                       </span>
@@ -5844,8 +6037,8 @@ The render below must not guess. A merchant may paste
               // The drawer quotes the SELECTED zone's real charge — the same
               // resolver, the same fee and the same VAT-inclusive math the
               // checkout button uses — so the two totals can never disagree.
-              const zoneFee = shippingArea === 'inside' ? insideAreaFee : outsideAreaFee;
-              const zoneConfigured = shippingArea === 'inside' ? insideConfigured : outsideConfigured;
+              const zoneFee = effectiveShippingArea === 'inside' ? insideAreaFee : outsideAreaFee;
+              const zoneConfigured = effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured;
               const freeRemaining = Math.max(0, checkoutMinOrder - itemsSubtotal);
               return (
               <div className="p-5 border-t border-slate-800/80 bg-slate-950/90 space-y-3">
@@ -5855,7 +6048,7 @@ The render below must not guess. A merchant may paste
                     <span className="font-extrabold text-slate-200">৳{cartTotal.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between text-slate-400">
-                    <span>Delivery Fee ({shippingArea === 'inside' ? 'Inside City' : 'Outside City'})</span>
+                    <span>Delivery Fee ({effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'})</span>
                     <span className="text-emerald-400 font-bold">
                       {qualifiesForFreeShipping ? (
                         <>

@@ -51,6 +51,15 @@ import {
   writeThemeRequest,
 } from './adminRequests.js';
 import { pick, toNumber } from './hybridDb.js';
+// Shared Bangladesh delivery-zone rules. The server resolves the merchant's
+// base city and the canonical delivery fees for the storefront payload; the
+// browser bundle imports the SAME module so the checkout's zone picker and
+// the server can never disagree about which zone a city belongs to.
+import {
+  resolveMerchantBaseCity,
+  resolveDeliveryZoneForCity,
+  BANGLADESH_DISTRICTS,
+} from './deliveryZones.js';
 // Shared gallery defaults + the Unsplash purge. Kept in its own module so the
 // server AND the browser bundle apply the exact same rule when a saved
 // `themeConfig.galleryImages` is read or written (see lib/galleryDefaults.ts).
@@ -6038,6 +6047,32 @@ app.get('/api/storefront/:slug?', async (req, res) => {
         enabled: resolveAdvanceChargeEnabled(codConfig, shippingConfig, merchantRecord),
         amount: resolveAdvanceChargeAmount(codConfig, shippingConfig, merchantRecord),
       },
+      // ── Delivery fees + base city — canonical, DB-shaped keys ────────────
+      // Every number here is the merchant's OWN saved value, read from the
+      // `inside_dhaka_fee` / `outside_dhaka_fee` columns (or the shipping /
+      // COD config that mirrors them). `null` means "never priced" and is
+      // rendered as "To be confirmed" — there is NO hardcoded ৳80 / ৳150 / ৳60
+      // fallback anywhere in this payload.
+      deliveryFees: {
+        inside: resolveDeliveryFeeColumn(
+          ['inside_dhaka_fee', 'insideDhakaFee', 'insideCityFee', 'inside_city_fee'],
+          merchantRecord,
+          shippingConfig,
+          codConfig,
+        ),
+        outside: resolveDeliveryFeeColumn(
+          ['outside_dhaka_fee', 'outsideDhakaFee', 'outsideCityFee', 'outside_city_fee'],
+          merchantRecord,
+          shippingConfig,
+          codConfig,
+        ),
+      },
+      // The merchant's own city/district. The checkout derives the delivery
+      // zone from it: picking this city enables "Inside City", picking any
+      // other district forces "Outside City" and blocks the cheaper option.
+      baseCity: resolveMerchantBaseCity(merchantRecord, storefrontMerchant),
+      // The district list the checkout's "City / District" dropdown renders.
+      districts: BANGLADESH_DISTRICTS,
       // Public storefront modules. Only published pages/posts are exposed.
       brandConfig,
       navigationMenus,
@@ -6777,10 +6812,26 @@ app.post('/api/stores/update', async (req, res) => {
           'password', 'logo_url', 'subscription_plan', 'subscription_expiry', 'plan_started_at',
           'expires_at', 'duration_days', 'trial_ends_at', 'trial_days_remaining',
           'is_locked', 'status', 'active_theme_id', 'theme_config', 'created_at', 'updated_at',
+          // Delivery zone columns. The merchant's base city is what the
+          // checkout's city → zone validation is derived from, and the fee
+          // columns carry the merchant's real numbers so no reader ever has to
+          // invent a fallback.
+          'base_city',
+          'inside_dhaka_fee',
+          'outside_dhaka_fee',
+          'advance_amount',
+          'advance_delivery_charge_enabled',
+          'is_cod_enabled',
         ];
         const sbPayload: Record<string, any> = {};
         for (const key of allowed) {
           if (cleanMerchant[key] !== undefined) sbPayload[key] = cleanMerchant[key];
+        }
+        // Carry the merchant's base city under its snake_case column name.
+        const baseCity =
+          cleanMerchant.baseCity ?? cleanMerchant.base_city ?? cleanMerchant.storeCity ?? '';
+        if (baseCity !== '' && sbPayload.base_city === undefined) {
+          sbPayload.base_city = String(baseCity).trim();
         }
         // Carry the theme selection under its snake_case column names.
         if (cleanMerchant.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = cleanMerchant.activeThemeId;
@@ -11660,6 +11711,13 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
       fallback.advanceDeliveryChargeAmount,
       { min: 0 },
     ),
+    // The merchant's base city. Read from the shipping config first, then
+    // from the store record's own base-city field, so the checkout's zone
+    // validation always has an anchor.
+    baseCity: cfgStr(
+      src.baseCity ?? src.base_city ?? src.storeCity ?? src.store_city,
+      fallback.baseCity ?? fallback.base_city ?? '',
+    ).trim(),
     notes: cfgStr(src.notes, fallback.notes),
   };
 }
@@ -11915,6 +11973,47 @@ function resolveAdvanceChargeAmount(...sources: any[]): number {
   return 0;
 }
 
+/**
+ * The merchant's canonical delivery FEES, read from whichever source carries
+ * the value.
+ *
+ * Accepted spellings, canonical column first:
+ *   inside_dhaka_fee / insideDhakaFee / insideCityFee   — the Inside-City fee
+ *   outside_dhaka_fee / outsideDhakaFee / outsideCityFee — the Outside-City fee
+ *
+ * SEMANTICS (deliberate, and the whole point of this helper):
+ *   • `null`  → the merchant never priced this zone. The storefront renders
+ *     "To be confirmed" — NEVER a phantom ৳0.
+ *   • `0`     → the merchant deliberately saved "free delivery". Honoured as ৳0.
+ *
+ * There is NO hardcoded fallback amount anywhere in this function: an
+ * unconfigured store simply has no inside/outside fee.
+ */
+function resolveDeliveryFeeColumn(
+  keys: string[],
+  ...sources: any[]
+): number | null {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    const candidates = [
+      source.shippingConfig,
+      source.codConfig,
+      source.shipping_config,
+      source.cod_config,
+    ].filter((c) => c && typeof c === 'object');
+    candidates.push(source);
+    for (const candidate of candidates) {
+      for (const key of keys) {
+        const value = (candidate as any)[key];
+        if (value === null || value === undefined || value === '') continue;
+        const n = Number(value);
+        if (Number.isFinite(n) && n >= 0) return n;
+      }
+    }
+  }
+  return null;
+}
+
 /** Every storage key a config may live under, canonical first. */
 function configKeys(name: StoreConfigName): string[] {
   const entry = storeConfigs[name] as { key: string; legacyKeys?: readonly string[] };
@@ -11974,6 +12073,31 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
       const $unset: Record<string, ''> = {};
       for (const old of keys.slice(1)) $unset[old] = '';
 
+      // The shipping config ALSO writes the canonical COLUMN-shaped values onto
+      // the store document, so a reader that only knows `inside_dhaka_fee` /
+      // `outside_dhaka_fee` / `advance_amount` / `advance_delivery_charge_enabled`
+      // / `is_cod_enabled` finds the merchant's REAL numbers.
+      //
+      // Every one of them is derived from the merchant's own input:
+      //   • a blank fee field is stored as null ("never priced"), NOT ৳0;
+      //   • a deliberately saved ৳0 stays ৳0 (free delivery).
+      // No fallback number is ever invented here.
+      if (name === 'shipping') {
+        const shippingNext = next as Record<string, any>;
+        $set.inside_dhaka_fee = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
+        $set.outside_dhaka_fee = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
+        $set.advance_amount = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 }) ?? 0;
+        $set.advance_delivery_charge_enabled = shippingNext.requestAdvanceDeliveryCharge === true;
+        $set.is_cod_enabled = shippingNext.isEnabled !== false;
+        // The merchant's base city, under BOTH spellings, so every reader
+        // (Mongo query, Supabase column, storefront payload) finds it.
+        const baseCityValue = String(shippingNext.baseCity ?? '').trim();
+        if (baseCityValue) {
+          $set.baseCity = baseCityValue;
+          $set.base_city = baseCityValue;
+        }
+      }
+
       const update: Record<string, any> = { $set };
       if (Object.keys($unset).length) update.$unset = $unset;
       const storesResult: any = await (mongoose.connection.db.collection('stores') as any)
@@ -12026,6 +12150,15 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
   if (name === 'shipping') {
     // `next` is a union of every config shape; narrow once for the COD fields.
     const shippingNext = next as Record<string, any>;
+    // The canonical, COLUMN-shaped values every reader looks for. Each is
+    // derived from the merchant's own input — never a hardcoded fallback:
+    //   • a blank fee field stays NULL ("never priced"), NOT ৳0;
+    //   • a saved ৳0 stays ৳0 (a deliberate "free delivery").
+    const insideFeeColumn = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
+    const outsideFeeColumn = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
+    const advanceAmountColumn = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 });
+    const advanceEnabledColumn = shippingNext.requestAdvanceDeliveryCharge === true;
+    const codEnabledColumn = shippingNext.isEnabled !== false;
     try {
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
       if (isConfigured) {
@@ -12038,9 +12171,14 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
             body: {
               // Master COD switch — read back by the storefront to HIDE the COD
               // option entirely when the merchant turns it off.
-              is_cod_enabled: shippingNext.isEnabled !== false,
-              advance_delivery_charge_enabled: shippingNext.requestAdvanceDeliveryCharge === true,
-              advance_amount: shippingNext.advanceDeliveryChargeAmount ?? null,
+              is_cod_enabled: codEnabledColumn,
+              advance_delivery_charge_enabled: advanceEnabledColumn,
+              advance_amount: advanceAmountColumn ?? 0,
+              // NULL = "never priced" so the storefront says "To be confirmed"
+              // instead of printing a phantom ৳0.
+              inside_dhaka_fee: insideFeeColumn,
+              outside_dhaka_fee: outsideFeeColumn,
+              base_city: String(shippingNext.baseCity ?? '').trim() || null,
               shipping_config: shippingNext,
               updated_at: new Date().toISOString(),
             },
@@ -12053,9 +12191,12 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
             headers: { Prefer: 'resolution=merge-duplicates' },
             body: {
               store_slug: slug,
-              is_cod_enabled: shippingNext.isEnabled !== false,
-              advance_delivery_charge_enabled: shippingNext.requestAdvanceDeliveryCharge === true,
-              advance_amount: shippingNext.advanceDeliveryChargeAmount ?? null,
+              is_cod_enabled: codEnabledColumn,
+              advance_delivery_charge_enabled: advanceEnabledColumn,
+              advance_amount: advanceAmountColumn ?? 0,
+              inside_dhaka_fee: insideFeeColumn,
+              outside_dhaka_fee: outsideFeeColumn,
+              base_city: String(shippingNext.baseCity ?? '').trim() || null,
               updated_at: new Date().toISOString(),
             },
             conflictPatchPath: `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`,

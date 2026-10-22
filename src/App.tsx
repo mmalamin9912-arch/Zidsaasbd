@@ -2007,6 +2007,9 @@ export default function App() {
             maxOrderLimit: shipping.maxOrderLimit ?? prev.maxOrderLimit,
             requestAdvanceDeliveryCharge: shipping.requestAdvanceDeliveryCharge === true,
             advanceDeliveryChargeAmount: shipping.advanceDeliveryChargeAmount ?? '',
+            // The merchant's base city anchors the checkout's delivery-zone
+            // validation, so it must be restored from the database too.
+            baseCity: shipping.baseCity ?? prev.baseCity ?? '',
           }));
         }
       }

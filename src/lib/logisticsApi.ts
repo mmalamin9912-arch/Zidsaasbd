@@ -34,6 +34,12 @@ export interface ShippingConfig {
   maxOrderLimit: number | null;
   requestAdvanceDeliveryCharge: boolean;
   advanceDeliveryChargeAmount: number | null;
+  /**
+   * The merchant's base city / district. The checkout derives the delivery
+   * zone from it, so an out-of-city customer can never tick the cheaper
+   * "Inside City" option. Empty means "not configured".
+   */
+  baseCity: string;
   notes: string;
 }
 
@@ -83,6 +89,7 @@ function normalizeShipping(raw: any): ShippingConfig | null {
     maxOrderLimit: toNullableFee(raw.maxOrderLimit),
     requestAdvanceDeliveryCharge: raw.requestAdvanceDeliveryCharge === true,
     advanceDeliveryChargeAmount: toNullableFee(raw.advanceDeliveryChargeAmount),
+    baseCity: String(raw.baseCity ?? raw.base_city ?? '').trim(),
     notes: typeof raw.notes === 'string' ? raw.notes : '',
   };
 }
