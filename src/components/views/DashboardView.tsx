@@ -792,6 +792,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   setPickupLocation(location);
                   setActiveModal('none');
                   await saveStep('pickup_point', location);
+                  // Refresh onboarding status from server so UI reflects the saved step
+                  const status = await fetchOnboardingStatus(storeSlug);
+                  if (status) setOnboarding(status);
                 }}
                 disabled={savingStep}
                 className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1 disabled:opacity-60"
@@ -851,6 +854,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   setBrandLogo(logo);
                   setActiveModal('none');
                   await saveStep('setup_branding', logo);
+                  // Refresh onboarding status from server so UI reflects the saved step
+                  const status = await fetchOnboardingStatus(storeSlug);
+                  if (status) setOnboarding(status);
                 }}
                 disabled={savingStep}
                 className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1 disabled:opacity-60"

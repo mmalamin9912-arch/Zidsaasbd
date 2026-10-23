@@ -353,10 +353,10 @@ export function deriveOnboardingStatus(input: {
   const phone = firstValue(store, ['phone', 'support_contact', 'supportContact', 'support_phone', 'supportPhone', 'contact_phone']);
   const logo = firstValue(store, ['logo_url', 'logoUrl', 'logo']);
   const theme = firstValue(store, ['theme', 'active_theme_id', 'activeThemeId', 'theme_config', 'themeConfig', 'branding', 'banner_url', 'bannerUrl']);
-  const pickup = firstValue(store, ['pickup_address', 'pickupAddress', 'pickup_point', 'pickupLocation', 'address']);
+  const pickup = firstValue(store, ['pickup_address', 'pickupAddress', 'pickup_point', 'pickupLocation', 'address', 'store_address', 'storeAddress']);
   const payment = firstValue(store, [
     'payment_config', 'paymentConfig', 'adminPaymentConfig', 'payment_methods', 'paymentMethods',
-    'payment_gateways', 'paymentGateways', 'bkash_number', 'bank_account',
+    'payment_gateways', 'paymentGateways', 'bkash_number', 'bank_account', 'bank_details', 'bankDetails',
   ]);
 
   const steps: OnboardingStepStatus[] = [
@@ -603,9 +603,9 @@ export const STEP_FIELD_MAP: Record<OnboardingStepId, string[]> = {
   // product completion is derived from the products collection, not a store field.
   add_product: [],
   setup_branding: ['logo_url', 'logoUrl'],
-  confirm_phone: ['phone', 'support_contact'],
-  pickup_point: ['pickup_address'],
-  payment_setup: ['payment_config'],
+  confirm_phone: ['phone', 'support_contact', 'support_phone'],
+  pickup_point: ['pickup_address', 'store_address'],
+  payment_setup: ['payment_config', 'payment_methods', 'bank_details'],
 };
 
 /** Every step id this module understands, for request validation. */
