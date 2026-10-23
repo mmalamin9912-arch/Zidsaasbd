@@ -354,7 +354,16 @@ export async function updateOrderFields(
       { $set: set }
     );
 
-    // Re-read so the response carries the authoritative document.
+    // Synchronize any legacy duplicate records with the same order_number
+    const orderNum = located.doc.order_number || key.replace(/^#/, '');
+    if (orderNum) {
+      await db.collection(ORDERS_COLLECTION).updateMany(
+        { order_number: orderNum, _id: { $ne: located.doc._id } },
+        { $set: set }
+      ).catch(() => null);
+    }
+
+    // Re-read so the response carries the authoritative single document.
     const fresh = await db.collection(ORDERS_COLLECTION).findOne({ _id: located.doc._id });
     return {
       ok: res.matchedCount > 0,

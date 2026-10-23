@@ -785,11 +785,12 @@ export default function App() {
         // a JSON string). Normalize them into the UI `Order` shape so the
         // dashboard never renders `.toLocaleString()` on an undefined field.
         const normalized = normalizeOrders(data);
+        const uniqueOrders = Array.from(new Map(normalized.map(item => [item.id, item])).values());
         setOrders(prev =>
           // Keep the previous array identity when nothing changed — the
           // keep-previous-data behaviour that stops tab switches from
           // re-rendering (and flickering) the whole table.
-          JSON.stringify(prev) === JSON.stringify(normalized) ? prev : normalized
+          JSON.stringify(prev) === JSON.stringify(uniqueOrders) ? prev : uniqueOrders
         );
       })
       .finally(() => {
@@ -2178,12 +2179,13 @@ export default function App() {
   };
 
   const handleUpdateOrders = async (updatedOrders: Order[]) => {
-    setOrders(updatedOrders);
+    const deduped = Array.from(new Map(updatedOrders.map(item => [item.id, item])).values());
+    setOrders(deduped);
     if (merchant?.id) {
       await fetch(`${window.location.origin}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedOrders.map(o => ({ ...o, merchantId: merchant.id })))
+        body: JSON.stringify(deduped.map(o => ({ ...o, merchantId: merchant.id })))
       }).catch(err => console.error('Error updating orders in DB:', err));
     }
   };
@@ -2697,6 +2699,7 @@ onPlaceOrder={async (newOrder) => {
                 // Background polls sync state ONLY — never POST the list back
                 // (see OrdersViewProps.onSyncOrders for the loop this breaks).
                 onSyncOrders={setOrders}
+                setOrders={setOrders}
                 merchantId={merchant?.id}
                 storeSlug={merchant?.storeSlug}
                 // Page ID powers "Share to Messenger": the chat opens directly

@@ -85,7 +85,8 @@ interface OrdersViewProps {
    * (which persists on demand). Falls back to `onUpdateOrders` when omitted so
    * callers that don't pass it behave exactly as before.
    */
-  onSyncOrders?: (orders: Order[]) => void;
+  onSyncOrders?: (orders: Order[] | ((prev: Order[]) => Order[])) => void;
+  setOrders?: React.Dispatch<React.SetStateAction<Order[]>>;
   /**
    * Hydration gate from App: false while the first /api/orders request for the
    * current store is still in flight. Status-tab count pills render a pulsing
@@ -265,10 +266,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    */
   const syncOrders = onSyncOrders || onUpdateOrders;
   const mergeServerOrders = (serverOrders: Order[]) => {
-    // Rows whose delete is in flight (or already committed this session) must
-    // never be resurrected by a poll response that raced the DELETE call.
+    // Deduplicate incoming serverOrders by unique ID
+    const dedupedServerOrders = Array.from(new Map(serverOrders.map(item => [item.id, item])).values());
+    let currentServerOrders = dedupedServerOrders;
     if (deletingIdsRef.current.size > 0) {
-      serverOrders = serverOrders.filter(o => !deletingIdsRef.current.has(o.id));
+      currentServerOrders = currentServerOrders.filter(o => !deletingIdsRef.current.has(o.id));
     }
     const pending = pendingWritesRef.current;
     const rejected = failedWritesRef.current;
@@ -277,12 +279,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
     // Fast path: nothing in flight and nothing to revert.
     if (!hasPending && !hasRejected) {
-      syncOrders(serverOrders);
+      syncOrders(currentServerOrders);
       return;
     }
 
     const localById = new Map<string, Order>(latestOrdersRef.current.map(o => [o.id, o]));
-    const merged = serverOrders.map(serverOrder => {
+    const merged = currentServerOrders.map(serverOrder => {
       const local = localById.get(serverOrder.id);
       if (!local) return serverOrder;
       // Keep the optimistically painted row until its write settles.
@@ -297,12 +299,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
     // Preserve rows that were optimistically added locally (e.g. a duplicated or
     // manually created order) until the server list catches up.
-    const serverIds = new Set(serverOrders.map(o => o.id));
+    const serverIds = new Set(currentServerOrders.map(o => o.id));
     const localOnly = latestOrdersRef.current.filter(
       o => !serverIds.has(o.id) && pending[o.id]
     );
 
-    syncOrders(localOnly.length ? [...localOnly, ...merged] : merged);
+    const fullList = localOnly.length ? [...localOnly, ...merged] : merged;
+    const dedupedFullList = Array.from(new Map(fullList.map(item => [item.id, item])).values());
+    syncOrders(dedupedFullList);
   };
 
   // ── Filter / view state ─────────────────────────────────────────────────────
@@ -407,7 +411,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // renders `undefined.toLocaleString()` and blanks the whole app.
         // The merge is a READ-ONLY sync (onSyncOrders) — the poll never writes
         // the list back to the server.
-        mergeServerOrders(normalizeOrders(data));
+        const normalized = normalizeOrders(data);
+        const uniqueFetched = Array.from(new Map(normalized.map(item => [item.id, item])).values());
+        mergeServerOrders(uniqueFetched);
       } catch (err) {
         console.warn('Error fetching live orders:', err);
       }
@@ -932,7 +938,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     const counts: Record<string, number> = { All: 0 };
     STATUS_TABS.forEach(st => { if (st !== 'All') counts[st] = 0; });
 
-    orders.forEach((ord) => {
+    const uniqueOrders = Array.from(new Map(orders.map(item => [item.id, item])).values());
+    uniqueOrders.forEach((ord) => {
       counts['All'] += 1;
       // Use the canonical label so a row stored as 'in_delivery' is counted
       // under 'In delivery' rather than vanishing from every tab.
@@ -947,7 +954,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
   // Filter logic
   const filteredOrders = useMemo(() => {
-    return orders.filter((ord) => {
+    // Unique ID check before rendering to guarantee no repeated rows appear in any status tab
+    const uniqueOrders = Array.from(new Map(orders.map(item => [item.id, item])).values());
+
+    return uniqueOrders.filter((ord) => {
       // 1. Sub-menu filter
       //
       // `isManualOrder` checks the persisted `is_manual` / `isManual` flag AND
@@ -1099,7 +1109,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    */
   const paintOrder = (orderId: string, patch: Partial<Order>): Order | undefined => {
     const previous = latestOrdersRef.current.find(o => o.id === orderId);
-    onUpdateOrders(latestOrdersRef.current.map(o => (o.id === orderId ? { ...o, ...patch } : o)));
+    if (!previous) return undefined;
+    const updated: Order = { ...previous, ...patch };
+
+    // Deduplicate orders by unique ID using map instead of appending to array
+    if (typeof setOrders === 'function') {
+      setOrders(prev => prev.map(o => (o.id === updated.id ? updated : o)));
+    }
+
+    const updatedList = latestOrdersRef.current.map(o => (o.id === orderId ? updated : o));
+    const deduped = Array.from(new Map(updatedList.map(item => [item.id, item])).values());
+    onUpdateOrders(deduped);
     return previous;
   };
 
@@ -1122,7 +1142,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           storeSlug || ''
         )}&merchant_id=${encodeURIComponent(merchantId || '')}`,
         {
-          method: 'PUT',
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...payload, merchantId, storeSlug }),
         }
@@ -1144,11 +1164,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       // (e.g. `In Delivery` → `In delivery`) land in the UI without a refetch.
       if (data.order) {
         const serverOrder = normalizeOrder(data.order);
-        onUpdateOrders(
-          latestOrdersRef.current.map(o =>
-            o.id === orderId ? { ...o, ...serverOrder, id: o.id } : o
-          )
+        const existing = latestOrdersRef.current.find(o => o.id === orderId) || ({} as Order);
+        const updated: Order = { ...existing, ...serverOrder, id: orderId };
+        if (typeof setOrders === 'function') {
+          setOrders(prev => prev.map(o => (o.id === updated.id ? updated : o)));
+        }
+        const updatedList = latestOrdersRef.current.map(o =>
+          o.id === orderId ? updated : o
         );
+        const deduped = Array.from(new Map(updatedList.map(item => [item.id, item])).values());
+        onUpdateOrders(deduped);
       }
       return true;
     } catch (err: any) {
@@ -1167,6 +1192,19 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const handleBulkUpdateStatus = async (newStatus: Order['status']) => {
     const ids = orders.filter(o => selectedOrderIds.includes(o.id)).map(o => o.id);
     if (ids.length === 0) return;
+
+    if (typeof setOrders === 'function') {
+      setOrders(prev => prev.map(o => {
+        if (!ids.includes(o.id)) return o;
+        const fulfillment =
+          newStatus === 'Completed'
+            ? 'Delivered'
+            : newStatus === 'In delivery'
+            ? 'In Transit'
+            : o.fulfillmentStatus;
+        return { ...o, status: newStatus, fulfillmentStatus: fulfillment };
+      }));
+    }
 
     // Paint every selected row NOW, then persist in the background.
     const snapshots = new Map<string, Order>();
@@ -1285,16 +1323,32 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    * second, revert and explain on failure.
    */
   const handleQuickUpdateStatus = async (orderId: string, newStatus: Order['status']) => {
-    const beforeStatus = latestOrdersRef.current.find(o => o.id === orderId)?.status;
+    const existing = latestOrdersRef.current.find(o => o.id === orderId);
+    const beforeStatus = existing?.status;
     beginWrite(orderId);
+
+    const impliedFulfillment =
+      newStatus === 'Completed'
+        ? 'Delivered'
+        : newStatus === 'In delivery'
+        ? 'In Transit'
+        : existing?.fulfillmentStatus;
+
+    const updated: Order = {
+      ...(existing || ({} as Order)),
+      id: orderId,
+      status: newStatus,
+      fulfillmentStatus: impliedFulfillment,
+    };
+
+    // Ensure React state does NOT append duplicate objects; deduplicate by unique ID
+    if (typeof setOrders === 'function') {
+      setOrders(prev => prev.map(o => (o.id === updated.id ? updated : o)));
+    }
+
     const previous = paintOrder(orderId, {
       status: newStatus,
-      fulfillmentStatus:
-        newStatus === 'Completed'
-          ? 'Delivered'
-          : newStatus === 'In delivery'
-          ? 'In Transit'
-          : latestOrdersRef.current.find(o => o.id === orderId)?.fulfillmentStatus,
+      fulfillmentStatus: impliedFulfillment,
     });
 
     const ok = await persistOrder(
@@ -3766,3 +3820,5 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     </div>
   );
 };
+
+export { OrdersView as OrdersManagement };

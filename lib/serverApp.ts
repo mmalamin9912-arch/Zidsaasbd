@@ -14775,11 +14775,21 @@ app.get('/api/orders', async (req, res) => {
       console.warn('[Server] GET /api/orders query warning:', queryErr?.message || queryErr);
       orders = [];
     }
+    // Deduplicate orders by unique identifier (id / order_number / _id) before returning
+    const dedupedOrders = Array.from(
+      new Map(
+        (Array.isArray(orders) ? orders : []).map((item: any) => [
+          String(item.id || item.order_number || item._id || '').replace(/^#/, '').trim(),
+          item,
+        ])
+      ).values()
+    );
+
     // Report the authoritative number of matches so the client can tell an
     // empty tab apart from a broken filter without fetching every row.
-    res.setHeader('X-Orders-Count', String(Array.isArray(orders) ? orders.length : 0));
+    res.setHeader('X-Orders-Count', String(dedupedOrders.length));
     res.setHeader('X-Orders-Filtered', filterClauses ? 'true' : 'false');
-    return res.status(200).json(Array.isArray(orders) ? orders : []);
+    return res.status(200).json(dedupedOrders);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
     return res.status(200).json([]);
@@ -15064,18 +15074,62 @@ app.post('/api/orders', async (req, res) => {
 
       // Write through the native driver so the record always lands in
       // zidbdsaas.orders regardless of the connection string's default DB.
-      // Each insert is isolated so one malformed order can never fail the batch.
+      // Each write is isolated and updates existing matching record to prevent duplicates.
       let persisted = false;
       try {
         const db = await getMongoDb(ORDERS_DB_NAME);
         if (db) {
-          const result = await db.collection(ORDERS_COLLECTION).insertOne({ ...record });
-          inserted.push({ _id: result.insertedId, ...record });
-          persisted = true;
+          const matchConditions: Record<string, any>[] = [
+            { order_number: record.order_number },
+          ];
+          if (order.id) matchConditions.push({ id: order.id });
+          if (record.id) matchConditions.push({ id: record.id });
+
+          const existingDoc = await db.collection(ORDERS_COLLECTION).findOne({
+            $or: matchConditions,
+            $and: [
+              {
+                $or: [
+                  { store_slug: slug },
+                  { storeSlug: slug },
+                  { merchant_id: merchantId },
+                  { merchantId },
+                ],
+              },
+            ],
+          });
+
+          if (existingDoc) {
+            await db.collection(ORDERS_COLLECTION).updateOne(
+              { _id: existingDoc._id },
+              { $set: { ...record, updated_at: new Date() } }
+            );
+            inserted.push({ _id: existingDoc._id, ...record });
+            persisted = true;
+          } else {
+            const result = await db.collection(ORDERS_COLLECTION).insertOne({ ...record });
+            inserted.push({ _id: result.insertedId, ...record });
+            persisted = true;
+          }
         } else {
-          const doc = await Order.create(record);
-          inserted.push(doc);
-          persisted = true;
+          const existingDoc = await (Order as any).findOne({
+            $or: [
+              { order_number: record.order_number },
+              ...(order.id ? [{ id: order.id }] : []),
+            ],
+          });
+          if (existingDoc) {
+            await (Order as any).updateOne(
+              { _id: existingDoc._id },
+              { $set: { ...record, updated_at: new Date() } }
+            );
+            inserted.push({ ...existingDoc.toObject(), ...record });
+            persisted = true;
+          } else {
+            const doc = await Order.create(record);
+            inserted.push(doc);
+            persisted = true;
+          }
         }
       } catch (insertErr: any) {
         console.warn('[Server] POST /api/orders insert warning:', insertErr?.message || insertErr);
@@ -15295,6 +15349,33 @@ const handleOrderUpdate = async (req: any, res: any) => {
         error: result.error || 'The order could not be updated.',
         order: null,
       });
+    }
+
+    // ── Supabase single order status sync ────────────────────────────────
+    // Updates the single matching order in Supabase without creating or returning duplicate records.
+    try {
+      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+      if (isConfigured) {
+        const cleanId = id.replace(/^#/, '');
+        const sbPatch: Record<string, any> = {
+          updated_at: new Date().toISOString(),
+        };
+        if (status) sbPatch.status = status;
+        if (paymentStatus) sbPatch.payment_status = paymentStatus;
+        if (fields.fulfillment_status) sbPatch.fulfillment_status = fields.fulfillment_status;
+
+        // Target the single matching order in Supabase by UUID id or order_number
+        const filter = isUuidLike(cleanId)
+          ? `id=eq.${encodeURIComponent(cleanId)}`
+          : `or=(order_number.eq.${encodeURIComponent(cleanId)},order_number.eq.${encodeURIComponent(id)})`;
+
+        await postgrestWrite(supabaseUrl, supabaseKey, `/rest/v1/orders?${filter}&limit=1`, {
+          method: 'PATCH',
+          body: sbPatch,
+        });
+      }
+    } catch (sbErr: any) {
+      console.warn('[Server] Supabase order status sync warning:', sbErr?.message || sbErr);
     }
 
     const freshOrder = normalizeOrderRow(result.order);
