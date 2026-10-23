@@ -14841,6 +14841,41 @@ app.get('/api/orders/:storeRef', async (req, res) => {
 });
 
 // POST /api/orders — batch sync updated orders into MongoDB.
+//
+// DUPLICATE PREVENTION (5-second window):
+// A double-tap on "Confirm Order" (or a retry before the first request
+// settles) used to insert the SAME order twice — the frontend guard is a
+// best-effort, but two browser tabs / a flaky network can still race. The
+// route therefore computes a fingerprint per order (store + customer phone +
+// cart contents + total + payment method) and treats a repeat submission of
+// the SAME fingerprint within 5 seconds as a duplicate: it is acknowledged
+// with the FIRST order's number and skipped, so the customer's UI and the
+// merchant's dashboard each see exactly one order.
+//
+// The fingerprint is content-based (not session-id-based) so it also catches
+// the classic "two tabs, same cart" case, while a genuinely NEW order — even
+// an identical re-order minutes later — still goes through.
+const ORDER_DEDUP_WINDOW_MS = 5_000;
+type OrderDedupEntry = { orderNumber: string; at: number };
+// Keyed by the fingerprint string; process-local, which is the right scope for
+// a double-submit race (both requests land on the same warm instance).
+const recentOrderSubmissions = new Map<string, OrderDedupEntry>();
+
+function orderFingerprintOf(order: any, storeSlug: string): string {
+  const items = Array.isArray(order.items) ? order.items : [];
+  const itemKey = items
+    .map((i: any) => `${String(i?.productName ?? i?.id ?? '')}x${Number(i?.quantity ?? 0)}`)
+    .sort()
+    .join('|');
+  return [
+    storeSlug,
+    String(order.customerPhone ?? order.customer_phone ?? '').replace(/\D/g, ''),
+    itemKey,
+    String(toNumeric(order.totalBDT ?? order.total_price ?? order.total ?? 0, 0)),
+    String(order.paymentMethod ?? order.payment_method ?? ''),
+  ].join('::');
+}
+
 app.post('/api/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -14936,6 +14971,34 @@ app.post('/api/orders', async (req, res) => {
         order.platform === 'POS'
       );
       const source = isManual ? (rawSource || 'Manual') : (rawSource || 'Store');
+
+      // ── Duplicate-submission guard (5-second window) ──────────────────
+      // A double-tap on "Confirm Order" used to insert the SAME order twice.
+      // An identical fingerprint (same store + phone + cart + total + payment
+      // method) submitted again within the window is treated as a duplicate:
+      // acknowledged with the FIRST order's number and skipped.
+      const dedupKey = orderFingerprintOf(order, slug);
+      const now = Date.now();
+      // Opportunistic pruning so the map cannot grow without bound.
+      if (recentOrderSubmissions.size > 500) {
+        for (const [key, entry] of recentOrderSubmissions) {
+          if (now - entry.at > ORDER_DEDUP_WINDOW_MS) recentOrderSubmissions.delete(key);
+        }
+      }
+      const previous = recentOrderSubmissions.get(dedupKey);
+      if (previous && now - previous.at < ORDER_DEDUP_WINDOW_MS) {
+        console.log('[Server] POST /api/orders duplicate submission ignored:', {
+          order_number: previous.orderNumber,
+          age_ms: now - previous.at,
+          store: slug,
+        });
+        inserted.push({ order_number: previous.orderNumber, duplicate: true });
+        continue;
+      }
+      // The order number the client generated (or a fresh one) — remembered
+      // BEFORE the insert so the duplicate that raced this request maps to it.
+      const dedupOrderNumber = String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, '');
+      recentOrderSubmissions.set(dedupKey, { orderNumber: dedupOrderNumber, at: now });
 
       const record: any = {
         store_id: storeId,
