@@ -218,6 +218,7 @@ function invoiceHeadSection(
         <div class="header-right">
           <div class="brand-app">
             <div class="app-name">ZID SAAS BD</div>
+            <div class="brand-divider"></div>
             <div class="app-sub">TAX INVOICE &amp; PACKING SLIP</div>
           </div>
 
@@ -412,7 +413,8 @@ export function buildA4InvoiceHtml(orders: Order[], store?: PrintStoreInfo): str
       .brand-left { flex: none; }
       .header-right { flex: none; display: flex; gap: 24px; align-items: flex-start; }
       .brand-app { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
-      .app-name { font-size: 16px; font-weight: 900; color: #0F4C81; letter-spacing: 1px; }
+      .app-name { font-size: 26px; font-weight: 900; color: #0F4C81; letter-spacing: 1px; line-height: 1.1; }
+      .brand-divider { width: 100%; height: 2px; background: #0f172a; margin: 4px 0; }
       .app-sub { font-size: 11px; font-weight: 800; color: #F59E0B; text-transform: uppercase; letter-spacing: 1.2px; }
       .logo { position: relative; width: 78px; height: 78px; flex: none; }
       .logo .logo-initials {
