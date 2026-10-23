@@ -1097,7 +1097,29 @@ The render below must not guess. A merchant may paste
 
     // A bare numeric Page ID pasted into the Facebook field — keep it as-is so
     // the Messenger widget can link it via m.me (e.g. "130070660193001").
-    if (channel === 'facebook' && /^\d{5,25}$/.test(bare)) return bare;
+    if (channel === 'facebook') {
+      // Numeric Page ID → m.me link (e.g. 130070660193001).
+      if (/^\d{5,25}$/.test(bare)) return `https://m.me/${bare}`;
+      // Already an m.me link → canonicalise.
+      const alreadyMe = String(bare).match(/^m\.me\/([^\/?#]+)/i);
+      if (alreadyMe) return `https://m.me/${alreadyMe[1]}`;
+      // Extract a page username from any Facebook URL path depth.
+      const segs = String(bare).split('/').filter(Boolean);
+      const skip = new Set(['www','facebook','com','m','fb','pages','profile','watch','reels','reel','groups','photos']);
+      let username = '';
+      for (let i = segs.length - 1; i >= 0; i--) {
+        const seg = segs[i].replace(/[^a-zA-Z0-9._-]/g, '');
+        if (seg && !skip.has(seg.toLowerCase())) { username = seg; break; }
+      }
+      if (username) return `https://m.me/${username}`;
+      // Bare handle (`mypage`, `@mypage` — leading '@' already stripped above).
+      if (!String(bare).includes('.')) {
+        const handle = String(bare).replace(/[^a-zA-Z0-9._]/g, '');
+        if (!handle) return '';
+        return `https://m.me/${handle}`;
+      }
+      return ''; // not a usable Facebook identity
+    }
 
     // A value that is just a handle (`mypage`, `@mypage`) — build the canonical URL.
     if (!bare.includes('.')) {

@@ -79,7 +79,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [logoUrl, setLogoUrl] = useState(merchant?.logoUrl || '');
   const [storeTagline, setStoreTagline] = useState(merchant?.storeTagline || '');
   const [storeDescription, setStoreDescription] = useState(merchant?.storeDescription || '');
-  const [whatsappNumber, setWhatsappNumber] = useState(merchant?.whatsappNumber || '');
+
+  /** Normalise a WhatsApp input to clean international digits (e.g. `8801712345678`)
+   *  so `wa.me/<number>` links resolve directly on the storefront. Local BD
+   *  numbers starting with `0` are converted to the `880` country code. */
+  const normalizeWhatsapp = (value: string): string => {
+    let v = String(value).replace(/\\D/g, '');
+    if (v.startsWith('0')) v = '880' + v.slice(1);
+    return v;
+  };
+
+  const [whatsappNumber, setWhatsappNumber] = useState(normalizeWhatsapp(merchant?.whatsappNumber || ''));
   const [facebookUrl, setFacebookUrl] = useState(merchant?.facebookUrl || '');
   const [instagramUrl, setInstagramUrl] = useState(merchant?.instagramUrl || '');
   const [tiktokUrl, setTiktokUrl] = useState(merchant?.tiktokUrl || '');
@@ -1550,7 +1560,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       logoUrl,
       storeTagline,
       storeDescription,
-      whatsappNumber,
+      whatsappNumber: normalizeWhatsapp(whatsappNumber),
       facebookUrl,
       instagramUrl,
       tiktokUrl,
@@ -2153,7 +2163,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <input
                       type="text"
                       value={whatsappNumber}
-                      onChange={(e) => setWhatsappNumber(e.target.value)}
+                      onChange={(e) => setWhatsappNumber(normalizeWhatsapp(e.target.value))}
                       placeholder="017xxxxxxxx"
                       className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
                     />
@@ -2231,7 +2241,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <input
                       type="text"
                       value={whatsappNumber}
-                      onChange={(e) => setWhatsappNumber(e.target.value)}
+                      onChange={(e) => setWhatsappNumber(normalizeWhatsapp(e.target.value))}
                       placeholder="017xxxxxxxx"
                       className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
                     />
