@@ -62,6 +62,11 @@ import {
   BANGLADESH_DISTRICT_AREAS,
   SUB_DHAKA_AREAS,
 } from './deliveryZones.js';
+import {
+  resolveZoneRates,
+  findMissingRequiredZones,
+  describeMissingZones,
+} from './productDeliveryZones.js';
 // Shared gallery defaults + the Unsplash purge. Kept in its own module so the
 // server AND the browser bundle apply the exact same rule when a saved
 // `themeConfig.galleryImages` is read or written (see lib/galleryDefaults.ts).
@@ -5400,6 +5405,38 @@ const handleProductUpsert = async (req: any, res: any) => {
     const price = parseFloat(body.price ?? body.priceBDT ?? body.price_bdt ?? 0) || 0;
     const stock_quantity = parseInt(body.stock_quantity ?? body.stock ?? 0, 10) || 0;
     const stock = stock_quantity;
+
+    // SERVER-SIDE ENFORCEMENT of the per-product mandatory delivery zones.
+    //
+    // The product form enforces this too, but the form can be bypassed (a stale
+    // bundle, a direct API call), and a product that reaches the storefront
+    // without an Inside/Outside fee leaves the checkout unable to price
+    // delivery. Sub-Dhaka stays OPTIONAL — an unpriced Sub zone falls back to
+    // the product's Inside fee, which is the safer (never-overcharging) reading.
+    // A published product that fails this check is rejected with 400 so the
+    // merchant sees the exact zones to fill in; a DRAFT is allowed through so
+    // merchants can stage work-in-progress products.
+    const resolvedDelivery = buildProductDeliveryFields(body);
+    const isPublished = body.status !== 'Draft' && body.status !== 'draft' && body.is_published !== false;
+    if (isPublished) {
+      const rates = Array.isArray(body.deliveryRates)
+        ? body.deliveryRates
+        : Array.isArray(body.delivery_rates)
+        ? body.delivery_rates
+        : [];
+      const zoneTable = resolveZoneRates(rates, {
+        inside: body.inside_city_fee ?? body.insideCityFee,
+        sub: body.sub_dhaka_fee ?? body.subDhakaFee,
+        outside: body.outside_city_fee ?? body.outsideCityFee,
+      });
+      const missingZones = findMissingRequiredZones(zoneTable);
+      if (missingZones.length > 0) {
+        return res.status(400).json({
+          error: describeMissingZones(missingZones),
+          missingZones: missingZones.map((zone) => zone.key),
+        });
+      }
+    }
 
     const id = String(body.id || `prod-${Date.now()}`).trim();
     const title = String(body.title || body.name || 'Untitled Product').trim();

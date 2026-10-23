@@ -2,6 +2,14 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../types';
 import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug } from '../../utils/catalogPayload';
 import { buildDeliveryFeeFields } from '../../utils/deliveryCharges';
+import {
+  PRODUCT_DELIVERY_ZONES,
+  buildCanonicalZoneRates,
+  classifyZoneName,
+  describeMissingZones,
+  findMissingRequiredZones,
+  resolveZoneRates,
+} from '../../../lib/productDeliveryZones';
 import { downscaleImage, readAndDownscaleImage } from '../../utils/imageUtils';
 import { readZidStoreData } from '../../lib/storeData';
 import { safeGetItem } from '../../utils/safeStorage';
@@ -464,17 +472,26 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   });
 
     const [deliveryRates, setDeliveryRates] = useState<{ zoneName: string; fee: number | string }[]>(() => {
-    if (initialData?.deliveryRates && initialData.deliveryRates.length > 0) {
-      return initialData.deliveryRates;
-    }
-    return [
-      { zoneName: 'Inside City', fee: '' },
-      // Priced separately: Dhaka DISTRICT but outside the metropolitan thanas
-      // (Kamrangirchar, Savar, Tongi, Demra, Uttarkhan, …). Left blank, those
-      // areas pay the Inside City fee.
-      { zoneName: 'Sub-Dhaka / Suburbs', fee: '' },
-      { zoneName: 'Outside City', fee: '' }
-    ];
+    const savedRates = Array.isArray(initialData?.deliveryRates) ? initialData.deliveryRates : [];
+    const feeTable = resolveZoneRates(savedRates, {
+      inside: initialData?.inside_city_fee ?? initialData?.insideCityFee,
+      sub: initialData?.sub_dhaka_fee ?? initialData?.subDhakaFee,
+      outside: initialData?.outside_city_fee ?? initialData?.outsideCityFee,
+    });
+    const canonical = PRODUCT_DELIVERY_ZONES.map((zone) => ({
+      zoneName: zone.label,
+      fee: feeTable[zone.key] ?? '',
+    }));
+    // Preserve any custom/remote zones from older product records, but keep the
+    // three canonical zones fixed and first in the form.
+    const extras = savedRates
+      .filter((rate: any) => !classifyZoneName(rate?.zoneName ?? rate?.zone_name ?? rate?.name))
+      .map((rate: any) => ({
+        zoneName: String(rate?.zoneName ?? rate?.zone_name ?? rate?.name ?? '').trim(),
+        fee: rate?.fee ?? rate?.amount ?? rate?.charge ?? '',
+      }))
+      .filter((rate: { zoneName: string }) => rate.zoneName);
+    return [...canonical, ...extras];
   });
   const [deliveryValidationError, setDeliveryValidationError] = useState<string>('');
   // General form-level validation message (title / category / price), shown in
@@ -846,13 +863,19 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       }
     }
 
-    // Validate delivery rates: MUST enter at least one location name and valid amount (৳)
-    const validRates = deliveryRates.filter(r => r.zoneName.trim() !== '' && r.fee !== '' && !isNaN(Number(r.fee)));
-    if (validRates.length === 0) {
-      setDeliveryValidationError('At least one delivery zone and delivery fee amount (৳) are required.');
-      toast.error('At least one delivery zone and delivery fee amount (৳) are required.');
+    // Inside City and Outside City are mandatory per product. Sub-Dhaka is an
+    // optional separately-priced zone; if left blank, it uses that product's
+    // Inside City fee at checkout. Explicitly saved ৳0 is valid.
+    const zoneTable = resolveZoneRates(deliveryRates);
+    const missingRequiredZones = findMissingRequiredZones(zoneTable);
+    if (missingRequiredZones.length > 0) {
+      const message = describeMissingZones(missingRequiredZones);
+      setDeliveryValidationError(message);
+      toast.error(message);
       return;
     }
+    const canonicalRates = buildCanonicalZoneRates(deliveryRates);
+    const validRates = canonicalRates.filter((rate) => rate.fee !== null);
     setDeliveryValidationError('');
     setFormError('');
 
@@ -922,10 +945,13 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       requiresShipping,
       isTaxExempt,
       hasDiscount,
-      // Persist the charges in BOTH shapes: the explicit inside/outside pair that
-      // the storefront and checkout read directly, and the original zone list
-      // (which keeps custom zone names and any extra zones the merchant added).
-      deliveryRates: validRates.map(r => ({ zoneName: r.zoneName.trim(), fee: Number(r.fee) })),
+      // Persist the canonical, named zone list plus the explicit per-zone fields.
+      // Sub-Dhaka can be blank; checkout then falls back to this product's Inside
+      // City fee. Inside and Outside are validated above and always have values.
+      deliveryRates: canonicalRates.map((rate) => ({
+        zoneName: rate.zoneName,
+        fee: rate.fee === null ? '' : Number(rate.fee),
+      })),
       ...buildDeliveryFeeFields(validRates),
       colorImages,
       selectedFilter,
@@ -2409,7 +2435,8 @@ onClick={suggestPricing}
                   </span>
                 </h3>
                 <p className="text-[11px] text-slate-400">
-                  Specify location-specific delivery fees for this product. All custom zones are required before saving.
+                  Per-product delivery fees. <span className="text-slate-200 font-semibold">Inside City and Outside City are required</span> before saving;
+                  Sub-Dhaka and any custom zone are optional surcharges.
                 </p>
               </div>
             </div>
@@ -2422,33 +2449,43 @@ onClick={suggestPricing}
             )}
 
             <div className="space-y-3">
-              {deliveryRates.map((rate, index) => (
-                <div key={index} className="flex items-center gap-3">
+              {deliveryRates.map((rate, index) => {
+                const zoneKey = classifyZoneName(rate.zoneName);
+                const zoneDefinition = PRODUCT_DELIVERY_ZONES.find((zone) => zone.key === zoneKey);
+                const required = zoneDefinition?.required === true;
+                return (
+                <div key={`${zoneKey || 'custom'}-${index}`} className="flex items-center gap-3">
                   <div className="flex-1">
                     <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                      Zone/Location Name
+                      {zoneDefinition ? zoneDefinition.label : 'Custom zone'} {required ? '(Required)' : '(Optional surcharge)'}
                     </label>
+                    {zoneDefinition ? (
+                      <div className="w-full bg-[#181B26] border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs font-bold text-white">
+                        {zoneDefinition.label}
+                        <span className="block mt-1 text-[10px] font-normal text-slate-500">{zoneDefinition.hint}</span>
+                      </div>
+                    ) : (
                     <input
                       type="text"
-                      required
                       value={rate.zoneName}
                       onChange={(e) => {
                         const newRates = [...deliveryRates];
                         newRates[index].zoneName = e.target.value;
                         setDeliveryRates(newRates);
                       }}
-                      placeholder="e.g. Inside Dhaka"
+                      placeholder="e.g. Remote area surcharge"
                       className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00D68F] placeholder-slate-600"
                     />
+                    )}
                   </div>
                   <div className="w-36">
                     <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                      Delivery Fee (৳)
+                      Delivery Fee (৳) {required ? '(Required)' : '(Optional)'}
                     </label>
                     <div className="relative">
                       <input
                         type="number"
-                        required
+                        required={required}
                         min="0"
                         value={rate.fee}
                         onChange={(e) => {
@@ -2464,7 +2501,7 @@ onClick={suggestPricing}
                       </span>
                     </div>
                   </div>
-                  {deliveryRates.length > 1 && (
+                  {!zoneDefinition && (
                     <div className="pt-5">
                       <button
                         type="button"
@@ -2480,7 +2517,8 @@ onClick={suggestPricing}
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
 
             <button
@@ -2491,7 +2529,7 @@ onClick={suggestPricing}
               className="px-4 py-2 bg-[#202533] hover:bg-[#282E3F] text-slate-300 font-bold rounded-xl border border-[#2E3548] hover:border-[#00D68F] text-xs transition cursor-pointer flex items-center gap-1.5 w-fit"
             >
               <Plus className="w-4 h-4 text-[#00D68F]" />
-              <span>+ Add Delivery Zone</span>
+              <span>+ Add Optional Custom Zone</span>
             </button>
           </div>
 
