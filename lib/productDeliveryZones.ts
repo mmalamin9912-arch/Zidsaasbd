@@ -38,7 +38,7 @@ export interface DeliveryZoneDefinition {
   hint: string;
   /** Customer-facing zone name used in the checkout breakdown. */
   checkoutLabel: string;
-  /** True for the zones the form enforces (Inside + Outside + Sub-Dhaka). */
+  /** True for the zones the form enforces (Inside + Outside). */
   required: boolean;
   /** Legacy names that also map onto this zone (old saved products). */
   legacyNames: readonly string[];
@@ -58,7 +58,7 @@ export const PRODUCT_DELIVERY_ZONES: readonly DeliveryZoneDefinition[] = [
     label: 'Sub-Dhaka / Suburbs',
     hint: 'Optional separate rate for Keraniganj, Savar, Tongi, Demra, Uttarkhan, Rupganj, …',
     checkoutLabel: 'Sub-Dhaka / Suburbs',
-    required: false,
+    required: false, // Sub stays optional: an unpriced Sub zone falls back to Inside fee.
     legacyNames: [
       'sub dhaka', 'sub-dhaka', 'subdhaka', 'suburbs', 'dhaka suburbs',
       'sub dhaka / suburbs', 'sub-dhaka / suburbs', 'suburban',
