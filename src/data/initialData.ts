@@ -324,6 +324,7 @@ export const initialCodConfig: CodConfig = {
   insideDhakaFee: '',
   outsideDhakaFee: '',
   subDhakaFee: '',
+  subDhakaAreas: [],
   freeShippingThreshold: '',
   maxOrderLimit: '',
   requestAdvanceDeliveryCharge: false,

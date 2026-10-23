@@ -4,7 +4,7 @@ import { useToast } from '../ToastProvider';
 import { saveShippingConfig, loadShippingConfigWithMeta } from '../../lib/logisticsApi';
 // The canonical Bangladesh district list, shared with the storefront checkout
 // so the merchant picks the SAME city names the customer selects.
-import { BANGLADESH_DISTRICTS } from '../../../lib/deliveryZones';
+import { BANGLADESH_DISTRICTS, SUB_DHAKA_AREAS } from '../../../lib/deliveryZones';
 import {
   CreditCard,
   Building2,
@@ -260,6 +260,9 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         insideDhakaFee: codForm.insideDhakaFee ?? '',
         outsideDhakaFee: codForm.outsideDhakaFee ?? '',
         subDhakaFee: codForm.subDhakaFee ?? '',
+        // The merchant's OWN suburb selection — saved with the fee so the
+        // checkout prices exactly the areas ticked here.
+        subDhakaAreas: Array.isArray(codForm.subDhakaAreas) ? codForm.subDhakaAreas : [],
         freeShippingThreshold: codForm.freeShippingThreshold ?? '',
         maxOrderLimit: codForm.maxOrderLimit ?? '',
         isEnabled: codForm.isEnabled !== false,
@@ -862,10 +865,82 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
               />
               <p className="mt-1 text-[10px] text-slate-500">
-                Keraniganj, Savar, Tongi, Demra, Uttarkhan, Southkhan, Rupganj &amp; other outskirts.
-                Blank = those areas pay the Inside fee.
+                Applied to the suburb areas you tick below. Blank = those areas pay the Inside fee.
               </p>
             </div>
+          </div>
+
+          {/* ── Sub-Dhaka / Suburb area selection ─────────────────────────────
+              The MERCHANT decides exactly which areas count as "Sub-Dhaka".
+              Nothing is hardcoded on the storefront: the checkout matches the
+              customer's selected area against THIS list (alias-aware, so
+              "Savar Sadar" still matches "Savar") and applies the Sub-Dhaka
+              fee ONLY when the area is ticked here. Unticked areas pay the
+              standard Inside-City fee. Leaving every box unticked means no
+              area is treated as a suburb. */}
+          <div className="bg-[#181B26] border border-[#2E3548] p-4 rounded-xl space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <span className="text-white font-semibold text-xs">Sub-Dhaka / Suburb Areas</span>
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                  Tick the areas that should pay the Sub-Dhaka fee. Unticked areas pay the standard Inside-City fee.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCodForm({ ...codForm, subDhakaAreas: [...SUB_DHAKA_AREAS] })}
+                  className="px-3 py-1.5 rounded-lg bg-[#202533] border border-[#3A435E] text-slate-300 text-[10px] font-bold hover:border-[#00D68F] transition cursor-pointer"
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCodForm({ ...codForm, subDhakaAreas: [] })}
+                  className="px-3 py-1.5 rounded-lg bg-[#202533] border border-[#3A435E] text-slate-300 text-[10px] font-bold hover:border-rose-500 transition cursor-pointer"
+                >
+                  Clear all
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1.5">
+              {SUB_DHAKA_AREAS.map((area) => {
+                const checked = (codForm.subDhakaAreas || []).some(
+                  (a) => a.toLowerCase().replace(/[^a-z0-9]/g, '') ===
+                    area.toLowerCase().replace(/[^a-z0-9]/g, ''),
+                );
+                return (
+                  <label
+                    key={area}
+                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-[10px] font-semibold cursor-pointer transition ${
+                      checked
+                        ? 'bg-[#00D68F]/10 border-[#00D68F]/40 text-[#00D68F]'
+                        : 'bg-[#202533] border-[#2E3548] text-slate-400 hover:border-[#3A435E]'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        const current = codForm.subDhakaAreas || [];
+                        // Compare on compacted keys so "Gazipur Sadar" vs
+                        // "GazipurSadar" can never produce a duplicate entry.
+                        const compact = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        const next = e.target.checked
+                          ? [...current, area]
+                          : current.filter((a) => compact(a) !== compact(area));
+                        setCodForm({ ...codForm, subDhakaAreas: next });
+                      }}
+                      className="w-3.5 h-3.5 accent-[#00D68F] shrink-0"
+                    />
+                    <span className="truncate" title={area}>{area}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="text-[10px] text-slate-500">
+              Selected: <span className="text-slate-300 font-bold">{(codForm.subDhakaAreas || []).length}</span> of {SUB_DHAKA_AREAS.length} areas
+            </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs pt-2">

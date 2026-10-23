@@ -156,6 +156,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
         insideDhakaFee: stored.insideDhakaFee ?? '',
         outsideDhakaFee: stored.outsideDhakaFee ?? '',
         subDhakaFee: stored.subDhakaFee ?? '',
+        // The merchant's own suburb selection (from their COD settings).
+        subDhakaAreas: Array.isArray(stored.subDhakaAreas) ? stored.subDhakaAreas : [],
         freeShippingThreshold: stored.freeShippingThreshold ?? '',
         maxOrderLimit: stored.maxOrderLimit ?? '',
         requestAdvanceDeliveryCharge: stored.requestAdvanceDeliveryCharge,

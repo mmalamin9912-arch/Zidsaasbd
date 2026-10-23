@@ -6159,7 +6159,15 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       cityAreas: BANGLADESH_DISTRICT_AREAS,
       // Areas priced as "Sub-Dhaka / Dhaka Suburbs" — the checkout derives the
       // Sub-Dhaka zone from the customer's area, not from their district alone.
-      subDhakaAreas: SUB_DHAKA_AREAS,
+      // The MERCHANT'S OWN selection wins: when they have configured one in the
+      // COD settings we ship exactly those areas, so the storefront never
+      // hardcodes the default list over the merchant's choice. Only when they
+      // have never configured a selection do we fall back to the built-ins.
+      subDhakaAreas:
+        Array.isArray((shippingConfig as any)?.subDhakaAreas)
+          && (shippingConfig as any).subDhakaAreas.length > 0
+          ? (shippingConfig as any).subDhakaAreas
+          : SUB_DHAKA_AREAS,
       // Public storefront modules. Only published pages/posts are exposed.
       brandConfig,
       navigationMenus,
@@ -11791,6 +11799,22 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
       { min: 0 },
     ),
     subDhakaFee: cfgNumOrNull(src.subDhakaFee, fallback.subDhakaFee, { min: 0 }),
+    // The merchant's OWN Sub-Dhaka selection. Stored as normalised display
+    // names; the checkout matches with the same alias-aware normalisation.
+    // Absent → fall back to the built-in list; present (even empty) → ONLY
+    // these areas are priced as suburbs.
+    subDhakaAreas: (() => {
+      const rawList = src.subDhakaAreas ?? src.sub_dhaka_areas;
+      if (Array.isArray(rawList)) {
+        return rawList.map((a: any) => String(a ?? '').trim()).filter(Boolean);
+      }
+      // A comma-separated string from an older/flat payload is still honoured.
+      if (typeof rawList === 'string' && rawList.trim()) {
+        return rawList.split(',').map((a: string) => a.trim()).filter(Boolean);
+      }
+      const fallbackList = fallback.subDhakaAreas ?? fallback.sub_dhaka_areas;
+      return Array.isArray(fallbackList) ? fallbackList : [];
+    })(),
     // 0 / blank disables the offer, so it is normalised to null (= "not offered")
     // rather than a threshold of zero, which would make every order free.
     freeShippingThreshold: (() => {
@@ -12232,6 +12256,11 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
         const shippingNext = next as Record<string, any>;
         $set.inside_dhaka_fee = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
         $set.sub_dhaka_fee = cfgNumOrNull(shippingNext.subDhakaFee, undefined, { min: 0 });
+        // The merchant's Sub-Dhaka area selection — an explicit array (even an
+        // empty one) is stored verbatim so "no suburbs" survives the round-trip.
+        if (Array.isArray(shippingNext.subDhakaAreas)) {
+          $set.sub_dhaka_areas = shippingNext.subDhakaAreas;
+        }
         $set.outside_dhaka_fee = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
         $set.advance_amount = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 }) ?? 0;
         $set.advance_delivery_charge_enabled = shippingNext.requestAdvanceDeliveryCharge === true;
@@ -12303,6 +12332,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
     //   • a saved ৳0 stays ৳0 (a deliberate "free delivery").
     const insideFeeColumn = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
     const subFeeColumn = cfgNumOrNull(shippingNext.subDhakaFee, undefined, { min: 0 });
+    const subAreasColumn = Array.isArray(shippingNext.subDhakaAreas) ? shippingNext.subDhakaAreas : null;
     const outsideFeeColumn = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
     const advanceAmountColumn = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 });
     const advanceEnabledColumn = shippingNext.requestAdvanceDeliveryCharge === true;
@@ -12326,6 +12356,9 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
               // instead of printing a phantom ৳0.
               inside_dhaka_fee: insideFeeColumn,
               sub_dhaka_fee: subFeeColumn,
+              // The merchant's own Sub-Dhaka selection, as a JSON column. Sent
+              // as null when never configured so the default list applies.
+              ...(subAreasColumn !== null ? { sub_dhaka_areas: subAreasColumn } : {}),
               outside_dhaka_fee: outsideFeeColumn,
               base_city: String(shippingNext.baseCity ?? '').trim() || null,
               shipping_config: shippingNext,
@@ -12352,6 +12385,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
               advance_amount: advanceAmountColumn ?? 0,
               inside_dhaka_fee: insideFeeColumn,
               sub_dhaka_fee: subFeeColumn,
+              ...(subAreasColumn !== null ? { sub_dhaka_areas: subAreasColumn } : {}),
               outside_dhaka_fee: outsideFeeColumn,
               base_city: String(shippingNext.baseCity ?? '').trim() || null,
               updated_at: new Date().toISOString(),
@@ -12489,6 +12523,7 @@ async function mirrorShippingToCodConfig(storeRef: string, shipping: Record<stri
         insideDhakaFee: shipping.insideDhakaFee ?? '',
         outsideDhakaFee: shipping.outsideDhakaFee ?? '',
         subDhakaFee: shipping.subDhakaFee ?? '',
+        subDhakaAreas: Array.isArray(shipping.subDhakaAreas) ? shipping.subDhakaAreas : [],
         freeShippingThreshold: shipping.freeShippingThreshold ?? '',
         maxOrderLimit: shipping.maxOrderLimit ?? '',
         isEnabled: shipping.isEnabled !== false,
@@ -12539,6 +12574,7 @@ for (const route of CONFIG_ROUTES) {
       advance_amount: 'advanceDeliveryChargeAmount',
       inside_dhaka_fee: 'insideDhakaFee',
       sub_dhaka_fee: 'subDhakaFee',
+      sub_dhaka_areas: 'subDhakaAreas',
       outside_dhaka_fee: 'outsideDhakaFee',
     };
     for (const [column, configKey] of Object.entries(aliases)) {

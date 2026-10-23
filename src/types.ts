@@ -650,6 +650,12 @@ export interface CodConfig {
   insideDhakaFee: number | string;
   outsideDhakaFee: number | string;
   subDhakaFee: number | string;
+  /**
+   * The areas the MERCHANT decided count as Sub-Dhaka / Suburbs. Empty or
+   * absent = the built-in default list applies. Matched alias-aware on the
+   * checkout, so "Savar Sadar" still matches a saved "Savar".
+   */
+  subDhakaAreas?: string[];
   freeShippingThreshold: number | string;
   maxOrderLimit: number | string;
   requestAdvanceDeliveryCharge?: boolean;

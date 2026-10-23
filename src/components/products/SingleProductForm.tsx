@@ -950,7 +950,10 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       // City fee. Inside and Outside are validated above and always have values.
       deliveryRates: canonicalRates.map((rate) => ({
         zoneName: rate.zoneName,
-        fee: rate.fee === null ? '' : Number(rate.fee),
+        // Unpriced optional zones (e.g. Sub-Dhaka) keep an EMPTY fee, which the
+        // checkout treats as "fall back to the Inside fee". Priced zones store
+        // their real number (a deliberate ৳0 stays ৳0).
+        fee: (rate.fee === null ? '' : Number(rate.fee)) as number,
       })),
       ...buildDeliveryFeeFields(validRates),
       colorImages,

@@ -29,6 +29,12 @@ export interface ShippingConfig {
   insideDhakaFee: number | null;
   outsideDhakaFee: number | null;
   subDhakaFee: number | null;
+  /**
+   * The areas THIS merchant prices with the Sub-Dhaka fee, as canonical keys
+   * ("keraniganj", "savar", …). Empty/absent means "use the built-in default
+   * list" — an explicit `[]` from the settings UI means "no suburbs".
+   */
+  subDhakaAreas: string[];
   /** Cart total above which delivery is free. `null` disables the offer. */
   freeShippingThreshold: number | null;
   maxOrderLimit: number | null;
@@ -85,6 +91,11 @@ function normalizeShipping(raw: any): ShippingConfig | null {
     insideDhakaFee: toNullableFee(raw.insideDhakaFee ?? raw.insideCityFee),
     outsideDhakaFee: toNullableFee(raw.outsideDhakaFee ?? raw.outsideCityFee),
     subDhakaFee: toNullableFee(raw.subDhakaFee),
+    subDhakaAreas: Array.isArray(raw.subDhakaAreas)
+      ? raw.subDhakaAreas.map((a: any) => String(a ?? '').trim()).filter(Boolean)
+      : Array.isArray(raw.sub_dhaka_areas)
+      ? raw.sub_dhaka_areas.map((a: any) => String(a ?? '').trim()).filter(Boolean)
+      : [],
     freeShippingThreshold: toNullableFee(raw.freeShippingThreshold),
     maxOrderLimit: toNullableFee(raw.maxOrderLimit),
     requestAdvanceDeliveryCharge: raw.requestAdvanceDeliveryCharge === true,

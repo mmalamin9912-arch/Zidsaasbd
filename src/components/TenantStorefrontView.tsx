@@ -2071,6 +2071,8 @@ The render below must not guess. A merchant may paste
     | {
         insideDhakaFee?: number | string | null;
         subDhakaFee?: number | string | null;
+        /** The merchant's own Sub-Dhaka selection (COD settings). */
+        subDhakaAreas?: string[] | null;
         outsideDhakaFee?: number | string | null;
         freeShippingThreshold?: number | string | null;
         isEnabled?: boolean;
@@ -2157,11 +2159,38 @@ The render below must not guess. A merchant may paste
   ).trim();
 
   /**
+   * The merchant's OWN Sub-Dhaka area selection from their COD settings.
+   *
+   * The checkout does NOT hardcode which areas are suburbs: the merchant picks
+   * them (Keraniganj, Savar, Tongi, …) in the dashboard and this array is what
+   * the zone resolver consults. An empty/absent list means the store never
+   * configured one — the resolver then falls back to its built-in defaults so
+   * a store that never touched the setting still prices suburbs sensibly.
+   */
+  const merchantSubDhakaAreas: readonly string[] | undefined = (() => {
+    const raw = (liveStoreData as any).sub_dhaka_areas
+      ?? (liveStoreData as any).subDhakaAreas
+      ?? storefrontShippingConfig?.subDhakaAreas
+      ?? (storefrontCodConfig as any)?.sub_dhaka_areas
+      ?? (storefrontCodConfig as any)?.subDhakaAreas
+      ?? (liveStoreData.merchant as any)?.sub_dhaka_areas
+      ?? (liveStoreData.merchant as any)?.subDhakaAreas
+      ?? (merchant as any)?.sub_dhaka_areas;
+    if (Array.isArray(raw)) return raw.map((a) => String(a ?? '').trim()).filter(Boolean);
+    if (typeof raw === 'string' && raw.trim()) {
+      return raw.split(',').map((a) => a.trim()).filter(Boolean);
+    }
+    return undefined;
+  })();
+
+  /**
    * The zones the customer may choose, given the district AND area they picked.
    *
-   * • Customer area is a Sub-Dhaka suburb → "Sub-Dhaka / Suburbs" is FORCED.
-   *   This is checked FIRST so Kamrangirchar / Savar / Tongi can never be
-   *   quoted the core Inside-City rate.
+   * • Customer area is in the MERCHANT'S OWN Sub-Dhaka selection (COD settings;
+   *   falls back to the built-in list only when they never configured one) →
+   *   "Sub-Dhaka / Suburbs" is FORCED and priced with the merchant's exact
+   *   `sub_dhaka_fee`. This is checked FIRST so a suburb can never be quoted
+   *   the core Inside-City rate.
    * • Customer district == merchant base district → "Inside City" allowed,
    *   the others BLOCKED.
    * • Any other district → "Outside City" forced, "Inside City" BLOCKED (the
@@ -2174,6 +2203,10 @@ The render below must not guess. A merchant may paste
     // Dhaka customer picking "Savar" is charged the Sub-Dhaka rate.
     area: custCityArea,
     baseCity: merchantBaseCity,
+    // The merchant's OWN suburb selection — never a hardcoded list. Omitted
+    // (undefined) here when the store has no configured selection, which makes
+    // the resolver use its built-in defaults.
+    subDhakaAreas: merchantSubDhakaAreas,
   });
   const insideZoneAllowed = deliveryZoneResolution.insideAllowed;
   const subZoneAllowed = deliveryZoneResolution.subAllowed;
@@ -2197,7 +2230,11 @@ The render below must not guess. A merchant may paste
     // The area belongs to the PREVIOUS district — clear it so a stale "Uttara"
     // can never be submitted against Khulna.
     setCustCityArea('');
-    const resolution = resolveDeliveryZoneForCity({ city, baseCity: merchantBaseCity });
+    const resolution = resolveDeliveryZoneForCity({
+      city,
+      baseCity: merchantBaseCity,
+      subDhakaAreas: merchantSubDhakaAreas,
+    });
     if (!resolution.hasBaseCity) return;
     setShippingArea((current) => {
       const allowed = current === 'inside'
@@ -2221,6 +2258,7 @@ The render below must not guess. A merchant may paste
       city: custDistrict,
       area,
       baseCity: merchantBaseCity,
+      subDhakaAreas: merchantSubDhakaAreas,
     });
     setShippingArea((current) => {
       const allowed = current === 'inside'

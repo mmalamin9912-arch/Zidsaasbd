@@ -426,9 +426,7 @@ const SUB_AREA_ALIASES: Record<string, string> = {
 let subDhakaKeysCache: ReadonlySet<string> | null = null;
 function subDhakaKeys(): ReadonlySet<string> {
   if (!subDhakaKeysCache) {
-    subDhakaKeysCache = new Set(
-      SUB_DHAKA_AREAS.map((area) => normalizeCityName(area)).filter(Boolean),
-    );
+    subDhakaKeysCache = areaListKeys(SUB_DHAKA_AREAS);
   }
   return subDhakaKeysCache;
 }
@@ -436,13 +434,31 @@ function subDhakaKeys(): ReadonlySet<string> {
 /**
  * Is this area / thana one of the Sub-Dhaka (Dhaka suburbs) delivery zones?
  *
+ * When `customAreas` is supplied (the merchant's own selection from the COD
+ * settings), ONLY those areas count — the built-in list is ignored entirely, so
+ * a merchant who unchecks "Savar" stops pricing Savar as a suburb. The custom
+ * list is matched with the same normalization, aliases and qualifier-stripping
+ * as the built-in list.
+ *
  * Matching is exact-after-normalisation (deliberately NOT substring matching:
  * "Uttara Sector 7" must stay core, while "Uttarkhan" must be suburban). A
  * trailing qualifier — "Savar Sadar", "Tongi Municipal Area", "Keraniganj,
  * Dhaka" — is tolerated by testing the first word-stem as well.
  */
-export function isSubDhakaArea(area: unknown): boolean {
-  const keys = subDhakaKeys();
+export function isSubDhakaArea(area: unknown, customAreas?: readonly string[]): boolean {
+  // A merchant-provided selection wins outright: it IS the definition of which
+  // areas this store prices as suburbs. An empty list means "none configured"
+  // and falls back to the built-in list (so a fresh merchant still gets the
+  // sensible defaults) — pass `[]` explicitly only when "no suburbs" is wanted.
+  if (customAreas && customAreas.length > 0) {
+    return matchesAreaList(area, customAreas);
+  }
+  return matchesAreaList(area, SUB_DHAKA_AREAS);
+}
+
+/** Match an area against an arbitrary list using the shared normalization. */
+function matchesAreaList(area: unknown, list: readonly string[]): boolean {
+  const keys = areaListKeys(list);
   const key = normalizeCityName(area);
   if (!key) return false;
   const canonical = SUB_AREA_ALIASES[key] || key;
@@ -456,6 +472,18 @@ export function isSubDhakaArea(area: unknown): boolean {
     if (keys.has(alias)) return true;
   }
   return false;
+}
+
+/** Memoized key-sets for custom area lists (keyed by joined list). */
+const customAreaKeysCache = new Map<string, ReadonlySet<string>>();
+function areaListKeys(list: readonly string[]): ReadonlySet<string> {
+  const cacheKey = list.join('|');
+  const cached = customAreaKeysCache.get(cacheKey);
+  if (cached) return cached;
+  const keys = new Set(list.map((a) => normalizeCityName(a)).filter(Boolean));
+  if (customAreaKeysCache.size > 50) customAreaKeysCache.clear();
+  customAreaKeysCache.set(cacheKey, keys);
+  return keys;
 }
 
 /** The outcome of the city → zone decision. */
@@ -497,16 +525,22 @@ export function resolveDeliveryZoneForCity(options: {
   city?: unknown;
   area?: unknown;
   baseCity?: unknown;
+  /** The merchant's own Sub-Dhaka selection (COD settings). Omit for defaults. */
+  subDhakaAreas?: readonly string[];
 }): DeliveryZoneResolution {
   const baseCity = String(options.baseCity ?? '').trim();
   const city = String(options.city ?? '').trim();
   const area = String(options.area ?? '').trim();
   const hasBaseCity = Boolean(baseCity) && Boolean(normalizeCityName(baseCity));
+  const subAreas = options.subDhakaAreas;
   // An area from ANY district is checked, so a customer who picks Gazipur →
   // Tongi (or Narayanganj → Rupganj) is priced as a Dhaka suburb too. Even
   // when the district itself is suburban (Savar / Keraniganj are their own
   // upazila entries on some courier sheets) the area check still wins.
-  const isSubDhaka = isSubDhakaArea(area) || (Boolean(area) && isSubDhakaArea(city));
+  // With a merchant selection, ONLY the selected areas qualify; anything else
+  // falls back to the standard Inside-City rate.
+  const isSubDhaka =
+    isSubDhakaArea(area, subAreas) || (Boolean(area) && isSubDhakaArea(city, subAreas));
 
   if (isSubDhaka) {
     return {

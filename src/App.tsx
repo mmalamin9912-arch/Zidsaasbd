@@ -2003,6 +2003,10 @@ export default function App() {
             insideDhakaFee: shipping.insideDhakaFee ?? prev.insideDhakaFee,
             outsideDhakaFee: shipping.outsideDhakaFee ?? prev.outsideDhakaFee,
             subDhakaFee: shipping.subDhakaFee ?? prev.subDhakaFee,
+            // Restore the merchant's Sub-Dhaka area selection from the database.
+            subDhakaAreas: Array.isArray(shipping.subDhakaAreas) && shipping.subDhakaAreas.length > 0
+              ? shipping.subDhakaAreas
+              : prev.subDhakaAreas,
             freeShippingThreshold: shipping.freeShippingThreshold ?? prev.freeShippingThreshold,
             maxOrderLimit: shipping.maxOrderLimit ?? prev.maxOrderLimit,
             requestAdvanceDeliveryCharge: shipping.requestAdvanceDeliveryCharge === true,

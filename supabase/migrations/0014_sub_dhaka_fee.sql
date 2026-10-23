@@ -27,7 +27,11 @@
 BEGIN;
 
 ALTER TABLE IF EXISTS public.stores
-  ADD COLUMN IF NOT EXISTS sub_dhaka_fee numeric;
+  ADD COLUMN IF NOT EXISTS sub_dhaka_fee numeric,
+  -- The merchant's OWN Sub-Dhaka area selection (JSON array of area keys,
+  -- e.g. ["keraniganj","savar","tongi"]). See the header for the NULL vs
+  -- empty-array semantics — nothing on the storefront is hardcoded from it.
+  ADD COLUMN IF NOT EXISTS sub_dhaka_areas jsonb;
 
 NOTIFY pgrst, 'reload schema';
 
