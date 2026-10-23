@@ -119,7 +119,7 @@ function money(value: unknown): string {
  */
 export function resolvePrintStoreInfo(): PrintStoreInfo {
   const fallback: PrintStoreInfo = {
-    name: 'My Store',
+    name: '',
     logoUrl: '',
     address: '',
     phone: '',
@@ -205,31 +205,24 @@ function invoiceHeadSection(
   tracking: string,
   courier: string
 ): string {
-  // Large brand logo with an initials-medallion fallback underneath, so a
-  // missing/broken logo URL still prints a polished header.
-  const logo = info.logoUrl
-    ? `<img src="${esc(info.logoUrl)}" alt="" onerror="this.remove();" />`
-    : '';
-  const initials = esc((info.name || 'M').trim().charAt(0).toUpperCase());
-
+  // Top-left shows only the dynamic merchant store name (no logo, no email).
   return `
     <div class="invoice-box">
       <div class="accent"></div>
 
       <div class="header">
-        <div class="brand">
-          <div class="logo">${logo}<span class="logo-initials">${initials}</span></div>
-          <div>
-            <h1>${esc(info.name)}</h1>
-            ${info.address ? `<p class="addr">${esc(info.address)}</p>` : ''}
-            ${info.phone ? `<p class="addr">${esc(info.phone)}</p>` : ''}
-            ${info.vatNumber ? `<p class="vat-line">VAT / BIN: ${esc(info.vatNumber)} &bull; Tax Registered Merchant</p>` : ''}
-          </div>
+        <div class="brand-left">
+          <h1>${esc(info.name)}</h1>
         </div>
 
-        <div class="head-right">
-          <span class="doc-badge">Tax Invoice &amp; Packing Slip</span>
-          <p class="order-num">Order #${esc(ord?.orderNumber || ord?.id)}</p>
+        <div class="header-right">
+          <div class="brand-app">
+            <div class="app-name">ZID SAAS BD</div>
+            <div class="app-sub">TAX INVOICE &amp; PACKING SLIP</div>
+          </div>
+
+          <div class="head-right">
+            <p class="order-num">Order #${esc(ord?.orderNumber || ord?.id)}</p>
           <p class="date">Placed: ${esc(safeDate(ord?.createdAt))}</p>
           <div class="seal ${seal.cls}" title="${esc(seal.label)}">
             <span class="seal-main">${esc(seal.label)}</span>
@@ -237,6 +230,7 @@ function invoiceHeadSection(
           </div>
         </div>
       </div>
+    </div>
 
       <div class="meta-box">
         <div>
@@ -414,8 +408,12 @@ export function buildA4InvoiceHtml(orders: Order[], store?: PrintStoreInfo): str
       .accent { height: 8px; background: linear-gradient(90deg, #0f172a 0%, #d4af37 55%, #00d68f 100%); }
 
       /* ── Brand header + payment seal ──────────────────────────────────── */
-      .header { display: flex; justify-content: space-between; gap: 18px; padding: 24px 30px 16px; border-bottom: 2px solid #0f172a; }
-      .brand { display: flex; gap: 16px; align-items: center; }
+      .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 24px 30px 16px; border-bottom: 2px solid #0f172a; }
+      .brand-left { flex: none; }
+      .header-right { flex: none; display: flex; gap: 24px; align-items: flex-start; }
+      .brand-app { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+      .app-name { font-size: 16px; font-weight: 900; color: #0F4C81; letter-spacing: 1px; }
+      .app-sub { font-size: 11px; font-weight: 800; color: #F59E0B; text-transform: uppercase; letter-spacing: 1.2px; }
       .logo { position: relative; width: 78px; height: 78px; flex: none; }
       .logo .logo-initials {
         display: flex; align-items: center; justify-content: center;
@@ -427,7 +425,7 @@ export function buildA4InvoiceHtml(orders: Order[], store?: PrintStoreInfo): str
         position: absolute; inset: 0; width: 100%; height: 100%;
         object-fit: cover; border-radius: 16px; border: 2px solid #d4af37;
       }
-      h1 { margin: 0; font-size: 24px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.5px; }
+      h1 { margin: 0; font-size: 18px; font-weight: 700; color: #222222; letter-spacing: 0.3px; }
       .addr { margin: 4px 0 0; font-size: 12px; color: #475569; }
       .vat-line { margin: 4px 0 0; font-size: 11px; font-weight: 700; color: #0369a1; }
       .head-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; text-align: right; }
