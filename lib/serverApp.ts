@@ -125,6 +125,8 @@ import {
   fulfillmentForStatus,
   updateOrderFields,
   recordCourierDispatch,
+  findOrder,
+  mapPathaoStatusToOrderStatus,
 } from './orderStatus.js';
 import {
   sendRecoveryCoupon,
@@ -14430,6 +14432,367 @@ app.post('/api/courier/send', async (req, res) => {
     });
   }
 });
+
+// ── Courier Webhook Handlers (Automated Status Sync) ─────────────────
+/**
+ * Update the matching order in Supabase when a courier webhook arrives.
+ *
+ * Automatically finds the matching order in Supabase by:
+ *   1. tracking_code / consignment_id
+ *   2. merchant_order_id / order_number / id
+ *   3. orderNumber resolved from MongoDB
+ *
+ * Updates the matching row's status, fulfillment_status and updated_at.
+ */
+async function updateSupabaseOrderFromWebhook(
+  consignmentId: string,
+  merchantOrderId: string,
+  orderStatus: string,
+  fulfillmentStatus: string,
+  extra: Record<string, any> = {}
+): Promise<{ ok: boolean; matchedId?: string; error?: string }> {
+  try {
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    if (!isConfigured) {
+      return { ok: false, error: 'Supabase is not configured' };
+    }
+
+    const cleanConsignment = String(consignmentId || '').replace(/^#/, '').trim();
+    const cleanMerchantId = String(merchantOrderId || '').replace(/^#/, '').trim();
+
+    let matchingRowId: string | null = null;
+
+    // 1. Probe by tracking_code / consignment_id
+    if (cleanConsignment) {
+      try {
+        const res = await fetch(
+          `${supabaseUrl}/rest/v1/orders?or=(tracking_code.eq.${encodeURIComponent(cleanConsignment)},consignment_id.eq.${encodeURIComponent(cleanConsignment)})&select=id,order_number&limit=1`,
+          {
+            headers: {
+              apikey: supabaseKey,
+              Authorization: `Bearer ${supabaseKey}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        if (res.ok) {
+          const rows = await res.json().catch(() => null);
+          if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) {
+            matchingRowId = String(rows[0].id);
+          }
+        }
+      } catch {
+        // Fall back to subsequent probes
+      }
+    }
+
+    // 2. Probe by merchant order id / order_number
+    if (!matchingRowId && cleanMerchantId) {
+      try {
+        const queryFilter = isUuidLike(cleanMerchantId)
+          ? `id=eq.${encodeURIComponent(cleanMerchantId)}`
+          : `or=(order_number.eq.${encodeURIComponent(cleanMerchantId)},order_number.eq.${encodeURIComponent(merchantOrderId)})`;
+        const res = await fetch(
+          `${supabaseUrl}/rest/v1/orders?${queryFilter}&select=id,order_number&limit=1`,
+          {
+            headers: {
+              apikey: supabaseKey,
+              Authorization: `Bearer ${supabaseKey}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        if (res.ok) {
+          const rows = await res.json().catch(() => null);
+          if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) {
+            matchingRowId = String(rows[0].id);
+          }
+        }
+      } catch {
+        // Fall back to subsequent probes
+      }
+    }
+
+    // 3. Probe by orderNumber from MongoDB doc if available
+    if (!matchingRowId && extra.orderNumber) {
+      try {
+        const cleanExtraNum = String(extra.orderNumber).replace(/^#/, '').trim();
+        const res = await fetch(
+          `${supabaseUrl}/rest/v1/orders?order_number=eq.${encodeURIComponent(cleanExtraNum)}&select=id,order_number&limit=1`,
+          {
+            headers: {
+              apikey: supabaseKey,
+              Authorization: `Bearer ${supabaseKey}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        if (res.ok) {
+          const rows = await res.json().catch(() => null);
+          if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) {
+            matchingRowId = String(rows[0].id);
+          }
+        }
+      } catch {
+        // Fall back
+      }
+    }
+
+    // 4. Update the row using postgrestWrite (survives column drift)
+    const patchBody: Record<string, any> = {
+      status: orderStatus,
+      fulfillment_status: fulfillmentStatus,
+      updated_at: new Date().toISOString(),
+    };
+    if (cleanConsignment) {
+      patchBody.tracking_code = cleanConsignment;
+      patchBody.consignment_id = cleanConsignment;
+    }
+
+    let targetPath = '';
+    if (matchingRowId) {
+      targetPath = `/rest/v1/orders?id=eq.${encodeURIComponent(matchingRowId)}`;
+    } else if (cleanConsignment) {
+      targetPath = `/rest/v1/orders?or=(tracking_code.eq.${encodeURIComponent(cleanConsignment)},consignment_id.eq.${encodeURIComponent(cleanConsignment)})`;
+    } else if (cleanMerchantId) {
+      targetPath = `/rest/v1/orders?order_number=eq.${encodeURIComponent(cleanMerchantId)}`;
+    } else {
+      return { ok: false, error: 'No matching order could be identified in Supabase' };
+    }
+
+    const sbWrite = await postgrestWrite(supabaseUrl, supabaseKey, targetPath, {
+      method: 'PATCH',
+      body: patchBody,
+    });
+
+    return {
+      ok: sbWrite.ok,
+      matchedId: matchingRowId || undefined,
+      error: sbWrite.ok ? undefined : sbWrite.detail,
+    };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+/**
+ * Pathao Courier Webhook Listener
+ *
+ * Receives real-time shipment status update payloads from Pathao:
+ *   - "Pickup Requested" -> "Processing" ("Preparing" in dashboard)
+ *   - "Picked Up" -> "In delivery"
+ *   - "In Transit" -> "In delivery"
+ *   - "Delivered" -> "Completed"
+ *   - "Cancelled" -> "Cancelled"
+ *
+ * Automatically locates the matching order by tracking `consignment_id`
+ * and updates Supabase and MongoDB without requiring manual dashboard intervention.
+ */
+async function handlePathaoWebhook(req: any, res: any) {
+  res.setHeader('Content-Type', 'application/json');
+
+  // Health / verification ping probe
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    return res.status(200).json({
+      ok: true,
+      service: 'pathao-courier-webhook',
+      status: 'active',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  try {
+    const body = req.body || {};
+    const payload = body.data || body.consignment || body.order || body;
+
+    // Extract consignment ID across possible payload shapes
+    const consignmentId = String(
+      payload.consignment_id ||
+      payload.consignmentId ||
+      payload.tracking_code ||
+      payload.trackingCode ||
+      payload.consignment_number ||
+      body.consignment_id ||
+      body.consignmentId ||
+      req.query.consignment_id ||
+      req.query.tracking_code ||
+      ''
+    ).trim();
+
+    // Extract merchant order ID / invoice ID
+    const merchantOrderId = String(
+      payload.merchant_order_id ||
+      payload.merchantOrderId ||
+      payload.order_id ||
+      payload.orderId ||
+      payload.invoice_id ||
+      payload.invoiceId ||
+      payload.order_number ||
+      payload.orderNumber ||
+      body.merchant_order_id ||
+      body.order_id ||
+      req.query.merchant_order_id ||
+      ''
+    ).trim();
+
+    // Extract status string
+    const rawStatus = String(
+      payload.order_status ||
+      payload.order_status_slug ||
+      payload.shipment_status ||
+      payload.status ||
+      payload.event ||
+      body.order_status ||
+      body.status ||
+      req.query.order_status ||
+      req.query.status ||
+      ''
+    ).trim();
+
+    if (!consignmentId) {
+      console.warn('[Pathao Webhook] Missing tracking consignment_id:', { body });
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        error: 'Missing required tracking consignment_id in webhook payload.',
+      });
+    }
+
+    if (!rawStatus) {
+      console.warn('[Pathao Webhook] Missing shipment status for consignment:', consignmentId);
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        error: 'Missing shipment status in webhook payload.',
+      });
+    }
+
+    // Map Pathao shipment status directly to store order statuses
+    const mapped = mapPathaoStatusToOrderStatus(rawStatus);
+    if (!mapped) {
+      console.warn(`[Pathao Webhook] Unrecognized status "${rawStatus}" for consignment:`, consignmentId);
+      return res.status(200).json({
+        ok: true,
+        acknowledged: true,
+        ignored: true,
+        message: `Status "${rawStatus}" does not require order state transition.`,
+      });
+    }
+
+    const cleanConsignment = consignmentId.replace(/^#/, '');
+    const cleanMerchantId = merchantOrderId.replace(/^#/, '');
+
+    // 1. Locate order in MongoDB by consignment_id or merchant_order_id
+    let locatedOrder = await findOrder(cleanConsignment).catch(() => ({ doc: null }));
+    if (!locatedOrder?.doc && cleanMerchantId) {
+      locatedOrder = await findOrder(cleanMerchantId).catch(() => ({ doc: null }));
+    }
+
+    const matchedDoc = locatedOrder?.doc;
+    const resolvedOrderNumber = matchedDoc?.order_number || cleanMerchantId || cleanConsignment;
+
+    // 2. Auto-update Supabase Orders
+    const supabaseResult = await updateSupabaseOrderFromWebhook(
+      cleanConsignment,
+      cleanMerchantId,
+      mapped.orderStatus,
+      mapped.fulfillmentStatus,
+      { orderNumber: matchedDoc?.order_number }
+    );
+
+    // 3. Auto-update MongoDB Orders
+    let mongoUpdated = false;
+    try {
+      const updateFields: Record<string, any> = {
+        status: mapped.orderStatus,
+        fulfillment_status: mapped.fulfillmentStatus,
+        fulfillmentStatus: mapped.fulfillmentStatus,
+        tracking_code: cleanConsignment,
+        trackingCode: cleanConsignment,
+        consignment_id: cleanConsignment,
+        consignmentId: cleanConsignment,
+        courier_status: rawStatus,
+        courier_name: 'Pathao Courier',
+        courier_updated_at: new Date(),
+      };
+
+      if (matchedDoc?._id) {
+        const updateRes = await updateOrderFields(matchedDoc._id.toString(), updateFields);
+        mongoUpdated = updateRes.ok;
+      } else {
+        const updateRes = await updateOrderFields(cleanConsignment, updateFields);
+        mongoUpdated = updateRes.ok;
+      }
+    } catch (mongoErr: any) {
+      console.warn('[Pathao Webhook] MongoDB update notice:', mongoErr?.message || mongoErr);
+    }
+
+    // 4. Trigger Customer SMS Notification if applicable
+    const customerPhone = matchedDoc?.customer_phone;
+    if (customerPhone) {
+      const smsTrigger: SmsTriggerKey | '' =
+        mapped.orderStatus === 'Completed'
+          ? 'delivery_success'
+          : mapped.orderStatus === 'In delivery'
+          ? 'order_shipped'
+          : '';
+
+      if (smsTrigger) {
+        const storeRef = String(matchedDoc?.store_slug || matchedDoc?.storeSlug || '').trim();
+        if (storeRef) {
+          void dispatchStoreSms({
+            storeRef,
+            trigger: smsTrigger,
+            to: String(customerPhone),
+            vars: {
+              customer_name: String(matchedDoc?.customer_name || 'Customer'),
+              order_number: String(matchedDoc?.order_number || resolvedOrderNumber),
+              order_id: String(matchedDoc?.order_number || resolvedOrderNumber),
+              tracking_code: cleanConsignment,
+              courier_name: 'Pathao Courier',
+              total: String(matchedDoc?.total_price ?? ''),
+            },
+            fallbackText:
+              smsTrigger === 'order_shipped'
+                ? 'Dear {customer_name}, your order {order_number} has been shipped via Pathao Courier. Tracking: {tracking_code}.'
+                : 'Dear {customer_name}, your order {order_number} has been delivered. Thank you for shopping with us!',
+          }).catch((smsErr: any) => {
+            console.warn(`[Pathao Webhook] SMS ${smsTrigger} notice:`, smsErr?.message || smsErr);
+          });
+        }
+      }
+    }
+
+    console.log(`[Pathao Webhook] Order ${resolvedOrderNumber} status synced -> ${mapped.orderStatus} (${mapped.displayStatus}) [Consignment: ${cleanConsignment}]`);
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      consignment_id: cleanConsignment,
+      order_number: resolvedOrderNumber,
+      order_status: mapped.displayStatus,
+      canonical_status: mapped.orderStatus,
+      fulfillment_status: mapped.fulfillmentStatus,
+      supabase_synced: supabaseResult.ok,
+      mongodb_synced: mongoUpdated,
+    });
+  } catch (err: any) {
+    console.error('[Pathao Webhook] Error processing webhook:', err);
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      error: err?.message || 'Internal webhook processing error',
+    });
+  }
+}
+
+// Mount Pathao courier webhook endpoints
+app.post('/api/courier/webhook/pathao', handlePathaoWebhook);
+app.get('/api/courier/webhook/pathao', handlePathaoWebhook);
+app.post('/api/courier/pathao/webhook', handlePathaoWebhook);
+app.get('/api/courier/pathao/webhook', handlePathaoWebhook);
+app.post('/api/courier/webhook', handlePathaoWebhook);
+app.get('/api/courier/webhook', handlePathaoWebhook);
 
 // ── Orders ──────────────────────
 // Orders are persisted in MongoDB. The API still accepts the same store refs

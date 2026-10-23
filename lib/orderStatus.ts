@@ -269,6 +269,12 @@ export async function findOrder(
       { transaction_id: key },
       { tracking_code: key },
       { trackingCode: key },
+      { tracking_code: cleaned },
+      { trackingCode: cleaned },
+      { consignment_id: key },
+      { consignmentId: key },
+      { consignment_id: cleaned },
+      { consignmentId: cleaned },
     ];
     // Only treat it as an ObjectId when it looks like one — casting an
     // arbitrary string would throw and fail the whole lookup.
@@ -420,6 +426,111 @@ export async function recordCourierDispatch(
   return updateOrderFields(id, fields, extra);
 }
 
+/**
+ * Map Pathao shipment statuses to store order statuses.
+ *
+ * Pathao shipment statuses:
+ *   - "Pickup Requested", "Order Created", "Pending" -> "Processing" ("Preparing")
+ *   - "Picked Up", "In Transit", "Out for Delivery" -> "In delivery"
+ *   - "Delivered", "Delivery Completed" -> "Completed"
+ *   - "Cancelled", "Returned", "Failed Delivery" -> "Cancelled"
+ */
+export function mapPathaoStatusToOrderStatus(rawStatus: unknown): {
+  orderStatus: OrderStatus;
+  displayStatus: 'Processing' | 'In delivery' | 'Completed' | 'Cancelled';
+  fulfillmentStatus: string;
+} | null {
+  const text = String(rawStatus ?? '').trim();
+  if (!text) return null;
+  const clean = normalizeKey(text);
+
+  // 1. Pickup Requested -> Processing ("Preparing" in dashboard)
+  if (
+    clean.includes('pickuprequested') ||
+    clean.includes('pickuprequest') ||
+    clean.includes('pickupassigned') ||
+    clean.includes('ordercreated') ||
+    clean.includes('orderplaced') ||
+    clean.includes('pendingpickup') ||
+    clean.includes('assignedforpickup') ||
+    clean.includes('processing') ||
+    clean.includes('readytopick')
+  ) {
+    return {
+      orderStatus: 'Preparing',
+      displayStatus: 'Processing',
+      fulfillmentStatus: 'Unfulfilled',
+    };
+  }
+
+  // 2. Picked Up / In Transit -> In delivery
+  if (
+    clean.includes('pickedup') ||
+    clean.includes('pickupcompleted') ||
+    clean.includes('intransit') ||
+    clean.includes('transit') ||
+    clean.includes('outfordelivery') ||
+    clean.includes('ondelivery') ||
+    clean.includes('indelivery') ||
+    clean.includes('dispatched') ||
+    clean.includes('sorting') ||
+    clean.includes('hub') ||
+    clean.includes('receivedathub') ||
+    clean.includes('assignedfordelivery')
+  ) {
+    return {
+      orderStatus: 'In delivery',
+      displayStatus: 'In delivery',
+      fulfillmentStatus: 'In Transit',
+    };
+  }
+
+  // 3. Delivered -> Completed
+  if (
+    clean.includes('delivered') ||
+    clean.includes('deliverycompleted') ||
+    clean.includes('completed') ||
+    clean.includes('complete') ||
+    clean.includes('partialdelivery') ||
+    clean.includes('partialdelivered')
+  ) {
+    return {
+      orderStatus: 'Completed',
+      displayStatus: 'Completed',
+      fulfillmentStatus: 'Delivered',
+    };
+  }
+
+  // 4. Cancelled / Returned -> Cancelled
+  if (
+    clean.includes('cancelled') ||
+    clean.includes('canceled') ||
+    clean.includes('returned') ||
+    clean.includes('return') ||
+    clean.includes('failed') ||
+    clean.includes('deliveryfailed') ||
+    clean.includes('rejected') ||
+    clean.includes('void') ||
+    clean.includes('damaged') ||
+    clean.includes('lost')
+  ) {
+    return {
+      orderStatus: 'Cancelled',
+      displayStatus: 'Cancelled',
+      fulfillmentStatus: 'Cancelled',
+    };
+  }
+
+  // Fallback checking canonicalOrderStatus
+  const canonical = canonicalOrderStatus(text);
+  if (canonical === 'Preparing') return { orderStatus: 'Preparing', displayStatus: 'Processing', fulfillmentStatus: 'Unfulfilled' };
+  if (canonical === 'In delivery') return { orderStatus: 'In delivery', displayStatus: 'In delivery', fulfillmentStatus: 'In Transit' };
+  if (canonical === 'Completed') return { orderStatus: 'Completed', displayStatus: 'Completed', fulfillmentStatus: 'Delivered' };
+  if (canonical === 'Cancelled') return { orderStatus: 'Cancelled', displayStatus: 'Cancelled', fulfillmentStatus: 'Cancelled' };
+
+  return null;
+}
+
 export default {
   ORDER_STATUSES,
   PAYMENT_STATUSES,
@@ -432,6 +543,7 @@ export default {
   findOrder,
   updateOrderFields,
   recordCourierDispatch,
+  mapPathaoStatusToOrderStatus,
   ORDERS_DB_NAME,
   ORDERS_COLLECTION,
 };
