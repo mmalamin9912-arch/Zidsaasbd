@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+﻿import React, { useState, useEffect, useMemo } from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig, CodConfig, Order, OrderItem, ThemeConfig } from '../types';
 import { buildCategoryDbPayload, buildProductDbPayload, maxCatalogId, packCatalogItem, toCatalogSlug, ensureCategory, mapApiProduct, mapApiCategory } from '../utils/catalogPayload';
 import { resolveDeliveryCharge, resolveProductDeliveryRates, readMerchantFee, toFee } from '../utils/deliveryCharges';
@@ -1803,6 +1803,8 @@ The render below must not guess. A merchant may paste
   const [returnModal, setReturnModal] = useState<{ order: Order; item: OrderItem } | null>(null);
   const [modalRating, setModalRating] = useState(0);
   const [modalComment, setModalComment] = useState('');
+  // Review photo upload: list of { file, preview } pairs (max 4)
+  const [modalReviewImages, setModalReviewImages] = useState<{ file: File; preview: string }[]>([]);
   const [modalReturnReason, setModalReturnReason] = useState('');
   const [modalReturnNote, setModalReturnNote] = useState('');
   const [modalReturnImage, setModalReturnImage] = useState('');
@@ -3182,6 +3184,7 @@ The render below must not guess. A merchant may paste
     setReviewModal({ order, item });
     setModalRating(0);
     setModalComment('');
+    setModalReviewImages([]);
     setModalError('');
   };
 
@@ -3196,8 +3199,30 @@ The render below must not guess. A merchant may paste
   const closeItemModals = () => {
     setReviewModal(null);
     setReturnModal(null);
+    setModalReviewImages([]);
     setModalError('');
     setIsModalSubmitting(false);
+  };
+
+  /** Handle review photo selection (gallery or camera). Up to 4 images. */
+  const handleModalReviewImages = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    const remaining = 4 - modalReviewImages.length;
+    const toAdd = files.slice(0, remaining);
+    toAdd.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setModalReviewImages((prev) => [
+          ...prev,
+          { file, preview: String(reader.result || '') },
+        ]);
+      };
+      reader.onerror = () => setModalError('Could not read the selected image.');
+      reader.readAsDataURL(file);
+    });
+    // Reset input so the same file can be re-selected if removed
+    e.target.value = '';
   };
 
   const handleModalReturnImage = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3207,6 +3232,37 @@ The render below must not guess. A merchant may paste
     reader.onload = () => setModalReturnImage(String(reader.result || ''));
     reader.onerror = () => setModalError('Could not read the selected image.');
     reader.readAsDataURL(file);
+  };
+
+  /** Upload review images to Supabase Storage (review-images bucket). Returns public URLs. */
+  const uploadReviewImages = async (
+    files: { file: File; preview: string }[],
+    slug: string,
+  ): Promise<string[]> => {
+    const { getSupabaseClient } = await import('../lib/supabase');
+    const client = getSupabaseClient();
+    if (!client || !files.length) return [];
+    const urls: string[] = [];
+    for (const { file } of files) {
+      try {
+        const ext = file.name.split('.').pop() || 'jpg';
+        const path = `${slug}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+        const { error } = await client.storage.from('review-images').upload(path, file, {
+          cacheControl: '3600',
+          upsert: false,
+          contentType: file.type,
+        });
+        if (!error) {
+          const { data: urlData } = client.storage.from('review-images').getPublicUrl(path);
+          if (urlData?.publicUrl) urls.push(urlData.publicUrl);
+        } else {
+          console.warn('[TenantStorefrontView] review image upload error:', error.message);
+        }
+      } catch (err: any) {
+        console.warn('[TenantStorefrontView] review image upload exception:', err?.message || err);
+      }
+    }
+    return urls;
   };
 
   /** POST a review for a single ordered item to /api/reviews. */
@@ -3222,6 +3278,8 @@ The render below must not guess. A merchant may paste
     const slug = String(effectiveStoreSlug || '').split(':')[0].trim();
     setIsModalSubmitting(true);
     let saved = false;
+    // Upload images to Supabase Storage first, then include URLs in the review payload.
+    const imageUrls = await uploadReviewImages(modalReviewImages, slug || 'general');
     try {
       const res = await fetch('/api/reviews', {
         method: 'POST',
@@ -3238,6 +3296,7 @@ The render below must not guess. A merchant may paste
           storeSlug: slug,
           storeId: order.storeId,
           merchantId: (merchant as any)?.id || order.merchantId,
+          ...(imageUrls.length ? { imageUrls } : {}),
         }),
       });
       const data = await res.json().catch(() => null);
@@ -5802,7 +5861,7 @@ The render below must not guess. A merchant may paste
           onClick={closeItemModals}
         >
           <div
-            className="w-full max-w-md rounded-t-3xl border border-slate-200 bg-white shadow-2xl sm:rounded-3xl"
+            className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl border border-slate-200 bg-white shadow-2xl sm:rounded-3xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-5">
@@ -5842,6 +5901,42 @@ The render below must not guess. A merchant may paste
                 rows={4}
                 className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-[var(--primary-accent)]"
               />
+              {/* ── Photo / Camera Upload ── */}
+              <div>
+                <label className="mb-1.5 block text-xs font-bold text-slate-600">{t('sf_review_add_photo')}</label>
+                <div className="flex flex-wrap gap-2">
+                  {modalReviewImages.map((img, idx) => (
+                    <div key={idx} className="relative h-20 w-20 shrink-0">
+                      <img src={img.preview} alt="" className="h-20 w-20 rounded-xl border border-slate-200 object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => setModalReviewImages((prev) => prev.filter((_, i) => i !== idx))}
+                        className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white shadow cursor-pointer"
+                        aria-label="Remove photo"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {modalReviewImages.length < 4 && (
+                    <div className="flex gap-2">
+                      <label className="flex h-20 w-20 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 text-slate-500 hover:border-[var(--primary-accent)] hover:bg-slate-100 transition">
+                        <Camera className="h-5 w-5" />
+                        <span className="text-[9px] font-bold leading-tight text-center px-1">{t('sf_review_add_photo_btn')}</span>
+                        <input type="file" accept="image/*" multiple className="hidden" onChange={handleModalReviewImages} />
+                      </label>
+                      <label className="flex h-20 w-20 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed border-amber-300 bg-amber-50 text-amber-600 hover:border-amber-400 hover:bg-amber-100 transition">
+                        <Camera className="h-5 w-5" />
+                        <span className="text-[9px] font-bold leading-tight text-center px-1">{t('sf_review_camera_btn')}</span>
+                        <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleModalReviewImages} />
+                      </label>
+                    </div>
+                  )}
+                </div>
+                {modalReviewImages.length > 0 && (
+                  <p className="mt-1.5 text-[10px] text-slate-400">{modalReviewImages.length}/4 {t('sf_review_photos_selected')}</p>
+                )}
+              </div>
               {modalError && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{modalError}</div>
               )}
