@@ -109,7 +109,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
   // Checkout Preview Simulator State
   const [simSelectedMethod, setSimSelectedMethod] = useState<'bkash' | 'nagad' | 'rocket' | 'bank' | 'cod' | 'gateway'>('bkash');
-  const [simCity, setSimCity] = useState<'Dhaka' | 'Chittagong' | 'Sylhet'>('Dhaka');
+  const [simCity, setSimCity] = useState<'Dhaka' | 'Savar' | 'Chittagong' | 'Sylhet'>('Dhaka');
   const [simAdvProvider, setSimAdvProvider] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [simTxId, setSimTxId] = useState('');
 
@@ -826,6 +826,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
               </select>
               <p className="mt-1 text-[10px] text-slate-500">
                 Your store&apos;s own city. Customers outside it are charged the Outside City rate.
+                Sub-urban areas (Keraniganj, Savar, Tongi, …) always use the Sub-Dhaka fee.
               </p>
             </div>
 
@@ -860,6 +861,10 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 placeholder="e.g. 80"
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
               />
+              <p className="mt-1 text-[10px] text-slate-500">
+                Keraniganj, Savar, Tongi, Demra, Uttarkhan, Southkhan, Rupganj &amp; other outskirts.
+                Blank = those areas pay the Inside fee.
+              </p>
             </div>
           </div>
 
@@ -1106,9 +1111,23 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         // Every amount here comes from the merchant's OWN saved values. There is
         // no hardcoded fallback fee: an unconfigured zone simply has no price.
         const simInsideFee = toNullableFee(codForm.insideDhakaFee);
+        const simSubFee = toNullableFee(codForm.subDhakaFee);
         const simOutsideFee = toNullableFee(codForm.outsideDhakaFee);
-        const simShippingFee = simCity === 'Dhaka' ? (simInsideFee ?? 0) : (simOutsideFee ?? 0);
-        const simShippingConfigured = simCity === 'Dhaka' ? simInsideFee !== null : simOutsideFee !== null;
+        // Which zone the simulated customer's city puts them in. "Savar"
+        // stands for the whole Sub-Dhaka / Dhaka-suburbs zone.
+        const simZone: 'inside' | 'sub' | 'outside' =
+          simCity === 'Dhaka' ? 'inside' : simCity === 'Savar' ? 'sub' : 'outside';
+        const simZoneLabel = simZone === 'inside'
+          ? 'Inside City'
+          : simZone === 'sub' ? 'Sub-Dhaka / Suburbs' : 'Outside City';
+        // A blank Sub-Dhaka fee falls back to the Inside fee — the same rule the
+        // checkout applies, so the simulator never quotes a phantom ৳0.
+        const simShippingFee = simZone === 'inside'
+          ? (simInsideFee ?? 0)
+          : simZone === 'sub' ? ((simSubFee ?? simInsideFee) ?? 0) : (simOutsideFee ?? 0);
+        const simShippingConfigured = simZone === 'inside'
+          ? simInsideFee !== null
+          : simZone === 'sub' ? (simSubFee ?? simInsideFee) !== null : simOutsideFee !== null;
         const simSubtotal = 3200;
         const simBaseTotal = simSubtotal + simShippingFee;
 
@@ -1155,6 +1174,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                   className="bg-[#202533] text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-[#3A435E] focus:outline-none"
                 >
                   <option value="Dhaka">Dhaka (Inside{simInsideFee !== null ? ` - ৳${simInsideFee}` : ''})</option>
+                  <option value="Savar">Savar / Sub-Dhaka (Suburbs{(simSubFee ?? simInsideFee) !== null ? ` - ৳${simSubFee ?? simInsideFee}` : ''})</option>
                   <option value="Chittagong">Chittagong (Outside{simOutsideFee !== null ? ` - ৳${simOutsideFee}` : ''})</option>
                   <option value="Sylhet">Sylhet (Outside{simOutsideFee !== null ? ` - ৳${simOutsideFee}` : ''})</option>
                 </select>
@@ -1165,7 +1185,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
               {/* Payment Choice Selection */}
               <div className="space-y-4">
                 <label className="block text-xs font-bold text-slate-300 uppercase">1. Customer Selects Payment Method:</label>
-                
+
                 <div className="space-y-3">
                   <button
                     type="button"
@@ -1340,7 +1360,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                             <span className="text-white">৳{simSubtotal.toLocaleString()}</span>
                           </div>
                           <div className="flex justify-between">
-                            <span>Shipping Fee ({simCity}):</span>
+                            <span>Shipping Fee ({simZoneLabel}):</span>
                             {/* Only print a price when the merchant actually saved
                                 one for this zone — an unconfigured zone must never
                                 read "৳0". */}

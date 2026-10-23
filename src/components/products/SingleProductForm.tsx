@@ -469,6 +469,10 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
     }
     return [
       { zoneName: 'Inside City', fee: '' },
+      // Priced separately: Dhaka DISTRICT but outside the metropolitan thanas
+      // (Kamrangirchar, Savar, Tongi, Demra, Uttarkhan, …). Left blank, those
+      // areas pay the Inside City fee.
+      { zoneName: 'Sub-Dhaka / Suburbs', fee: '' },
       { zoneName: 'Outside City', fee: '' }
     ];
   });

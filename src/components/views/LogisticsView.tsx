@@ -418,11 +418,12 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
             </select>
             <p className="text-[10px] text-slate-400">
               Your store&apos;s own city. Customers in this city may only choose &quot;Inside City&quot;;
-              customers in any other district are forced to &quot;Outside City&quot;.
+              customers in any other district are forced to &quot;Outside City&quot;. Sub-urban areas
+              (Keraniganj, Savar, Tongi, …) are always priced as &quot;Sub-Dhaka / Suburbs&quot;.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-300 block">Inside Dhaka Delivery Fee</label>
               <div className="relative">
@@ -448,6 +449,26 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
                   className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl pl-7 pr-3 py-2 text-white text-xs font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
                 />
               </div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300 block">Sub-Dhaka / Suburbs Fee</label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">৳</span>
+                <input
+                  type="number"
+                  value={shippingForm.subDhakaFee}
+                  onChange={(e) => setShippingForm({...shippingForm, subDhakaFee: e.target.value === '' ? '' : (parseInt(e.target.value) || 0)})}
+                  placeholder="e.g. 80"
+                  className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl pl-7 pr-3 py-2 text-white text-xs font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
+                />
+              </div>
+              {/* The suburb thanas are listed for the merchant so the zone is
+                  not a mystery: these are exactly the areas the checkout
+                  re-prices from "Inside City" to "Sub-Dhaka". */}
+              <p className="text-[10px] text-slate-500 italic">
+                For Keraniganj, Savar, Tongi, Demra, Uttarkhan, Southkhan, Rupganj &amp; other outskirts.
+                Left blank, those areas pay the Inside fee.
+              </p>
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-300 block">Free Shipping Threshold</label>

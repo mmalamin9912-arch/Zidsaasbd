@@ -8,6 +8,7 @@ import {
   BANGLADESH_DISTRICTS,
   BANGLADESH_DISTRICT_AREAS,
   getDistrictAreas,
+  isSubDhakaArea,
   resolveDeliveryZoneForCity,
 } from '../../lib/deliveryZones';
 import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera } from 'lucide-react';
@@ -128,6 +129,8 @@ function mapSupabaseProduct(p: any): Product {
     outside_city_fee: pickFee(p.outside_city_fee, p.outsideCityFee),
     insideCityFee: pickFee(p.insideCityFee, p.inside_city_fee),
     outsideCityFee: pickFee(p.outsideCityFee, p.outside_city_fee),
+    // Sub-Dhaka / Dhaka-suburbs charge, when the merchant priced one.
+    subDhakaFee: pickFee(p.subDhakaFee, p.sub_dhaka_fee),
     requiresShipping: p.requiresShipping !== false,
   };
 }
@@ -1969,10 +1972,11 @@ The render below must not guess. A merchant may paste
   const [custName, setCustName] = useState('');
   const [custPhone, setCustPhone] = useState('');
   const [payMethod, setPayMethod] = useState<'bkash' | 'nagad' | 'rocket' | 'bank' | 'cod'>('bkash');
-  // `inside` | `outside` rather than a free-text city: the delivery-zone selector
-  // is the single control for this, so the shipping area can never drift out of
-  // sync with what the customer picked (and the total updates with it).
-  const [shippingArea, setShippingArea] = useState<'inside' | 'outside'>('inside');
+  // `inside` | `sub` | `outside` rather than a free-text city: the delivery-zone
+  // selector is the single control for this, so the shipping area can never drift
+  // out of sync with what the customer picked (and the total updates with it).
+  // `sub` is the "Sub-Dhaka / Dhaka Suburbs" rate — auto-applied from the area.
+  const [shippingArea, setShippingArea] = useState<'inside' | 'sub' | 'outside'>('inside');
   // The customer's location is collected as TWO fields:
   //   1. `custDistrict` — District / জেলা (Dhaka, Chattogram, Khulna, …)
   //   2. `custCityArea` — City / Area / Thana / এলাকা inside it (Uttara, …)
@@ -2066,6 +2070,7 @@ The render below must not guess. A merchant may paste
   const storefrontShippingConfig = (liveStoreData as any).shippingConfig as
     | {
         insideDhakaFee?: number | string | null;
+        subDhakaFee?: number | string | null;
         outsideDhakaFee?: number | string | null;
         freeShippingThreshold?: number | string | null;
         isEnabled?: boolean;
@@ -2081,12 +2086,13 @@ The render below must not guess. A merchant may paste
   // saved — never a hardcoded ৳80 / ৳150 / ৳60.
   //
   //   deliveryFees.inside   → `inside_dhaka_fee`   (null = never priced)
+  //   deliveryFees.sub      → `sub_dhaka_fee`      (null = never priced)
   //   deliveryFees.outside  → `outside_dhaka_fee`  (null = never priced)
   //   advanceDeliveryCharge → `advance_delivery_charge_enabled` + `advance_amount`
   //   cod.enabled           → `is_cod_enabled`
   //   baseCity              → the merchant's own city / district
   const storefrontDeliveryFees = (liveStoreData as any).deliveryFees as
-    | { inside?: number | null; outside?: number | null }
+    | { inside?: number | null; sub?: number | null; outside?: number | null }
     | undefined;
 
   /**
@@ -2151,23 +2157,30 @@ The render below must not guess. A merchant may paste
   ).trim();
 
   /**
-   * The zones the customer may choose, given the city they picked.
+   * The zones the customer may choose, given the district AND area they picked.
    *
-   * • Customer city == merchant base city → "Inside City" allowed,
-   *   "Outside City" BLOCKED.
-   * • Any other district                 → "Outside City" forced,
-   *   "Inside City" BLOCKED (the customer cannot cheat the delivery fee).
-   * • No base city configured            → both remain available.
+   * • Customer area is a Sub-Dhaka suburb → "Sub-Dhaka / Suburbs" is FORCED.
+   *   This is checked FIRST so Kamrangirchar / Savar / Tongi can never be
+   *   quoted the core Inside-City rate.
+   * • Customer district == merchant base district → "Inside City" allowed,
+   *   the others BLOCKED.
+   * • Any other district → "Outside City" forced, "Inside City" BLOCKED (the
+   *   customer cannot cheat the delivery fee).
+   * • No base city configured → all zones remain available.
    */
   const deliveryZoneResolution = resolveDeliveryZoneForCity({
-    // The DISTRICT decides the zone — a city/area ("Uttara") is inside Dhaka,
-    // so matching on the area name alone would misclassify every Dhaka order.
     city: custDistrict,
+    // The AREA (not just the district) decides whether this is a suburb: a
+    // Dhaka customer picking "Savar" is charged the Sub-Dhaka rate.
+    area: custCityArea,
     baseCity: merchantBaseCity,
   });
   const insideZoneAllowed = deliveryZoneResolution.insideAllowed;
+  const subZoneAllowed = deliveryZoneResolution.subAllowed;
   const outsideZoneAllowed = deliveryZoneResolution.outsideAllowed;
-  const deliveryZoneIsForced = deliveryZoneResolution.hasBaseCity;
+  // A district/area decision is authoritative whenever one was made — either
+  // because a base city exists, or because the area is a known suburb.
+  const deliveryZoneIsForced = deliveryZoneResolution.hasBaseCity || deliveryZoneResolution.isSubDhaka;
 
   /**
    * Apply a city and move the customer's own zone choice onto a LEGAL one.
@@ -2187,14 +2200,40 @@ The render below must not guess. A merchant may paste
     const resolution = resolveDeliveryZoneForCity({ city, baseCity: merchantBaseCity });
     if (!resolution.hasBaseCity) return;
     setShippingArea((current) => {
-      const allowed = current === 'inside' ? resolution.insideAllowed : resolution.outsideAllowed;
+      const allowed = current === 'inside'
+        ? resolution.insideAllowed
+        : current === 'sub' ? resolution.subAllowed : resolution.outsideAllowed;
+      return allowed ? current : resolution.zone;
+    });
+  };
+
+  /**
+   * Apply an AREA and switch the delivery zone to the one that area entitles.
+   *
+   * This is the "sub-Dhaka" trigger: picking Savar / Kamrangirchar / Tongi
+   * immediately reprices delivery as the Sub-Dhaka / suburbs fee, and picking a
+   * core thana again brings back the Inside-City rate. Without it the customer
+   * had to notice a zone radio button that the area silently invalidated.
+   */
+  const handleCustomerAreaChange = (area: string) => {
+    setCustCityArea(area);
+    const resolution = resolveDeliveryZoneForCity({
+      city: custDistrict,
+      area,
+      baseCity: merchantBaseCity,
+    });
+    setShippingArea((current) => {
+      const allowed = current === 'inside'
+        ? resolution.insideAllowed
+        : current === 'sub' ? resolution.subAllowed : resolution.outsideAllowed;
       return allowed ? current : resolution.zone;
     });
   };
 
   // The zone actually applied to the order. When the merchant has a base city
-  // the customer's district decides it — never the customer's own choice.
-  const effectiveShippingArea: 'inside' | 'outside' = deliveryZoneIsForced
+  // or the customer's area is a known suburb, that decision wins — never the
+  // customer's own choice.
+  const effectiveShippingArea: 'inside' | 'sub' | 'outside' = deliveryZoneIsForced
     ? deliveryZoneResolution.zone
     : shippingArea;
 
@@ -2233,11 +2272,25 @@ The render below must not guess. A merchant may paste
     storefrontShippingConfig?.insideDhakaFee,
     storefrontCodConfig?.insideDhakaFee,
   );
+  // The merchant's Sub-Dhaka / suburbs rate. `null` means never priced — the
+  // resolver then falls back to the Inside-City fee, so a suburban customer is
+  // never charged MORE than the city rate and never a phantom ৳0.
+  const storeSubFee = readMerchantFee(
+    storefrontDeliveryFees?.sub,
+    storefrontShippingConfig?.subDhakaFee,
+    storefrontCodConfig?.subDhakaFee,
+  );
   const storeOutsideFee = readMerchantFee(
     storefrontDeliveryFees?.outside,
     storefrontShippingConfig?.outsideDhakaFee,
     storefrontCodConfig?.outsideDhakaFee,
   );
+
+  // What we hand the resolver for "this zone" — and what we fall back to when
+  // the merchant never priced Sub-Dhaka (the Inside fee).
+  const zoneArgument = (area: 'inside' | 'sub' | 'outside') =>
+    area === 'inside' ? 'dhaka' : area === 'sub' ? 'sub' : 'outside';
+  const effectiveSubFee = storeSubFee ?? storeInsideFee;
 
   // Free-shipping offer: when the cart total reaches the merchant's threshold
   // the delivery charge is waived. This threshold was previously saved by three
@@ -2262,8 +2315,9 @@ The render below must not guess. A merchant may paste
     for (const product of chargeProducts) {
       const resolved = resolveDeliveryCharge({
         product,
-        city: effectiveShippingArea === 'inside' ? 'dhaka' : 'outside',
+        city: zoneArgument(effectiveShippingArea),
         storeInsideFee,
+        storeSubFee: effectiveSubFee,
         storeOutsideFee,
       });
       fee += resolved.fee;
@@ -2272,8 +2326,9 @@ The render below must not guess. A merchant may paste
     }
     if (chargeProducts.length === 0) {
       const resolved = resolveDeliveryCharge({
-        city: effectiveShippingArea === 'inside' ? 'dhaka' : 'outside',
+        city: zoneArgument(effectiveShippingArea),
         storeInsideFee,
+        storeSubFee: effectiveSubFee,
         storeOutsideFee,
       });
       fee = resolved.fee;
@@ -2312,11 +2367,12 @@ The render below must not guess. A merchant may paste
   // cost it will actually be billed. `configured` distinguishes a real saved
   // price (including a deliberate ৳0) from "nothing set", so an unconfigured
   // store never shows the misleading "৳0" the merchant never entered.
-  const zoneFeeFor = (area: 'inside' | 'outside'): { fee: number; configured: boolean } => {
+  const zoneFeeFor = (area: 'inside' | 'sub' | 'outside'): { fee: number; configured: boolean } => {
     if (chargeProducts.length === 0) {
       const resolved = resolveDeliveryCharge({
-        city: area,
+        city: zoneArgument(area),
         storeInsideFee,
+        storeSubFee: effectiveSubFee,
         storeOutsideFee,
       });
       return { fee: resolved.fee, configured: resolved.configured };
@@ -2326,8 +2382,9 @@ The render below must not guess. A merchant may paste
     for (const product of chargeProducts) {
       const resolved = resolveDeliveryCharge({
         product,
-        city: area,
+        city: zoneArgument(area),
         storeInsideFee,
+        storeSubFee: effectiveSubFee,
         storeOutsideFee,
       });
       fee += resolved.fee;
@@ -2337,11 +2394,28 @@ The render below must not guess. A merchant may paste
   };
 
   const insideArea = zoneFeeFor('inside');
+  const subArea = zoneFeeFor('sub');
   const outsideArea = zoneFeeFor('outside');
   const insideAreaFee = insideArea.fee;
+  const subAreaFee = subArea.fee;
   const outsideAreaFee = outsideArea.fee;
   const insideConfigured = insideArea.configured;
+  // The Sub-Dhaka zone counts as priced only when the merchant actually set
+  // it — otherwise the checkout shows the (configured) Inside fee it falls back
+  // to, and the radio label reads "Sub-Dhaka / Suburbs".
+  const subConfigured = subArea.configured;
   const outsideConfigured = outsideArea.configured;
+
+  // Human-readable zone label for the order review / summary lines.
+  const zoneLabel = (area: 'inside' | 'sub' | 'outside'): string =>
+    area === 'inside' ? 'Inside City' : area === 'sub' ? 'Sub-Dhaka / Suburbs' : 'Outside City';
+  const effectiveZoneLabel = zoneLabel(effectiveShippingArea);
+  const effectiveZoneFee = effectiveShippingArea === 'inside'
+    ? insideAreaFee
+    : effectiveShippingArea === 'sub' ? subAreaFee : outsideAreaFee;
+  const effectiveZoneConfigured = effectiveShippingArea === 'inside'
+    ? insideConfigured
+    : effectiveShippingArea === 'sub' ? subConfigured : outsideConfigured;
 
   // ── VAT (Settings -> Tax) ──────────────────────────────
   //
@@ -2854,8 +2928,14 @@ The render below must not guess. A merchant may paste
       cityArea: custCityArea.trim() || undefined,
       customerCity:
         [custCityArea.trim(), custDistrict].filter(Boolean).join(', ')
-        || (effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'),
-      deliveryZone: effectiveShippingArea === 'inside' ? 'Inside Dhaka' : 'Outside Dhaka',
+        || effectiveZoneLabel,
+      // Sub-Dhaka is recorded as its own zone so the merchant, the courier sheet
+      // and every report can see that a suburban rate (not the core city rate)
+      // was charged.
+      deliveryZone:
+        effectiveShippingArea === 'inside' ? 'Inside Dhaka'
+          : effectiveShippingArea === 'sub' ? 'Sub Dhaka'
+            : 'Outside Dhaka',
       address: custAddress,
       platform: 'Mobile web',
       totalBDT: total,
@@ -4665,14 +4745,18 @@ The render below must not guess. A merchant may paste
                           required
                           disabled={!custDistrict}
                           value={custCityArea}
-                          onChange={(e) => setCustCityArea(e.target.value)}
+                          onChange={(e) => handleCustomerAreaChange(e.target.value)}
                           className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
                         >
                           <option value="">
                             {custDistrict ? 'Select area / thana' : 'Select a district first'}
                           </option>
                           {areaOptionsForDistrict.map((area) => (
-                            <option key={area} value={area}>{area}</option>
+                            <option key={area} value={area}>
+                              {/* Mark the suburbs so the customer can see which
+                                  areas carry the Sub-Dhaka rate. */}
+                              {area}{custDistrict === 'Dhaka' && isSubDhakaArea(area) ? ' — Sub-Dhaka' : ''}
+                            </option>
                           ))}
                         </select>
                       ) : (
@@ -4683,7 +4767,7 @@ The render below must not guess. A merchant may paste
                           required
                           disabled={!custDistrict}
                           value={custCityArea}
-                          onChange={(e) => setCustCityArea(e.target.value)}
+                          onChange={(e) => handleCustomerAreaChange(e.target.value)}
                           placeholder={custDistrict ? 'Area / Thana / Upazila' : 'Select a district first'}
                           className="w-full rounded-xl px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
                         />
@@ -4696,9 +4780,11 @@ The render below must not guess. A merchant may paste
                       data-testid="checkout-zone-hint"
                       className="text-[11px] font-medium text-amber-300"
                     >
-                      {deliveryZoneResolution.isBaseCity
-                        ? `You selected ${custDistrict} — our city. Delivery applies the Inside City rate.`
-                        : `You selected ${custDistrict} — outside our city (${merchantBaseCity}). Delivery applies the Outside City rate.`}
+                      {deliveryZoneResolution.isSubDhaka
+                        ? `You selected ${[custCityArea, custDistrict].filter(Boolean).join(', ')} — a Dhaka suburb. Delivery applies the Sub-Dhaka / Suburbs rate.`
+                        : deliveryZoneResolution.isBaseCity
+                          ? `You selected ${custDistrict} — our city. Delivery applies the Inside City rate.`
+                          : `You selected ${custDistrict} — outside our city (${merchantBaseCity}). Delivery applies the Outside City rate.`}
                     </p>
                   )}
 
@@ -4712,10 +4798,11 @@ The render below must not guess. A merchant may paste
                         When the merchant has a base city, the zone the customer
                         is NOT entitled to is DISABLED, so they cannot pick the
                         cheaper Inside-City rate from another district. */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       {([
-                        { value: 'inside', fee: insideAreaFee, configured: insideConfigured, allowed: insideZoneAllowed },
-                        { value: 'outside', fee: outsideAreaFee, configured: outsideConfigured, allowed: outsideZoneAllowed },
+                        { value: 'inside', label: 'Inside City', fee: insideAreaFee, configured: insideConfigured, allowed: insideZoneAllowed },
+                        { value: 'sub', label: 'Sub-Dhaka / Suburbs', fee: subAreaFee, configured: subConfigured, allowed: subZoneAllowed },
+                        { value: 'outside', label: 'Outside City', fee: outsideAreaFee, configured: outsideConfigured, allowed: outsideZoneAllowed },
                       ] as const).map((zone) => {
                         const checked = effectiveShippingArea === zone.value;
                         const blocked = !zone.allowed;
@@ -4727,7 +4814,9 @@ The render below must not guess. A merchant may paste
                             title={blocked
                               ? (zone.value === 'inside'
                                 ? `Inside City is only available in ${merchantBaseCity}.`
-                                : `Outside City is not available in ${merchantBaseCity}.`)
+                                : zone.value === 'sub'
+                                  ? 'The Sub-Dhaka rate applies automatically to the suburban area you selected.'
+                                  : `Outside City is not available in ${merchantBaseCity}.`)
                               : undefined}
                             className={`flex items-center gap-2.5 rounded-xl px-3.5 py-3 border text-xs font-semibold transition ${
                               blocked
@@ -4751,7 +4840,7 @@ The render below must not guess. A merchant may paste
                                   the merchant actually saved in Mongo, and it is
                                   omitted entirely when nothing was saved, so an
                                   unconfigured zone never reads "৳0". */}
-                              {zone.value === 'inside' ? 'Inside City' : 'Outside City'}
+                              {zone.label}
                               {qualifiesForFreeShipping ? (
                                 <span className="text-emerald-400 font-black"> (FREE)</span>
                               ) : zone.configured ? (
@@ -4997,11 +5086,11 @@ The render below must not guess. A merchant may paste
                         <span className="font-semibold text-slate-100">৳{itemsSubtotal.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between text-slate-400">
-                        <span>Shipping Fee ({effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'}):</span>
+                        <span>Shipping Fee ({effectiveZoneLabel}):</span>
                         {/* Only print a price when one was actually saved for the
                             selected zone; an unconfigured zone must not read "৳0". */}
                         <span className="font-semibold text-slate-100">
-                          {(effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured)
+                          {effectiveZoneConfigured
                             ? `৳${shippingFee.toLocaleString()}`
                             : 'To be confirmed'}
                         </span>
@@ -5117,7 +5206,7 @@ The render below must not guess. A merchant may paste
                       is paid in cash on delivery.
                       {advanceUsesZoneFee && (
                         <span className="block mt-1 text-[10px] text-slate-400">
-                          This is the {effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'} delivery fee for your zone.
+                          This is the {effectiveZoneLabel} delivery fee for your zone.
                         </span>
                       )}
                     </p>
@@ -5293,9 +5382,9 @@ The render below must not guess. A merchant may paste
                   </div>
                   <div className="border-t border-slate-800 pt-3 space-y-2 text-xs">
                     <div className="flex justify-between items-center">
-                      <span className="text-slate-400">Delivery — {effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'}</span>
+                      <span className="text-slate-400">Delivery — {effectiveZoneLabel}</span>
                       <span className="font-bold text-slate-200">
-                        {(effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured)
+                        {effectiveZoneConfigured
                           ? `৳${shippingFee.toLocaleString()}`
                           : 'To be confirmed'}
                       </span>
@@ -6137,8 +6226,8 @@ The render below must not guess. A merchant may paste
               // The drawer quotes the SELECTED zone's real charge — the same
               // resolver, the same fee and the same VAT-inclusive math the
               // checkout button uses — so the two totals can never disagree.
-              const zoneFee = effectiveShippingArea === 'inside' ? insideAreaFee : outsideAreaFee;
-              const zoneConfigured = effectiveShippingArea === 'inside' ? insideConfigured : outsideConfigured;
+              const zoneFee = effectiveZoneFee;
+              const zoneConfigured = effectiveZoneConfigured;
               const freeRemaining = Math.max(0, checkoutMinOrder - itemsSubtotal);
               return (
               <div className="p-5 border-t border-slate-800/80 bg-slate-950/90 space-y-3">
@@ -6148,7 +6237,7 @@ The render below must not guess. A merchant may paste
                     <span className="font-extrabold text-slate-200">৳{cartTotal.toLocaleString()}</span>
                   </div>
                   <div className="flex justify-between text-slate-400">
-                    <span>Delivery Fee ({effectiveShippingArea === 'inside' ? 'Inside City' : 'Outside City'})</span>
+                    <span>Delivery Fee ({effectiveZoneLabel})</span>
                     <span className="text-emerald-400 font-bold">
                       {qualifiesForFreeShipping ? (
                         <>

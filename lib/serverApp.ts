@@ -60,6 +60,7 @@ import {
   resolveDeliveryZoneForCity,
   BANGLADESH_DISTRICTS,
   BANGLADESH_DISTRICT_AREAS,
+  SUB_DHAKA_AREAS,
 } from './deliveryZones.js';
 // Shared gallery defaults + the Unsplash purge. Kept in its own module so the
 // server AND the browser bundle apply the exact same rule when a saved
@@ -5217,6 +5218,7 @@ app.get('/api/products', async (req, res) => {
 function buildProductDeliveryFields(body: Record<string, any>): Record<string, any> {
   // An explicit pair on the payload already wins — the client computed it.
   const explicitInside = toNumeric(body.inside_city_fee ?? body.insideCityFee, NaN);
+  const explicitSub = toNumeric(body.sub_dhaka_fee ?? body.subDhakaFee, NaN);
   const explicitOutside = toNumeric(body.outside_city_fee ?? body.outsideCityFee, NaN);
 
   const rates = Array.isArray(body.deliveryRates)
@@ -5233,6 +5235,7 @@ function buildProductDeliveryFields(body: Record<string, any>): Record<string, a
   };
 
   let inside: number | null = Number.isFinite(explicitInside) ? explicitInside : null;
+  let sub: number | null = Number.isFinite(explicitSub) ? explicitSub : null;
   let outside: number | null = Number.isFinite(explicitOutside) ? explicitOutside : null;
 
   if (rates.length > 0) {
@@ -5251,6 +5254,15 @@ function buildProductDeliveryFields(body: Record<string, any>): Record<string, a
       return null;
     };
 
+    // Sub-Dhaka is matched FIRST — its name contains "Dhaka", which the inside
+    // matchers would otherwise claim as the core metropolitan rate.
+    if (sub === null) {
+      const hit = match([/sub\s*-?\s*dhaka/i, /sub\s*-?\s*city/i, /suburb/i, /\bsub\b/i]);
+      if (hit) {
+        sub = hit.fee;
+        used.add(hit.index);
+      }
+    }
     if (inside === null) {
       const hit = match([/inside/i, /\bcity\b/i, /dhaka/i, /within/i]);
       if (hit) {
@@ -5286,12 +5298,16 @@ function buildProductDeliveryFields(body: Record<string, any>): Record<string, a
   }
 
   const safeInside = inside ?? 0;
+  const safeSub = sub;
   const safeOutside = outside ?? 0;
   return {
     inside_city_fee: safeInside,
     outside_city_fee: safeOutside,
     insideCityFee: safeInside,
     outsideCityFee: safeOutside,
+    // Only written when the merchant actually priced the zone — an absent field
+    // means "never priced" and the checkout quotes the STORE's sub_dhaka_fee.
+    ...(safeSub !== null ? { sub_dhaka_fee: safeSub, subDhakaFee: safeSub } : {}),
   };
 }
 
@@ -6079,6 +6095,14 @@ app.get('/api/storefront/:slug?', async (req, res) => {
           shippingConfig,
           codConfig,
         ),
+        // Sub-Dhaka / Dhaka suburbs (Kamrangirchar, Savar, Tongi, …). `null`
+        // means the merchant never priced that zone.
+        sub: resolveDeliveryFeeColumn(
+          ['sub_dhaka_fee', 'subDhakaFee', 'suburbsDhakaFee', 'suburban_fee'],
+          merchantRecord,
+          shippingConfig,
+          codConfig,
+        ),
         outside: resolveDeliveryFeeColumn(
           ['outside_dhaka_fee', 'outsideDhakaFee', 'outsideCityFee', 'outside_city_fee'],
           merchantRecord,
@@ -6096,6 +6120,9 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       // dropdown (e.g. Uttara, Mirpur, Dhanmondi for Dhaka). A district with no
       // list here gets a free-text area field at checkout instead.
       cityAreas: BANGLADESH_DISTRICT_AREAS,
+      // Areas priced as "Sub-Dhaka / Dhaka Suburbs" — the checkout derives the
+      // Sub-Dhaka zone from the customer's area, not from their district alone.
+      subDhakaAreas: SUB_DHAKA_AREAS,
       // Public storefront modules. Only published pages/posts are exposed.
       brandConfig,
       navigationMenus,
@@ -6841,6 +6868,7 @@ app.post('/api/stores/update', async (req, res) => {
           // invent a fallback.
           'base_city',
           'inside_dhaka_fee',
+          'sub_dhaka_fee',
           'outside_dhaka_fee',
           'advance_amount',
           'advance_delivery_charge_enabled',
@@ -12166,6 +12194,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
       if (name === 'shipping') {
         const shippingNext = next as Record<string, any>;
         $set.inside_dhaka_fee = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
+        $set.sub_dhaka_fee = cfgNumOrNull(shippingNext.subDhakaFee, undefined, { min: 0 });
         $set.outside_dhaka_fee = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
         $set.advance_amount = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 }) ?? 0;
         $set.advance_delivery_charge_enabled = shippingNext.requestAdvanceDeliveryCharge === true;
@@ -12236,6 +12265,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
     //   • a blank fee field stays NULL ("never priced"), NOT ৳0;
     //   • a saved ৳0 stays ৳0 (a deliberate "free delivery").
     const insideFeeColumn = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
+    const subFeeColumn = cfgNumOrNull(shippingNext.subDhakaFee, undefined, { min: 0 });
     const outsideFeeColumn = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
     const advanceAmountColumn = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 });
     const advanceEnabledColumn = shippingNext.requestAdvanceDeliveryCharge === true;
@@ -12258,6 +12288,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
               // NULL = "never priced" so the storefront says "To be confirmed"
               // instead of printing a phantom ৳0.
               inside_dhaka_fee: insideFeeColumn,
+              sub_dhaka_fee: subFeeColumn,
               outside_dhaka_fee: outsideFeeColumn,
               base_city: String(shippingNext.baseCity ?? '').trim() || null,
               shipping_config: shippingNext,
@@ -12283,6 +12314,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
               advance_delivery_charge_enabled: advanceEnabledColumn,
               advance_amount: advanceAmountColumn ?? 0,
               inside_dhaka_fee: insideFeeColumn,
+              sub_dhaka_fee: subFeeColumn,
               outside_dhaka_fee: outsideFeeColumn,
               base_city: String(shippingNext.baseCity ?? '').trim() || null,
               updated_at: new Date().toISOString(),
@@ -12469,6 +12501,7 @@ for (const route of CONFIG_ROUTES) {
       advance_delivery_charge_enabled: 'requestAdvanceDeliveryCharge',
       advance_amount: 'advanceDeliveryChargeAmount',
       inside_dhaka_fee: 'insideDhakaFee',
+      sub_dhaka_fee: 'subDhakaFee',
       outside_dhaka_fee: 'outsideDhakaFee',
     };
     for (const [column, configKey] of Object.entries(aliases)) {

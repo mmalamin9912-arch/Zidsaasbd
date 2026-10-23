@@ -88,6 +88,7 @@ export function mapApiProduct(raw: any): any {
       : undefined,
     inside_city_fee: raw.inside_city_fee != null ? Number(raw.inside_city_fee) : (raw.insideCityFee != null ? Number(raw.insideCityFee) : undefined),
     outside_city_fee: raw.outside_city_fee != null ? Number(raw.outside_city_fee) : (raw.outsideCityFee != null ? Number(raw.outsideCityFee) : undefined),
+    sub_dhaka_fee: raw.sub_dhaka_fee != null ? Number(raw.sub_dhaka_fee) : (raw.subDhakaFee != null ? Number(raw.subDhakaFee) : undefined),
     requiresShipping: raw.requiresShipping !== false,
   };
 }
@@ -237,6 +238,10 @@ export function buildProductDbPayload(product: any, merchant?: { id?: string; st
     outside_city_fee: product.outside_city_fee != null ? Number(product.outside_city_fee) : (product.outsideCityFee != null ? Number(product.outsideCityFee) : undefined),
     insideCityFee: product.insideCityFee != null ? Number(product.insideCityFee) : (product.inside_city_fee != null ? Number(product.inside_city_fee) : undefined),
     outsideCityFee: product.outsideCityFee != null ? Number(product.outsideCityFee) : (product.outside_city_fee != null ? Number(product.outside_city_fee) : undefined),
+    // Sub-Dhaka / Dhaka-suburbs charge. Absent (not 0) when the merchant never
+    // priced it, so the checkout can fall back to the Inside fee honestly.
+    sub_dhaka_fee: product.sub_dhaka_fee != null ? Number(product.sub_dhaka_fee) : (product.subDhakaFee != null ? Number(product.subDhakaFee) : undefined),
+    subDhakaFee: product.subDhakaFee != null ? Number(product.subDhakaFee) : (product.sub_dhaka_fee != null ? Number(product.sub_dhaka_fee) : undefined),
     colorImages: product.colorImages || {},
     selectedFilter: product.selectedFilter || '',
     customFields: product.customFields || [],

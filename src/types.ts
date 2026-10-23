@@ -173,8 +173,11 @@ export interface Product {
    */
   inside_city_fee?: number;
   outside_city_fee?: number;
+  /** Sub-Dhaka / Dhaka-suburbs charge (Kamrangirchar, Savar, Tongi, …). */
+  sub_dhaka_fee?: number;
   insideCityFee?: number;
   outsideCityFee?: number;
+  subDhakaFee?: number;
   selectedFilter?: string;
 }
 

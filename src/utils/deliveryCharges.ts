@@ -28,10 +28,14 @@
 export interface DeliveryRates {
   /** Charge when the customer's city counts as "inside". */
   insideFee: number | null;
+  /** Charge when the customer's area is a Sub-Dhaka suburb. */
+  subFee: number | null;
   /** Charge when the customer's city counts as "outside". */
   outsideFee: number | null;
   /** The zone label to show for the inside charge, when one was named. */
   insideLabel: string;
+  /** The zone label to show for the Sub-Dhaka charge, when one was named. */
+  subLabel: string;
   /** The zone label to show for the outside charge, when one was named. */
   outsideLabel: string;
   /** True when this product has any usable charge stored. */
@@ -41,6 +45,9 @@ export interface DeliveryRates {
 /** Matchers, tried in order — the first hit wins. */
 const INSIDE_MATCHERS = [/inside/i, /\bcity\b/i, /dhaka/i, /within/i, /^metro$/i];
 const OUTSIDE_MATCHERS = [/outside/i, /out of/i, /other/i, /sub\s*-?\s*(city|dhaka)/i, /district/i, /upazila/i];
+/** Sub-Dhaka matchers — checked BEFORE the inside matchers, so "Sub-Dhaka"
+ *  (which also contains "Dhaka") is never mistaken for the core city rate. */
+const SUB_MATCHERS = [/sub\s*-?\s*dhaka/i, /sub\s*-?\s*city/i, /suburb/i, /\bsub\b/i];
 
 /** Coerce a stored delivery fee to a non-negative finite number, or null. */
 export function toFee(value: unknown): number | null {
@@ -78,8 +85,10 @@ function pickZone(
 export function resolveProductDeliveryRates(product: any): DeliveryRates {
   const empty: DeliveryRates = {
     insideFee: null,
+    subFee: null,
     outsideFee: null,
     insideLabel: '',
+    subLabel: '',
     outsideLabel: '',
     hasProductRates: false,
   };
@@ -93,12 +102,22 @@ export function resolveProductDeliveryRates(product: any): DeliveryRates {
 
   const used = new Set<number>();
   let insideFee: number | null = null;
+  let subFee: number | null = null;
   let outsideFee: number | null = null;
   let insideLabel = '';
+  let subLabel = '';
   let outsideLabel = '';
 
   // 1. Prefer the named zone list — it is what the merchant actually typed.
+  //    Sub-Dhaka is picked FIRST: its name also matches the inside matchers
+  //    ("Sub-Dhaka" contains "Dhaka"), so the order matters.
   if (rates.length > 0) {
+    const sub = pickZone(rates, SUB_MATCHERS, used);
+    if (sub) {
+      subFee = sub.fee;
+      subLabel = sub.label;
+      used.add(sub.index);
+    }
     const inside = pickZone(rates, INSIDE_MATCHERS, used);
     if (inside) {
       insideFee = inside.fee;
@@ -141,6 +160,10 @@ export function resolveProductDeliveryRates(product: any): DeliveryRates {
     const explicit = toFee(product.inside_city_fee ?? product.insideCityFee);
     if (explicit !== null) insideFee = explicit;
   }
+  if (subFee === null) {
+    const explicit = toFee(product.sub_dhaka_fee ?? product.subDhakaFee);
+    if (explicit !== null) subFee = explicit;
+  }
   if (outsideFee === null) {
     const explicit = toFee(product.outside_city_fee ?? product.outsideCityFee);
     if (explicit !== null) outsideFee = explicit;
@@ -148,10 +171,12 @@ export function resolveProductDeliveryRates(product: any): DeliveryRates {
 
   return {
     insideFee,
+    subFee,
     outsideFee,
     insideLabel,
+    subLabel,
     outsideLabel,
-    hasProductRates: insideFee !== null || outsideFee !== null,
+    hasProductRates: insideFee !== null || subFee !== null || outsideFee !== null,
   };
 }
 
@@ -176,15 +201,24 @@ export function readMerchantFee(...values: Array<unknown>): number | null {
  * Defaults to inside when the city is unknown, matching the previous behaviour:
  * charging the cheaper fee is the safer failure mode for a merchant (it never
  * overcharges a customer).
+ *
+ * `'sub'` (used for the Sub-Dhaka/Suburbs zone) is NOT inside: it has its own
+ * merchant-priced fee, and treating it as inside would quote the metropolitan
+ * rate to a customer the courier drives past the city boundary for.
  */
 export function isInsideCity(city: unknown): boolean {
   const value = String(city ?? '').trim().toLowerCase();
   if (!value) return true;
+  if (value === 'sub') return false;
   return value.includes('dhaka') || value.includes('inside') || value === 'city';
 }
 
 /**
- * Resolve the charge to apply for a given product + city.
+ * Resolve the charge to apply for a given product + zone.
+ *
+ * `city` accepts the checkout's zone id (`'inside'` | `'sub'` | `'outside'`) as
+ * well as a free-text city name. `storeSubFee` is the merchant's Sub-Dhaka fee
+ * (the `sub_dhaka_fee` column / Shipping settings input).
  *
  * `storeInsideFee` / `storeOutsideFee` come from the store's COD configuration and
  * are used ONLY when the product stores no usable charge, so a product-specific
@@ -194,11 +228,14 @@ export function resolveDeliveryCharge(options: {
   product?: any;
   city?: unknown;
   storeInsideFee?: unknown;
+  storeSubFee?: unknown;
   storeOutsideFee?: unknown;
 }): {
   fee: number;
   source: 'product' | 'store' | 'none';
   isInside: boolean;
+  /** The resolved zone. `sub` is the Sub-Dhaka / Dhaka suburbs rate. */
+  zone: 'inside' | 'sub' | 'outside';
   label: string;
   /**
    * True only when a real fee was found (product or store). A fee of exactly ৳0
@@ -209,25 +246,43 @@ export function resolveDeliveryCharge(options: {
    */
   configured: boolean;
 } {
-  const isInside = isInsideCity(options.city);
+  const zone: 'inside' | 'sub' | 'outside' = String(options.city ?? '').trim().toLowerCase() === 'sub'
+    ? 'sub'
+    : isInsideCity(options.city) ? 'inside' : 'outside';
+  const isInside = zone === 'inside';
   const product = resolveProductDeliveryRates(options.product);
 
-  const productFee = isInside ? product.insideFee : product.outsideFee;
+  const productFee = zone === 'sub'
+    ? product.subFee
+    : isInside ? product.insideFee : product.outsideFee;
   if (productFee !== null) {
-    const label = isInside
-      ? product.insideLabel || 'Inside City'
-      : product.outsideLabel || 'Outside City';
-    return { fee: productFee, source: 'product', isInside, label, configured: true };
+    const label = zone === 'sub'
+      ? product.subLabel || 'Sub-Dhaka / Suburbs'
+      : isInside
+        ? product.insideLabel || 'Inside City'
+        : product.outsideLabel || 'Outside City';
+    return { fee: productFee, source: 'product', isInside, zone, label, configured: true };
   }
 
-  const storeFee = toFee(isInside ? options.storeInsideFee : options.storeOutsideFee);
+  const storeFee = toFee(
+    zone === 'sub'
+      ? options.storeSubFee
+      : isInside ? options.storeInsideFee : options.storeOutsideFee,
+  );
   if (storeFee !== null) {
-    return { fee: storeFee, source: 'store', isInside, label: isInside ? 'Inside City' : 'Outside City', configured: true };
+    return { fee: storeFee, source: 'store', isInside, zone, label: zone === 'sub' ? 'Sub-Dhaka / Suburbs' : isInside ? 'Inside City' : 'Outside City', configured: true };
   }
 
   // Nothing was ever configured for this zone. Report `configured: false` so the
   // UI does not print a phantom "৳0"; the fee stays 0 so order math is unaffected.
-  return { fee: 0, source: 'none', isInside, label: isInside ? 'Inside City' : 'Outside City', configured: false };
+  return {
+    fee: 0,
+    source: 'none',
+    isInside,
+    zone,
+    label: zone === 'sub' ? 'Sub-Dhaka / Suburbs' : isInside ? 'Inside City' : 'Outside City',
+    configured: false,
+  };
 }
 
 /**
@@ -246,14 +301,26 @@ export function resolveDeliveryCharge(options: {
  */
 export function buildDeliveryFeeFields(
   rates: { zoneName?: string; fee?: number | string }[] | undefined
-): Partial<Pick<import('../types').Product, 'inside_city_fee' | 'outside_city_fee' | 'insideCityFee' | 'outsideCityFee'>> {
+): Partial<
+  Pick<
+    import('../types').Product,
+    'inside_city_fee' | 'outside_city_fee' | 'sub_dhaka_fee' | 'insideCityFee' | 'outsideCityFee' | 'subDhakaFee'
+  >
+> {
   const resolved = resolveProductDeliveryRates({ deliveryRates: rates || [] });
   const fields: Partial<
-    Pick<import('../types').Product, 'inside_city_fee' | 'outside_city_fee' | 'insideCityFee' | 'outsideCityFee'>
+    Pick<
+      import('../types').Product,
+      'inside_city_fee' | 'outside_city_fee' | 'sub_dhaka_fee' | 'insideCityFee' | 'outsideCityFee' | 'subDhakaFee'
+    >
   > = {};
   if (resolved.insideFee !== null) {
     fields.inside_city_fee = resolved.insideFee;
     fields.insideCityFee = resolved.insideFee;
+  }
+  if (resolved.subFee !== null) {
+    fields.sub_dhaka_fee = resolved.subFee;
+    fields.subDhakaFee = resolved.subFee;
   }
   if (resolved.outsideFee !== null) {
     fields.outside_city_fee = resolved.outsideFee;

@@ -13,9 +13,11 @@
  * THE RULE
  * --------
  *   • The merchant configures ONE base city (their store location).
- *   • Customer picks their city / district.
- *   • Base city      → "Inside City" is allowed, "Outside City" is BLOCKED.
- *   • Any other city → "Outside City" is forced, "Inside City" is BLOCKED.
+ *   • Customer picks their city / district, then the area inside it.
+ *   • A Sub-Dhaka area  → "Sub-Dhaka / Suburbs" (checked first, see
+ *                         {@link SUB_DHAKA_AREAS}).
+ *   • Base city         → "Inside City" is allowed, other zones BLOCKED.
+ *   • Any other city    → "Outside City" is forced, "Inside City" is BLOCKED.
  *
  * WHY A SEPARATE MODULE
  * ---------------------
@@ -127,11 +129,18 @@ export const BANGLADESH_DISTRICT_AREAS: Record<string, readonly string[]> = {
     'Lalbagh', 'Mirpur', 'Mohammadpur', 'Motijheel', 'Mugda', 'New Market',
     'Pallabi', 'Paltan', 'Ramna', 'Rampura', 'Sabujbagh', 'Shahbagh',
     'Shah Ali', 'Sher-e-Bangla Nagar', 'Shyampur', 'Sutrapur', 'Tejgaon',
-    'Turag', 'Uttara', 'Uttarkhan', 'Vatara',
-    // Popular residential / commercial areas customers search by name
+    'Turag', 'Uttara', 'Vatara',
+    // Popular residential / commercial areas customers search by name.
     'Bashundhara R/A', 'Baridhara', 'Banasree', 'Aftabnagar', 'Baily Road',
     'Farmgate', 'Green Road', 'Karwan Bazar', 'Malibagh', 'Manikdi',
     'Moghbazar', 'Nadda', 'Nikunja', 'Rayer Bazar', 'Shyamoli', 'Siddheshwari',
+    // ── Sub-Dhaka / Dhaka suburbs ──────────────────────────────────────────
+    // Dhaka DISTRICT but outside the metropolitan thanas. Listed here so the
+    // customer picks them under Dhaka instead of hunting for the Gazipur /
+    // Narayanganj district; `isSubDhakaArea` prices every one of them as
+    // "Sub-Dhaka / Suburbs", never the core metropolitan rate.
+    'Uttarkhan', 'Southkhan', 'Keraniganj', 'Savar', 'Ashulia', 'Dhamrai',
+    'Dohar', 'Tongi', 'Rupganj', 'Siddhirganj',
   ],
   Chattogram: [
     'Anwara', 'Banshkhali', 'Bayezid', 'Boalkhali', 'Chandanaish', 'Chandgaon',
@@ -352,49 +361,174 @@ export function resolveMerchantBaseCity(
   return '';
 }
 
-/** The two delivery zones a merchant prices. */
-export type DeliveryZone = 'inside' | 'outside';
+/**
+ * The delivery zones a merchant prices.
+ *
+ *   inside  — Dhaka metropolitan thanas that a courier treats as city delivery.
+ *   sub     — "Sub-Dhaka / Dhaka Suburbs": areas that are administratively
+ *             OUTSIDE Dhaka city (Keraniganj, Savar, Tongi, Rupganj, …) but are
+ *             close enough that couriers quote a rate between inside and the
+ *             64-district rate. Priced separately by the merchant.
+ *   outside — everywhere else in Bangladesh.
+ */
+export type DeliveryZone = 'inside' | 'sub' | 'outside';
+
+/**
+ * Every non-metropolitan area a courier treats as "Sub-Dhaka / Dhaka Suburbs".
+ *
+ * These were previously lumped into core "Inside City" whenever the customer
+ * picked the district `Dhaka` — an Uttarkhan delivery was quoted the metropolitan
+ * rate even though the courier drives well past the city boundary. Each entry is
+ * normalised with {@link normalizeCityName}, so "Keraniganj", "Keranigonj" and
+ * "Keraniganj Sadar" all resolve to the same key.
+ *
+ * The list deliberately uses the names that appear in a courier zone sheet, the
+ * postal address and the checkout's own area dropdown. A few heavily-ordered
+ * neighbouring areas (Tongi, Rupganj, Siddhirganj, Sonargaon) are included even
+ * though they sit in Gazipur / Narayanganj district, because couriers bill them
+ * as Dhaka suburbs.
+ */
+export const SUB_DHAKA_AREAS: readonly string[] = [
+  // Dhaka district — outskirts, outside the core metropolitan thanas
+  'Kamrangirchar', 'Keraniganj', 'Keranigonj', 'Savar', 'Ashulia', 'Dhamrai',
+  'Dohar', 'Uttarkhan', 'Southkhan', 'Dakshinkhan', 'Demra', 'Narayanganj',
+  // Suburban / commuter belt billed as Dhaka suburbs by the couriers
+  'Tongi', 'Rupganj', 'Siddhirganj', 'Fatullah', 'Kanchpur', 'Sonargaon',
+  'Araihazar', 'Bandar', 'Gazipur Sadar', 'Kaliakair', 'Sreepur', 'Kapasia',
+  'Kaliganj',
+];
+
+/**
+ * Spellings that mean the SAME sub-urban area.
+ *
+ * Folded onto one canonical key so free text, a legacy order and the dropdown
+ * all agree: "Keranigonj" → keraniganj, "Uttor Khan" → uttarkhan, …
+ */
+const SUB_AREA_ALIASES: Record<string, string> = {
+  keranigonj: 'keraniganj',
+  keranigong: 'keraniganj',
+  southkhansadar: 'southkhan',
+  northkhan: 'uttarkhan',
+  utorkhan: 'uttarkhan',
+  ashuliasadar: 'ashulia',
+  narayangonj: 'narayanganj',
+  gazipursadar: 'gazipursadar',
+};
+
+/**
+ * Canonical keys of {@link SUB_DHAKA_AREAS}, for O(1) matching.
+ *
+ * Built lazily (and memoised) rather than at module load so this module never
+ * depends on the declaration order of `normalizeCityName` — a module-level
+ * `new Set(SUB_DHAKA_AREAS.map(normalizeCityName))` would hit the const's TDZ
+ * when the file is evaluated top-to-bottom.
+ */
+let subDhakaKeysCache: ReadonlySet<string> | null = null;
+function subDhakaKeys(): ReadonlySet<string> {
+  if (!subDhakaKeysCache) {
+    subDhakaKeysCache = new Set(
+      SUB_DHAKA_AREAS.map((area) => normalizeCityName(area)).filter(Boolean),
+    );
+  }
+  return subDhakaKeysCache;
+}
+
+/**
+ * Is this area / thana one of the Sub-Dhaka (Dhaka suburbs) delivery zones?
+ *
+ * Matching is exact-after-normalisation (deliberately NOT substring matching:
+ * "Uttara Sector 7" must stay core, while "Uttarkhan" must be suburban). A
+ * trailing qualifier — "Savar Sadar", "Tongi Municipal Area", "Keraniganj,
+ * Dhaka" — is tolerated by testing the first word-stem as well.
+ */
+export function isSubDhakaArea(area: unknown): boolean {
+  const keys = subDhakaKeys();
+  const key = normalizeCityName(area);
+  if (!key) return false;
+  const canonical = SUB_AREA_ALIASES[key] || key;
+  if (keys.has(canonical)) return true;
+
+  // "Savar Sadar" / "Keraniganj Dhaka" — drop trailing administrative words
+  // and retry, so a qualified spelling still lands on its zone.
+  const condensed = canonical.replace(/(sadar|municipality|municipal|pouroshova|union|city)$/, '');
+  if (condensed && condensed !== canonical) {
+    const alias = SUB_AREA_ALIASES[condensed] || condensed;
+    if (keys.has(alias)) return true;
+  }
+  return false;
+}
 
 /** The outcome of the city → zone decision. */
 export interface DeliveryZoneResolution {
-  /** The zone that MUST be used for this city. */
+  /** The zone that MUST be used for this city / area. */
   zone: DeliveryZone;
   /** Whether the customer may pick "Inside City". */
   insideAllowed: boolean;
+  /** Whether the customer may pick "Sub-Dhaka / Suburbs". */
+  subAllowed: boolean;
   /** Whether the customer may pick "Outside City". */
   outsideAllowed: boolean;
   /** True when the selected city IS the merchant's base city. */
   isBaseCity: boolean;
   /** True when the merchant actually configured a base city. */
   hasBaseCity: boolean;
+  /** True when the selected AREA classifies as a Sub-Dhaka / suburb zone. */
+  isSubDhaka: boolean;
 }
 
 /**
  * Decide which delivery zone applies for a customer city.
  *
- *   • No base city configured → both zones stay available (the merchant has
+ *   • No base city configured → all zones stay available (the merchant has
  *     not told us where they are, so we must not guess a fee).
- *   • No city selected yet   → both zones stay available; the checkout
- *     re-evaluates the moment the customer picks a district.
- *   • Customer city == base city → "Inside City" allowed, "Outside City"
- *     blocked.
+ *   • No city selected yet   → all zones stay available; the checkout
+ *     re-evaluates the moment the customer picks a district / area.
+ *   • A Sub-Dhaka area (Kamrangirchar, Savar, Tongi, …) → "Sub-Dhaka /
+ *     Suburbs" is FORCED, whatever district it is filed under. This is
+ *     checked FIRST so a Savar customer can never be quoted the core
+ *     metropolitan rate.
+ *   • Customer city == base city → "Inside City" allowed, the others blocked.
  *   • Any other city → "Outside City" forced, "Inside City" blocked.
+ *
+ * `area` is the City / Area / Thana the customer picked inside the district.
+ * It is what turns "inside Dhaka" into "Sub-Dhaka" for a suburban thana.
  */
 export function resolveDeliveryZoneForCity(options: {
   city?: unknown;
+  area?: unknown;
   baseCity?: unknown;
 }): DeliveryZoneResolution {
   const baseCity = String(options.baseCity ?? '').trim();
   const city = String(options.city ?? '').trim();
+  const area = String(options.area ?? '').trim();
   const hasBaseCity = Boolean(baseCity) && Boolean(normalizeCityName(baseCity));
+  // An area from ANY district is checked, so a customer who picks Gazipur →
+  // Tongi (or Narayanganj → Rupganj) is priced as a Dhaka suburb too. Even
+  // when the district itself is suburban (Savar / Keraniganj are their own
+  // upazila entries on some courier sheets) the area check still wins.
+  const isSubDhaka = isSubDhakaArea(area) || (Boolean(area) && isSubDhakaArea(city));
+
+  if (isSubDhaka) {
+    return {
+      zone: 'sub',
+      insideAllowed: false,
+      subAllowed: true,
+      outsideAllowed: false,
+      isBaseCity: false,
+      hasBaseCity,
+      isSubDhaka: true,
+    };
+  }
 
   if (!hasBaseCity) {
     return {
       zone: 'inside',
       insideAllowed: true,
+      subAllowed: true,
       outsideAllowed: true,
       isBaseCity: false,
       hasBaseCity: false,
+      isSubDhaka: false,
     };
   }
 
@@ -402,9 +536,11 @@ export function resolveDeliveryZoneForCity(options: {
     return {
       zone: 'inside',
       insideAllowed: true,
+      subAllowed: true,
       outsideAllowed: true,
       isBaseCity: false,
       hasBaseCity: true,
+      isSubDhaka: false,
     };
   }
 
@@ -413,16 +549,20 @@ export function resolveDeliveryZoneForCity(options: {
     ? {
         zone: 'inside',
         insideAllowed: true,
+        subAllowed: false,
         outsideAllowed: false,
         isBaseCity: true,
         hasBaseCity: true,
+        isSubDhaka: false,
       }
     : {
         zone: 'outside',
         insideAllowed: false,
+        subAllowed: false,
         outsideAllowed: true,
         isBaseCity: false,
         hasBaseCity: true,
+        isSubDhaka: false,
       };
 }
 
@@ -433,16 +573,23 @@ export function resolveDeliveryZoneForCity(options: {
 export function buildDeliveryZoneOptions(
   resolution: DeliveryZoneResolution,
 ): Array<{ value: DeliveryZone; allowed: boolean; forced: boolean }> {
-  return (['inside', 'outside'] as const).map((value) => ({
+  return (['inside', 'sub', 'outside'] as const).map((value) => ({
     value,
-    allowed: value === 'inside' ? resolution.insideAllowed : resolution.outsideAllowed,
-    forced: resolution.hasBaseCity && resolution.zone === value,
+    allowed:
+      value === 'inside'
+        ? resolution.insideAllowed
+        : value === 'sub'
+          ? resolution.subAllowed
+          : resolution.outsideAllowed,
+    forced: (resolution.hasBaseCity || resolution.isSubDhaka) && resolution.zone === value,
   }));
 }
 
 export default {
   BANGLADESH_DISTRICTS,
   BANGLADESH_DISTRICT_AREAS,
+  SUB_DHAKA_AREAS,
+  isSubDhakaArea,
   getDistrictAreas,
   normalizeCityName,
   findCityInText,
