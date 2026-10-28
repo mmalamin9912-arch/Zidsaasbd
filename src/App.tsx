@@ -37,7 +37,9 @@ import { StorefrontPreviewModal } from './components/StorefrontPreviewModal';
 import { TenantStorefrontView } from './components/TenantStorefrontView';
 import { StorefrontPageView } from './components/StorefrontPageView';
 import { SuperAdminPortalView } from './components/SuperAdminPortalView';
-import { MarketplaceView } from './components/MarketplaceView';
+// The platform's OWN marketplace theme — a separate design from every tenant
+// storefront (TenantStorefrontView), deliberately.
+import { MegaMarketplaceView } from './components/MegaMarketplaceView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
@@ -116,6 +118,9 @@ const RESERVED_ROOT_SEGMENTS = new Set([
   'admin', 'super-admin', 'admin-login', 'super-admin-gateway',
   'dashboard', 'store', 'e', 'pricing', 'landing', 'login', 'signin',
   'register', 'signup', 'checkout', 'api', 'assets', 'static',
+  // Platform marketplace — never a merchant slug, or `/marketplace` would be
+  // rewritten into `/store/marketplace` and render a tenant theme.
+  'marketplace',
 ]);
 
 /**
@@ -245,7 +250,12 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     try {
       const path = window.location.pathname;
-      if (path === '/' || path === '' || path === '/pricing' || path === '/landing' || path === '/marketplace') {
+      // Public surfaces: the marketplace is the site root now, so `/` must not
+      // imply "signed in". The pricing landing stays at /pricing and /landing.
+      if (
+        path === '/' || path === '' || path === '/pricing' || path === '/landing' ||
+        path === '/marketplace' || path.startsWith('/marketplace/') || path === '/store/marketplace'
+      ) {
         return false;
       }
       const savedSession = getStoredSession();
@@ -256,14 +266,18 @@ export default function App() {
   });
 
   // App Master States
+  //
+  // `showLanding` now means "render the SaaS PRICING page", which lives at
+  // /pricing (and the legacy /landing). The site root `/` belongs to the
+  // marketplace, so landing on it must NOT flip this flag on.
   const [showLanding, setShowLanding] = useState<boolean>(() => {
     const path = window.location.pathname;
-    if (path === '/' || path === '' || path === '/pricing' || path === '/landing') {
+    if (path === '' || path === '/pricing' || path === '/landing') {
       return true;
     }
     // The marketplace is a PUBLIC page — it must never be gated behind the
     // merchant session, so it renders the marketplace view directly.
-    if (path === '/marketplace') {
+    if (path === '/' || path === '/marketplace' || path === '/store/marketplace') {
       return false;
     }
     const savedSession = getStoredSession();
@@ -280,6 +294,7 @@ export default function App() {
       path === '/pricing' ||
       path === '/landing' ||
       path === '/marketplace' ||
+      path === '/store/marketplace' ||
       path.startsWith('/marketplace/') ||
       path.startsWith('/store/') ||
       path.startsWith('/e/') ||
@@ -332,6 +347,15 @@ export default function App() {
         return;
       }
 
+      // The marketplace is a PLATFORM surface. It must stay reachable even from
+      // a merchant subdomain (`shop.zidbdsaas.com/marketplace`), so it is
+      // handled before the host rewrite below would turn it into a store page.
+      if (path === '/marketplace' || path.startsWith('/marketplace/')) {
+        setShowLanding(false);
+        setIsAuthChecking(false);
+        return;
+      }
+
       // ── Merchant subdomain (`storename.zidbdsaas.com/…`).
       //
       // `/middleware.ts` normally rewrites this to `/store/<slug>` before the
@@ -367,8 +391,21 @@ export default function App() {
       const session = getStoredSession();
       const hasSession = !!(session && (session.userProfile || session.email));
 
-      // Root path (/) must show the Landing Page first.
-      if (path === '/' || path === '' || path === '/pricing' || path === '/landing') {
+      // ── Marketplace is the SITE ROOT ──────────────────────────────────
+      // `/` and `/marketplace` render the mega-marketplace. The SaaS pricing
+      // page lives at `/pricing` (and legacy `/landing`).
+      //
+      // This branch runs BEFORE the landing check below, otherwise `/` would
+      // still be swallowed by `showLanding` and merchants would never see the
+      // marketplace at the bare domain.
+      if (path === '/' || path === '' || path === '/marketplace' || path === '/store/marketplace') {
+        setShowLanding(false);
+        setIsAuthChecking(false);
+        return;
+      }
+
+      // Pricing / landing page.
+      if (path === '/pricing' || path === '/landing') {
         setShowLanding(true);
         if (!hasSession) {
           setIsAuthenticated(false);
@@ -2332,47 +2369,54 @@ onPlaceOrder={async (newOrder) => {
     );
   }
 
-  // ── Public marketplace homepage ────────────────────────────────────────────
+  // ── Public MEGA MARKETPLACE ────────────────────────────────────────────────
   //
-  // `/marketplace` lists every public product from every active merchant on one
-  // grid (see MarketplaceView + GET /api/marketplace/products). Clicking a
-  // vendor jumps to its own storefront; adding a product hands that storefront
-  // the product WITH its `vendor_id`, so a cart can span several merchants.
-  if (currentPath === '/marketplace' || currentPath.startsWith('/marketplace/')) {
-    const marketplaceCartKey = 'zid_marketplace_cart';
+  // The platform's own storefront theme (MegaMarketplaceView) — deliberately
+  // NOT a tenant storefront. It is reachable at BOTH:
+  //
+  //   /              the platform's front door (the SaaS landing keeps /pricing)
+  //   /marketplace   the canonical, shareable URL
+  //
+  // `/store/marketplace` is the LEGACY form: it used to fall through to the
+  // `/store/<slug>` branch below and render a single merchant theme with the
+  // slug "marketplace". It is redirected (not rendered) so old links land on
+  // the real marketplace instead of a lookalike tenant shop.
+  const isMarketplacePath =
+    currentPath === '/' ||
+    currentPath === '' ||
+    currentPath === '/marketplace' ||
+    currentPath.startsWith('/marketplace/') ||
+    currentPath === '/store/marketplace';
+
+  if (isMarketplacePath) {
+    // Self-heal the URL so the address bar always shows `/marketplace`, whether
+    // the visitor arrived at `/` or an old `/store/marketplace` link.
+    if (currentPath !== '/marketplace') {
+      window.history.replaceState({}, '', '/marketplace');
+    }
+
+    const query = new URLSearchParams(window.location.search);
+    const initialCategory = query.get('category') || undefined;
+    const initialSearch = query.get('q') || undefined;
+
+    const goToVendor = (vendorSlug: string) => {
+      if (!vendorSlug) return;
+      window.history.pushState({}, '', `/store/${vendorSlug}`);
+      setCurrentPath(`/store/${vendorSlug}`);
+    };
+
     return (
-      <MarketplaceView
-        onBack={() => {
-          window.history.pushState({}, '', '/');
-          setCurrentPath('/');
-          setShowLanding(true);
+      <MegaMarketplaceView
+        initialFilters={{ category: initialCategory, q: initialSearch }}
+        onVisitVendor={goToVendor}
+        onCheckout={goToVendor}
+        onOpenAccount={() => {
+          window.history.pushState({}, '', '/dashboard');
+          setCurrentPath('/dashboard');
         }}
-        onVisitStore={(vendorSlug) => {
-          if (!vendorSlug) return;
-          window.history.pushState({}, '', `/store/${vendorSlug}`);
-          setCurrentPath(`/store/${vendorSlug}`);
-        }}
-        onAddToCart={(product, quantity) => {
-          // The marketplace cart is kept in its own storage key so it never
-          // collides with a single merchant's local cart. Each line keeps the
-          // product's vendor identity for the per-vendor checkout split.
-          try {
-            const raw = localStorage.getItem(marketplaceCartKey);
-            const parsed = raw ? JSON.parse(raw) : [];
-            const lines: any[] = Array.isArray(parsed) ? parsed : [];
-            const existing = lines.find(
-              (l) => String(l?.product?.id) === String(product.id) && String(l?.product?.vendor_id) === String(product.vendor_id)
-            );
-            if (existing) existing.quantity = Number(existing.quantity || 1) + quantity;
-            else lines.push({ product, quantity });
-            safeSetItem(marketplaceCartKey, lines);
-          } catch (e) {
-            console.warn('[Marketplace] cart persist warning:', e);
-          }
-          if (product.vendor_slug) {
-            window.history.pushState({}, '', `/store/${product.vendor_slug}`);
-            setCurrentPath(`/store/${product.vendor_slug}`);
-          }
+        onGoToPlans={() => {
+          window.history.pushState({}, '', '/pricing');
+          setCurrentPath('/pricing');
         }}
       />
     );
@@ -2577,6 +2621,13 @@ onPlaceOrder={async (newOrder) => {
         onLoginClick={() => {
           setAuthMode('login');
           setShowLanding(false);
+        }}
+        // `/` is now the marketplace, so the pricing page needs its own way
+        // back to the shop floor.
+        onGoToMarketplace={() => {
+          setShowLanding(false);
+          window.history.pushState({}, '', '/marketplace');
+          setCurrentPath('/marketplace');
         }}
       />
     );

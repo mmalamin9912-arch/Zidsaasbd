@@ -16234,6 +16234,16 @@ app.get('/api/marketplace/products', async (req, res) => {
       sort: (str(req.query.sort) as any) || 'newest',
       page: num(req.query.page),
       limit: num(req.query.limit),
+      // Offline safety net: when MongoDB is unreachable the marketplace serves
+      // the same on-disk catalogue the storefronts use, instead of going blank.
+      loadLocal: async () => {
+        const payload = await readStorePayload();
+        const stores = Object.values(payload?.stores || {}).map((s: any) => ({
+          ...s,
+          store_slug: s?.store_slug || s?.storeSlug,
+        }));
+        return { stores, products: Array.isArray(payload?.products) ? payload.products : [] };
+      },
     });
 
     return res.status(200).json({ ok: result.ok, ...result });

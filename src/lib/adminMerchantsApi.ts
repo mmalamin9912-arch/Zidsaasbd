@@ -14,6 +14,9 @@ const RESERVED_MERCHANT_SLUGS = new Set([
   'dashboard', 'store', 'e', 'pricing', 'landing', 'login', 'signin',
   'register', 'signup', 'checkout', 'api', 'assets', 'static',
   'www', 'zid', 'zid-bd', 'app', 'portal', 'support', 'help', 'docs', 'status', 'auth',
+  // The platform marketplace owns this slug — a merchant must never claim it,
+  // or their storefront would shadow the platform's front door.
+  'marketplace',
 ]);
 
 export function normalizeMerchantSlug(requestedSlug: unknown): string {

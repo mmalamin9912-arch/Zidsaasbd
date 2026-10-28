@@ -20,6 +20,10 @@
       "destination": "/api/index.ts"
     },
     {
+      "source": "/marketplace",
+      "destination": "/index.html"
+    },
+    {
       "source": "/ZID-BD-:storeCode",
       "destination": "/index.html"
     },

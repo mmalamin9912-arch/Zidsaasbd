@@ -11,13 +11,21 @@ interface PublicPricingLandingProps {
   onLoginClick: () => void;
   isAuthenticated?: boolean;
   onGoToDashboard?: () => void;
+  /**
+   * Opens the multi-vendor marketplace.
+   *
+   * The marketplace owns the site root (`/`), so the pricing page is no longer
+   * the entry point and needs its own link back to the shop floor.
+   */
+  onGoToMarketplace?: () => void;
 }
 
 export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({ 
   onSelectPlan, 
   onLoginClick,
   isAuthenticated,
-  onGoToDashboard
+  onGoToDashboard,
+  onGoToMarketplace,
 }) => {
   const { t } = useLanguage();
   return (
@@ -26,6 +34,16 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
       <nav id="pricing-navbar" className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900">
         <BrandLogo size="md" showSubtitle={false} />
         <div className="flex items-center gap-4 text-sm font-semibold">
+          {onGoToMarketplace && (
+            <button
+              id="pricing-marketplace-btn"
+              onClick={onGoToMarketplace}
+              className="hidden items-center gap-1.5 text-slate-300 transition hover:text-white sm:flex cursor-pointer"
+            >
+              <span>Marketplace</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          )}
           <LanguageToggle compact />
           {isAuthenticated && onGoToDashboard ? (
             <button 

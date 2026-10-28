@@ -158,6 +158,16 @@ export function isActiveStore(store: any): boolean {
 }
 
 export interface MarketplaceQuery {
+  /**
+   * Optional OFFLINE fallback.
+   *
+   * Returns the same `{ stores, products }` shape the storefront serves from
+   * the on-disk mirror. It is used ONLY when MongoDB is unreachable, so a
+   * database outage degrades the marketplace to the last known catalogue
+   * instead of an empty grid (the storefront has had this safety net for a
+   * long time; the marketplace should not be the one page that goes blank).
+   */
+  loadLocal?: () => Promise<{ stores?: any[]; products?: any[] }>;
   /** Case-insensitive product search across title / sku / brand. */
   q?: string;
   category?: string;
@@ -176,6 +186,12 @@ export interface MarketplaceQuery {
 
 export interface MarketplaceResult {
   ok: boolean;
+  /**
+   * Where the rows came from. `local` means MongoDB was unreachable and the
+   * rows were served from the on-disk storefront mirror — surfaced so an
+   * outage is never mistaken for an empty catalogue.
+   */
+  source?: 'mongo' | 'local';
   products: any[];
   total: number;
   page: number;
@@ -209,7 +225,29 @@ export async function searchMarketplaceProducts(query: MarketplaceQuery = {}): P
   } catch (err: any) {
     console.warn('[Marketplace] database unavailable:', err?.message || err);
   }
-  if (!db) return { ...empty, ok: false, error: 'The marketplace database is unavailable.' };
+  // ── 0. Offline mode: no database connection. ───────────────────────────
+  if (!db) {
+    if (!query.loadLocal) {
+      return { ...empty, ok: false, error: 'The marketplace database is unavailable.' };
+    }
+    try {
+      const local = await query.loadLocal();
+      const localStores = Array.isArray(local?.stores) ? local.stores : [];
+      // The file mirror keeps products either at the top level or nested per
+      // store (`stores[slug].products`); flatten both.
+      const nested = localStores.flatMap((s: any) => (Array.isArray(s?.products) ? s.products : []));
+      const flat = Array.isArray(local?.products) ? local.products : [];
+      const byId = new Map<string, any>();
+      for (const p of [...nested, ...flat]) {
+        const key = String(p?.id ?? p?._id ?? '');
+        if (key) byId.set(key, p);
+      }
+      return buildMarketplaceResult([...byId.values()], localStores, query, page, limit, 'local');
+    } catch (err: any) {
+      console.warn('[Marketplace] local fallback warning:', err?.message || err);
+      return { ...empty, ok: false, error: 'The marketplace database is unavailable.' };
+    }
+  }
 
   try {
     // ── 1. Which stores may sell on the marketplace? ────────────────────────
@@ -280,13 +318,19 @@ export async function searchMarketplaceProducts(query: MarketplaceQuery = {}): P
 
     // Vendor filter: an explicit ref narrows the DB query; otherwise the
     // in-code allow-list below enforces "active merchant only".
-    if (query.vendor && query.vendor.trim()) {
-      const ref = await resolveStoreRef(query.vendor);
+    //
+    // An explicit `vendor` ALWAYS wins over `excludeVendor`. Without this, a
+    // request that carried both (a stale deep link, or a storefront passing
+    // "exclude my store" by default) would intersect to an EMPTY set even
+    // though the shopper explicitly picked a vendor.
+    const hasVendorFilter = Boolean(query.vendor && query.vendor.trim());
+    if (hasVendorFilter) {
+      const ref = await resolveStoreRef(query.vendor!.trim());
       const clauses = storeMatchClauses(ref);
       if (clauses.length) and.push({ $or: clauses });
-      else and.push({ store_slug: query.vendor.trim().toLowerCase() });
+      else and.push({ store_slug: query.vendor!.trim().toLowerCase() });
     }
-    if (query.excludeVendor && query.excludeVendor.trim()) {
+    if (!hasVendorFilter && query.excludeVendor && query.excludeVendor.trim()) {
       const ref = await resolveStoreRef(query.excludeVendor);
       const clauses = storeMatchClauses(ref);
       if (clauses.length) and.push({ $nor: clauses });
@@ -320,101 +364,187 @@ export async function searchMarketplaceProducts(query: MarketplaceQuery = {}): P
       .catch(() => []);
 
     // ── 3. Annotate with vendor identity, drop non-public / inactive. ──────
-    const enriched: any[] = [];
-    const categoryCounts = new Map<string, number>();
-    const vendorCounts = new Map<string, { vendor_id: string; vendor_slug: string; vendor_name: string; vendor_code?: string; product_count: number }>();
-    let priceMin = Infinity;
-    let priceMax = -Infinity;
-
-    for (const raw of rows) {
-      if (!isPublicProduct(raw)) continue;
-      const keys = [
-        raw.store_id, raw.storeId, raw.merchant_id, raw.merchantId,
-        raw.store_slug, raw.storeSlug, raw.store_code, raw.storeCode,
-      ].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean);
-
-      // Determine the selling store. A product whose store row is unknown is
-      // still listed (older data may lack a stores row) as long as it carries
-      // a store reference; a product with NO store reference is skipped.
-      if (keys.length === 0) continue;
-      let store: any = null;
-      for (const k of keys) {
-        if (storeByKey.has(k)) { store = storeByKey.get(k); break; }
-      }
-      // If we know ANY stores at all and this product's vendors are all
-      // registered-but-suspended, exclude it.
-      if (!store && activeStoreIds.size > 0) {
-        const registered = storeDocs.find((s) => {
-          const sKeys = [s.id, s.store_id, s.merchant_id, s.store_slug, s.storeSlug, s.store_code, s.storeCode]
-            .map((v) => String(v || '').trim().toLowerCase()).filter(Boolean);
-          return sKeys.some((k) => keys.includes(k));
-        });
-        if (registered && !isActiveStore(registered)) continue;
-        store = registered || null;
-      }
-
-      const vendorId = String(store?.id || store?.store_id || raw.store_id || raw.storeId || raw.merchant_id || raw.store_slug || '').trim();
-      const vendorSlug = String(store?.store_slug || store?.storeSlug || raw.store_slug || raw.storeSlug || '').trim().toLowerCase();
-      const vendorName = String(store?.store_name || store?.storeName || raw.store_name || raw.storeName || vendorSlug || 'Store').trim();
-
-      const price = toNum(raw.priceBDT ?? raw.price ?? raw.price_bdt, 0);
-      if (price > 0) {
-        priceMin = Math.min(priceMin, price);
-        priceMax = Math.max(priceMax, price);
-      }
-
-      const id = raw.id != null ? String(raw.id) : (raw._id != null ? String(raw._id) : '');
-      const category = String(raw.category || raw.category_name || 'Uncategorized').trim() || 'Uncategorized';
-      categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
-      const vKey = vendorId || vendorSlug;
-      if (vKey) {
-        const existing = vendorCounts.get(vKey);
-        if (existing) existing.product_count += 1;
-        else vendorCounts.set(vKey, {
-          vendor_id: vendorId,
-          vendor_slug: vendorSlug,
-          vendor_name: vendorName,
-          vendor_code: store?.store_code ? String(store.store_code) : undefined,
-          product_count: 1,
-        });
-      }
-
-      enriched.push({
-        ...toPlain(raw),
-        id,
-        priceBDT: price,
-        // Marketplace identity, always explicit on the row itself.
-        vendor_id: vendorId,
-        vendor_name: vendorName,
-        vendor_slug: vendorSlug,
-        vendor_code: store?.store_code ? String(store.store_code) : undefined,
-        store_id: String(raw.store_id || raw.storeId || vendorId),
-        store_slug: vendorSlug || raw.store_slug || raw.storeSlug,
-      });
-    }
-
-    const total = enriched.length;
-    const start = (page - 1) * limit;
-    const paged = enriched.slice(start, start + limit);
-
-    return {
-      ok: true,
-      products: paged,
-      total,
-      page,
-      limit,
-      pages: Math.ceil(total / limit),
-      vendors: [...vendorCounts.values()].sort((a, b) => b.product_count - a.product_count).slice(0, 60),
-      categories: [...categoryCounts.entries()]
-        .map(([name, product_count]) => ({ name, product_count }))
-        .sort((a, b) => b.product_count - a.product_count)
-        .slice(0, 60),
-      price_range: Number.isFinite(priceMin) ? { min: priceMin, max: priceMax } : null,
-    };
+    return buildMarketplaceResult(rows, storeDocs, query, page, limit, 'mongo');
   } catch (err: any) {
     console.warn('[Marketplace] search warning:', err?.message || err);
     return { ...empty, ok: false, error: 'The marketplace could not be searched right now.' };
   }
+}
+
+/**
+ * ANNOTATE + FACET a raw product list.
+ *
+ * Shared by the MongoDB path and the offline mirror so both produce the SAME
+ * payload: every row carries its vendor identity, category tags, discount,
+ * stock state and rating, and the facets are computed from exactly the rows
+ * shown. Keeping one implementation is what guarantees the card looks identical
+ * whether the data came from Atlas or from the local file fallback.
+ */
+function buildMarketplaceResult(
+  rows: any[],
+  storeDocs: any[],
+  query: MarketplaceQuery,
+  page: number,
+  limit: number,
+  source: 'mongo' | 'local',
+): MarketplaceResult {
+  const activeStores = storeDocs.filter(isActiveStore);
+  const storeByKey = new Map<string, any>();
+  for (const s of activeStores) {
+    for (const key of [s.id, s.store_id, s.merchant_id, s.store_slug, s.storeSlug, s.store_code, s.storeCode]) {
+      const k = String(key || '').trim().toLowerCase();
+      if (k) storeByKey.set(k, s);
+    }
+  }
+
+  const enriched: any[] = [];
+  const categoryCounts = new Map<string, number>();
+  const vendorCounts = new Map<string, { vendor_id: string; vendor_slug: string; vendor_name: string; vendor_code?: string; product_count: number }>();
+  let priceMin = Infinity;
+  let priceMax = -Infinity;
+
+  const needle = String(query.q || '').trim().toLowerCase();
+  const catNeedle = String(query.category || '').trim().toLowerCase();
+
+  for (const raw of Array.isArray(rows) ? rows : []) {
+    if (!isPublicProduct(raw)) continue;
+
+    const keys = [
+      raw.store_id, raw.storeId, raw.merchant_id, raw.merchantId,
+      raw.store_slug, raw.storeSlug, raw.store_code, raw.storeCode,
+    ].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean);
+    if (keys.length === 0) continue;
+
+    let store: any = null;
+    for (const k of keys) {
+      if (storeByKey.has(k)) { store = storeByKey.get(k); break; }
+    }
+    // A product whose registered store is suspended must not be listed.
+    if (!store && storeDocs.length > 0) {
+      const registered = storeDocs.find((s) => {
+        const sKeys = [s.id, s.store_id, s.merchant_id, s.store_slug, s.storeSlug, s.store_code, s.storeCode]
+          .map((v) => String(v || '').trim().toLowerCase()).filter(Boolean);
+        return sKeys.some((k) => keys.includes(k));
+      });
+      if (registered && !isActiveStore(registered)) continue;
+      store = registered || null;
+    }
+
+    const vendorId = String(store?.id || store?.store_id || raw.store_id || raw.storeId || raw.merchant_id || raw.store_slug || '').trim();
+    const vendorSlug = String(store?.store_slug || store?.storeSlug || raw.store_slug || raw.storeSlug || '').trim().toLowerCase();
+    const vendorName = String(store?.store_name || store?.storeName || raw.store_name || raw.storeName || vendorSlug || 'Store').trim();
+
+    const price = toNum(raw.priceBDT ?? raw.price ?? raw.price_bdt, 0);
+    const id = raw.id != null ? String(raw.id) : (raw._id != null ? String(raw._id) : '');
+    const category = String(raw.category || raw.category_name || 'Uncategorized').trim() || 'Uncategorized';
+
+    // ── In-code filters (needed for the offline path; harmless in Mongo) ──
+    if (needle) {
+      const haystack = [raw.title, raw.name, raw.sku, raw.brand, raw.descriptionEn, raw.description_en]
+        .map((v) => String(v ?? '').toLowerCase()).join(' ');
+      if (!haystack.includes(needle)) continue;
+    }
+    if (catNeedle && category.toLowerCase() !== catNeedle && String(raw.category_id || raw.categoryId || '').toLowerCase() !== catNeedle) {
+      continue;
+    }
+    if (query.minPrice != null && price < Number(query.minPrice)) continue;
+    if (query.maxPrice != null && price > Number(query.maxPrice)) continue;
+    if (query.vendor && query.vendor.trim()) {
+      const want = query.vendor.trim().toLowerCase();
+      if (!keys.includes(want) && vendorId.toLowerCase() !== want && vendorSlug !== want) continue;
+    }
+
+    if (price > 0) {
+      priceMin = Math.min(priceMin, price);
+      priceMax = Math.max(priceMax, price);
+    }
+    categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
+
+    const vKey = vendorId || vendorSlug;
+    if (vKey) {
+      const existing = vendorCounts.get(vKey);
+      if (existing) existing.product_count += 1;
+      else vendorCounts.set(vKey, {
+        vendor_id: vendorId, vendor_slug: vendorSlug, vendor_name: vendorName,
+        vendor_code: store?.store_code ? String(store.store_code) : undefined,
+        product_count: 1,
+      });
+    }
+
+    // ── Card presentation fields ────────────────────────────────────────
+    const tagList: string[] = [category];
+    const pushTag = (value: unknown) => {
+      const t = String(value ?? '').trim();
+      if (t && !tagList.some((existing) => existing.toLowerCase() === t.toLowerCase())) tagList.push(t);
+    };
+    if (Array.isArray(raw.tags)) raw.tags.forEach(pushTag);
+    pushTag(raw.subcategory ?? raw.sub_category);
+    pushTag(raw.brand);
+
+    const compareAt = toNum(
+      raw.compareAtPriceBDT ?? raw.compare_at_price_bdt ?? raw.compareAtPrice ?? raw.compare_at_price,
+      0,
+    );
+    const discountPercent = compareAt > price && price > 0
+      ? Math.round(((compareAt - price) / compareAt) * 100)
+      : 0;
+
+    const stockQty = Math.max(0, Math.floor(toNum(raw.stock ?? raw.stock_quantity, 0)));
+    const stockStatus: 'in_stock' | 'low_stock' | 'out_of_stock' =
+      stockQty <= 0 ? 'out_of_stock' : stockQty <= 5 ? 'low_stock' : 'in_stock';
+
+    const rating = toNum(raw.rating ?? raw.average_rating ?? raw.avg_rating, 0);
+    const reviewCount = Math.max(0, Math.floor(toNum(raw.review_count ?? raw.reviewCount ?? raw.reviews_count, 0)));
+
+    enriched.push({
+      ...toPlain(raw),
+      id,
+      priceBDT: price,
+      vendor_id: vendorId,
+      vendor_name: vendorName,
+      vendor_slug: vendorSlug,
+      vendor_code: store?.store_code ? String(store.store_code) : undefined,
+      vendor_logo: store?.logo_url || store?.logoUrl || null,
+      vendor_verified: isActiveStore(store || {}),
+      store_id: String(raw.store_id || raw.storeId || vendorId),
+      store_slug: vendorSlug || raw.store_slug || raw.storeSlug,
+      category,
+      category_tags: tagList,
+      compare_at_price: compareAt > price ? compareAt : null,
+      discount_percent: discountPercent,
+      stock_status: stockStatus,
+      stock_quantity: stockQty,
+      rating: Math.min(5, Math.round(rating * 10) / 10),
+      review_count: reviewCount,
+    });
+  }
+
+  // ── In-code sort (the offline path has no DB sort) ───────────────────
+  const sorted = [...enriched];
+  switch (query.sort) {
+    case 'price_asc': sorted.sort((a, b) => toNum(a.priceBDT) - toNum(b.priceBDT)); break;
+    case 'price_desc': sorted.sort((a, b) => toNum(b.priceBDT) - toNum(a.priceBDT)); break;
+    case 'popular': sorted.sort((a, b) => toNum(b.salesCount ?? b.sales_count) - toNum(a.salesCount ?? a.sales_count)); break;
+    default: break;
+  }
+
+  const total = sorted.length;
+  const start = (page - 1) * limit;
+  return {
+    ok: true,
+    source,
+    products: sorted.slice(start, start + limit),
+    total,
+    page,
+    limit,
+    pages: Math.ceil(total / limit),
+    vendors: [...vendorCounts.values()].sort((a, b) => b.product_count - a.product_count).slice(0, 60),
+    categories: [...categoryCounts.entries()]
+      .map(([name, product_count]) => ({ name, product_count }))
+      .sort((a, b) => b.product_count - a.product_count)
+      .slice(0, 60),
+    price_range: Number.isFinite(priceMin) ? { min: priceMin, max: priceMax } : null,
+  };
 }
 
 /** Seed the default commission rule the first time the collection is read. */

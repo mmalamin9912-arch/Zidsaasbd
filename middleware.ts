@@ -111,6 +111,11 @@ export function isSlugLike(value: string): boolean {
  * middleware unable to reprocess its own output.
  */
 export function isAppPath(path: string): boolean {
+  // The site ROOT is the multi-vendor marketplace — a platform page, never a
+  // merchant storefront. Without this, PLATFORM_HOSTS still passes through,
+  // but a merchant subdomain's `/` would be rewritten to `/store/<slug>`; the
+  // marketplace must stay reachable everywhere.
+  if (path === '/' || path === '') return true;
   if (path.startsWith('/.')) return true;
   return APP_PATH_PREFIXES.some(
     (prefix) => path === prefix.replace(/\/$/, '') || path.startsWith(prefix)
