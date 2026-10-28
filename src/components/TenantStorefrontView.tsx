@@ -1734,7 +1734,62 @@ The render below must not guess. A merchant may paste
     }
   };
   const [checkoutStep, setCheckoutStep] = useState<'catalog' | 'checkout' | 'success'>('catalog');
-  const [cart, setCart] = useState<{product: Product, quantity: number, variant: string}[]>([]);
+  // ── Multi-vendor cart ────────────────────────────────────────────────────
+  //
+  // Every line carries WHICH merchant sells it. A marketplace cart can hold
+  // products from several `store_id`s at once; checkout then posts ONE master
+  // order and the server splits it into one child order per vendor (see
+  // `persistVendorChildren` in lib/serverApp.ts) so each merchant can generate
+  // its own Pathao/Steadfast slip.
+  //
+  // `vendorId` is the canonical stores.id UUID when known, otherwise the slug —
+  // never empty, so the splitter can always group the line.
+  const [cart, setCart] = useState<{product: Product, quantity: number, variant: string, vendorId: string, vendorName: string}[]>([]);
+
+  /** The merchant that owns the currently rendered storefront. */
+  const currentVendor = useMemo(() => ({
+    id: String((merchant as any)?.id || resolvedStoreId || effectiveStoreSlug || '').trim(),
+    name: String((merchant as any)?.storeName || (merchant as any)?.store_name || effectiveStoreSlug || 'Store').trim(),
+    slug: String(effectiveStoreSlug || '').split(':')[0].trim().toLowerCase(),
+  }), [(merchant as any)?.id, (merchant as any)?.storeName, effectiveStoreSlug, resolvedStoreId]);
+
+  /**
+   * The vendor a product belongs to. Marketplace products carry `vendor_id`
+   * explicitly; a storefront product falls back to this store's identity.
+   */
+  const vendorOfProduct = (product: Product): { vendorId: string; vendorName: string } => {
+    const p = product as any;
+    const explicitId = String(p?.vendor_id || p?.vendorId || p?.store_id || p?.storeId || '').trim();
+    if (explicitId) {
+      return {
+        vendorId: explicitId,
+        vendorName: String(p?.vendor_name || p?.vendorName || p?.store_name || p?.storeSlug || explicitId).trim(),
+      };
+    }
+    return { vendorId: currentVendor.id, vendorName: currentVendor.name };
+  };
+
+  /** Distinct merchants currently in the cart — drives the split summary UI. */
+  const cartVendors = useMemo(() => {
+    const groups = new Map<string, { vendorId: string; vendorName: string; subtotal: number; itemCount: number }>();
+    for (const line of cart || []) {
+      const key = line.vendorId || currentVendor.id;
+      const units = (line.product?.priceBDT ?? 0) * line.quantity;
+      const existing = groups.get(key);
+      if (existing) {
+        existing.subtotal += units;
+        existing.itemCount += line.quantity;
+      } else {
+        groups.set(key, {
+          vendorId: key,
+          vendorName: line.vendorName || currentVendor.name,
+          subtotal: units,
+          itemCount: line.quantity,
+        });
+      }
+    }
+    return [...groups.values()];
+  }, [cart, currentVendor.id, currentVendor.name]);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -2870,26 +2925,41 @@ The render below must not guess. A merchant may paste
   const handleAddToCart = (product: Product, variant = 'Default') => {
     setCart(prev => {
       const next = prev || [];
-      const existing = next.find(item => item.product.id === product.id && item.variant === variant);
+      const vendor = vendorOfProduct(product);
+      // Two vendors can sell the same product id, so identity is
+      // (vendor, product, variant) — never the product id alone.
+      const existing = next.find(item =>
+        item.product.id === product.id && item.variant === variant && item.vendorId === vendor.vendorId
+      );
       if (existing) {
-        return next.map(item => item.product.id === product.id && item.variant === variant
-          ? { ...item, quantity: clampQty(item.quantity + 1) }
-          : item
+        return next.map(item =>
+          item.product.id === product.id && item.variant === variant && item.vendorId === vendor.vendorId
+            ? { ...item, quantity: clampQty(item.quantity + 1) }
+            : item
         );
       }
       // A freshly added line starts at the minimum order quantity.
-      return [...next, { product, quantity: clampQty(1), variant }];
+      return [...next, { product, quantity: clampQty(1), variant, vendorId: vendor.vendorId, vendorName: vendor.vendorName }];
     });
     setIsCartOpen(true);
   };
 
-  const handleUpdateCartQty = (productId: string, delta: number) => {
+  /**
+   * Change the quantity of a cart line.
+   *
+   * `vendorId` disambiguates the identical product sold by two merchants; when
+   * it is omitted (older call sites) the line is matched by product id + variant
+   * and, if still ambiguous, the FIRST match wins.
+   */
+  const handleUpdateCartQty = (productId: string, delta: number, vendorId?: string, variant?: string) => {
     setCart(prev => (prev || []).map(item => {
-      if (item.product.id === productId) {
-        const newQty = clampQty(item.quantity + delta);
-        return newQty > 0 ? { ...item, quantity: newQty } : null;
-      }
-      return item;
+      const sameProduct = item.product.id === productId;
+      if (!sameProduct) return item;
+      if (vendorId && item.vendorId !== vendorId) return item;
+      if (variant && item.variant !== variant) return item;
+      const newQty = clampQty(item.quantity + delta);
+      // `delta < 0` past the minimum removes the line entirely.
+      return newQty > 0 && !(delta < 0 && item.quantity + delta <= 0) ? { ...item, quantity: newQty } : null;
     }).filter(Boolean) as any);
   };
 
@@ -2936,21 +3006,37 @@ The render below must not guess. A merchant may paste
 
     const orderNum = '#' + Math.floor(100000 + Math.random() * 900000);
 
-    const items: OrderItem[] = (cart || []).length > 0 ? (cart || []).map((c, i) => ({
-      id: `item-${i}`,
-      productName: c.product.title,
-      variant: c.variant,
-      quantity: c.quantity,
-      unitPriceBDT: c.product.priceBDT,
-      image: c.product.image,
-    })) : selectedProduct ? [{
+    // Every line records its SELLING VENDOR. The server groups these by
+    // `vendor_id` to create one child order (and one courier slip) per
+    // merchant — see persistVendorChildren in lib/serverApp.ts.
+    const items: OrderItem[] = (cart || []).length > 0 ? (cart || []).map((c, i) => {
+      const vendor = vendorOfProduct(c.product);
+      return {
+        id: `item-${i}`,
+        productId: c.product.id,
+        productName: c.product.title,
+        variant: c.variant,
+        quantity: c.quantity,
+        unitPriceBDT: c.product.priceBDT,
+        image: c.product.image,
+        vendor_id: c.vendorId || vendor.vendorId,
+        store_id: c.vendorId || vendor.vendorId,
+        store_slug: (c.product as any)?.store_slug || (c.product as any)?.storeSlug || currentVendor.slug,
+        vendor_name: c.vendorName || vendor.vendorName,
+      } as OrderItem;
+    }) : selectedProduct ? [{
       id: 'item-single',
+      productId: selectedProduct.id,
       productName: selectedProduct.title,
       variant: 'Standard',
       quantity: 1,
       unitPriceBDT: selectedProduct.priceBDT,
       image: selectedProduct.image,
-    }] : [];
+      vendor_id: vendorOfProduct(selectedProduct).vendorId,
+      store_id: vendorOfProduct(selectedProduct).vendorId,
+      store_slug: (selectedProduct as any)?.store_slug || currentVendor.slug,
+      vendor_name: vendorOfProduct(selectedProduct).vendorName,
+    } as OrderItem] : [];
 
     // ── Recorded money ────────────────────────────────────────────────────
     //   wallet  → goods + delivery + VAT + cash-out (exactly `totalAmount`)
@@ -3108,6 +3194,14 @@ The render below must not guess. A merchant may paste
     // `merchantId`, the order layer off `store_slug`, and the permanent record
     // off `store_id`/`store_code`. A successful POST that stored only one of
     // these is exactly what made a placed order appear as 0 in the dashboard.
+    // Multi-vendor marketplace checkout: when the cart spans several stores we
+    // ask the server to split this master order into one child order per
+    // vendor, so each merchant gets its own fulfilment row and courier slip.
+    const distinctVendors = new Set(
+      (items || []).map((i) => String(i.vendor_id || currentVendor.id)).filter(Boolean),
+    );
+    const isMultiVendor = distinctVendors.size > 1;
+
     const orderPayload = {
       ...newOrder,
       storeId,
@@ -3117,6 +3211,10 @@ The render below must not guess. A merchant may paste
       merchantId: (newOrder as any).merchantId || (merchant as any)?.id || storeId || effectiveStoreSlug,
       storeCode: resolvedStoreCode || (merchant as any)?.storeCode || '',
       store_code: resolvedStoreCode || (merchant as any)?.store_code || '',
+      // `vendor_count` is recorded on the master so the dashboard can show the
+      // split; `split_by_vendor` is the server's instruction to fan out.
+      vendor_count: distinctVendors.size,
+      split_by_vendor: isMultiVendor,
     };
 
     // Save order to backend API (MongoDB-backed). Non-blocking: log failures
@@ -3206,7 +3304,7 @@ The render below must not guess. A merchant may paste
 
   /** Handle review photo selection (gallery or camera). Up to 4 images. */
   const handleModalReviewImages = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    const files: File[] = Array.from(e.target.files || []);
     if (!files.length) return;
     const remaining = 4 - modalReviewImages.length;
     const toAdd = files.slice(0, remaining);
@@ -5478,6 +5576,19 @@ The render below must not guess. A merchant may paste
                     </h4>
                   </div>
                   <div className="bg-slate-900/80 rounded-xl p-3 border border-slate-800 space-y-2">
+                    {/* Multi-vendor split notice: one parcel (and one courier
+                        slip) per merchant. Hidden for a normal single-store
+                        cart so today's checkout is unchanged. */}
+                    {cartVendors.length > 1 && (
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10px] text-amber-200">
+                        <div className="font-black uppercase tracking-wide">
+                          {cartVendors.length} sellers in this order
+                        </div>
+                        <div className="mt-0.5 text-amber-200/80">
+                          Each seller ships separately with its own tracking number.
+                        </div>
+                      </div>
+                    )}
                     {cart.length > 0 ? (
                       cart.map((item, idx) => (
                         <div key={idx} className="flex items-center gap-3 py-2">
@@ -5485,6 +5596,11 @@ The render below must not guess. A merchant may paste
                           <div className="flex-1 min-w-0">
                             <h4 className="font-semibold text-xs text-slate-100 truncate leading-tight">{item.product.title}</h4>
                             <div className="text-[10px] text-slate-400">Qty: {item.quantity}</div>
+                            {cartVendors.length > 1 && (
+                              <div className="text-[9px] font-bold uppercase tracking-wide text-amber-400/80 truncate">
+                                {item.vendorName}
+                              </div>
+                            )}
                           </div>
                           <div className="text-xs font-black text-amber-400 shrink-0 leading-tight">৳{((item.product.priceBDT ?? 0) * item.quantity).toLocaleString()}</div>
                         </div>

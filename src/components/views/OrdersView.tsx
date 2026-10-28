@@ -202,6 +202,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   storeSlug,
   openReturnsSignal,
   onSyncOrders,
+  setOrders,
   facebookPageId,
   ordersHydrated = true,
 }) => {
@@ -957,7 +958,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     // Unique ID check before rendering to guarantee no repeated rows appear in any status tab
     const uniqueOrders = Array.from(new Map(orders.map(item => [item.id, item])).values());
 
-    return uniqueOrders.filter((ord) => {
+    return uniqueOrders.filter((rawOrd) => {
+      // The Map above is typed `unknown` (it merges rows from state and polls),
+      // so narrow it back to the shared `Order` shape once, here.
+      const ord = rawOrd as Order;
       // 1. Sub-menu filter
       //
       // `isManualOrder` checks the persisted `is_manual` / `isManual` flag AND
@@ -999,8 +1003,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       if (filterCourier !== 'All' && (ord.courierName || 'Unassigned') !== filterCourier) return false;
 
       return true;
-    }).sort((a, b) => {
-      if (sortBy === 'newest') return b.id.localeCompare(a.id);
+    }).sort((rawA, rawB) => {
+      const a = rawA as Order;
+      const b = rawB as Order;
+      if (sortBy === 'newest') return String(b.id ?? '').localeCompare(String(a.id ?? ''));
       if (sortBy === 'oldest') return String(a.id ?? '').localeCompare(String(b.id ?? ''));
       if (sortBy === 'amount_high') return toNumber(b.totalBDT) - toNumber(a.totalBDT);
       if (sortBy === 'amount_low') return toNumber(a.totalBDT) - toNumber(b.totalBDT);

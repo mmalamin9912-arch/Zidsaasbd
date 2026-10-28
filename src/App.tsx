@@ -37,6 +37,7 @@ import { StorefrontPreviewModal } from './components/StorefrontPreviewModal';
 import { TenantStorefrontView } from './components/TenantStorefrontView';
 import { StorefrontPageView } from './components/StorefrontPageView';
 import { SuperAdminPortalView } from './components/SuperAdminPortalView';
+import { MarketplaceView } from './components/MarketplaceView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
@@ -244,7 +245,7 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     try {
       const path = window.location.pathname;
-      if (path === '/' || path === '' || path === '/pricing' || path === '/landing') {
+      if (path === '/' || path === '' || path === '/pricing' || path === '/landing' || path === '/marketplace') {
         return false;
       }
       const savedSession = getStoredSession();
@@ -260,6 +261,11 @@ export default function App() {
     if (path === '/' || path === '' || path === '/pricing' || path === '/landing') {
       return true;
     }
+    // The marketplace is a PUBLIC page — it must never be gated behind the
+    // merchant session, so it renders the marketplace view directly.
+    if (path === '/marketplace') {
+      return false;
+    }
     const savedSession = getStoredSession();
     return !(savedSession && (savedSession.userProfile || savedSession.email));
   });
@@ -273,6 +279,8 @@ export default function App() {
       path === '' ||
       path === '/pricing' ||
       path === '/landing' ||
+      path === '/marketplace' ||
+      path.startsWith('/marketplace/') ||
       path.startsWith('/store/') ||
       path.startsWith('/e/') ||
       isBareStorePath(path) ||
@@ -2320,6 +2328,52 @@ onPlaceOrder={async (newOrder) => {
               console.error('Error recording order to database:', e);
             }
           }}
+      />
+    );
+  }
+
+  // ── Public marketplace homepage ────────────────────────────────────────────
+  //
+  // `/marketplace` lists every public product from every active merchant on one
+  // grid (see MarketplaceView + GET /api/marketplace/products). Clicking a
+  // vendor jumps to its own storefront; adding a product hands that storefront
+  // the product WITH its `vendor_id`, so a cart can span several merchants.
+  if (currentPath === '/marketplace' || currentPath.startsWith('/marketplace/')) {
+    const marketplaceCartKey = 'zid_marketplace_cart';
+    return (
+      <MarketplaceView
+        onBack={() => {
+          window.history.pushState({}, '', '/');
+          setCurrentPath('/');
+          setShowLanding(true);
+        }}
+        onVisitStore={(vendorSlug) => {
+          if (!vendorSlug) return;
+          window.history.pushState({}, '', `/store/${vendorSlug}`);
+          setCurrentPath(`/store/${vendorSlug}`);
+        }}
+        onAddToCart={(product, quantity) => {
+          // The marketplace cart is kept in its own storage key so it never
+          // collides with a single merchant's local cart. Each line keeps the
+          // product's vendor identity for the per-vendor checkout split.
+          try {
+            const raw = localStorage.getItem(marketplaceCartKey);
+            const parsed = raw ? JSON.parse(raw) : [];
+            const lines: any[] = Array.isArray(parsed) ? parsed : [];
+            const existing = lines.find(
+              (l) => String(l?.product?.id) === String(product.id) && String(l?.product?.vendor_id) === String(product.vendor_id)
+            );
+            if (existing) existing.quantity = Number(existing.quantity || 1) + quantity;
+            else lines.push({ product, quantity });
+            safeSetItem(marketplaceCartKey, lines);
+          } catch (e) {
+            console.warn('[Marketplace] cart persist warning:', e);
+          }
+          if (product.vendor_slug) {
+            window.history.pushState({}, '', `/store/${product.vendor_slug}`);
+            setCurrentPath(`/store/${product.vendor_slug}`);
+          }
+        }}
       />
     );
   }

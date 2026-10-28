@@ -2,6 +2,22 @@ import React, { useState } from 'react';
 import { BankAccount, MobileBankingConfig, CodConfig, PaymentGatewayConfig } from '../../types';
 import { useToast } from '../ToastProvider';
 import { saveShippingConfig, loadShippingConfigWithMeta } from '../../lib/logisticsApi';
+// Vendor Wallet — the commission ledger written at checkout by the multi-vendor
+// order split (see `vendor_payouts` in lib/marketplace.ts).
+import {
+  fetchVendorPayouts,
+  fetchCommissionRates,
+  fetchVendorWallet,
+  fetchCodLedger,
+  fetchPayoutRequests,
+  requestPayout,
+  type VendorPayoutResponse,
+  type VendorWallet,
+  type CodLedgerResponse,
+  type PayoutRequest,
+  type PayoutRules,
+} from '../../lib/marketplaceApi';
+import type { CommissionRate } from '../../types';
 // The canonical Bangladesh district list, shared with the storefront checkout
 // so the merchant picks the SAME city names the customer selects.
 import { BANGLADESH_DISTRICTS, SUB_DHAKA_AREAS } from '../../../lib/deliveryZones';
@@ -23,7 +39,12 @@ import {
   Info,
   Copy,
   ExternalLink,
-  ShieldCheck
+  ShieldCheck,
+  Wallet,
+  RefreshCw,
+  TrendingUp,
+  Banknote,
+  X
 } from 'lucide-react';
 
 interface PaymentsViewProps {
@@ -64,7 +85,119 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   onUpdateGatewayConfig,
 }) => {
   const toast = useToast();
-  const [activeTab, setActiveTab] = useState<'banks' | 'mobile' | 'cod' | 'links' | 'gateways' | 'simulator'>('mobile');
+  const [activeTab, setActiveTab] = useState<'banks' | 'mobile' | 'cod' | 'links' | 'gateways' | 'simulator' | 'wallet'>('mobile');
+
+  // ── Vendor Wallet state ────────────────────────────────────────────────────
+  // Payouts are created per CHILD order at checkout, so this panel only reads
+  // them. A Super Admin disburses; the merchant sees gross, fee and net.
+  const [payouts, setPayouts] = useState<VendorPayoutResponse | null>(null);
+  const [payoutsLoading, setPayoutsLoading] = useState(false);
+  const [commissionRules, setCommissionRules] = useState<CommissionRate[]>([]);
+
+  // ── COD earnings (vendor_wallets / cod_ledger / payout_requests) ─────────
+  const [wallet, setWallet] = useState<VendorWallet | null>(null);
+  const [walletLoading, setWalletLoading] = useState(false);
+  const [codLedger, setCodLedger] = useState<CodLedgerResponse>({
+    ok: false, entries: [], summary: { count: 0, gross: 0, courier: 0, commission: 0, credit: 0 },
+  });
+  const [payoutRequests, setPayoutRequests] = useState<{
+    ok: boolean; requests: PayoutRequest[]; summary: { pending_bdt: number; paid_bdt: number };
+  }>({ ok: false, requests: [], summary: { pending_bdt: 0, paid_bdt: 0 } });
+  const [payoutRules, setPayoutRules] = useState<PayoutRules>({ minAmountBDT: 500, reviewThresholdBDT: 50000 });
+
+  // Request Payout modal
+  const [isPayoutModalOpen, setIsPayoutModalOpen] = useState(false);
+  const [payoutAmount, setPayoutAmount] = useState('');
+  const [payoutMethod, setPayoutMethod] = useState('bKash');
+  const [payoutAccount, setPayoutAccount] = useState('');
+  const [payoutNotice, setPayoutNotice] = useState('');
+  const [isSubmittingPayout, setIsSubmittingPayout] = useState(false);
+
+  const loadWallet = React.useCallback(async () => {
+    setPayoutsLoading(true);
+    setWalletLoading(true);
+    try {
+      const [ledger, rates, walletRes, codRes, reqRes] = await Promise.all([
+        fetchVendorPayouts({ storeSlug, limit: 200 }),
+        fetchCommissionRates(),
+        fetchVendorWallet({ storeSlug }),
+        fetchCodLedger({ storeSlug, limit: 200 }),
+        fetchPayoutRequests({ storeSlug, limit: 100 }),
+      ]);
+      setPayouts(ledger);
+      setCommissionRules(rates.rates || []);
+      setWallet(walletRes.wallet);
+      if (walletRes.payout_rules) setPayoutRules(walletRes.payout_rules);
+      setCodLedger(codRes);
+      setPayoutRequests({ ok: reqRes.ok, requests: reqRes.requests, summary: reqRes.summary });
+    } finally {
+      setPayoutsLoading(false);
+      setWalletLoading(false);
+    }
+  }, [storeSlug]);
+
+  /**
+   * Submit a withdrawal request.
+   *
+   * The server re-checks the balance atomically, so a stale `available_bdt`
+   * on screen can never overdraw the wallet — the authoritative error is
+   * shown verbatim and the wallet is re-read afterwards.
+   */
+  const handleSubmitPayout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPayoutNotice('');
+    const amount = Number(payoutAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setPayoutNotice('Enter a valid withdrawal amount.');
+      return;
+    }
+    if (amount < payoutRules.minAmountBDT) {
+      setPayoutNotice(`The minimum withdrawal is ৳${payoutRules.minAmountBDT}.`);
+      return;
+    }
+    if (amount > Number(wallet?.available_bdt ?? 0)) {
+      setPayoutNotice(`You can withdraw up to ৳${Number(wallet?.available_bdt ?? 0).toLocaleString()}.`);
+      return;
+    }
+
+    setIsSubmittingPayout(true);
+    try {
+      const result = await requestPayout({
+        storeSlug,
+        amountBDT: amount,
+        method: payoutMethod,
+        accountName: payoutAccount || undefined,
+        accountNumber: payoutAccount || undefined,
+      });
+      if (!result.ok) {
+        setPayoutNotice(result.error || 'The payout request could not be created.');
+        return;
+      }
+      toast.success('Payout requested', {
+        description: `৳${amount.toLocaleString()} will be reviewed and disbursed to your ${payoutMethod} account.`,
+      });
+      if (result.wallet) setWallet(result.wallet);
+      setIsPayoutModalOpen(false);
+      setPayoutAmount('');
+      setPayoutAccount('');
+      await loadWallet();
+    } finally {
+      setIsSubmittingPayout(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (activeTab === 'wallet') void loadWallet();
+  }, [activeTab, loadWallet]);
+
+  /** The rule that applies to THIS store (vendor override → default). */
+  const myCommissionRule = React.useMemo(() => {
+    if (!commissionRules.length) return null;
+    const vendorMatch = commissionRules.find((r) =>
+      r.vendor_id && storeSlug && String(r.vendor_id).toLowerCase() === String(storeSlug).toLowerCase()
+    );
+    return vendorMatch || commissionRules.find((r) => r.is_default) || null;
+  }, [commissionRules, storeSlug]);
 
   // Bank Form Modal State
   const [isBankModalOpen, setIsBankModalOpen] = useState(false);
@@ -432,7 +565,304 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           <Eye className="w-4 h-4" />
           <span>Checkout Preview Simulator</span>
         </button>
+
+        <button
+          onClick={() => setActiveTab('wallet')}
+          className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 transition cursor-pointer ${
+            activeTab === 'wallet'
+              ? 'bg-[#00D68F] text-slate-950'
+              : 'bg-[#202533] text-slate-300 hover:text-white border border-[#2E3548]'
+          }`}
+        >
+          <Wallet className="w-4 h-4" />
+          <span>Vendor Wallet</span>
+        </button>
       </div>
+
+      {/* TAB 7: Vendor Wallet — COD earnings, commission and payouts */}
+      {activeTab === 'wallet' && (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h3 className="text-lg font-black text-white flex items-center gap-2">
+                <Wallet className="w-5 h-5 text-[#00D68F]" />
+                Vendor Wallet &amp; COD Earnings
+              </h3>
+              <p className="text-xs text-slate-400">
+                Each delivered COD parcel credits your wallet net of the courier fee and
+                platform commission. Rates resolve vendor override {'>'} category {'>'} platform default.
+              </p>
+            </div>
+            <button
+              onClick={() => void loadWallet()}
+              disabled={payoutsLoading}
+              className="px-3 py-2 rounded-xl bg-[#202533] border border-[#2E3548] text-xs font-bold text-slate-300 hover:text-white flex items-center gap-2 disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${payoutsLoading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+          </div>
+
+          {/* ── Available COD earnings + Request Payout ──────────────────── */}
+          <div className="rounded-2xl border border-[#00D68F]/40 bg-gradient-to-br from-[#0f2a22] to-[#202533] p-5 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300/80">
+                Available COD Earnings
+              </div>
+              <div className="mt-1 text-3xl font-black text-white" data-testid="wallet-available">
+                ৳{Number(wallet?.available_bdt ?? 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}
+              </div>
+              <div className="mt-1 text-[11px] text-slate-400 space-x-3">
+                <span>
+                  Held in requests:{' '}
+                  <span className="font-bold text-amber-300">
+                    ৳{Number(wallet?.pending_payout_bdt ?? 0).toLocaleString()}
+                  </span>
+                </span>
+                <span>
+                  Lifetime paid:{' '}
+                  <span className="font-bold text-slate-200">
+                    ৳{Number(wallet?.lifetime_paid_bdt ?? 0).toLocaleString()}
+                  </span>
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setPayoutAmount(String(Math.floor(Number(wallet?.available_bdt ?? 0)) || ''));
+                setPayoutNotice('');
+                setIsPayoutModalOpen(true);
+              }}
+              disabled={!wallet || Number(wallet.available_bdt ?? 0) < payoutRules.minAmountBDT}
+              className="px-5 py-3 rounded-xl bg-[#00D68F] text-slate-950 text-xs font-black hover:bg-emerald-300 transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              <Banknote className="w-4 h-4" />
+              Request Payout
+            </button>
+          </div>
+
+          {Number(wallet?.available_bdt ?? 0) > 0 && Number(wallet?.available_bdt ?? 0) < payoutRules.minAmountBDT && (
+            <div className="text-[11px] text-amber-300/90 -mt-3">
+              A minimum of ৳{payoutRules.minAmountBDT} is required to withdraw. Keep collecting — the balance rolls over.
+            </div>
+          )}
+
+          {/* Wallet performance tiles */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {[
+              { label: 'COD settled', value: String(wallet?.cod_orders_count ?? 0) },
+              { label: 'Lifetime credit', value: `৳${Number(wallet?.lifetime_credit_bdt ?? 0).toLocaleString()}` },
+              { label: 'Courier fees', value: `৳${Number(wallet?.lifetime_courier_fee_bdt ?? 0).toLocaleString()}`, accent: 'text-amber-300' },
+              { label: 'Platform fees', value: `৳${Number(wallet?.lifetime_commission_bdt ?? 0).toLocaleString()}`, accent: 'text-rose-300' },
+            ].map((tile) => (
+              <div key={tile.label} className="rounded-2xl border border-[#2E3548] bg-[#202533] p-4">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{tile.label}</div>
+                <div className={`mt-1 text-lg font-black ${tile.accent || 'text-white'}`}>{tile.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Applied commission rate */}
+          {myCommissionRule && (
+            <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2 text-xs text-emerald-200">
+                <TrendingUp className="w-4 h-4" />
+                <span className="font-bold">Your commission rate</span>
+              </div>
+              <div className="text-sm font-black text-emerald-300">
+                {myCommissionRule.rate_percent}%
+                {Number(myCommissionRule.flat_fee_bdt || 0) > 0 && (
+                  <span className="text-xs font-bold text-emerald-200/80"> + ৳{myCommissionRule.flat_fee_bdt} / order</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Summary tiles */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {[
+              { label: 'Orders', value: String(payouts?.summary.total ?? 0) },
+              { label: 'Gross sales', value: `৳${(payouts?.summary.gross_bdt ?? 0).toLocaleString()}` },
+              { label: 'Platform fees', value: `৳${(payouts?.summary.commission_bdt ?? 0).toLocaleString()}`, accent: 'text-rose-300' },
+              { label: 'Net payable', value: `৳${(payouts?.summary.net_bdt ?? 0).toLocaleString()}`, accent: 'text-[#00D68F]' },
+            ].map((tile) => (
+              <div key={tile.label} className="rounded-2xl border border-[#2E3548] bg-[#202533] p-4">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{tile.label}</div>
+                <div className={`mt-1 text-lg font-black ${tile.accent || 'text-white'}`}>{tile.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* ── COD settlement ledger (cod_ledger) ──────────────────────── */}
+          <div className="rounded-2xl border border-[#2E3548] bg-[#202533] overflow-hidden">
+            <div className="px-4 py-3 border-b border-[#2E3548] flex items-center justify-between">
+              <h4 className="text-xs font-black uppercase tracking-widest text-slate-300">
+                COD settlements
+              </h4>
+              <span className="text-[10px] text-slate-500">
+                {codLedger.summary.count} parcels · ৳{codLedger.summary.gross.toLocaleString()} collected
+              </span>
+            </div>
+            {walletLoading && codLedger.entries.length === 0 ? (
+              <div className="p-8 text-center text-xs text-slate-400">Loading settlements…</div>
+            ) : codLedger.entries.length === 0 ? (
+              <div className="p-10 text-center text-xs text-slate-400">
+                No COD settlements yet. A parcel appears here the moment its delivery is confirmed
+                by the courier webhook (or when you mark it Delivered).
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase tracking-widest text-slate-500 border-b border-[#2E3548]">
+                      <th className="px-4 py-3">Order</th>
+                      <th className="px-4 py-3">Collected</th>
+                      <th className="px-4 py-3">Courier fee</th>
+                      <th className="px-4 py-3">Commission</th>
+                      <th className="px-4 py-3">Credited</th>
+                      <th className="px-4 py-3">Settled</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {codLedger.entries.map((row) => (
+                      <tr key={row.id || row.order_number} className="border-b border-[#2E3548]/60 last:border-0">
+                        <td className="px-4 py-3">
+                          <div className="font-mono text-slate-200">{row.order_number}</div>
+                          <div className="text-[10px] text-slate-500">{row.courier_name || 'Courier'}</div>
+                        </td>
+                        <td className="px-4 py-3 text-slate-200">৳{Number(row.gross_collected || 0).toLocaleString()}</td>
+                        <td className="px-4 py-3 text-amber-300">−৳{Number(row.courier_fee || 0).toLocaleString()}</td>
+                        <td className="px-4 py-3 text-rose-300">
+                          −৳{Number(row.platform_commission || 0).toLocaleString()}
+                          {row.commission_rate_percent != null && (
+                            <span className="ml-1 text-[10px] text-slate-500">({row.commission_rate_percent}%)</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 font-black text-[#00D68F]">+৳{Number(row.vendor_credit || 0).toLocaleString()}</td>
+                        <td className="px-4 py-3 text-slate-400">
+                          {row.reconciled_at ? new Date(row.reconciled_at).toLocaleDateString() : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* ── Withdrawal requests (payout_requests) ───────────────────── */}
+          <div className="rounded-2xl border border-[#2E3548] bg-[#202533] overflow-hidden">
+            <div className="px-4 py-3 border-b border-[#2E3548] flex items-center justify-between">
+              <h4 className="text-xs font-black uppercase tracking-widest text-slate-300">
+                Payout requests
+              </h4>
+              <span className="text-[10px] text-slate-500">
+                {payoutRequests.summary.pending_bdt > 0
+                  ? `৳${payoutRequests.summary.pending_bdt.toLocaleString()} pending`
+                  : 'Nothing pending'}
+              </span>
+            </div>
+            {payoutRequests.requests.length === 0 ? (
+              <div className="p-10 text-center text-xs text-slate-400">
+                No withdrawal requests yet. Use “Request Payout” once your COD earnings settle.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase tracking-widest text-slate-500 border-b border-[#2E3548]">
+                      <th className="px-4 py-3">Request</th>
+                      <th className="px-4 py-3">Amount</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Method</th>
+                      <th className="px-4 py-3">Reference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {payoutRequests.requests.map((row) => {
+                      const cls =
+                        row.status === 'paid' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                          : row.status === 'rejected' || row.status === 'cancelled' ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                            : row.status === 'approved' ? 'bg-sky-500/15 text-sky-300 border-sky-500/40'
+                              : 'bg-amber-500/15 text-amber-300 border-amber-500/40';
+                      return (
+                        <tr key={row.id || row.request_number} className="border-b border-[#2E3548]/60 last:border-0">
+                          <td className="px-4 py-3 font-mono text-slate-200">{row.request_number}</td>
+                          <td className="px-4 py-3 font-black text-white">৳{Number(row.amount_bdt || 0).toLocaleString()}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-0.5 rounded-md border text-[10px] font-black uppercase ${cls}`}>
+                              {row.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-slate-400">{row.method || '—'}</td>
+                          <td className="px-4 py-3 font-mono text-slate-400">{row.payout_reference || '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Per-order commission ledger (vendor_payouts) */}
+          <div className="rounded-2xl border border-[#2E3548] bg-[#202533] overflow-hidden">
+            <div className="px-4 py-3 border-b border-[#2E3548]">
+              <h4 className="text-xs font-black uppercase tracking-widest text-slate-300">
+                Order commission ledger
+              </h4>
+            </div>
+            {payoutsLoading && !payouts ? (
+              <div className="p-8 text-center text-xs text-slate-400">Loading payouts…</div>
+            ) : (payouts?.payouts?.length ?? 0) === 0 ? (
+              <div className="p-10 text-center text-xs text-slate-400">
+                No payouts yet. They are created automatically when an order is placed for your store.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase tracking-widest text-slate-500 border-b border-[#2E3548]">
+                      <th className="px-4 py-3">Child order</th>
+                      <th className="px-4 py-3">Gross</th>
+                      <th className="px-4 py-3">Commission</th>
+                      <th className="px-4 py-3">Net payout</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Reference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(payouts?.payouts || []).map((row) => {
+                      const statusCls =
+                        row.status === 'paid' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                          : row.status === 'failed' ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                            : row.status === 'processing' ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                              : 'bg-slate-500/15 text-slate-300 border-slate-500/40';
+                      return (
+                        <tr key={row.id || row.child_order_id} className="border-b border-[#2E3548]/60 last:border-0">
+                          <td className="px-4 py-3 font-mono text-slate-200">{row.child_order_number || row.child_order_id}</td>
+                          <td className="px-4 py-3 text-slate-200">৳{Number(row.gross_amount_bdt || 0).toLocaleString()}</td>
+                          <td className="px-4 py-3 text-rose-300">
+                            ৳{Number(row.commission_bdt || 0).toLocaleString()}
+                            <span className="ml-1 text-[10px] text-slate-500">({row.commission_rate_percent}%)</span>
+                          </td>
+                          <td className="px-4 py-3 font-black text-[#00D68F]">৳{Number(row.net_payout_bdt || 0).toLocaleString()}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-0.5 rounded-md border text-[10px] font-black uppercase ${statusCls}`}>
+                              {row.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-slate-400 font-mono">{row.payout_reference || '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: Mobile Banking (bKash, Nagad, Rocket) */}
       {activeTab === 'mobile' && (
@@ -1599,6 +2029,108 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           </div>
         );
       })()}
+
+      {/* ── Request Payout modal ───────────────────────────────────────────
+          Withdrawals are debited from `available_bdt` atomically on the server,
+          so the balance below is informational and the server is authoritative. */}
+      {isPayoutModalOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-base font-black text-white flex items-center gap-2">
+                  <Banknote className="w-5 h-5 text-[#00D68F]" />
+                  Request Payout
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Available: <span className="font-bold text-[#00D68F]">৳{Number(wallet?.available_bdt ?? 0).toLocaleString()}</span>
+                  {' · '}Minimum ৳{payoutRules.minAmountBDT}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPayoutModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-[#202533]"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitPayout} className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-300 mb-1">Amount (৳ BDT)</label>
+                <input
+                  type="number"
+                  min={payoutRules.minAmountBDT}
+                  max={Number(wallet?.available_bdt ?? 0)}
+                  value={payoutAmount}
+                  onChange={(e) => setPayoutAmount(e.target.value)}
+                  className="w-full bg-[#12151F] border border-[#3A435E] rounded-xl px-3 py-2.5 text-white font-bold focus:outline-none focus:border-[#00D68F]"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setPayoutAmount(String(Math.floor(Number(wallet?.available_bdt ?? 0))))}
+                  className="mt-1 text-[10px] font-bold text-[#00D68F] hover:underline"
+                >
+                  Withdraw maximum
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-300 mb-1">Payout method</label>
+                <select
+                  value={payoutMethod}
+                  onChange={(e) => setPayoutMethod(e.target.value)}
+                  className="w-full bg-[#12151F] border border-[#3A435E] rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-[#00D68F]"
+                >
+                  <option value="bKash">bKash</option>
+                  <option value="Nagad">Nagad</option>
+                  <option value="Rocket">Rocket</option>
+                  <option value="Bank Transfer">Bank Transfer</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-300 mb-1">
+                  {payoutMethod === 'Bank Transfer' ? 'Account number' : 'Mobile number'}
+                </label>
+                <input
+                  type="text"
+                  value={payoutAccount}
+                  onChange={(e) => setPayoutAccount(e.target.value)}
+                  placeholder={payoutMethod === 'Bank Transfer' ? '0123456789012' : '01XXXXXXXXX'}
+                  className="w-full bg-[#12151F] border border-[#3A435E] rounded-xl px-3 py-2.5 text-white font-mono focus:outline-none focus:border-[#00D68F]"
+                />
+              </div>
+
+              {payoutNotice && (
+                <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-300">
+                  {payoutNotice}
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsPayoutModalOpen(false)}
+                  className="flex-1 py-2.5 rounded-xl bg-[#202533] border border-[#2E3548] text-slate-300 text-xs font-bold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingPayout}
+                  className="flex-1 py-2.5 rounded-xl bg-[#00D68F] text-slate-950 text-xs font-black disabled:opacity-60"
+                >
+                  {isSubmittingPayout ? 'Submitting…' : 'Submit Request'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

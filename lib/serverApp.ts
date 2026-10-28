@@ -135,6 +135,31 @@ import {
   RECOVERY_TEMPLATE_PLACEHOLDERS,
 } from './abandonedCarts.js';
 import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId, postgrestWrite } from './supabaseSchema.js';
+// Multi-vendor marketplace: global product search, per-vendor order splitting,
+// commission rates and the vendor_payouts ledger. See lib/marketplace.ts.
+import {
+  searchMarketplaceProducts,
+  resolveStoreRef,
+  storeMatchClauses,
+  splitOrderByVendor,
+  resolveCommission,
+  recordVendorPayout,
+  listVendorPayouts,
+  updatePayoutStatus,
+  listCommissionRates,
+  upsertCommissionRate,
+  deleteCommissionRate,
+} from './marketplace.js';
+// COD reconciliation + vendor wallet. See lib/codLedger.ts.
+import {
+  reconcileCodDelivery,
+  listCodLedger,
+  getVendorWallet,
+  createPayoutRequest,
+  listPayoutRequests,
+  updatePayoutRequest,
+  PAYOUT_RULES,
+} from './codLedger.js';
 import { sanitizeImagePayload, formatBytes, approximateSize, MAX_PAYLOAD_BYTES } from './imagePayload.js';
 // Central email transport (Resend first, SMTP/Nodemailer fallback). Every
 // broadcast and automation-trigger email goes through `sendEmail` so delivery
@@ -14727,6 +14752,51 @@ async function handlePathaoWebhook(req: any, res: any) {
       console.warn('[Pathao Webhook] MongoDB update notice:', mongoErr?.message || mongoErr);
     }
 
+    // ── 3b. COD RECONCILIATION ──────────────────────────────────────────
+    // A delivered COD parcel is the ONE moment the cash actually changes
+    // hands: the courier has collected it from the buyer. Record the collection
+    // in the central `cod_ledger`, deduct the courier fee and the platform
+    // commission, and credit the balance to the vendor's wallet.
+    //
+    // It is deliberately AWAITED before the SMS/response so the money state is
+    // committed by the time the courier gets its 200 (a retry then finds the
+    // existing ledger row instead of double-crediting).
+    //
+    // `reconcileCodDelivery` is idempotent on the order, so the same delivery
+    // event arriving twice is a no-op.
+    let codReconciliation: Record<string, any> | null = null;
+    if (mapped.orderStatus === 'Completed') {
+      const reconciliation = await reconcileCodDelivery(
+        {
+          ...(matchedDoc || {}),
+          order_number: resolvedOrderNumber,
+          courier_name: 'Pathao Courier',
+          tracking_code: cleanConsignment,
+          fulfillment_status: mapped.fulfillmentStatus,
+          status: mapped.orderStatus,
+          store_slug: matchedDoc?.store_slug || matchedDoc?.storeSlug,
+        },
+        { courierName: 'Pathao Courier' }
+      ).catch((codErr: any) => {
+        console.warn('[Pathao Webhook] COD reconciliation warning:', codErr?.message || codErr);
+        return null;
+      });
+
+      if (reconciliation) {
+        codReconciliation = {
+          ok: reconciliation.ok,
+          status: reconciliation.status,
+          reason: reconciliation.reason,
+          error: reconciliation.error,
+          gross_collected: reconciliation.ledger?.gross_collected ?? null,
+          courier_fee: reconciliation.ledger?.courier_fee ?? null,
+          platform_commission: reconciliation.ledger?.platform_commission ?? null,
+          vendor_credit: reconciliation.ledger?.vendor_credit ?? null,
+          wallet_balance: reconciliation.wallet?.available_bdt ?? null,
+        };
+      }
+    }
+
     // 4. Trigger Customer SMS Notification if applicable
     const customerPhone = matchedDoc?.customer_phone;
     if (customerPhone) {
@@ -14775,6 +14845,9 @@ async function handlePathaoWebhook(req: any, res: any) {
       fulfillment_status: mapped.fulfillmentStatus,
       supabase_synced: supabaseResult.ok,
       mongodb_synced: mongoUpdated,
+      // Present only for a Delivered transition. `status: 'exists'` means this
+      // parcel was already reconciled, so nothing was credited twice.
+      cod_reconciliation: codReconciliation,
     });
   } catch (err: any) {
     console.error('[Pathao Webhook] Error processing webhook:', err);
@@ -14793,6 +14866,249 @@ app.post('/api/courier/pathao/webhook', handlePathaoWebhook);
 app.get('/api/courier/pathao/webhook', handlePathaoWebhook);
 app.post('/api/courier/webhook', handlePathaoWebhook);
 app.get('/api/courier/webhook', handlePathaoWebhook);
+
+// ── Steadfast Courier Webhook ────────────────────────────────────────────────
+//
+// Steadfast posts a status payload when a parcel moves:
+//
+//   { consignment_id | tracking_code, invoice | merchant_order_id,
+//     status | delivery_status | tracking_message,
+//     cod_amount, delivery_charge | courier_charge }
+//
+// The handler mirrors the Pathao one — locate the order, write the status,
+// fire the customer SMS — and adds the step this endpoint exists for: COD
+// RECONCILIATION. A Steadfast `delivered` is the moment the cash changes hands,
+// so that is where the vendor's wallet is credited.
+//
+// Steadfast's `delivery_status` is a single word (`delivered`, `partial_delivered`,
+// `cancelled`, `in_transit`, …), so the same canonical status mapper is used.
+app.post('/api/courier/webhook/steadfast', async (req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    return res.status(200).json({
+      ok: true,
+      service: 'steadfast-courier-webhook',
+      status: 'active',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  try {
+    const body = req.body || {};
+    const payload = body.data || body.consignment || body.order || body;
+
+    // Steadfast identifies a parcel by consignment id OR tracking code.
+    const consignmentId = String(
+      payload.consignment_id ||
+      payload.consignmentId ||
+      payload.tracking_code ||
+      payload.trackingCode ||
+      body.consignment_id ||
+      req.query.consignment_id ||
+      req.query.tracking_code ||
+      ''
+    ).trim();
+
+    // …and the merchant's order by invoice / order number.
+    const merchantOrderId = String(
+      payload.invoice ||
+      payload.invoice_id ||
+      payload.merchant_order_id ||
+      payload.order_number ||
+      payload.orderNumber ||
+      body.invoice ||
+      req.query.invoice ||
+      req.query.order_number ||
+      ''
+    ).trim();
+
+    const rawStatus = String(
+      payload.delivery_status ||
+      payload.status ||
+      payload.tracking_message ||
+      payload.message ||
+      body.delivery_status ||
+      body.status ||
+      req.query.status ||
+      ''
+    ).trim();
+
+    if (!consignmentId && !merchantOrderId) {
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        error: 'Missing consignment id / tracking code and order number in the Steadfast payload.',
+      });
+    }
+    if (!rawStatus) {
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        error: 'Missing delivery status in the Steadfast payload.',
+      });
+    }
+
+    const mapped = mapPathaoStatusToOrderStatus(rawStatus);
+    if (!mapped) {
+      console.warn(`[Steadfast Webhook] Unrecognized status "${rawStatus}" for ${consignmentId || merchantOrderId}`);
+      return res.status(200).json({
+        ok: true,
+        acknowledged: true,
+        ignored: true,
+        message: `Status "${rawStatus}" does not require an order state transition.`,
+      });
+    }
+
+    const cleanConsignment = consignmentId.replace(/^#/, '');
+    const cleanMerchantId = merchantOrderId.replace(/^#/, '');
+
+    // 1. Locate the order — tracking code first, then the merchant's number.
+    let locatedOrder = cleanConsignment
+      ? await findOrder(cleanConsignment).catch(() => ({ doc: null }))
+      : { doc: null };
+    if (!locatedOrder?.doc && cleanMerchantId) {
+      locatedOrder = await findOrder(cleanMerchantId).catch(() => ({ doc: null }));
+    }
+    const matchedDoc = locatedOrder?.doc;
+    const resolvedOrderNumber = matchedDoc?.order_number || cleanMerchantId || cleanConsignment;
+
+    // 2. Persist the status (MongoDB is the order store).
+    const updateFields: Record<string, any> = {
+      status: mapped.orderStatus,
+      fulfillment_status: mapped.fulfillmentStatus,
+      fulfillmentStatus: mapped.fulfillmentStatus,
+      courier_status: rawStatus,
+      courier_name: 'Steadfast Courier',
+      courier_updated_at: new Date(),
+    };
+    if (cleanConsignment) {
+      updateFields.tracking_code = cleanConsignment;
+      updateFields.trackingCode = cleanConsignment;
+      updateFields.consignment_id = cleanConsignment;
+      updateFields.consignmentId = cleanConsignment;
+    }
+
+    let mongoUpdated = false;
+    try {
+      const updateRes = await updateOrderFields(
+        matchedDoc?._id ? String(matchedDoc._id) : (cleanConsignment || cleanMerchantId),
+        updateFields
+      );
+      mongoUpdated = updateRes.ok;
+    } catch (mongoErr: any) {
+      console.warn('[Steadfast Webhook] MongoDB update notice:', mongoErr?.message || mongoErr);
+    }
+
+    // 3. COD RECONCILIATION on delivery.
+    //    Awaited so the money state is committed before the courier gets its
+    //    200; `reconcileCodDelivery` is idempotent on the order, so a retried
+    //    webhook credits nothing twice.
+    let codReconciliation: Record<string, any> | null = null;
+    if (mapped.orderStatus === 'Completed') {
+      const reconciliation = await reconcileCodDelivery(
+        {
+          ...(matchedDoc || {}),
+          order_number: resolvedOrderNumber,
+          courier_name: 'Steadfast Courier',
+          tracking_code: cleanConsignment || matchedDoc?.tracking_code,
+          fulfillment_status: mapped.fulfillmentStatus,
+          status: mapped.orderStatus,
+          store_slug: matchedDoc?.store_slug || matchedDoc?.storeSlug,
+          // Steadfast reports the fee it deducts; when present it is the
+          // AUTHORITATIVE courier cost (better than the merchant's quote).
+          courier_fee:
+            payload.delivery_charge ??
+            payload.courier_charge ??
+            payload.cod_fee ??
+            undefined,
+          cod_amount: payload.cod_amount ?? matchedDoc?.cod_amount,
+        },
+        { courierName: 'Steadfast Courier' }
+      ).catch((codErr: any) => {
+        console.warn('[Steadfast Webhook] COD reconciliation warning:', codErr?.message || codErr);
+        return null;
+      });
+
+      if (reconciliation) {
+        codReconciliation = {
+          ok: reconciliation.ok,
+          status: reconciliation.status,
+          reason: reconciliation.reason,
+          error: reconciliation.error,
+          gross_collected: reconciliation.ledger?.gross_collected ?? null,
+          courier_fee: reconciliation.ledger?.courier_fee ?? null,
+          platform_commission: reconciliation.ledger?.platform_commission ?? null,
+          vendor_credit: reconciliation.ledger?.vendor_credit ?? null,
+          wallet_balance: reconciliation.wallet?.available_bdt ?? null,
+        };
+      }
+    }
+
+    // 4. Customer SMS (fire-and-forget — never delays the courier ack).
+    const customerPhone = matchedDoc?.customer_phone;
+    if (customerPhone) {
+      const smsTrigger: SmsTriggerKey | '' =
+        mapped.orderStatus === 'Completed'
+          ? 'delivery_success'
+          : mapped.orderStatus === 'In delivery'
+          ? 'order_shipped'
+          : '';
+      const storeRef = String(matchedDoc?.store_slug || matchedDoc?.storeSlug || '').trim();
+      if (smsTrigger && storeRef) {
+        void dispatchStoreSms({
+          storeRef,
+          trigger: smsTrigger,
+          to: String(customerPhone),
+          vars: {
+            customer_name: String(matchedDoc?.customer_name || 'Customer'),
+            order_number: String(matchedDoc?.order_number || resolvedOrderNumber),
+            order_id: String(matchedDoc?.order_number || resolvedOrderNumber),
+            tracking_code: cleanConsignment,
+            courier_name: 'Steadfast Courier',
+            total: String(matchedDoc?.total_price ?? ''),
+          },
+          fallbackText:
+            smsTrigger === 'order_shipped'
+              ? 'Dear {customer_name}, your order {order_number} has been shipped via Steadfast Courier. Tracking: {tracking_code}.'
+              : 'Dear {customer_name}, your order {order_number} has been delivered. Thank you for shopping with us!',
+        }).catch((smsErr: any) => {
+          console.warn(`[Steadfast Webhook] SMS ${smsTrigger} notice:`, smsErr?.message || smsErr);
+        });
+      }
+    }
+
+    console.log(`[Steadfast Webhook] Order ${resolvedOrderNumber} synced -> ${mapped.orderStatus} [${cleanConsignment || cleanMerchantId}]`);
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      consignment_id: cleanConsignment || null,
+      order_number: resolvedOrderNumber,
+      order_status: mapped.displayStatus,
+      canonical_status: mapped.orderStatus,
+      fulfillment_status: mapped.fulfillmentStatus,
+      mongodb_synced: mongoUpdated,
+      cod_reconciliation: codReconciliation,
+    });
+  } catch (err: any) {
+    console.error('[Steadfast Webhook] Error processing webhook:', err);
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      error: err?.message || 'Internal webhook processing error',
+    });
+  }
+});
+
+app.get('/api/courier/webhook/steadfast', async (_req: any, res: any) =>
+  res.status(200).json({
+    ok: true,
+    service: 'steadfast-courier-webhook',
+    status: 'active',
+    timestamp: new Date().toISOString(),
+  })
+);
 
 // ── Orders ──────────────────────
 // Orders are persisted in MongoDB. The API still accepts the same store refs
@@ -15249,6 +15565,269 @@ function orderFingerprintOf(order: any, storeSlug: string): string {
   ].join('::');
 }
 
+/**
+ * Build the persisted `orders` document from a checkout / dashboard payload.
+ *
+ * Extracted from POST /api/orders so a MULTI-VENDOR checkout can persist one
+ * child order per merchant through the SAME shaping rules — every amount
+ * finite, every store identifier spelled both ways, every location column
+ * populated. Sharing this function is what guarantees a child order is found
+ * by the vendor's dashboard exactly like a standard order is.
+ */
+function buildOrderRecord(
+  order: Record<string, any>,
+  ctx: { storeId: string; merchantId: string; slug: string; storeCode?: string; source: string; isManual: boolean }
+): Record<string, any> {
+  const { storeId, merchantId, slug, storeCode, source, isManual } = ctx;
+  const record: any = {
+    store_id: storeId,
+    // Persist BOTH the snake_case (read path) and camelCase (client payload)
+    // spellings so legacy readers and new callers both match.
+    store_slug: slug,
+    storeSlug: slug,
+    merchant_id: merchantId,
+    merchantId,
+    ...(storeCode ? { store_code: storeCode } : {}),
+    order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
+    // The client-generated id is kept as `id` too: the dashboard de-duplicates
+    // and addresses rows by it, and the vendor split stores it on the master.
+    ...(order.id ? { id: String(order.id) } : {}),
+    customer_name: order.customerName || order.customer_name || 'Customer',
+    customer_phone: order.customerPhone || order.customer_phone || '',
+    // ── District + City/Area ────────────────────────────────────────────────
+    // The checkout collects them as TWO fields (District, then the
+    // City / Area / Thana inside it) so a courier can route the parcel and
+    // a non-delivery area can be filtered out. Persisted under their own
+    // canonical column names AND folded into `customer_city` for every
+    // legacy reader (dashboard tables, CSV export, courier payloads).
+    district: String(order.district || order.district_name || order.districtName || order.customer_district || '').trim(),
+    city_area: String(
+      order.cityArea || order.city_area || order.customer_area || order.area || order.thana || '',
+    ).trim(),
+    customer_district: String(order.district || order.district_name || order.districtName || order.customer_district || '').trim(),
+    customer_area: String(
+      order.cityArea || order.city_area || order.customer_area || order.area || order.thana || '',
+    ).trim(),
+    customer_city: String(
+      order.customerCity || order.customer_city ||
+      [
+        order.cityArea || order.city_area || order.area || order.thana,
+        order.district || order.district_name || order.districtName,
+      ].filter(Boolean).join(', ') ||
+      '',
+    ),
+    shipping_address: String(order.address || order.shipping_address || '').trim(),
+    // `items` is persisted as a JSON string; keep normalizing here so readers
+    // always get a parseable value rather than a raw object/undefined.
+    items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []),
+    // Amounts are ALWAYS finite numbers. A string/undefined total would make
+    // the dashboard render `undefined.toLocaleString()` and blank the app.
+    total_price: toNumeric(order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total, 0),
+    subtotal_bdt: toNumeric(order.subtotalBDT ?? order.subtotal_bdt, 0),
+    delivery_charge: toNumeric(order.deliveryCharge ?? order.delivery_charge, 0),
+    cod_amount: toNumeric(order.totalBDT ?? order.total_price ?? order.cod_amount, 0),
+    payment_method: order.paymentMethod || order.payment_method || 'COD',
+    payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
+    transaction_id: order.transactionId || order.transaction_id || null,
+    // The merchant-configured Advance Delivery Charge actually collected
+    // upfront (0 when the toggle is off), and the cash balance still due on
+    // delivery. Recorded explicitly so the dashboard/reconciliation never
+    // has to re-derive the split.
+    advance_delivery_paid: toNumeric(order.advanceDeliveryPaidBDT ?? order.advance_delivery_paid, 0),
+    cod_balance: toNumeric(order.codBalanceBDT ?? order.cod_balance, 0),
+    status: order.status || 'New',
+    source,
+    order_source: source,
+    is_manual: isManual,
+    isManual,
+    // Explicit, valid creation timestamp for the dashboard's date column.
+    created_at: toValidDate(order.createdAt ?? order.created_at ?? order.date),
+  };
+  return record;
+}
+
+/** A locally generated courier tracking code for one vendor's slip. */
+function makeVendorTrackingCode(courierName: string, orderNumber: string): string {
+  const key = String(courierName || '').toLowerCase();
+  const prefix = key.includes('pathao') ? 'PAD' : key.includes('redx') ? 'RED' : key.includes('paperfly') ? 'PF' : 'STF';
+  const tail = String(orderNumber || '').replace(/[^0-9]/g, '').slice(-6) || String(Date.now()).slice(-6);
+  return `${prefix}-${tail}-${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
+/**
+ * SPLIT A MASTER ORDER INTO ONE CHILD ORDER PER VENDOR.
+ *
+ * For each selling merchant this:
+ *   1. resolves that vendor's canonical store identity,
+ *   2. computes its commission via `resolveCommission` (commission_rates),
+ *   3. writes a CHILD order (order_type: 'child', parent_order_id/…) that the
+ *      vendor's own dashboard lists and fulfils,
+ *   4. records the commission ledger row in `vendor_payouts`,
+ *   5. mints a vendor-specific tracking slip (Pathao/Steadfast/RedX prefix)
+ *      so each parcel can be booked independently.
+ *
+ * Returns the child orders. Never throws to the caller — a split failure must
+ * not lose the master order the shopper already placed.
+ *
+ * Single-vendor orders return ONE child only when the caller explicitly asked
+ * for a split (`order.split_by_vendor === true`), so ordinary storefront
+ * checkouts keep their existing single-row behaviour.
+ */
+async function persistVendorChildren(masterOrder: Record<string, any>, masterRecord: Record<string, any>): Promise<any[]> {
+  const wantsSplit = masterOrder.split_by_vendor === true || masterOrder.splitByVendor === true;
+  const items = Array.isArray(masterOrder.items)
+    ? masterOrder.items
+    : (() => { try { return JSON.parse(String(masterOrder.items || '[]')); } catch { return []; } })();
+  if (!Array.isArray(items) || items.length === 0) return [];
+
+  const fallback = {
+    storeId: String(masterOrder.storeId || masterOrder.store_id || masterRecord.store_id || '').trim(),
+    slug: String(masterRecord.store_slug || '').trim(),
+    name: String(masterOrder.storeName || masterOrder.store_name || masterRecord.store_slug || '').trim(),
+    code: String(masterOrder.store_code || masterOrder.storeCode || masterRecord.store_code || '').trim(),
+  };
+
+  const children = splitOrderByVendor(items, fallback, toNumeric(masterOrder.deliveryCharge ?? masterOrder.delivery_charge, 0));
+  // No split requested and only one vendor → nothing to fan out.
+  if (!wantsSplit && children.length <= 1) return [];
+  if (children.length === 0) return [];
+
+  const vendorIds = [...new Set(children.map((c) => c.vendor_id))];
+  const masterId = String(masterRecord.id || masterOrder.id || `ord-${Date.now()}`);
+  const masterNumber = String(masterRecord.order_number || '');
+  const courierName = String(masterOrder.courierName || masterOrder.courier_name || 'Steadfast Courier');
+  const results: any[] = [];
+  const db = await getMongoDb(ORDERS_DB_NAME);
+
+  for (const [index, child] of children.entries()) {
+    // 1. Canonical vendor identity (UUID + slug + code).
+    const ref = await resolveStoreRef(child.vendor_id);
+    const vendorStoreDoc: any = db
+      ? await db.collection('stores').findOne({ $or: storeMatchClauses(ref) }).catch(() => null)
+      : null;
+    const vendorStoreId = String(
+      vendorStoreDoc?.id || vendorStoreDoc?.store_id || ref.storeId || child.store_id || child.vendor_id
+    ).trim();
+    const vendorSlug = String(
+      vendorStoreDoc?.store_slug || vendorStoreDoc?.storeSlug || ref.slug || child.vendor_slug || ''
+    ).trim().toLowerCase();
+    const vendorName = String(
+      vendorStoreDoc?.store_name || vendorStoreDoc?.storeName || child.vendor_name || vendorSlug || 'Store'
+    ).trim();
+
+    // 2. Platform commission on this vendor's goods subtotal.
+    const categories = child.items
+      .map((line) => {
+        const original = items.find((i: any) => String(i.id) === String(line.id));
+        return String(original?.category || original?.category_id || '').trim();
+      })
+      .filter(Boolean);
+    const commission = await resolveCommission(
+      { storeId: vendorStoreId, slug: vendorSlug, code: vendorStoreDoc?.store_code || ref.code, name: vendorName },
+      child.subtotal_bdt,
+      [...new Set(categories)]
+    );
+
+    // 3. Child order row.
+    const childId = `${masterId}-v${index + 1}`;
+    const childNumber = `${masterNumber}-${index + 1}`;
+    const trackingCode = makeVendorTrackingCode(courierName, childNumber);
+    const childPayload: Record<string, any> = {
+      ...masterOrder,
+      id: childId,
+      orderNumber: childNumber,
+      parent_order_id: masterId,
+      parent_order_number: masterNumber,
+      order_type: 'child',
+      vendor_id: vendorStoreId,
+      vendor_name: vendorName,
+      storeId: vendorStoreId,
+      store_id: vendorStoreId,
+      storeSlug: vendorSlug || masterOrder.storeSlug || masterOrder.store_slug,
+      store_slug: vendorSlug || masterOrder.storeSlug || masterOrder.store_slug,
+      merchantId: vendorStoreId,
+      storeCode: vendorStoreDoc?.store_code || ref.code || '',
+      items: child.items,
+      subtotalBDT: child.subtotal_bdt,
+      deliveryCharge: child.delivery_charge,
+      totalBDT: child.cod_amount,
+      codBalanceBDT: child.cod_amount,
+      commission_bdt: commission.commission_bdt,
+      commission_rate_percent: commission.rate_percent,
+      vendor_net_payable_bdt: commission.net_bdt,
+      trackingCode,
+      courierName,
+      // A child order awaits its vendor's own courier booking.
+      fulfillmentStatus: 'Unfulfilled',
+      status: 'New',
+    };
+
+    const childRecord = buildOrderRecord(childPayload, {
+      storeId: vendorStoreId,
+      merchantId: vendorStoreId,
+      slug: vendorSlug || String(masterRecord.store_slug || '').trim(),
+      storeCode: vendorStoreDoc?.store_code || ref.code,
+      source: String(masterRecord.source || 'Store'),
+      isManual: Boolean(masterRecord.is_manual),
+    });
+    Object.assign(childRecord, {
+      order_type: 'child',
+      parent_order_id: masterId,
+      parent_order_number: masterNumber,
+      vendor_id: vendorStoreId,
+      vendor_name: vendorName,
+      commission_bdt: commission.commission_bdt,
+      commission_rate_percent: commission.rate_percent,
+      vendor_net_payable_bdt: commission.net_bdt,
+      tracking_code: trackingCode,
+      courier_name: courierName,
+    });
+
+    if (db) {
+      await db.collection(ORDERS_COLLECTION)
+        .updateOne(
+          { $or: [{ id: childId }, { order_number: childNumber, parent_order_id: masterId }] },
+          { $set: { ...sanitizeMongoPatch(childRecord), updated_at: new Date() }, $setOnInsert: { created_at: childRecord.created_at } },
+          { upsert: true }
+        )
+        .catch((err: any) => console.warn('[Server] child order upsert warning:', err?.message || err));
+    }
+
+    // 4. Commission ledger row → vendor_payouts.
+    await recordVendorPayout({
+      masterOrderId: masterId,
+      masterOrderNumber: masterNumber,
+      childOrderId: childId,
+      childOrderNumber: childNumber,
+      vendorId: vendorStoreId,
+      vendorName,
+      storeSlug: vendorSlug,
+      grossAmountBDT: child.subtotal_bdt,
+      commissionPercent: commission.rate_percent,
+      commissionFlatFeeBDT: commission.flat_fee_bdt,
+      commissionBDT: commission.commission_bdt,
+    }).catch((err: any) => console.warn('[Server] vendor payout warning:', err?.message || err));
+
+    results.push({
+      id: childId,
+      order_number: childNumber,
+      vendor_id: vendorStoreId,
+      vendor_name: vendorName,
+      store_slug: vendorSlug,
+      subtotal_bdt: child.subtotal_bdt,
+      delivery_charge: child.delivery_charge,
+      cod_amount: child.cod_amount,
+      commission_bdt: commission.commission_bdt,
+      net_payout_bdt: commission.net_bdt,
+      courier_name: courierName,
+      tracking_code: trackingCode,
+    });
+  }
+
+  console.log('[Server] vendored order split:', { master_order: masterNumber, vendors: vendorIds.length });
+  return results;
+}
+
 app.post('/api/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -15373,67 +15952,36 @@ app.post('/api/orders', async (req, res) => {
       const dedupOrderNumber = String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, '');
       recentOrderSubmissions.set(dedupKey, { orderNumber: dedupOrderNumber, at: now });
 
-      const record: any = {
-        store_id: storeId,
-        // Persist BOTH the snake_case (read path) and camelCase (client payload)
-        // spellings so legacy readers and new callers both match.
-        store_slug: slug,
-        storeSlug: slug,
-        merchant_id: merchantId,
-        merchantId,
-        ...(identity.storeCode ? { store_code: identity.storeCode } : {}),
-        order_number: String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, ''),
-        customer_name: order.customerName || order.customer_name || 'Customer',
-        customer_phone: order.customerPhone || order.customer_phone || '',
-        // ── District + City/Area ────────────────────────────────────────────
-        // The checkout collects them as TWO fields (District, then the
-        // City / Area / Thana inside it) so a courier can route the parcel and
-        // a non-delivery area can be filtered out. Persisted under their own
-        // canonical column names AND folded into `customer_city` for every
-        // legacy reader (dashboard tables, CSV export, courier payloads).
-        district: String(order.district || order.district_name || order.districtName || order.customer_district || '').trim(),
-        city_area: String(
-          order.cityArea || order.city_area || order.customer_area || order.area || order.thana || '',
-        ).trim(),
-        customer_district: String(order.district || order.district_name || order.districtName || order.customer_district || '').trim(),
-        customer_area: String(
-          order.cityArea || order.city_area || order.customer_area || order.area || order.thana || '',
-        ).trim(),
-        customer_city: String(
-          order.customerCity || order.customer_city ||
-          [
-            order.cityArea || order.city_area || order.area || order.thana,
-            order.district || order.district_name || order.districtName,
-          ].filter(Boolean).join(', ') ||
-          '',
-        ),
-        shipping_address: String(order.address || order.shipping_address || '').trim(),
-        // `items` is persisted as a JSON string; keep normalizing here so readers
-        // always get a parseable value rather than a raw object/undefined.
-        items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []),
-        // Amounts are ALWAYS finite numbers. A string/undefined total would make
-        // the dashboard render `undefined.toLocaleString()` and blank the app.
-        total_price: toNumeric(order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total, 0),
-        subtotal_bdt: toNumeric(order.subtotalBDT ?? order.subtotal_bdt, 0),
-        delivery_charge: toNumeric(order.deliveryCharge ?? order.delivery_charge, 0),
-        cod_amount: toNumeric(order.totalBDT ?? order.total_price ?? order.cod_amount, 0),
-        payment_method: order.paymentMethod || order.payment_method || 'COD',
-        payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
-        transaction_id: order.transactionId || order.transaction_id || null,
-        // The merchant-configured Advance Delivery Charge actually collected
-        // upfront (0 when the toggle is off), and the cash balance still due on
-        // delivery. Recorded explicitly so the dashboard/reconciliation never
-        // has to re-derive the split.
-        advance_delivery_paid: toNumeric(order.advanceDeliveryPaidBDT ?? order.advance_delivery_paid, 0),
-        cod_balance: toNumeric(order.codBalanceBDT ?? order.cod_balance, 0),
-        status: order.status || 'New',
-        source,
-        order_source: source,
-        is_manual: isManual,
-        isManual,
-        // Explicit, valid creation timestamp for the dashboard's date column.
-        created_at: toValidDate(order.createdAt ?? order.created_at ?? order.date),
-      };
+      const record = buildOrderRecord(order, { storeId, merchantId, slug, storeCode: identity.storeCode, source, isManual });
+
+      // ── MASTER / CHILD SPLIT ────────────────────────────────────────────
+      // A multi-vendor cart is written as ONE master order (what the shopper
+      // sees) plus ONE child order per selling vendor, each carrying its own
+      // commission and its own courier slip. `persistVendorChildren` never
+      // throws: the master write below still succeeds if splitting fails.
+      if (!order.parent_order_id && !order.parentOrderId) {
+        const split = await persistVendorChildren(order, record).catch((splitErr: any) => {
+          console.warn('[Server] vendor split warning:', splitErr?.message || splitErr);
+          return [] as any[];
+        });
+        if (split.length > 0) {
+          record.order_type = 'master';
+          record.child_order_ids = split.map((c: any) => c.id);
+          record.child_order_numbers = split.map((c: any) => c.order_number);
+          record.vendor_count = split.length;
+          record.vendor_slips = split.map((c: any) => ({
+            vendor_id: c.vendor_id,
+            vendor_name: c.vendor_name,
+            child_order_id: c.id,
+            child_order_number: c.order_number,
+            courier_name: c.courier_name,
+            tracking_code: c.tracking_code,
+            cod_amount_bdt: c.cod_amount,
+          }));
+        }
+      }
+
+
 
       // Write through the native driver so the record always lands in
       // zidbdsaas.orders regardless of the connection string's default DB.
@@ -15648,6 +16196,340 @@ app.get('/api/abandoned-carts/logs', async (req, res) => {
   }
 });
 
+// ── MARKETPLACE: GLOBAL PRODUCT SEARCH ────────────────────────────────────────
+//
+// GET /api/marketplace/products — every PUBLIC product from every ACTIVE
+// merchant, for the central marketplace homepage.
+//
+//   q                product search (title / sku / brand / description)
+//   category         category name or id
+//   min_price        minimum price (BDT)
+//   max_price        maximum price (BDT)
+//   vendor           vendor slug, ZID-BD code or stores.id UUID
+//   vendor_name      vendor display-name substring
+//   exclude_vendor   hide one store's products (own-shop browsing)
+//   sort             relevance | newest | price_asc | price_desc | popular
+//   page, limit      pagination (limit capped at 200)
+//
+// The response also carries the facets the marketplace sidebar needs:
+// vendors, categories and the observed price range.
+app.get('/api/marketplace/products', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const num = (v: unknown) => {
+      if (v === undefined || v === null || v === '') return undefined;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+
+    const result = await searchMarketplaceProducts({
+      q: str(req.query.q ?? req.query.search ?? req.query.query),
+      category: str(req.query.category ?? req.query.category_id),
+      minPrice: num(req.query.min_price ?? req.query.minPrice),
+      maxPrice: num(req.query.max_price ?? req.query.maxPrice),
+      vendor: str(req.query.vendor ?? req.query.vendor_id ?? req.query.store_slug),
+      vendorName: str(req.query.vendor_name ?? req.query.vendorName),
+      excludeVendor: str(req.query.exclude_vendor ?? req.query.excludeVendor),
+      sort: (str(req.query.sort) as any) || 'newest',
+      page: num(req.query.page),
+      limit: num(req.query.limit),
+    });
+
+    return res.status(200).json({ ok: result.ok, ...result });
+  } catch (err: any) {
+    console.error('[Server] GET /api/marketplace/products error:', err);
+    return res.status(200).json({
+      ok: false, products: [], total: 0, page: 1, limit: 24, pages: 0,
+      vendors: [], categories: [], price_range: null,
+      error: err?.message || 'The marketplace could not be searched.',
+    });
+  }
+});
+
+// ── COMMISSION RATES ─────────────────────────────────────────────────────────
+// GET / POST /api/marketplace/commission-rates · DELETE …/:id
+//
+// The platform fee matrix. Rates resolve most-specific-first at checkout:
+// vendor override > category rule > default rule (stored in `commission_rates`).
+app.get('/api/marketplace/commission-rates', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await listCommissionRates();
+  return res.status(200).json({ ok: result.ok, rates: result.rates, error: result.error ?? null });
+});
+
+app.post('/api/marketplace/commission-rates', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+  const result = await upsertCommissionRate(body);
+  return res.status(result.ok ? 200 : 400).json({ ok: result.ok, rate: result.rate ?? null, error: result.error ?? null });
+});
+
+app.delete('/api/marketplace/commission-rates/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await deleteCommissionRate(String(req.params.id || ''));
+  return res.status(result.ok ? 200 : 400).json({ ok: result.ok, error: result.error ?? null });
+});
+
+// ── VENDOR PAYOUTS ───────────────────────────────────────────────────────────
+// GET /api/marketplace/vendor-payouts — the per-child-order commission ledger.
+//
+// Scoped by the SAME store identifiers the orders API uses, so a merchant's
+// Vendor Wallet panel reads only its own payouts:
+//   ?vendor_id=<uuid>  ?store_slug=<slug>  ?master_order_id=<id>  ?status=<s>
+//
+// An optional `?order_id=` returns the payouts for the vendor that owns the
+// given order (convenience for the order drawer).
+app.get('/api/marketplace/vendor-payouts', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+    const vendorRef = str(req.query.vendor_id ?? req.query.vendorId ?? req.query.store_id);
+    let vendorId = vendorRef;
+    let storeSlug = str(req.query.store_slug ?? req.query.storeSlug);
+    // Resolve a slug / code reference to the canonical UUID so both spellings
+    // of a vendor id match the ledger row written at checkout.
+    if (vendorRef && !isUuidLike(vendorRef)) {
+      const ref = await resolveStoreRef(vendorRef);
+      vendorId = ref.storeId || vendorRef;
+      storeSlug = storeSlug || ref.slug;
+    }
+
+    const result = await listVendorPayouts({
+      vendorId,
+      storeSlug,
+      masterOrderId: str(req.query.master_order_id ?? req.query.masterOrderId),
+      status: str(req.query.status),
+      limit: Number(req.query.limit) || undefined,
+    });
+    return res.status(200).json({ ok: result.ok, payouts: result.payouts, summary: result.summary, error: result.error ?? null });
+  } catch (err: any) {
+    console.error('[Server] GET /api/marketplace/vendor-payouts error:', err);
+    return res.status(200).json({
+      ok: false, payouts: [],
+      summary: { total: 0, pending: 0, paid: 0, gross_bdt: 0, commission_bdt: 0, net_bdt: 0 },
+      error: err?.message || 'Payouts could not be read.',
+    });
+  }
+});
+
+// PATCH /api/marketplace/vendor-payouts/:id — disburse / fail one payout.
+app.patch('/api/marketplace/vendor-payouts/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+  const result = await updatePayoutStatus(String(req.params.id || ''), {
+    status: String(body.status || ''),
+    payout_reference: body.payout_reference ?? body.reference,
+    payout_method: body.payout_method ?? body.method,
+    notes: body.notes,
+  });
+  return res.status(result.ok ? 200 : 400).json({ ok: result.ok, payout: result.payout ?? null, error: result.error ?? null });
+});
+
+// ── COD LEDGER & VENDOR WALLET ───────────────────────────────────────────────
+//
+// The money side of a delivered COD parcel. A settlement row is written by
+// `reconcileCodDelivery` (courier webhook or a manual "Delivered"):
+//
+//   gross_collected − courier_fee − platform_commission = vendor_credit
+//
+// and the vendor's `vendor_wallets.available_bdt` is credited with that result.
+const strParam = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+
+// GET /api/marketplace/cod-ledger — settlement rows + money summary.
+app.get('/api/marketplace/cod-ledger', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const vendorRef = strParam(req.query.vendor_id ?? req.query.vendorId ?? req.query.store_id);
+    let vendorId = vendorRef;
+    let storeSlug = strParam(req.query.store_slug ?? req.query.storeSlug);
+    if (vendorRef && !isUuidLike(vendorRef)) {
+      const ref = await resolveStoreRef(vendorRef);
+      vendorId = ref.storeId || vendorRef;
+      storeSlug = storeSlug || ref.slug;
+    }
+    const result = await listCodLedger({
+      vendorId,
+      storeSlug,
+      orderNumber: strParam(req.query.order_number ?? req.query.orderNumber),
+      status: strParam(req.query.status),
+      from: strParam(req.query.from),
+      to: strParam(req.query.to),
+      limit: Number(req.query.limit) || undefined,
+    });
+    return res.status(200).json({ ok: result.ok, entries: result.entries, summary: result.summary, error: result.error ?? null });
+  } catch (err: any) {
+    console.error('[Server] GET /api/marketplace/cod-ledger error:', err);
+    return res.status(200).json({
+      ok: false, entries: [],
+      summary: { count: 0, gross: 0, courier: 0, commission: 0, credit: 0 },
+      error: err?.message || 'The COD ledger could not be read.',
+    });
+  }
+});
+
+// GET /api/marketplace/vendor-wallet — available COD earnings + payout rules.
+//
+// Scoped by the same identifiers the orders API accepts, so the merchant
+// dashboard reads ONLY its own wallet:
+//   ?vendor_id=<uuid> | ?store_slug=<slug>
+app.get('/api/marketplace/vendor-wallet', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const vendorRef = strParam(
+      req.query.vendor_id ?? req.query.vendorId ?? req.query.store_slug ?? req.query.storeSlug
+    );
+    if (!vendorRef) {
+      return res.status(200).json({ ok: false, wallet: null, error: 'A vendor_id or store_slug is required.' });
+    }
+    const result = await getVendorWallet(vendorRef);
+    return res.status(200).json({
+      ok: result.ok,
+      wallet: result.wallet,
+      payout_rules: PAYOUT_RULES,
+      error: result.error ?? null,
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/marketplace/vendor-wallet error:', err);
+    return res.status(200).json({ ok: false, wallet: null, error: err?.message || 'The wallet could not be read.' });
+  }
+});
+
+// GET /api/marketplace/payout-requests — the vendor's withdrawal history.
+app.get('/api/marketplace/payout-requests', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const vendorRef = strParam(req.query.vendor_id ?? req.query.vendorId ?? req.query.store_id);
+    let vendorId = vendorRef;
+    let storeSlug = strParam(req.query.store_slug ?? req.query.storeSlug);
+    if (vendorRef && !isUuidLike(vendorRef)) {
+      const ref = await resolveStoreRef(vendorRef);
+      vendorId = ref.storeId || vendorRef;
+      storeSlug = storeSlug || ref.slug;
+    }
+    const result = await listPayoutRequests({
+      vendorId,
+      storeSlug,
+      status: strParam(req.query.status),
+      limit: Number(req.query.limit) || undefined,
+    });
+    return res.status(200).json({ ok: result.ok, requests: result.requests, summary: result.summary, error: result.error ?? null });
+  } catch (err: any) {
+    console.error('[Server] GET /api/marketplace/payout-requests error:', err);
+    return res.status(200).json({
+      ok: false, requests: [], summary: { pending_bdt: 0, paid_bdt: 0 },
+      error: err?.message || 'Payout requests could not be read.',
+    });
+  }
+});
+
+// POST /api/marketplace/payout-requests — vendor withdraws settled earnings.
+//
+// The balance check and the debit happen in ONE atomic update, so two
+// concurrent requests can never withdraw the same taka.
+app.post('/api/marketplace/payout-requests', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const vendorRef = strParam(
+      body.vendor_id ?? body.vendorId ?? body.store_slug ?? body.storeSlug ??
+      req.query.vendor_id ?? req.query.store_slug
+    );
+    if (!vendorRef) {
+      return res.status(400).json({ ok: false, error: 'A vendor_id or store_slug is required.' });
+    }
+
+    const result = await createPayoutRequest({
+      vendorRef,
+      amountBDT: toNumeric(body.amount_bdt ?? body.amountBDT ?? body.amount, 0),
+      method: body.method ?? body.payout_method,
+      accountName: body.account_name ?? body.accountName,
+      accountNumber: body.account_number ?? body.accountNumber,
+      bankName: body.bank_name ?? body.bankName,
+      notes: body.notes,
+      requestedBy: body.requested_by ?? body.requestedBy,
+    });
+
+    return res.status(result.ok ? 200 : 200).json({
+      ok: result.ok,
+      request: result.request ?? null,
+      wallet: result.wallet ?? null,
+      error: result.error ?? null,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/marketplace/payout-requests error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'The payout request could not be created.' });
+  }
+});
+
+// PATCH /api/marketplace/payout-requests/:id — approve / pay / reject.
+app.patch('/api/marketplace/payout-requests/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+  const result = await updatePayoutRequest(String(req.params.id || ''), {
+    status: String(body.status || ''),
+    payout_reference: body.payout_reference ?? body.reference,
+    notes: body.notes,
+    processedBy: body.processed_by ?? body.processedBy,
+  });
+  return res.status(result.ok ? 200 : 400).json({ ok: result.ok, request: result.request ?? null, error: result.error ?? null });
+});
+
+// POST /api/marketplace/cod-ledger/reconcile — reconcile one order on demand.
+//
+// Repairs a parcel whose delivery event was missed (webhook never arrived) or
+// lets an operator verify the split before it is committed. Idempotent.
+app.post('/api/marketplace/cod-ledger/reconcile', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const orderRef = String(body.order_id ?? body.order_number ?? body.orderNumber ?? '').trim();
+    if (!orderRef) {
+      return res.status(400).json({ ok: false, error: 'An order_id or order_number is required.' });
+    }
+
+    let order: Record<string, any> | null = body.order && typeof body.order === 'object' ? body.order : null;
+    if (!order) {
+      const located = await findOrder(orderRef).catch(() => ({ doc: null }));
+      order = (located?.doc as Record<string, any> | null) || null;
+    }
+    if (!order) {
+      return res.status(200).json({ ok: false, error: `Order ${orderRef} was not found.` });
+    }
+
+    const result = await reconcileCodDelivery(
+      { ...order, order_number: order.order_number || orderRef },
+      { courierName: body.courier_name ?? order.courier_name, courierFee: body.courier_fee }
+    );
+    return res.status(200).json({
+      ok: result.ok,
+      status: result.status,
+      reason: result.reason ?? null,
+      error: result.error ?? null,
+      ledger: result.ledger ?? null,
+      wallet: result.wallet ?? null,
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/marketplace/cod-ledger/reconcile error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'COD reconciliation failed.' });
+  }
+});
+
+// ── VENDOR COMMISSION PREVIEW ────────────────────────────────────────────────
+// POST /api/marketplace/commission/preview — what the platform would withhold
+// for a given vendor + amount, and which rule matched. Read-only.
+app.post('/api/marketplace/commission/preview', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+  const ref = await resolveStoreRef(String(body.vendor_id || body.vendor || body.store_slug || ''));
+  const result = await resolveCommission(
+    { storeId: ref.storeId, slug: ref.slug, code: ref.code },
+    toNumeric(body.gross_amount_bdt ?? body.subtotalBDT ?? body.amount, 0),
+    Array.isArray(body.categories) ? body.categories.map((c: any) => String(c)) : []
+  );
+  return res.status(200).json({ ok: true, ...result });
+});
+
 // ── PUT / PATCH /api/orders/:id — update status / payment_status ──────────────
 //
 // The Status and Payment Status dropdowns post here. The identifiers and the
@@ -15743,6 +16625,39 @@ const handleOrderUpdate = async (req: any, res: any) => {
 
     const freshOrder = normalizeOrderRow(result.order);
 
+    // ── COD RECONCILIATION on a manual delivery ─────────────────────────
+    // The courier webhook is not the only way an order reaches Delivered: a
+    // merchant marking it by hand (or a bulk action) settles the same cash.
+    // `reconcileCodDelivery` checks the payment method and delivery state
+    // itself, so this is safe for every order, and it is idempotent — the
+    // webhook and this path can both fire for the same parcel and only the
+    // first one credits the wallet.
+    let codReconciliation: Record<string, any> | null = null;
+    if (status === 'Delivered') {
+      const reconciliation = await reconcileCodDelivery(
+        {
+          ...(freshOrder as any),
+          store_slug:
+            req.query.store_slug || req.query.storeSlug || body.store_slug ||
+            body.storeSlug || (freshOrder as any).store_slug || (freshOrder as any).storeSlug,
+        },
+        { courierName: (freshOrder as any)?.courier_name || (freshOrder as any)?.courierName }
+      ).catch((codErr: any) => {
+        console.warn('[Server] COD reconciliation warning:', codErr?.message || codErr);
+        return null;
+      });
+      if (reconciliation) {
+        codReconciliation = {
+          ok: reconciliation.ok,
+          status: reconciliation.status,
+          reason: reconciliation.reason,
+          error: reconciliation.error,
+          vendor_credit: reconciliation.ledger?.vendor_credit ?? null,
+          wallet_balance: reconciliation.wallet?.available_bdt ?? null,
+        };
+      }
+    }
+
     // ── Status-change SMS triggers ───────────────────────────────────────
     //
     // `order_shipped` and `delivery_success` are the other two customer-facing
@@ -15798,6 +16713,9 @@ const handleOrderUpdate = async (req: any, res: any) => {
       // The UI applies this document directly, so the badge changes without a
       // manual reload.
       order: freshOrder,
+      // Present for a Delivered transition; `status: 'exists'` means the
+      // parcel was already reconciled (webhook or a previous click).
+      cod_reconciliation: codReconciliation,
     });
   } catch (err: any) {
     console.error('[Server] PUT /api/orders/:id error:', err);

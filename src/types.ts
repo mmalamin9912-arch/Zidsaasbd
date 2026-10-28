@@ -701,6 +701,97 @@ export interface OrderItem {
   quantity: number;
   unitPriceBDT: number;
   image: string;
+  /**
+   * Multi-vendor marketplace fields.
+   *
+   * A marketplace cart can mix products from several merchants, so every line
+   * records WHICH merchant owns it. `vendor_id` is the canonical stores.id
+   * UUID of the selling store; `store_id` is kept beside it because the order
+   * splitting logic and the legacy read path both key off `store_id`.
+   */
+  productId?: string;
+  vendor_id?: string;
+  store_id?: string;
+  store_slug?: string;
+  vendor_name?: string;
+}
+
+/**
+ * Marketplace product — one public product as listed on the central
+ * marketplace homepage, regardless of which merchant sells it.
+ *
+ * This is a `Product` plus the vendor identity the marketplace grid needs to
+ * render a seller badge and link back to the selling storefront.
+ */
+export interface MarketplaceProduct extends Product {
+  /** Canonical stores.id UUID of the selling merchant. */
+  vendor_id: string;
+  /** Merchant display name (falls back to the slug when the store has none). */
+  vendor_name: string;
+  /** Public storefront slug for the "Visit store" link. */
+  vendor_slug: string;
+  /** Permanent ZID-BD-XXXX store code, when known. */
+  vendor_code?: string;
+}
+
+/**
+ * A commission rule (persisted in MongoDB `commission_rates`).
+ *
+ * Rates are resolved most-specific-first at checkout: an active vendor override
+ * beats an active category rule, which beats the active default rule
+ * (`vendor_id` and `category` both null).
+ */
+export interface CommissionRate {
+  id?: string;
+  /** Vendor override (stores.id UUID). `null`/absent = applies to every vendor. */
+  vendor_id?: string | null;
+  vendor_name?: string;
+  /** Category override. `null`/absent = every category. */
+  category?: string | null;
+  /** Platform fee percentage (0–100). */
+  rate_percent: number;
+  /** Optional flat fee (BDT) added to the percentage fee. */
+  flat_fee_bdt?: number;
+  /** True for the fallback rule used when nothing more specific matches. */
+  is_default?: boolean;
+  is_active?: boolean;
+  notes?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * One merchant's disbursement for one child order (`vendor_payouts`).
+ *
+ * Created at checkout with status `pending`; a Super Admin records the actual
+ * transfer (`processing` → `paid`, or `failed`) together with the reference.
+ */
+export interface VendorPayout {
+  id?: string;
+  master_order_id: string;
+  master_order_number: string;
+  /** The vendor's own child order (``orders.order_number``). */
+  child_order_id: string;
+  child_order_number: string;
+  vendor_id: string;
+  vendor_name?: string;
+  store_slug?: string;
+  /** Sum of the child order's line items. */
+  gross_amount_bdt: number;
+  /** Platform fee withheld (percentage fee + flat fee). */
+  commission_bdt: number;
+  commission_rate_percent: number;
+  commission_flat_fee_bdt?: number;
+  /** `gross_amount_bdt - commission_bdt` — what the merchant is owed. */
+  net_payout_bdt: number;
+  status: 'pending' | 'processing' | 'paid' | 'failed' | 'cancelled';
+  /** bKash / Nagad / bank reference of the actual transfer. */
+  payout_reference?: string;
+  payout_method?: string;
+  paid_at?: string;
+  notes?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface Order {
@@ -757,6 +848,45 @@ export interface Order {
   storeSlug?: string;
   storeId?: string;
   items: OrderItem[];
+
+  // ── Multi-vendor marketplace ──────────────────────────────────────────────
+  //
+  // A marketplace checkout produces ONE master order that the shopper sees,
+  // plus one child order per selling merchant so each vendor can be booked
+  // with its own Pathao/Steadfast slip. The fields below exist on both sides:
+  // a master carries `child_order_numbers`; a child carries `parent_order_id`
+  // and its own commission. Ordinary single-vendor orders leave them unset.
+  /** `master` for the shopper-facing order, `child` for a per-vendor split. */
+  order_type?: 'master' | 'child' | 'standard' | string;
+  /** Master order id (on a child order). */
+  parent_order_id?: string;
+  parent_order_number?: string;
+  /** Child order ids / numbers (on a master order). */
+  child_order_ids?: string[];
+  child_order_numbers?: string[];
+  /** Number of distinct merchants in this order. */
+  vendor_count?: number;
+  /** Canonical vendor/store UUID that owns a child order. */
+  vendor_id?: string;
+  vendor_name?: string;
+  /** Platform commission charged on this order (child orders only). */
+  commission_bdt?: number;
+  commission_rate_percent?: number;
+  /** `subtotalBDT - commission_bdt` — payable to the vendor. */
+  vendor_net_payable_bdt?: number;
+  /** Per-vendor courier slips, keyed by vendor, on the master order. */
+  vendor_slips?: VendorSlip[];
+}
+
+/** One courier tracking slip generated for one vendor of a master order. */
+export interface VendorSlip {
+  vendor_id: string;
+  vendor_name: string;
+  child_order_id: string;
+  child_order_number: string;
+  courier_name: string;
+  tracking_code: string;
+  cod_amount_bdt: number;
 }
 
 export interface Customer {

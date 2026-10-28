@@ -91,6 +91,8 @@ const APP_PATH_PREFIXES = [
   '/admin', '/super-admin', '/admin-login', '/super-admin-gateway',
   '/dashboard', '/pricing', '/landing', '/login', '/signin',
   '/register', '/signup', '/checkout', '/store/', '/e/',
+  // Global multi-vendor marketplace — a platform surface, never a store page.
+  '/marketplace',
   // Build output / PWA assets that can be requested without an extension.
   '/assets', '/static', '/_vercel',
 ];
