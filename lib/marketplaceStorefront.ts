@@ -385,12 +385,28 @@ export async function reorderMarketplaceBanners(ids: string[]): Promise<{ ok: bo
 
 /* ────────────────────────────── categories API ────────────────────────────── */
 
+/**
+ * The artwork stored on a category, under any of the spellings in use.
+ *
+ * `image` is the canonical key the Studio writes. `imageUrl` / `iconUrl` /
+ * `thumbnail` are accepted because a category row may also arrive from the
+ * merchant catalogue mirror or a hand-edited document, and a missing icon is a
+ * visibly broken tile rather than a cosmetic detail.
+ */
+function imageOf(raw: any): string | undefined {
+  const candidate = raw?.image ?? raw?.imageUrl ?? raw?.image_url ?? raw?.iconUrl ?? raw?.icon_url ?? raw?.thumbnail;
+  const value = typeof candidate === 'string' ? candidate.trim() : '';
+  return value || undefined;
+}
+
 function normalizeCategory(raw: any, index: number): MarketplaceCategory {
   return {
     id: String(raw?.id || makeId('cat')),
     name: String(raw?.name ?? '').trim(),
     emoji: raw?.emoji ? String(raw.emoji) : undefined,
-    image: raw?.image ? String(raw.image) : undefined,
+    // `image` is what the Studio writes; the aliases let a row hand-authored in
+    // Mongo (or imported from another system) still render its artwork.
+    image: imageOf(raw),
     isActive: toBool(raw?.isActive ?? raw?.is_active ?? raw?.status !== 'hidden', true),
     isFeatured: toBool(raw?.isFeatured ?? raw?.is_featured, true),
     sortOrder: toNum(raw?.sortOrder ?? raw?.sort_order, index),

@@ -1370,6 +1370,16 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     }`}
                     style={isActive || isOpen ? { backgroundColor: isActive ? THEME.brand : '#eef0ff', color: isActive ? '#fff' : THEME.brand } : { backgroundColor: '#f4f5ff' }}
                   >
+                    {/* Category artwork from Marketplace Studio. Shown only from
+                        `lg` up: on a phone the circular `sm` thumb would eat the
+                        chip and push a usable number of categories off-screen. */}
+                    {(cat as any).image ? (
+                      <SafeImage
+                        src={(cat as any).image}
+                        alt=""
+                        className="mr-1 hidden h-4 w-4 shrink-0 rounded-full object-cover sm:inline-block"
+                      />
+                    ) : null}
                     {cat.name}
                     {tree && tree.children.length > 0 && (
                       <ChevronDown className={`hidden h-3 w-3 transition-transform lg:block ${isOpen ? 'rotate-180' : ''}`} />

@@ -19,6 +19,7 @@ import {
   Image as ImageIcon, Tag, LayoutList, Sparkles, Plus, Trash2, Save, Loader2,
   ChevronUp, ChevronDown, Eye, EyeOff, Search, X, Star, RefreshCw, Copy,
   MapPin, Truck, RotateCcw, ShieldCheck, BadgePercent, Store, Flame, ExternalLink,
+  Upload,
 } from 'lucide-react';
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
@@ -95,7 +96,16 @@ export const MarketplaceStudioPanel: React.FC = () => {
 
   // Categories
   const [categories, setCategories] = useState<MarketplaceCategoryRow[]>([]);
-  const [newCategory, setNewCategory] = useState({ name: '', emoji: '🛍️' });
+  /**
+   * Draft state for the "add category" row.
+   *
+   * `image` is the value that will actually be saved (an uploaded data-URL or a
+   * pasted URL); `imageUrl` is only the text being typed, so a half-typed URL
+   * never becomes the tile's artwork.
+   */
+  const [newCategory, setNewCategory] = useState<{
+    name: string; emoji: string; image?: string; imageUrl: string;
+  }>({ name: '', emoji: '🛍️', image: undefined, imageUrl: '' });
 
   // Utility strip
   const [strip, setStrip] = useState<UtilityStripConfig>(EMPTY_STRIP);
@@ -213,9 +223,12 @@ export const MarketplaceStudioPanel: React.FC = () => {
   const handleAddCategory = async () => {
     const name = newCategory.name.trim();
     if (!name) return;
+    // A URL that was typed but never blurred is still honoured.
+    const image = newCategory.image || newCategory.imageUrl.trim() || undefined;
     const res = await saveCategory({
       name,
       emoji: newCategory.emoji || '🛍️',
+      image,
       isActive: true,
       isFeatured: true,
       sortOrder: categories.length,
@@ -224,8 +237,8 @@ export const MarketplaceStudioPanel: React.FC = () => {
       toast.error('Category was NOT saved', { description: res.error });
       return;
     }
-    setCategories((prev) => [...prev, res.category!]);
-    setNewCategory({ name: '', emoji: '🛍️' });
+    setCategories((prev) => [...prev, { ...res.category!, image }]);
+    setNewCategory({ name: '', emoji: '🛍️', image: undefined, imageUrl: '' });
     toast.success(`“${name}” added to the marketplace rail`);
   };
 
@@ -426,11 +439,10 @@ export const MarketplaceStudioPanel: React.FC = () => {
               key={s.id}
               type="button"
               onClick={() => setSection(s.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition border cursor-pointer ${
-                active
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition border cursor-pointer ${active
                   ? 'bg-[#252B3B] text-[#D4AF37] border-[#D4AF37]/50'
                   : 'bg-[#181B26] text-slate-300 border-[#2E3548] hover:bg-[#202533] hover:text-white'
-              }`}
+                }`}
             >
               <Icon className="w-4 h-4" />
               {s.label}
@@ -660,9 +672,8 @@ export const MarketplaceStudioPanel: React.FC = () => {
                     key={preset.value}
                     type="button"
                     onClick={() => setEditingBanner({ ...editingBanner, gradient: preset.value })}
-                    className={`rounded-lg border p-1 text-left transition ${
-                      editingBanner.gradient === preset.value ? 'border-[#D4AF37]' : 'border-[#2E3548] hover:border-slate-500'
-                    }`}
+                    className={`rounded-lg border p-1 text-left transition ${editingBanner.gradient === preset.value ? 'border-[#D4AF37]' : 'border-[#2E3548] hover:border-slate-500'
+                      }`}
                   >
                     <span className={`block h-8 rounded bg-gradient-to-r ${preset.value}`} />
                     <span className="mt-1 block text-[9px] font-bold text-slate-400">{preset.label}</span>
@@ -755,21 +766,91 @@ export const MarketplaceStudioPanel: React.FC = () => {
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Live preview of whatever artwork the new tile will use. */}
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#f2f4ff] text-lg">
+                {newCategory.image
+                  ? <SafeImage src={newCategory.image} alt="" className="h-full w-full object-cover" />
+                  : (newCategory.emoji || '🛍️')}
+              </div>
               <input
-                className={`${INPUT} flex-1 min-w-[180px]`}
+                className={`${INPUT} min-w-[180px] flex-1`}
                 value={newCategory.name}
                 onChange={(e) => setNewCategory({ ...newCategory, name: e.target.value })}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleAddCategory(); } }}
                 placeholder="New category name (must match product category)"
               />
               <input
-                className={`${INPUT} w-20 text-center`}
+                // `INPUT` carries `w-full`, which outranks a width utility, so the
+                // emoji box is sized with `!` — otherwise it stretches and pushes
+                // the URL field onto its own row.
+                className={`${INPUT} !w-16 shrink-0 text-center`}
                 value={newCategory.emoji}
                 onChange={(e) => setNewCategory({ ...newCategory, emoji: e.target.value })}
                 maxLength={4}
                 aria-label="Category emoji"
+                title="Emoji (used when no image is set)"
               />
+
+              {/* IMAGE: URL or upload. Both write the same `image` field. */}
+              <div className="relative min-w-[200px] flex-1">
+                <ImageIcon className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                <input
+                  className={`${INPUT} pl-9`}
+                  value={newCategory.imageUrl}
+                  onChange={(e) => setNewCategory({ ...newCategory, imageUrl: e.target.value })}
+                  onBlur={() => {
+                    // A typed URL is promoted to the stored image on blur, so the
+                    // preview above reflects it without a separate "apply" step.
+                    const url = newCategory.imageUrl.trim();
+                    if (url && url !== newCategory.image) setNewCategory({ ...newCategory, image: url });
+                  }}
+                  placeholder="Image URL (https://…)"
+                  aria-label="Category image URL"
+                />
+              </div>
+              <label className={`${BTN_GHOST} cursor-pointer`} title="Upload an icon or image">
+                <Upload className="w-3.5 h-3.5" /> Upload
+                <input
+                  type="file"
+                  accept="image/*,.svg"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    // An SVG must be stored as-is: rasterising it through a canvas
+                    // destroys the crispness that make an icon useful at 20px.
+                    const isSvg = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name);
+                    if (isSvg) {
+                      if (file.size > 200 * 1024) {
+                        toast.error('SVG is too large', { description: 'Keep icon SVGs under 200KB.' });
+                        return;
+                      }
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        const url = String(reader.result || '');
+                        if (url) setNewCategory((prev) => ({ ...prev, image: url, imageUrl: '' }));
+                      };
+                      reader.readAsDataURL(file);
+                      return;
+                    }
+                    const dataUrl = await readAndDownscaleImage(file, 256);
+                    if (dataUrl) setNewCategory((prev) => ({ ...prev, image: dataUrl, imageUrl: '' }));
+                  }}
+                />
+              </label>
+              {newCategory.image && (
+                <button
+                  type="button"
+                  onClick={() => setNewCategory({ ...newCategory, image: undefined, imageUrl: '' })}
+                  className={BTN_DANGER}
+                  title="Remove image"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+
               <button type="button" onClick={() => void handleAddCategory()} className={BTN_PRIMARY}>
                 <Plus className="w-4 h-4" /> Add
               </button>
@@ -801,11 +882,55 @@ export const MarketplaceStudioPanel: React.FC = () => {
                     </button>
                   </div>
 
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#f2f4ff] text-lg overflow-hidden">
+                  {/* Thumbnail preview — click to replace the artwork. */}
+                  <label
+                    className="group relative flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-full bg-[#f2f4ff] text-lg"
+                    title={category.image ? 'Replace image' : 'Upload image / icon'}
+                  >
                     {category.image
                       ? <SafeImage src={category.image} alt={category.name} className="h-full w-full object-cover" />
                       : (category.emoji || '🛍️')}
-                  </div>
+                    <span className="absolute inset-0 hidden items-center justify-center bg-slate-900/60 group-hover:flex">
+                      <Upload className="h-3.5 w-3.5 text-white" />
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/*,.svg"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (!file) return;
+                        const isSvg = file.type === 'image/svg+xml' || /\.svg$/i.test(file.name);
+                        if (isSvg) {
+                          if (file.size > 200 * 1024) {
+                            toast.error('SVG is too large', { description: 'Keep icon SVGs under 200KB.' });
+                            return;
+                          }
+                          const reader = new FileReader();
+                          reader.onload = () => {
+                            const url = String(reader.result || '');
+                            if (url) void patchCategory(category, { image: url });
+                          };
+                          reader.readAsDataURL(file);
+                          return;
+                        }
+                        const dataUrl = await readAndDownscaleImage(file, 256);
+                        if (dataUrl) void patchCategory(category, { image: dataUrl });
+                      }}
+                    />
+                  </label>
+
+                  {category.image && (
+                    <button
+                      type="button"
+                      onClick={() => void patchCategory(category, { image: undefined })}
+                      className="rounded-lg border border-[#3A435E] px-2 py-1 text-[10px] font-bold text-slate-400 hover:text-red-400"
+                      title="Remove image (falls back to the emoji)"
+                    >
+                      Clear
+                    </button>
+                  )}
 
                   <input
                     defaultValue={category.emoji || ''}
@@ -823,14 +948,28 @@ export const MarketplaceStudioPanel: React.FC = () => {
                     aria-label="Category name"
                   />
 
+                  {/* Image URL — blur to apply, so a half-typed URL never becomes
+                      the tile's artwork. */}
+                  <input
+                    defaultValue={category.image?.startsWith('data:') ? '' : (category.image || '')}
+                    key={`img-${category.id}-${category.image ? 'set' : 'unset'}`}
+                    onBlur={(e) => {
+                      const url = e.target.value.trim();
+                      if (url !== (category.image || '')) void patchCategory(category, { image: url || undefined });
+                    }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                    className="min-w-[170px] flex-1 rounded-lg border border-[#3A435E] bg-[#181B26] px-3 py-1.5 text-[11px] text-white placeholder:text-slate-600"
+                    placeholder={category.image?.startsWith('data:') ? 'Uploaded image' : 'Image URL (https://…)'}
+                    aria-label="Category image URL"
+                  />
+
                   <button
                     type="button"
                     onClick={() => void patchCategory(category, { isFeatured: !category.isFeatured })}
-                    className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-black uppercase transition cursor-pointer ${
-                      category.isFeatured
+                    className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-black uppercase transition cursor-pointer ${category.isFeatured
                         ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
                         : 'bg-[#202533] text-slate-500 border border-[#2E3548]'
-                    }`}
+                      }`}
                     title="Show in the featured category tiles"
                   >
                     <Star className="w-3 h-3" /> Featured
@@ -839,11 +978,10 @@ export const MarketplaceStudioPanel: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => void patchCategory(category, { isActive: !category.isActive })}
-                    className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-black uppercase transition cursor-pointer ${
-                      category.isActive
+                    className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-black uppercase transition cursor-pointer ${category.isActive
                         ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                         : 'bg-[#202533] text-slate-500 border border-[#2E3548]'
-                    }`}
+                      }`}
                   >
                     {category.isActive ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
                     {category.isActive ? 'Visible' : 'Hidden'}
@@ -874,9 +1012,8 @@ export const MarketplaceStudioPanel: React.FC = () => {
               <button
                 type="button"
                 onClick={() => patchStrip({ isActive: !strip.isActive })}
-                className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold transition cursor-pointer ${
-                  strip.isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#202533] text-slate-500'
-                }`}
+                className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-bold transition cursor-pointer ${strip.isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#202533] text-slate-500'
+                  }`}
               >
                 {strip.isActive ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                 {strip.isActive ? 'Strip visible' : 'Strip hidden'}
@@ -935,9 +1072,8 @@ export const MarketplaceStudioPanel: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => patchStripItem(item.id, { isActive: !item.isActive })}
-                      className={`rounded-lg px-2.5 py-1.5 text-[10px] font-black uppercase transition cursor-pointer ${
-                        item.isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#181B26] text-slate-500'
-                      }`}
+                      className={`rounded-lg px-2.5 py-1.5 text-[10px] font-black uppercase transition cursor-pointer ${item.isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-[#181B26] text-slate-500'
+                        }`}
                     >
                       {item.isActive ? 'On' : 'Off'}
                     </button>
@@ -1130,9 +1266,8 @@ export const MarketplaceStudioPanel: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setFeatured({ ...featured, dealsEnabled: !featured.dealsEnabled })}
-                    className={`rounded-lg px-2.5 py-1 text-[10px] font-black uppercase transition cursor-pointer ${
-                      featured.dealsEnabled ? 'bg-rose-500/20 text-rose-400' : 'bg-[#181B26] text-slate-500'
-                    }`}
+                    className={`rounded-lg px-2.5 py-1 text-[10px] font-black uppercase transition cursor-pointer ${featured.dealsEnabled ? 'bg-rose-500/20 text-rose-400' : 'bg-[#181B26] text-slate-500'
+                      }`}
                   >
                     {featured.dealsEnabled ? 'Enabled' : 'Disabled'}
                   </button>
