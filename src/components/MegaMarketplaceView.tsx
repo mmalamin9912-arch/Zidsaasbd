@@ -44,6 +44,7 @@ import {
   type UtilityStripConfig,
   type FeaturedConfig,
 } from '../lib/marketplaceStorefrontApi';
+import { fetchTaxonomy, type TaxonomyTree } from '../lib/categoryTaxonomyApi';
 import { useMarketplaceBasket } from '../lib/useMarketplaceBasket';
 import type { MarketplaceProduct } from '../types';
 
@@ -67,6 +68,18 @@ const THEME = {
 } as const;
 
 const bdt = (value: number) => `৳${Math.round(Number(value) || 0).toLocaleString('en-US')}`;
+
+/**
+ * True on touch-only devices, where `hover` never fires.
+ *
+ * The rail uses it to decide the FIRST tap's meaning: on a phone a tap should
+ * open the category's panel; with a mouse it should apply the filter directly
+ * (the panel is already open from hover).
+ */
+function isTouchDevice(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia?.('(hover: none)').matches ?? false;
+}
 
 /** Icon name → component, for the admin-authored utility strip items. */
 const STRIP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -468,6 +481,109 @@ const HeroCarousel: React.FC<{
   );
 };
 
+/* ──────────────────────────── NOON-STYLE MEGA-MENU ────────────────────────────
+   Hovering (or focusing) a primary category in the rail opens a panel listing
+   that category's sub-categories, with any third-level sub-types shown beneath.
+
+   WHY A CONTROLLED PANEL RATHER THAN PURE CSS `group-hover`:
+   A hover-only menu is unreachable by keyboard and on touch. This one opens on
+   hover AND on focus/click, stays open while the pointer is inside it (so the
+   shopper can travel down into the list), and closes on Escape.
+*/
+const MegaMenuPanel: React.FC<{
+  node: TaxonomyTree;
+  counts: Map<string, number>;
+  onSelectSub: (primary: string, sub: string) => void;
+  onSelectPrimary: (primary: string) => void;
+  onClose: () => void;
+}> = ({ node, counts, onSelectSub, onSelectPrimary, onClose }) => {
+  const total = counts.get(node.name.toLowerCase()) ?? 0;
+
+  return (
+    <div
+      className="absolute left-0 right-0 top-full z-50 border-t bg-white shadow-[0_18px_40px_-12px_rgba(17,24,39,0.28)]"
+      style={{ borderColor: THEME.line }}
+      onMouseLeave={onClose}
+    >
+      <div className="mx-auto flex max-w-[1400px] gap-6 px-4 py-4">
+        {/* Left: the primary category itself */}
+        <div className="w-[210px] shrink-0 border-r pr-4" style={{ borderColor: THEME.line }}>
+          <div className="mb-2 flex items-center gap-2">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-[#eef0ff] text-lg">
+              {node.image ? (
+                <SafeImage src={node.image} alt={node.name} className="h-full w-full object-cover" />
+              ) : (
+                node.emoji || '📁'
+              )}
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-black text-slate-900">{node.name}</div>
+              <div className="text-[10px] text-slate-500">{total} products</div>
+            </div>
+          </div>
+          {node.description && (
+            <p className="mb-2 text-[11px] leading-relaxed text-slate-500">{node.description}</p>
+          )}
+          <button
+            type="button"
+            onClick={() => onSelectPrimary(node.name)}
+            className="flex min-h-[32px] w-full items-center justify-between rounded-md px-2 text-left text-[11.5px] font-bold transition hover:bg-[#f4f5ff]"
+            style={{ color: THEME.brand }}
+          >
+            Shop all {node.name}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        {/* Right: the sub-category columns */}
+        <div className="min-w-0 flex-1">
+          {node.children.length === 0 ? (
+            <div className="flex h-full items-center text-[11.5px] text-slate-400">
+              No sub-categories — use “Shop all {node.name}”.
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 md:grid-cols-3 xl:grid-cols-4">
+              {node.children.map((sub) => {
+                const count = counts.get(`${node.name} › ${sub.name}`.toLowerCase())
+                  ?? counts.get(sub.name.toLowerCase()) ?? 0;
+                return (
+                  <div key={sub.id} className="min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => onSelectSub(node.name, sub.name)}
+                      className="group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition hover:bg-[#f4f5ff]"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-slate-700 group-hover:underline">
+                        {sub.name}
+                      </span>
+                      <span className="shrink-0 text-[10px] tabular-nums text-slate-400">{count}</span>
+                    </button>
+                    {/* Third level (sub-types), indented under their parent */}
+                    {sub.children.length > 0 && (
+                      <div className="mb-1 ml-3 border-l pl-2" style={{ borderColor: THEME.line }}>
+                        {sub.children.slice(0, 5).map((type) => (
+                          <button
+                            key={type.id}
+                            type="button"
+                            onClick={() => onSelectSub(node.name, type.name)}
+                            className="block w-full truncate rounded px-1 py-0.5 text-left text-[11px] text-slate-500 transition hover:text-slate-900 hover:underline"
+                          >
+                            {type.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 /* ───────────────────────── filter section types ───────────────────────── */
 
 export type MarketplaceSortValue = NonNullable<MarketplaceFilters['sort']>;
@@ -599,6 +715,13 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   }>({ banners: [], categories: [], strip: null, featured: null });
   const [featuredProducts, setFeaturedProducts] = useState<MarketplaceProduct[]>([]);
   const [dealProducts, setDealProducts] = useState<MarketplaceProduct[]>([]);
+  /** Global taxonomy tree — powers the Noon-style mega-menu. */
+  const [taxonomy, setTaxonomy] = useState<TaxonomyTree[]>([]);
+  /** Which primary category's mega-menu is open (desktop only). */
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  /** Sub-category currently filtering the grid, from the mega-menu. */
+  const [activeSub, setActiveSub] = useState<string | undefined>(undefined);
+  const menuCloseTimer = useRef<number | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -622,7 +745,44 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
       })
       .catch(() => { /* the strips simply do not render */ });
 
+    fetchTaxonomy()
+      .then((res) => { if (active) setTaxonomy(res.tree); })
+      .catch(() => { /* the rail falls back to flat chips */ });
+
     return () => { active = false; };
+  }, []);
+
+  // Close the mega-menu on Escape, and on any outside pointer-down so it cannot
+  // be left hanging over the grid.
+  useEffect(() => {
+    if (!openMenu) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpenMenu(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openMenu]);
+
+  useEffect(() => () => {
+    if (menuCloseTimer.current) window.clearTimeout(menuCloseTimer.current);
+  }, []);
+
+  /**
+   * Hover with a small close delay.
+   *
+   * A bare `onMouseLeave` closes the panel in the few pixels between the chip and
+   * the panel below it, which makes the sub-categories impossible to reach. The
+   * timer gives the pointer time to travel down; entering the panel cancels it.
+   */
+  const openMegaMenu = useCallback((id: string) => {
+    if (menuCloseTimer.current) {
+      window.clearTimeout(menuCloseTimer.current);
+      menuCloseTimer.current = null;
+    }
+    setOpenMenu(id);
+  }, []);
+
+  const scheduleCloseMegaMenu = useCallback(() => {
+    if (menuCloseTimer.current) window.clearTimeout(menuCloseTimer.current);
+    menuCloseTimer.current = window.setTimeout(() => setOpenMenu(null), 160);
   }, []);
 
   /** Admin banners → carousel slides; built-in set is the fallback. */
@@ -735,7 +895,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    filters.q, filters.category, filters.minPrice, filters.maxPrice,
+    filters.q, filters.category, filters.subCategory, filters.minPrice, filters.maxPrice,
     filters.vendor, filters.vendorName, filters.sort,
   ]);
 
@@ -761,6 +921,22 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
     }
   };
 
+  const selectSubCategory = useCallback((primary: string, sub: string) => {
+    setOpenMenu(null);
+    setActiveSub(sub);
+    setSearchInput('');
+    setFilter({ category: primary, subCategory: sub, q: undefined });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [setFilter]);
+
+  const selectPrimaryCategory = useCallback((primary: string) => {
+    setOpenMenu(null);
+    setActiveSub(undefined);
+    setSearchInput('');
+    setFilter({ category: primary, subCategory: undefined, q: undefined });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [setFilter]);
+
   const submitSearch = (e?: React.FormEvent) => {
     e?.preventDefault();
     setFilter({ q: searchInput.trim() || undefined });
@@ -770,6 +946,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const clearAll = () => {
     setSearchInput('');
     setVendorQuery('');
+    setActiveSub(undefined);
+    setOpenMenu(null);
     setFilters({ sort: 'newest', page: 1, limit: PAGE_SIZE });
   };
 
@@ -846,6 +1024,20 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
   const topCategories = allCategories.tiles;
   const allProducts = useMemo(() => data?.products || [], [data?.products]);
+
+  /** Primary category name → live product count, for the mega-menu columns. */
+  const categoryCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const facet of data?.categories || []) map.set(facet.name.toLowerCase(), facet.product_count);
+    return map;
+  }, [data?.categories]);
+
+  /** Only primaries with children get a mega-menu; the rest stay plain links. */
+  const menuTreeByName = useMemo(() => {
+    const map = new Map<string, TaxonomyTree>();
+    for (const node of taxonomy) map.set(node.name.toLowerCase(), node);
+    return map;
+  }, [taxonomy]);
   const products = useMemo(
     () => (dealsOnly
       ? allProducts.filter((p) => Number((p as any).discount_percent || 0) > 0)
@@ -1121,14 +1313,17 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             stops a horizontal swipe at the end of the rail from triggering the
             browser's back-navigation gesture. */}
         <nav
-          className="border-t"
+          // `relative` anchors the absolutely-positioned mega-menu panel to the
+          // rail rather than to an individual (horizontally-scrolled) chip.
+          className="relative border-t"
           style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}
           aria-label="Marketplace categories"
+          onMouseLeave={scheduleCloseMegaMenu}
         >
           <div className="mx-auto flex max-w-[1400px] snap-x snap-mandatory items-center gap-1.5 overflow-x-auto overscroll-x-contain px-2 py-2 [scrollbar-width:none] lg:gap-1 lg:px-4 lg:py-1.5 [&::-webkit-scrollbar]:hidden">
             <button
               type="button"
-              onClick={() => setFilter({ category: undefined })}
+              onClick={() => { setOpenMenu(null); setActiveSub(undefined); setFilter({ category: undefined, subCategory: undefined }); }}
               // 44px tap height on mobile, compact on desktop.
               className={`flex shrink-0 snap-start items-center whitespace-nowrap rounded-full px-3.5 text-[12px] font-bold transition min-h-[36px] lg:min-h-0 lg:rounded-md lg:px-2.5 lg:py-1.5 ${
                 !filters.category ? 'text-white' : 'text-slate-600 active:bg-[#eef0ff] lg:hover:bg-[#f4f5ff]'
@@ -1137,19 +1332,52 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             >
               All categories
             </button>
-            {allCategories.rail.map((cat) => (
-              <button
-                key={cat.name}
-                type="button"
-                onClick={() => setFilter({ category: filters.category === cat.name ? undefined : cat.name })}
-                className={`flex shrink-0 snap-start items-center whitespace-nowrap rounded-full px-3.5 text-[12px] font-semibold transition min-h-[36px] lg:min-h-0 lg:rounded-md lg:px-2.5 lg:py-1.5 ${
-                  filters.category === cat.name ? 'text-white' : 'text-slate-600 active:bg-[#eef0ff] lg:hover:bg-[#f4f5ff]'
-                }`}
-                style={filters.category === cat.name ? { backgroundColor: THEME.brand } : { backgroundColor: '#f4f5ff' }}
-              >
-                {cat.name}
-              </button>
-            ))}
+            {allCategories.rail.map((cat) => {
+              const tree = menuTreeByName.get(cat.name.toLowerCase());
+              const isOpen = openMenu === cat.name;
+              const isActive = filters.category === cat.name;
+              return (
+                <div
+                  key={cat.name}
+                  className="shrink-0 snap-start"
+                  onMouseEnter={() => {
+                    // Only primaries with children open a panel; hovering a flat
+                    // chip closes whatever was open, matching Noon's behaviour.
+                    if (tree && tree.children.length > 0) openMegaMenu(cat.name);
+                    else setOpenMenu(null);
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      // Touch devices have no hover: the first tap opens the panel,
+                      // a second tap (or “Shop all”) applies the filter.
+                      if (tree && tree.children.length > 0 && !isOpen && !isTouchDevice()) {
+                        selectPrimaryCategory(cat.name);
+                      } else if (tree && tree.children.length > 0 && !isOpen) {
+                        openMegaMenu(cat.name);
+                      } else {
+                        selectPrimaryCategory(isActive ? '' : cat.name);
+                      }
+                    }}
+                    onFocus={() => {
+                      if (tree && tree.children.length > 0) openMegaMenu(cat.name);
+                    }}
+                    aria-haspopup={tree && tree.children.length > 0 ? 'menu' : undefined}
+                    aria-expanded={tree && tree.children.length > 0 ? isOpen : undefined}
+                    className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3.5 text-[12px] font-semibold transition min-h-[36px] lg:min-h-0 lg:rounded-md lg:px-2.5 lg:py-1.5 ${
+                      isActive ? 'text-white' : 'text-slate-600 active:bg-[#eef0ff] lg:hover:bg-[#f4f5ff]'
+                    }`}
+                    style={isActive || isOpen ? { backgroundColor: isActive ? THEME.brand : '#eef0ff', color: isActive ? '#fff' : THEME.brand } : { backgroundColor: '#f4f5ff' }}
+                  >
+                    {cat.name}
+                    {tree && tree.children.length > 0 && (
+                      <ChevronDown className={`hidden h-3 w-3 transition-transform lg:block ${isOpen ? 'rotate-180' : ''}`} />
+                    )}
+                  </button>
+                </div>
+              );
+            })}
             <span className="mx-1 h-4 w-px shrink-0" style={{ backgroundColor: THEME.line }} />
             <button
               type="button"
@@ -1169,6 +1397,21 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               <Sparkles className="h-3.5 w-3.5" /> New in
             </button>
           </div>
+
+          {/* ═════════ MEGA-MENU PANEL ═════════
+              Desktop only: on a phone the category drawer already lists every
+              sub-category, and a hover panel would fight the sticky header. */}
+          {openMenu && menuTreeByName.get(openMenu.toLowerCase()) && (
+            <div className="hidden lg:block" onMouseEnter={() => openMegaMenu(openMenu)}>
+              <MegaMenuPanel
+                node={menuTreeByName.get(openMenu.toLowerCase())!}
+                counts={categoryCounts}
+                onSelectSub={selectSubCategory}
+                onSelectPrimary={selectPrimaryCategory}
+                onClose={scheduleCloseMegaMenu}
+              />
+            </div>
+          )}
         </nav>
       </header>
 
@@ -1364,6 +1607,44 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       );
                     })}
                   </div>
+
+                  {/* Sub-categories of the selected primary, so the same
+                      narrowing is reachable without the mega-menu. */}
+                  {(() => {
+                    const tree = filters.category
+                      ? menuTreeByName.get(filters.category.toLowerCase())
+                      : undefined;
+                    if (!tree || tree.children.length === 0) return null;
+                    return (
+                      <div className="mt-2 border-t pt-2" style={{ borderColor: THEME.line }}>
+                        <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                          {tree.name} sub-categories
+                        </div>
+                        <div className="max-h-44 space-y-0.5 overflow-y-auto pr-1">
+                          {tree.children.map((sub) => {
+                            const selected = activeSub === sub.name;
+                            return (
+                              <button
+                                key={sub.id}
+                                type="button"
+                                onClick={() => {
+                                  if (selected) { setActiveSub(undefined); setFilter({ subCategory: undefined }); }
+                                  else selectSubCategory(tree.name, sub.name);
+                                }}
+                                className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[11.5px] transition ${
+                                  selected ? 'font-bold' : 'text-slate-500 hover:bg-slate-50'
+                                }`}
+                                style={selected ? { backgroundColor: '#eef0ff', color: THEME.brand } : undefined}
+                              >
+                                <span className="min-w-0 flex-1 truncate">{sub.name}</span>
+                                {selected && <Check className="h-3 w-3 shrink-0" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Price */}
@@ -1544,7 +1825,11 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 <h1 className="truncate text-[14px] font-black tracking-tight text-slate-900 sm:text-[15px]">
                   {filters.q
                     ? `Results for “${filters.q}”`
-                    : dealsOnly ? 'Today’s best deals' : filters.category || title}
+                    : dealsOnly
+                      ? 'Today’s best deals'
+                      : activeSub
+                        ? `${filters.category} › ${activeSub}`
+                        : filters.category || title}
                 </h1>
                 <p className="text-[11px] text-slate-500">
                   {loading
@@ -1577,7 +1862,12 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 {filters.q && (
                   <Chip label={`“${filters.q}”`} onRemove={() => { setSearchInput(''); setFilter({ q: undefined }); }} />
                 )}
-                {filters.category && <Chip label={filters.category} onRemove={() => setFilter({ category: undefined })} />}
+                {filters.category && (
+                  <Chip
+                    label={activeSub ? `${filters.category} › ${activeSub}` : filters.category}
+                    onRemove={() => { setActiveSub(undefined); setFilter({ category: undefined, subCategory: undefined }); }}
+                  />
+                )}
                 {(filters.minPrice != null || filters.maxPrice != null) && (
                   <Chip
                     label={`৳${filters.minPrice ?? 0} – ${filters.maxPrice != null ? bdt(filters.maxPrice) : '∞'}`}
@@ -2095,18 +2385,39 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               >
                 All categories
               </button>
-              {(data?.categories || []).map((cat) => (
-                <button
-                  key={cat.name}
-                  type="button"
-                  onClick={() => { setShowMenu(false); setFilter({ category: cat.name }); }}
-                  className="flex min-h-[48px] w-full items-center justify-between px-4 text-left text-[13.5px] font-semibold active:bg-slate-50"
-                  style={{ color: filters.category === cat.name ? THEME.brand : '#334155' }}
-                >
-                  <span className="truncate">{cat.name}</span>
-                  <span className="ml-2 text-[11px] text-slate-400">({cat.product_count})</span>
-                </button>
-              ))}
+              {allCategories.rail.map((cat) => {
+                const tree = menuTreeByName.get(cat.name.toLowerCase());
+                return (
+                  <div key={cat.name}>
+                    <button
+                      type="button"
+                      onClick={() => { setShowMenu(false); selectPrimaryCategory(cat.name); }}
+                      className="flex min-h-[48px] w-full items-center justify-between px-4 text-left text-[13.5px] font-semibold active:bg-slate-50"
+                      style={{ color: filters.category === cat.name ? THEME.brand : '#334155' }}
+                    >
+                      <span className="truncate">{cat.name}</span>
+                      <span className="ml-2 text-[11px] text-slate-400">({cat.product_count})</span>
+                    </button>
+                    {/* On mobile the drawer — not a hover panel — is where the
+                        sub-categories live, so they are listed inline here. */}
+                    {tree && tree.children.length > 0 && filters.category === cat.name && (
+                      <div className="pb-1 pl-4">
+                        {tree.children.map((sub) => (
+                          <button
+                            key={sub.id}
+                            type="button"
+                            onClick={() => { setShowMenu(false); selectSubCategory(cat.name, sub.name); }}
+                            className="flex min-h-[40px] w-full items-center justify-between rounded-md px-3 text-left text-[12.5px] active:bg-slate-50"
+                            style={{ color: activeSub === sub.name ? THEME.brand : '#64748b' }}
+                          >
+                            <span className="truncate">{sub.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
 
               {onGoToPlans && (
                 <>

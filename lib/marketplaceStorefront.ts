@@ -42,6 +42,7 @@
 import mongoose from 'mongoose';
 import { getMongoDb, DB_NAME } from './db.js';
 import { toJsonPlain } from './hybridDb.js';
+import { getPublicTaxonomyTree } from './categoryTaxonomy.js';
 
 export const MARKETPLACE_CONFIG_COLLECTION = 'marketplace_config';
 
@@ -563,19 +564,46 @@ export interface MarketplaceStorefrontConfig {
  */
 export async function getMarketplaceStorefrontConfig(): Promise<MarketplaceStorefrontConfig> {
   try {
-    const [bannerRes, categoryRes, strip, featured] = await Promise.all([
+    const [bannerRes, categoryRes, strip, featured, taxonomy] = await Promise.all([
       listMarketplaceBanners().catch(() => ({ ok: false, banners: DEFAULT_BANNERS, seeded: false })),
       listMarketplaceCategories().catch(() => ({ ok: false, categories: [] as MarketplaceCategory[], seeded: false })),
       getUtilityStrip().catch(() => DEFAULT_STRIP),
       getFeaturedConfig().catch(() => DEFAULT_FEATURED),
+      getPublicTaxonomyTree().catch(() => ({ ok: false, tree: [], flat: [] })),
     ]);
 
-    const categories = categoryRes.categories;
+    let categories = categoryRes.categories.filter((c) => c.isActive);
+
+    // THE TAXONOMY WINS ON NAMES AND ORDER.
+    //
+    // The two lists answer different questions: the taxonomy says what a product
+    // MAY be tagged with, the presentation list says what the rail SHOWS and how
+    // it is numbered. When a taxonomy exists it is the authority — otherwise an
+    // admin who renames "Fashion" → "Fashion & Lifestyle" in Master Categories
+    // would still see the old name in the rail, and the mega-menu would open onto
+    // categories the rail does not list (or vice versa).
+    if (taxonomy.tree.length > 0) {
+      const presentByName = new Map(categories.map((c) => [c.name.toLowerCase(), c]));
+      categories = taxonomy.tree.map((node, index) => {
+        const present = presentByName.get(node.name.toLowerCase());
+        const fallbackId = `tax-${node.slug}`;
+        return {
+          id: present?.id || fallbackId,
+          name: node.name,
+          emoji: node.emoji || present?.emoji,
+          image: node.image || present?.image,
+          isActive: true,
+          isFeatured: present?.isFeatured ?? true,
+          sortOrder: index,
+        };
+      });
+    } else if (categories.length === 0) {
+      categories = DEFAULT_MARKETPLACE_CATEGORIES.filter((c) => c.isActive);
+    }
+
     return {
       banners: (bannerRes.banners || []).filter((b) => b.isActive && (b.title || b.image)),
-      categories: categories.length > 0
-        ? categories.filter((c) => c.isActive)
-        : DEFAULT_MARKETPLACE_CATEGORIES.filter((c) => c.isActive),
+      categories,
       strip,
       featured,
       degraded: false,

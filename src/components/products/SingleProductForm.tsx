@@ -1,6 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../types';
-import { buildCategoryDbPayload, buildProductDbPayload, newCatalogId, postCatalogJson, toCatalogSlug } from '../../utils/catalogPayload';
+import { buildProductDbPayload, newCatalogId } from '../../utils/catalogPayload';
+import { fetchTaxonomy, type TaxonomyTree } from '../../lib/categoryTaxonomyApi';
 import { buildDeliveryFeeFields } from '../../utils/deliveryCharges';
 import {
   PRODUCT_DELIVERY_ZONES,
@@ -198,7 +199,74 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const [barcode, setBarcode] = useState(initialData?.barcode || '');
 
   const [customCategories, setCustomCategories] = useState<string[]>([]);
-  const [isCustomCategoryMode, setIsCustomCategoryMode] = useState<boolean>(false);
+
+  /* ── GLOBAL TAXONOMY (Super Admin owned) ──────────────────────────────
+     When the platform has a taxonomy, category becomes a MANDATORY two-step
+     dropdown (Category → Sub-category) instead of free text. That is the whole
+     point: one vocabulary, so the marketplace can build a real mega-menu and a
+     product can never be filed under "Fashion", "fashion" and "Cloths" at once.
+
+     The legacy free-text list is retained as a fallback ONLY when no taxonomy
+     has been published yet, so a merchant is never blocked from saving while
+     the operator is still setting the tree up. */
+  const [taxonomyTree, setTaxonomyTree] = useState<TaxonomyTree[]>([]);
+  const [taxonomyLoading, setTaxonomyLoading] = useState(true);
+  const [categoryId, setCategoryId] = useState<string>(initialData?.categoryId || initialData?.category_id || '');
+  const [subCategoryId, setSubCategoryId] = useState<string>(
+    (initialData as any)?.subCategoryId || (initialData as any)?.sub_category_id || '',
+  );
+  /**
+   * OPTIONAL merchant-owned label. It is written to `store_collection` and used
+   * ONLY for the merchant's own storefront grouping — it deliberately never
+   * reaches `category`, so it cannot pollute the global marketplace facets.
+   */
+  const [storeCollection, setStoreCollection] = useState<string>(
+    (initialData as any)?.storeCollection || (initialData as any)?.store_collection || '',
+  );
+
+  const hasTaxonomy = taxonomyTree.length > 0;
+
+  useEffect(() => {
+    let active = true;
+    fetchTaxonomy()
+      .then((res) => { if (active) setTaxonomyTree(res.tree); })
+      .finally(() => { if (active) setTaxonomyLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  // When the tree arrives, adopt an id for a legacy product that only carries a
+  // category NAME — otherwise opening an old product would show empty dropdowns
+  // and force the merchant to re-pick something they already chose.
+  useEffect(() => {
+    if (taxonomyTree.length === 0) return;
+    if (categoryId && subCategoryId) return;
+    const matchPrimary = (value: string) => {
+      const needle = value.trim().toLowerCase();
+      if (!needle) return null;
+      return taxonomyTree.find((n) => n.name.toLowerCase() === needle)
+        || taxonomyTree.find((n) => n.children.some((c) => c.name.toLowerCase() === needle));
+    };
+    const primary = matchPrimary(categoryId) || matchPrimary(category || '');
+    if (!primary) return;
+    setCategoryId(primary.id);
+    const subNeedle = String((initialData as any)?.subCategory || (initialData as any)?.sub_category || '').trim().toLowerCase();
+    const sub = subNeedle ? primary.children.find((c) => c.name.toLowerCase() === subNeedle) : undefined;
+    if (sub) setSubCategoryId(sub.id);
+    // Only run this reconciliation once, on the first tree load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taxonomyTree]);
+
+  const selectedPrimary = useMemo(
+    () => taxonomyTree.find((n) => n.id === categoryId) || null,
+    [taxonomyTree, categoryId],
+  );
+
+  /** "Fashion › Sarees & Jamdani" — what actually gets written as `category`. */
+  const taxonomyPathLabel = useMemo(() => {
+    if (!selectedPrimary) return '';
+    const sub = selectedPrimary.children.find((c) => c.id === subCategoryId);
+    return sub ? `${selectedPrimary.name} › ${sub.name}` : selectedPrimary.name;
+  }, [selectedPrimary, subCategoryId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -838,8 +906,27 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       return;
     }
 
-    const cleanCategory = category.trim();
-    if (!cleanCategory) {
+    // CATEGORY: from the global taxonomy when one exists (mandatory), else the
+    // merchant's legacy free-text list so nobody is blocked mid-migration.
+    let cleanCategory = category.trim();
+    let resolvedCategoryId = '';
+    let resolvedSubCategory = '';
+    let resolvedSubCategoryId = '';
+
+    if (hasTaxonomy) {
+      if (!selectedPrimary) {
+        setFormError('Please choose a category before saving.');
+        toast.error('A category is required.');
+        return;
+      }
+      const selectedSub = selectedPrimary.children.find((c) => c.id === subCategoryId);
+      resolvedCategoryId = selectedPrimary.id;
+      resolvedSubCategoryId = selectedSub?.id || '';
+      resolvedSubCategory = selectedSub?.name || '';
+      cleanCategory = resolvedSubCategory
+        ? `${selectedPrimary.name} › ${resolvedSubCategory}`
+        : selectedPrimary.name;
+    } else if (!cleanCategory) {
       setFormError('Please choose or type a category before saving.');
       toast.error('A category is required.');
       return;
@@ -881,24 +968,6 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
 
     // Set saving state after validation passes so the button is never stuck
     setSaveState(status === 'Draft' ? 'draft' : 'publish');
-    if (isCustomCategoryMode && category.trim()) {
-      try {
-        const newCat = buildCategoryDbPayload({
-          id: newCatalogId(),
-          name: category.trim(),
-          slug: toCatalogSlug(category.trim(), 'category'),
-          status: 'published',
-          parentId: null,
-        }, merchant);
-        void postCatalogJson('/api/categories', newCat).then(result => {
-          if (!result.ok) console.warn('Category sync skipped:', result.error);
-        });
-        // Supabase is a best-effort mirror; MongoDB is authoritative and a mirror
-        // failure must not be retried or block the product save path.
-      } catch (err) {
-        console.error('Error auto-saving new category:', err);
-      }
-    }
 
     const numericWeight = Number(weightKg) || 0.5;
     let finalWeightKg = numericWeight;
@@ -915,6 +984,13 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       sku,
       barcode,
       category: cleanCategory,
+      // Taxonomy ids make the tag unambiguous even after an admin rename; the
+      // sub-category is the second level of the marketplace mega-menu.
+      ...(resolvedCategoryId ? { categoryId: resolvedCategoryId, category_id: resolvedCategoryId } : {}),
+      ...(resolvedSubCategory ? { subCategory: resolvedSubCategory, sub_category: resolvedSubCategory } : {}),
+      ...(resolvedSubCategoryId ? { subCategoryId: resolvedSubCategoryId, sub_category_id: resolvedSubCategoryId } : {}),
+      // Merchant-only grouping label. Never feeds the global facets.
+      ...(storeCollection.trim() ? { storeCollection: storeCollection.trim(), store_collection: storeCollection.trim() } : {}),
       priceBDT: numSellingPrice,
       costPriceBDT: numCostPrice,
       compareAtPriceBDT: hasDiscount ? numComparePrice : undefined,
@@ -1318,57 +1394,120 @@ onClick={suggestPricing}
 
             {/* SKU, Weight & Category Grid */}
             <div className="pt-4 border-t border-[#2E3548] space-y-4">
-              {/* Categories Full-width Dropdown or Custom Input */}
-              <div>
-                <div className="flex justify-between items-center mb-1.5">
-                  <label className="block text-xs font-bold text-slate-300">
-                    Categories *
-                  </label>
-                  {customCategories.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setIsCustomCategoryMode(!isCustomCategoryMode)}
-                      className="text-[10px] font-bold text-[#00D68F] hover:underline cursor-pointer"
-                    >
-                      {isCustomCategoryMode ? 'Select from list' : 'Type custom category'}
-                    </button>
-                  )}
+              {/* GLOBAL CATEGORY — mandatory Category → Sub-category dropdowns */}
+              {taxonomyLoading ? (
+                <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading the global category tree…
                 </div>
-                {isCustomCategoryMode ? (
+              ) : hasTaxonomy ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                        Category *
+                      </label>
+                      <select
+                        required
+                        value={categoryId}
+                        onChange={(e) => {
+                          setCategoryId(e.target.value);
+                          // A sub-category belongs to exactly one primary, so
+                          // changing the primary must clear the old selection.
+                          setSubCategoryId('');
+                          const primary = taxonomyTree.find((n) => n.id === e.target.value);
+                          setCategory(primary?.name || '');
+                        }}
+                        className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00D68F] cursor-pointer"
+                      >
+                        <option value="" disabled>Select a category</option>
+                        {taxonomyTree.map((node) => (
+                          <option key={node.id} value={node.id}>
+                            {node.emoji ? `${node.emoji} ` : ''}{node.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                        Sub-category
+                      </label>
+                      <select
+                        value={subCategoryId}
+                        disabled={!selectedPrimary || selectedPrimary.children.length === 0}
+                        onChange={(e) => setSubCategoryId(e.target.value)}
+                        className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00D68F] cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                      >
+                        <option value="">
+                          {!selectedPrimary
+                            ? 'Choose a category first'
+                            : selectedPrimary.children.length === 0
+                              ? 'No sub-categories'
+                              : 'General (no sub-category)'}
+                        </option>
+                        {(selectedPrimary?.children || []).map((child) => (
+                          <option key={child.id} value={child.id}>
+                            {child.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {taxonomyPathLabel && (
+                    <p className="text-[11px] text-slate-400">
+                      Filed under{' '}
+                      <span className="font-bold text-[#00D68F]">{taxonomyPathLabel}</span>
+                      {' '}in the global marketplace.
+                      {selectedPrimary?.description ? ` ${selectedPrimary.description}` : ''}
+                    </p>
+                  )}
+
+                  {/* OPTIONAL MERCHANT-ONLY LABEL */}
+                  <div className="pt-1 border-t border-[#2E3548]">
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5 pt-3">
+                      Store Collection <span className="font-normal text-slate-500">(optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={storeCollection}
+                      onChange={(e) => setStoreCollection(e.target.value)}
+                      placeholder="e.g. Eid Special, Winter Drop, Best Sellers"
+                      maxLength={60}
+                      className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-[#00D68F]"
+                    />
+                    <p className="mt-1.5 text-[10px] text-slate-500 leading-relaxed">
+                      Groups products on <b>your own storefront only</b>. It never affects how the product
+                      appears in global marketplace filters.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                /* No taxonomy published yet — keep the merchant unblocked. */
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
+                    Category *
+                  </label>
                   <input
                     type="text"
                     required
                     value={category}
                     onChange={(e) => setCategory(e.target.value)}
-                    placeholder="Enter custom category name..."
+                    placeholder="Enter a category name…"
+                    list="legacy-category-options"
                     className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs font-bold text-white placeholder-slate-500 focus:outline-none focus:border-[#00D68F]"
                   />
-                ) : (
-                  <select
-                    required
-                    value={category}
-                    onChange={(e) => {
-                      if (e.target.value === '__custom__') {
-                        setIsCustomCategoryMode(true);
-                        setCategory('');
-                      } else {
-                        setCategory(e.target.value);
-                      }
-                    }}
-                    className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3.5 py-2.5 text-xs font-bold text-white focus:outline-none focus:border-[#00D68F] cursor-pointer"
-                  >
-                    <option value="" disabled>Select category</option>
-                    {customCategories.length === 0 ? (
-                      <option value="" disabled>No categories found - Create one first</option>
-                    ) : (
-                      customCategories.map((catName) => (
-                        <option key={catName} value={catName}>{catName}</option>
-                      ))
-                    )}
-                    <option value="__custom__">+ Type Custom Category...</option>
-                  </select>
-                )}
-              </div>
+                  <datalist id="legacy-category-options">
+                    {customCategories.map((catName) => (
+                      <option key={catName} value={catName} />
+                    ))}
+                  </datalist>
+                  <p className="mt-1.5 text-[10px] text-amber-400/80 leading-relaxed">
+                    The platform has not published a global category tree yet, so free-text entry is
+                    temporarily allowed. It will become a mandatory dropdown once categories are defined.
+                  </p>
+                </div>
+              )}
               </div>
 
           </div>

@@ -171,6 +171,14 @@ export interface MarketplaceQuery {
   /** Case-insensitive product search across title / sku / brand. */
   q?: string;
   category?: string;
+  /**
+   * Sub-category produced by the global taxonomy mega-menu ("Sarees &
+   * Jamdani"). Narrows WITHIN `category`; on its own it still matches, because
+   * a merchant may tag a sub-category whose primary is hidden from the rail.
+   */
+  subCategory?: string;
+  /** Product ids to exclude (the featured/deals rails already show them). */
+  excludeIds?: string[];
   minPrice?: number;
   maxPrice?: number;
   /** Vendor filter: slug, ZID-BD code or stores.id UUID. */
@@ -301,6 +309,20 @@ export async function searchMarketplaceProducts(query: MarketplaceQuery = {}): P
         ],
       });
     }
+    if (query.subCategory && query.subCategory.trim()) {
+      const sub = query.subCategory.trim();
+      and.push({
+        $or: [
+          { sub_category: sub }, { subCategory: sub },
+          { sub_category: new RegExp(`^${sub.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+          { sub_category_id: sub }, { subCategoryId: sub },
+        ],
+      });
+    }
+    if (Array.isArray(query.excludeIds) && query.excludeIds.length > 0) {
+      const ids = query.excludeIds.map(String).filter(Boolean).slice(0, 100);
+      and.push({ id: { $nin: ids } });
+    }
     const minPrice = Number.isFinite(query.minPrice as number) ? Number(query.minPrice) : null;
     const maxPrice = Number.isFinite(query.maxPrice as number) ? Number(query.maxPrice) : null;
     if (minPrice !== null || maxPrice !== null) {
@@ -405,6 +427,8 @@ function buildMarketplaceResult(
 
   const needle = String(query.q || '').trim().toLowerCase();
   const catNeedle = String(query.category || '').trim().toLowerCase();
+  const subNeedle = String(query.subCategory || '').trim().toLowerCase();
+  const excluded = new Set((query.excludeIds || []).map(String));
 
   for (const raw of Array.isArray(rows) ? rows : []) {
     if (!isPublicProduct(raw)) continue;
@@ -447,6 +471,12 @@ function buildMarketplaceResult(
     if (catNeedle && category.toLowerCase() !== catNeedle && String(raw.category_id || raw.categoryId || '').toLowerCase() !== catNeedle) {
       continue;
     }
+    if (subNeedle) {
+      const subName = String(raw.sub_category || raw.subCategory || '').toLowerCase();
+      const subId = String(raw.sub_category_id || raw.subCategoryId || '').toLowerCase();
+      if (subName !== subNeedle && subId !== subNeedle) continue;
+    }
+    if (excluded.size > 0 && excluded.has(id)) continue;
     if (query.minPrice != null && price < Number(query.minPrice)) continue;
     if (query.maxPrice != null && price > Number(query.maxPrice)) continue;
     if (query.vendor && query.vendor.trim()) {
@@ -472,13 +502,16 @@ function buildMarketplaceResult(
     }
 
     // ── Card presentation fields ────────────────────────────────────────
+    const subCategory = String(raw.sub_category || raw.subCategory || raw.subcategory || '').trim();
     const tagList: string[] = [category];
     const pushTag = (value: unknown) => {
       const t = String(value ?? '').trim();
       if (t && !tagList.some((existing) => existing.toLowerCase() === t.toLowerCase())) tagList.push(t);
     };
     if (Array.isArray(raw.tags)) raw.tags.forEach(pushTag);
-    pushTag(raw.subcategory ?? raw.sub_category);
+    // The taxonomy sub-category is the second level of the mega-menu, so it must
+    // always be present ahead of free-form tags.
+    pushTag(subCategory);
     pushTag(raw.brand);
 
     const compareAt = toNum(
@@ -509,6 +542,9 @@ function buildMarketplaceResult(
       store_id: String(raw.store_id || raw.storeId || vendorId),
       store_slug: vendorSlug || raw.store_slug || raw.storeSlug,
       category,
+      category_id: String(raw.category_id || raw.categoryId || ''),
+      sub_category: subCategory || null,
+      sub_category_id: String(raw.sub_category_id || raw.subCategoryId || ''),
       category_tags: tagList,
       compare_at_price: compareAt > price ? compareAt : null,
       discount_percent: discountPercent,

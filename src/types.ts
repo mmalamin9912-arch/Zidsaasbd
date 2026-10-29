@@ -118,6 +118,18 @@ export interface Product {
   category: string;
   categoryId?: string;
   category_id?: string;
+  /** Second level of the global taxonomy (mega-menu filter). */
+  subCategory?: string;
+  sub_category?: string;
+  subCategoryId?: string;
+  sub_category_id?: string;
+  /**
+   * Merchant-owned grouping label, shown on THAT store's storefront only.
+   * Deliberately separate from `category` so it never reaches the global
+   * marketplace facets.
+   */
+  storeCollection?: string;
+  store_collection?: string;
   priceBDT: number;
   costPriceBDT?: number;
   compareAtPriceBDT?: number;

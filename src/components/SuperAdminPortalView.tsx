@@ -9,6 +9,7 @@ import { readAndDownscaleImage } from '../utils/imageUtils';
 import { fetchAuditLogs } from '../lib/platformConfigApi';
 import { saveBroadcastDetailed } from '../lib/supportCommsApi';
 import { MarketplaceStudioPanel } from './admin/MarketplaceStudioPanel';
+import { MasterCategoryPanel } from './admin/MasterCategoryPanel';
 import {
   ShieldAlert,
   DollarSign,
@@ -69,6 +70,7 @@ import {
   Facebook,
   MessageCircle,
   Store,
+  FolderTree,
   Image
 } from 'lucide-react';
 import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, PlanFeatureFlags } from '../types';
@@ -351,7 +353,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   onUpdateRolePermissions
 }) => {
   const toast = useToast();
-  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace'>('analytics');
+  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy'>('analytics');
   const [openCategory, setOpenCategory] = useState<string | null>(null);
 
   // New modal state for creating merchant
@@ -2290,7 +2292,7 @@ onUpdateMerchant(updatedCurrent);
           // Falls back to the in-memory merchant list before the request resolves.
           const totalMerchantAccounts = merchantCounts.all || allMerchants.length;
 
-          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace';
+          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy';
 
           interface NavSubItem {
             id: SubTabKey;
@@ -2344,6 +2346,7 @@ onUpdateMerchant(updatedCurrent);
               icon: Store,
               items: [
                 { id: 'marketplace', label: 'Marketplace Studio', icon: Store },
+                { id: 'taxonomy', label: 'Master Categories', icon: FolderTree },
               ]
             },
             {
@@ -4237,6 +4240,9 @@ onUpdateMerchant(updatedCurrent);
         {/* MARKETPLACE STUDIO — the public marketplace front door's content */}
         {activeSubTab === 'marketplace' && <MarketplaceStudioPanel />}
 
+        {/* MASTER CATEGORIES — the global taxonomy merchants must file products under */}
+        {activeSubTab === 'taxonomy' && <MasterCategoryPanel />}
+
         {/* 10. ADD-ONS MANAGER TAB */}
         {activeSubTab === 'addons' && (
           <div className="space-y-6">
@@ -4451,7 +4457,7 @@ onUpdateMerchant(updatedCurrent);
                           <span className="text-[9px] text-slate-500">{rp.allowedTabs.length} Tabs Allowed</span>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                          {['analytics', 'merchants', 'support', 'broadcast', 'addons', 'gateways', 'plans', 'themes', 'announcements', 'marketplace'].map(tabId => (
+                          {['analytics', 'merchants', 'support', 'broadcast', 'addons', 'gateways', 'plans', 'themes', 'announcements', 'marketplace', 'taxonomy'].map(tabId => (
                             <div
                               key={tabId}
                               onClick={() => handleTogglePermission(rp.role, tabId)}

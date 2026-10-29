@@ -19,6 +19,10 @@ import type { MarketplaceProduct, VendorPayout, CommissionRate } from '../types'
 export interface MarketplaceFilters {
   q?: string;
   category?: string;
+  /** Second level of the global taxonomy mega-menu ("Sarees & Jamdani"). */
+  subCategory?: string;
+  /** Product ids already shown elsewhere (e.g. the featured rail). */
+  excludeIds?: string[];
   minPrice?: number | null;
   maxPrice?: number | null;
   /** Vendor slug / ZID-BD code / stores.id UUID. */
@@ -72,6 +76,10 @@ export function buildMarketplaceQuery(filters: MarketplaceFilters): string {
   };
   set('q', filters.q?.trim());
   set('category', filters.category?.trim());
+  set('sub_category', filters.subCategory?.trim());
+  if (Array.isArray(filters.excludeIds) && filters.excludeIds.length > 0) {
+    params.set('exclude_ids', filters.excludeIds.map(String).filter(Boolean).join(','));
+  }
   set('min_price', filters.minPrice);
   set('max_price', filters.maxPrice);
   set('vendor', filters.vendor?.trim());

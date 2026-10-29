@@ -49,6 +49,10 @@ export function mapApiProduct(raw: any): any {
     sku: raw.sku || '',
     category: raw.category || raw.category_name || 'General',
     categoryId: raw.categoryId || raw.category_id || '',
+    subCategory: raw.subCategory || raw.sub_category || '',
+    subCategoryId: raw.subCategoryId || raw.sub_category_id || '',
+    // Merchant-only storefront grouping — never used for marketplace filters.
+    storeCollection: raw.storeCollection || raw.store_collection || '',
     priceBDT: Number(raw.priceBDT ?? raw.price ?? raw.price_bdt ?? 0),
     costPriceBDT: raw.costPriceBDT != null ? Number(raw.costPriceBDT) : (raw.cost_price != null ? Number(raw.cost_price) : undefined),
     compareAtPriceBDT: raw.compareAtPriceBDT != null ? Number(raw.compareAtPriceBDT) : (raw.compare_at_price != null ? Number(raw.compare_at_price) : undefined),
@@ -196,6 +200,15 @@ export function buildProductDbPayload(product: any, merchant?: { id?: string; st
     merchant_id: merchantId,
     category: product.category || 'General',
     categoryId: product.categoryId || product.category_id || '',
+    // Global taxonomy second level. Carried on BOTH spellings so the marketplace
+    // query and the storefront can each read the one they already use.
+    sub_category: product.subCategory || product.sub_category || '',
+    subCategory: product.subCategory || product.sub_category || '',
+    sub_category_id: product.subCategoryId || product.sub_category_id || '',
+    subCategoryId: product.subCategoryId || product.sub_category_id || '',
+    // Merchant-owned grouping label. Storefront-only; the marketplace ignores it.
+    store_collection: product.storeCollection || product.store_collection || '',
+    storeCollection: product.storeCollection || product.store_collection || '',
     status: product.status || 'active',
     is_published: product.is_published !== false,
     sku: product.sku || '',

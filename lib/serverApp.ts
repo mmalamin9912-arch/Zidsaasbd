@@ -155,6 +155,19 @@ import {
 // `marketplace_config` collection so the PUBLIC read never exposes the
 // platform_config document (which carries gateway secrets). See
 // lib/marketplaceStorefront.ts.
+// Global category taxonomy: the Super-Admin-owned two-level tree every merchant
+// picks from and every marketplace filter resolves against. See
+// lib/categoryTaxonomy.ts.
+import {
+  listTaxonomyNodes,
+  getPublicTaxonomyTree,
+  loadTaxonomyLookup,
+  createTaxonomyNode,
+  updateTaxonomyNode,
+  deleteTaxonomyNode,
+  reorderTaxonomyNodes,
+  seedStarterTaxonomy,
+} from './categoryTaxonomy.js';
 import {
   getMarketplaceStorefrontConfig,
   listMarketplaceBanners,
@@ -782,6 +795,10 @@ const productSchema = new mongoose.Schema({
   stock: Number,
   category: String,
   category_id: String,
+  // Global taxonomy second level + the merchant's own storefront grouping label.
+  sub_category: String,
+  sub_category_id: String,
+  store_collection: String,
   image_url: String,
   image: String,
   status: String,
@@ -16250,6 +16267,10 @@ app.get('/api/marketplace/products', async (req, res) => {
     const result = await searchMarketplaceProducts({
       q: str(req.query.q ?? req.query.search ?? req.query.query),
       category: str(req.query.category ?? req.query.category_id),
+      subCategory: str(req.query.sub_category ?? req.query.subCategory ?? req.query.sub_category_id),
+      excludeIds: typeof req.query.exclude_ids === 'string'
+        ? req.query.exclude_ids.split(',').map((v) => v.trim()).filter(Boolean)
+        : undefined,
       minPrice: num(req.query.min_price ?? req.query.minPrice),
       maxPrice: num(req.query.max_price ?? req.query.maxPrice),
       vendor: str(req.query.vendor ?? req.query.vendor_id ?? req.query.store_slug),
@@ -16732,6 +16753,106 @@ app.get('/api/admin/marketplace/products', async (req, res) => {
     limit: Number(req.query.limit) || 30,
   });
   return res.status(200).json(result);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GLOBAL CATEGORY TAXONOMY
+//
+// The canonical two-level tree (primary → sub-category → sub-type) that replaces
+// free-text categories. One vocabulary for every merchant, so the marketplace
+// can build a real mega-menu instead of a list of near-duplicate spellings.
+//
+// PUBLIC (merchant product form + marketplace mega-menu):
+//   GET  /api/taxonomy            → nested active tree
+//
+// ADMIN (Super Admin → Master Categories):
+//   GET  /api/admin/taxonomy      → every node incl. hidden, flat + tree
+//   POST /api/admin/taxonomy      → create (parentId omitted = primary)
+//   PATCH /api/admin/taxonomy/:id → rename / move / hide / artwork
+//   DELETE /api/admin/taxonomy/:id
+//   POST /api/admin/taxonomy/reorder
+//   POST /api/admin/taxonomy/seed → install the starter tree
+// ═════════════════════════════════════════════════════════════════════════════
+
+app.get('/api/taxonomy', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const result = await getPublicTaxonomyTree();
+    return res.status(200).json({ ok: result.ok, tree: result.tree, flat: result.flat, error: result.error ?? null });
+  } catch (err: any) {
+    console.error('[Server] GET /api/taxonomy error:', err);
+    return res.status(200).json({ ok: false, tree: [], flat: [], error: err?.message || 'Taxonomy unavailable.' });
+  }
+});
+
+app.get('/api/admin/taxonomy', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await listTaxonomyNodes();
+  const tree = result.ok ? (await getPublicTaxonomyTree()).tree : [];
+  return res.status(200).json({ ok: result.ok, nodes: result.nodes, tree, error: result.error ?? null });
+});
+
+app.post('/api/admin/taxonomy', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await createTaxonomyNode(req.body || {});
+  return res.status(200).json(result);
+});
+
+// `reorder` and `seed` are declared BEFORE `/:id` so Express does not treat the
+// literal words as ids.
+app.post('/api/admin/taxonomy/reorder', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
+  const result = await reorderTaxonomyNodes(entries);
+  return res.status(200).json(result);
+});
+
+app.post('/api/admin/taxonomy/seed', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await seedStarterTaxonomy();
+  return res.status(200).json(result);
+});
+
+app.patch('/api/admin/taxonomy/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const id = String(req.params.id || '');
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const result = await updateTaxonomyNode({ ...body, id });
+  return res.status(200).json(result);
+});
+
+// PUT behaves like PATCH for callers that only speak PUT.
+app.put('/api/admin/taxonomy/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const id = String(req.params.id || '');
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const result = await updateTaxonomyNode({ ...body, id });
+  return res.status(200).json(result);
+});
+
+app.delete('/api/admin/taxonomy/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await deleteTaxonomyNode(String(req.params.id || ''));
+  return res.status(200).json(result);
+});
+
+// Resolve a merchant's dropdown selection into the exact product tag fields.
+// Used by the product form before save so the client never has to duplicate the
+// "which primary does this sub-category belong to" logic.
+app.post('/api/taxonomy/resolve', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const lookup = await loadTaxonomyLookup();
+    if (lookup.nodes.length === 0) {
+      return res.status(200).json({ ok: false, error: 'No global taxonomy is configured yet.' });
+    }
+    const { resolveProductTaxonomy } = await import('./categoryTaxonomy.js');
+    const resolved = resolveProductTaxonomy(lookup, body as any);
+    return res.status(200).json({ ok: Boolean(resolved.category), ...resolved });
+  } catch (err: any) {
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not resolve the category.' });
+  }
 });
 
 // ── PUT / PATCH /api/orders/:id — update status / payment_status ──────────────
