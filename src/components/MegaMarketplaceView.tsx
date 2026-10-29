@@ -26,6 +26,7 @@ import {
   SlidersHorizontal, X, Star, Truck, ShieldCheck, BadgePercent, Loader2,
   MapPin, TruckIcon, HeadphonesIcon, RotateCcw, Check, Plus, Minus,
   LayoutGrid, Flame, Sparkles, ArrowRight, Menu, ArrowUpDown,
+  Heart, Receipt, Globe,
 } from 'lucide-react';
 import SafeImage from './SafeImage';
 import { useToast } from './ToastProvider';
@@ -46,6 +47,7 @@ import {
 } from '../lib/marketplaceStorefrontApi';
 import { fetchTaxonomy, type TaxonomyTree } from '../lib/categoryTaxonomyApi';
 import { useMarketplaceBasket } from '../lib/useMarketplaceBasket';
+import { useMarketplaceWishlist } from '../lib/useMarketplaceWishlist';
 import type { MarketplaceProduct } from '../types';
 
 /* ─────────────────────────── platform palette ───────────────────────────
@@ -68,6 +70,59 @@ const THEME = {
 } as const;
 
 const bdt = (value: number) => `৳${Math.round(Number(value) || 0).toLocaleString('en-US')}`;
+
+/**
+ * Delivery destinations offered by the header's location selector.
+ *
+ * A short, high-traffic list rather than all 64 districts: the selector's job is
+ * to make the delivery promise concrete and to feel local, and a 64-item menu
+ * in a header dropdown is unusable. The full set is reachable at checkout.
+ */
+const DISTRICT_PRESETS = [
+  'Dhaka', 'Chattogram', 'Sylhet', 'Khulna', 'Rajshahi',
+  'Barishal', 'Rangpur', 'Mymensingh', 'Cumilla', 'Narayanganj',
+] as const;
+
+/**
+ * Search placeholders that rotate with the catalogue stop.
+ *
+ * A static "Search every store…" teaches a first-time shopper nothing about
+ * what is actually for sale. Rotating real category names doubles as discovery.
+ */
+const SEARCH_PLACEHOLDERS = [
+  'Search sarees, panjabi, phones, gadgets…',
+  'Search across 1,000+ verified stores…',
+  'Try “jamdani”, “smart watch”, “rice”…',
+  'Search every store — one basket, delivered nationwide…',
+] as const;
+
+/**
+ * Display name for a category.
+ *
+ * Category names are stored lower-case ("fashion", "electronics") because the
+ * taxonomy uses them as a case-insensitive join key against product rows. That
+ * is right for matching and wrong for display: a tile reading "fashion" next to
+ * "Sports" looks like a data-entry slip. This title-cases ONLY the rendering;
+ * the underlying value — and every filter, facet and product tag — is untouched.
+ */
+function displayCategory(name: string): string {
+  const raw = String(name || '').trim();
+  if (!raw) return raw;
+  // Words that stay lower-case in title case (English convention).
+  const MINOR = new Set(['and', 'or', 'the', 'of', 'for', 'a', 'an', 'to', 'in', 'on', 'with']);
+  return raw
+    .split(/\s+/)
+    .map((word, i) => {
+      // Leave already-upper-case acronyms alone ("SME", "TV").
+      if (word.length > 1 && word === word.toUpperCase()) return word;
+      // Leave mixed-case words alone ("iPhone", "McDonald") — the admin chose them.
+      if (word !== word.toLowerCase() && word !== word.toUpperCase()) return word;
+      const lower = word.toLowerCase();
+      if (i > 0 && MINOR.has(lower)) return lower;
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(' ');
+}
 
 /**
  * True on touch-only devices, where `hover` never fires.
@@ -206,7 +261,10 @@ const ProductCard: React.FC<{
   onAdd: (product: MarketplaceProduct) => void;
   onVisitVendor: (slug: string) => void;
   onOpenProduct: (product: MarketplaceProduct) => void;
-}> = ({ product, onAdd, onVisitVendor, onOpenProduct }) => {
+  /** True when this product is already saved to the shopper's wishlist. */
+  isWishlisted?: boolean;
+  onToggleWishlist?: (product: MarketplaceProduct) => void;
+}> = ({ product, onAdd, onVisitVendor, onOpenProduct, isWishlisted, onToggleWishlist }) => {
   const p = product as any;
   const image = p.image || p.image_url || p.imageUrl || p.thumbnail;
   const compareAt = Number(p.compare_at_price || 0);
@@ -261,6 +319,22 @@ const ProductCard: React.FC<{
           </span>
         )}
       </button>
+
+      {/* WISHLIST TOGGLE — a sibling of the media button, not a child: a button
+          nested inside a button is invalid HTML and swallows the click. */}
+      {onToggleWishlist && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleWishlist(product); }}
+          aria-pressed={Boolean(isWishlisted)}
+          aria-label={isWishlisted ? `Remove ${product.title} from wishlist` : `Save ${product.title} to wishlist`}
+          className="absolute right-2 top-2 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 shadow-sm ring-1 ring-black/5 transition hover:scale-105"
+        >
+          <Heart
+            className={`h-4 w-4 transition-colors ${isWishlisted ? 'fill-[#e11d48] text-[#e11d48]' : 'text-slate-500'}`}
+          />
+        </button>
+      )}
 
       <div className="flex min-w-0 flex-1 flex-col gap-1.5 p-2 sm:p-3">
         {/* Dynamic category tags — ONE line on mobile so the card height stays
@@ -377,7 +451,9 @@ const HeroCarousel: React.FC<{
   return (
     <section
       aria-label="Platform promotions"
-      className="relative overflow-hidden rounded-2xl"
+      // A single rounded surface for the whole component: the slide, the arrows
+      // and the dots all sit inside this radius, so nothing overflows a corner.
+      className="relative overflow-hidden rounded-2xl shadow-[0_10px_34px_-18px_rgba(17,24,39,0.42)] ring-1 ring-black/[0.04] sm:rounded-3xl"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
     >
@@ -422,11 +498,13 @@ const HeroCarousel: React.FC<{
           <button
             type="button"
             onClick={() => onCta(slide)}
-            className="mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-xl px-4 text-[12.5px] font-black text-slate-900 shadow-lg transition-transform active:scale-[0.98] sm:mt-5 sm:px-5 sm:text-[13px]"
-            style={{ backgroundColor: THEME.accent }}
+            // Amber on near-black text is the highest-contrast pairing available
+            // on every gradient in the preset list. A crisp hairline ring keeps
+            // the edge defined where the button meets a light slide.
+            className="group/cta mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-full bg-[#ff9f1c] px-5 text-[12.5px] font-black text-slate-900 shadow-[0_6px_18px_-6px_rgba(0,0,0,0.5)] ring-1 ring-white/25 transition-all duration-200 hover:bg-[#ffb03f] hover:shadow-[0_8px_22px_-6px_rgba(0,0,0,0.55)] active:scale-[0.98] sm:mt-5 sm:px-6 sm:text-[13px]"
           >
             {slide.cta}
-            <ArrowRight className="h-4 w-4" />
+            <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover/cta:translate-x-0.5" />
           </button>
         </div>
       </div>
@@ -456,24 +534,32 @@ const HeroCarousel: React.FC<{
               <ChevronRight className="h-4 w-4" />
             </span>
           </button>
-          {/* Dots: 44px tall tap targets wrapping a small visual indicator. */}
-          <div className="absolute bottom-0 left-1/2 z-20 flex -translate-x-1/2 items-center">
-            {slides.map((s, i) => (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => setIndex(i)}
-                aria-label={`Go to promotion ${i + 1}`}
-                aria-current={i === index}
-                className="flex h-11 w-9 items-center justify-center"
-              >
-                <span
-                  className={`h-1.5 rounded-full transition-all ${
-                    i === index ? 'w-6 bg-white' : 'w-1.5 bg-white/50'
-                  }`}
-                />
-              </button>
-            ))}
+          {/* Pagination dots. The tappable button stays 44px tall (legal touch
+              target) but sits in a small translucent pill on a scrim, so the
+              indicators stay visible over a bright hero photograph as well as a
+              gradient. The ACTIVE dot elongates rather than only brightening —
+              at 6px a colour-only change is invisible on a busy image. */}
+          <div className="absolute inset-x-0 bottom-2 z-20 flex justify-center sm:bottom-4">
+            <div className="flex items-center rounded-full bg-black/25 px-1.5 backdrop-blur-sm">
+              {slides.map((s, i) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setIndex(i)}
+                  aria-label={`Go to promotion ${i + 1}`}
+                  aria-current={i === index}
+                  className="flex h-9 w-8 items-center justify-center"
+                >
+                  <span
+                    className={`rounded-full transition-all duration-300 ${
+                      i === index
+                        ? 'h-1.5 w-6 bg-white shadow-[0_0_6px_rgba(255,255,255,0.6)]'
+                        : 'h-1.5 w-1.5 bg-white/55 hover:bg-white/80'
+                    }`}
+                  />
+                </button>
+              ))}
+            </div>
           </div>
         </>
       )}
@@ -616,29 +702,57 @@ const CategoryTile: React.FC<{
   emoji: string;
   /** Admin-uploaded cover, used instead of the emoji when present. */
   image?: string;
-}> = ({ name, count, active, onClick, emoji, image }) => (
+}> = ({ name: rawName, count, active, onClick, emoji, image }) => {
+  const name = displayCategory(rawName);
+  return (
   <button
     type="button"
     onClick={onClick}
-    className={`flex min-w-[92px] flex-col items-center gap-2 rounded-xl border px-3 py-3 transition-all ${
-      active ? 'shadow-sm' : 'hover:-translate-y-0.5 hover:shadow-sm'
+    aria-pressed={active}
+    // Pure white at rest (a tinted card read as "selected" even when nothing was
+    // selected), with the accent reserved for the active tile. Hover lifts a hair
+    // and deepens the border rather than moving the card, so a row of nine stays
+    // visually calm.
+    //
+    // SIZE IS FIXED, NOT DISTRIBUTED. Stretching these (`flex-1`) was wrong: with
+    // two categories each tile grew to 240x145, a big empty card around a 56px
+    // circle, and with nine they were cramped. A fixed 112x124 tile reads the
+    // same row whether there are two categories or twenty, and a short row simply
+    // ends early — which is the normal e-commerce pattern, not a defect.
+    className={`group flex h-[124px] w-[112px] shrink-0 flex-col items-center justify-start rounded-2xl border bg-white px-2 py-3 transition-all duration-200 ${
+      active
+        ? 'border-transparent shadow-[0_2px_10px_-2px_rgba(59,47,214,0.28)] ring-2 ring-[#3b2fd6]'
+        : 'border-[#e5e7eb] hover:-translate-y-0.5 hover:border-[#c7cbf5] hover:shadow-[0_10px_22px_-10px_rgba(17,24,39,0.28)]'
     }`}
-    style={{
-      borderColor: active ? THEME.brand : THEME.line,
-      backgroundColor: active ? '#eef0ff' : THEME.surface,
-    }}
+    style={active ? { backgroundColor: '#f5f6ff' } : undefined}
   >
-    <span className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-[#f2f4ff] text-xl">
+    {/* Fixed 56px circle so every tile in the row has identical optical weight.
+        `shrink-0` + a fixed box stops a wide source image (a photo rather than
+        an icon) from stretching the circle into an ellipse. */}
+    <span
+      className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#f4f5fb] text-[26px] leading-none"
+      aria-hidden="true"
+    >
       {image ? (
-        <SafeImage src={image} alt={name} className="h-full w-full object-cover" />
+        <SafeImage src={image} alt="" className="h-full w-full object-cover" />
       ) : (
         emoji
       )}
     </span>
-    <span className="max-w-[84px] truncate text-center text-[11px] font-bold text-slate-700">{name}</span>
-    <span className="text-[10px] text-slate-400">({count})</span>
+    {/* Two lines are allowed with balanced wrapping; `break-words` keeps a long
+        single word from overrunning the tile, and the fixed `h-7` block stops a
+        one-line name from making that tile 14px shorter than its neighbours. */}
+    <span
+      className="mt-2 flex h-7 w-full max-w-[150px] items-center justify-center text-center text-[11.5px] font-semibold leading-[1.15] tracking-[-0.01em] text-slate-700 [text-wrap:balance]"
+    >
+      <span className="line-clamp-2 break-words">{name}</span>
+    </span>
+    <span className="mt-1 text-[10px] font-medium leading-none tabular-nums text-slate-400">
+      {count} {count === 1 ? 'item' : 'items'}
+    </span>
   </button>
-);
+  );
+};
 
 /** Deterministic emoji per category name, so tiles never flicker between loads. */
 function categoryEmoji(name: string): string {
@@ -825,9 +939,95 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const [showBasket, setShowBasket] = useState(false);
+  const [showWishlist, setShowWishlist] = useState(false);
   // Mobile navigation: hamburger drawer + collapsible search field.
   const [showMenu, setShowMenu] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+
+  /* ── Noon-style header controls ────────────────────────────────────────
+     Location, language and the account menu are all shopper PREFERENCES, so
+     they persist in localStorage and survive a reload. They are presentation
+     only: the language switch changes the chrome's copy direction, not the
+     catalogue, which is stored bilingually (title + titleBn) either way. */
+  const [showLocation, setShowLocation] = useState(false);
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const [showLangMenu, setShowLangMenu] = useState(false);
+  const [deliverTo, setDeliverTo] = useState<string>(() => {
+    try { return localStorage.getItem('zid_marketplace_deliver_to') || 'Dhaka'; } catch { return 'Dhaka'; }
+  });
+  const [language, setLanguage] = useState<'en' | 'bn'>(() => {
+    try { return (localStorage.getItem('zid_marketplace_lang') as 'en' | 'bn') || 'en'; } catch { return 'en'; }
+  });
+
+  const wishlist = useMarketplaceWishlist();
+
+  /* Rotating search placeholder. Advances every 4s, but PAUSES once the shopper
+     starts typing so a half-written query is never silently replaced — and stops
+     entirely for `prefers-reduced-motion` users. */
+  const [placeholderIndex, setPlaceholderIndex] = useState(0);
+  const prefersReducedMotion = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  useEffect(() => {
+    if (searchInput || prefersReducedMotion) return;
+    const id = window.setInterval(
+      () => setPlaceholderIndex((i) => (i + 1) % SEARCH_PLACEHOLDERS.length),
+      4000,
+    );
+    return () => window.clearInterval(id);
+  }, [searchInput, prefersReducedMotion]);
+
+  /**
+   * The scoped search placeholder.
+   *
+   * When a category is active the field says "Search in Fashion" — the header's
+   * search then narrows WITHIN that category because `filters.category` is part
+   * of the query the submit builds. That is the Noon behaviour, and it is why the
+   * placeholder is derived rather than fixed.
+   */
+  const searchPlaceholder = useMemo(() => {
+    if (filters.category) return `Search in ${displayCategory(filters.category)}…`;
+    return SEARCH_PLACEHOLDERS[placeholderIndex] || SEARCH_PLACEHOLDERS[0];
+  }, [filters.category, placeholderIndex]);
+
+  const pickLocation = (zone: string) => {
+    setDeliverTo(zone);
+    try { localStorage.setItem('zid_marketplace_deliver_to', zone); } catch { /* private mode */ }
+    setShowLocation(false);
+  };
+
+  const pickLanguage = (lang: 'en' | 'bn') => {
+    setLanguage(lang);
+    try { localStorage.setItem('zid_marketplace_lang', lang); } catch { /* private mode */ }
+    setShowLangMenu(false);
+  };
+
+  // Any click outside the open header popover closes it. One listener for all
+  // three menus rather than one per menu, and registered only while one is open.
+  const headerMenusRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const anyOpen = showLocation || showAccountMenu || showLangMenu;
+    if (!anyOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (headerMenusRef.current && !headerMenusRef.current.contains(e.target as Node)) {
+        setShowLocation(false);
+        setShowAccountMenu(false);
+        setShowLangMenu(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowLocation(false);
+        setShowAccountMenu(false);
+        setShowLangMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [showLocation, showAccountMenu, showLangMenu]);
   // Which bottom sheet is open on mobile: filters/sort, or the category list.
   const [showFilterSheet, setShowFilterSheet] = useState(false);
   // "Deals" narrows the grid to products the merchant actually discounted
@@ -843,12 +1043,12 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   // Lock body scroll while a mobile overlay is open, so the page behind a
   // drawer/bottom sheet cannot scroll away from the user's thumb.
   useEffect(() => {
-    const anyOpen = showMenu || showBasket || showFilterSheet || Boolean(activeProduct);
+    const anyOpen = showMenu || showBasket || showWishlist || showFilterSheet || Boolean(activeProduct);
     if (!anyOpen) return;
     const previous = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => { document.body.style.overflow = previous; };
-  }, [showMenu, showBasket, showFilterSheet, activeProduct]);
+  }, [showMenu, showBasket, showWishlist, showFilterSheet, activeProduct]);
 
   // The document body is dark (#0f172a) for the merchant dashboard, so the
   // marketplace's light surface must own the whole viewport — otherwise the
@@ -1016,13 +1216,30 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
     const ordered = [...rail, ...extras];
     return {
+      // The rail keeps empties: it is navigation, and an admin may legitimately
+      // stage a category there before stock arrives.
       rail: ordered.slice(0, 20),
-      tiles: ordered.filter((c) => c.isFeatured).slice(0, 12),
+      tiles: ordered.filter((c) => c.isFeatured),
       configured: true,
     };
   }, [data?.categories, storefront.categories]);
 
-  const topCategories = allCategories.tiles;
+  /*
+   * "Shop by category" TILES: only categories that can actually be shopped.
+   *
+   * A tile reading "0 items" is worse than an absent tile — it advertises an
+   * empty aisle. The category is still reachable from the rail above (where it
+   * is a navigation affordance, not a promise of stock) and disappears from this
+   * promotional row until its first product lands.
+   *
+   * A product count of 0 is also what an un-tagged or brand-new admin category
+   * reports, so this doubles as the guard that keeps a freshly created category
+   * from appearing as a broken tile on the storefront.
+   */
+  const topCategories = useMemo(
+    () => allCategories.tiles.filter((cat) => cat.product_count > 0).slice(0, 12),
+    [allCategories.tiles],
+  );
   const allProducts = useMemo(() => data?.products || [], [data?.products]);
 
   /** Primary category name → live product count, for the mega-menu columns. */
@@ -1048,6 +1265,13 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const handleAdd = (product: MarketplaceProduct) => {
     basket.add(product, 1);
     toast.success('Added to basket', { description: `${product.title} — ${product.vendor_name}` });
+  };
+
+  const handleToggleWishlist = (product: MarketplaceProduct) => {
+    const saved = wishlist.toggle(product, 1);
+    toast.success(saved ? 'Saved to wishlist' : 'Removed from wishlist', {
+      description: product.title,
+    });
   };
 
   const handleHeroCta = (slide: HeroSlide) => {
@@ -1146,9 +1370,26 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
           <button
             type="button"
+            onClick={() => setShowWishlist(true)}
+            className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-700 active:bg-[#f4f5ff]"
+            aria-label={`Wishlist, ${wishlist.count} saved items`}
+          >
+            <Heart className="h-5 w-5" />
+            {wishlist.count > 0 && (
+              <span
+                className="absolute right-1 top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[9px] font-black text-white"
+                style={{ backgroundColor: THEME.danger }}
+              >
+                {wishlist.count > 99 ? '99+' : wishlist.count}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={() => setShowBasket(true)}
             className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-700 active:bg-[#f4f5ff]"
-            aria-label={`Basket, ${basket.itemCount} items`}
+            aria-label={`Cart, ${basket.itemCount} items`}
           >
             <ShoppingBasket className="h-5 w-5" />
             {basket.itemCount > 0 && (
@@ -1174,7 +1415,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 ref={searchRef}
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                placeholder="Search every store…"
+                placeholder={searchPlaceholder}
                 aria-label="Search the marketplace"
                 autoFocus
                 className="min-w-0 flex-1 px-2 py-3 text-[14px] text-slate-800 placeholder:text-slate-400 focus:outline-none"
@@ -1201,8 +1442,11 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
         )}
 
         {/* ── DESKTOP HEADER ROW (lg and up) ─────────────────────────── */}
-        <div className="mx-auto hidden max-w-[1400px] items-center gap-3 px-4 py-3 lg:flex">
-          {/* Brand */}
+        <div
+          ref={headerMenusRef}
+          className="mx-auto hidden max-w-[1400px] items-center gap-4 px-4 py-2.5 lg:flex"
+        >
+          {/* ── LEFT: brand + location ─────────────────────────────── */}
           <button
             type="button"
             onClick={() => { clearAll(); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
@@ -1225,6 +1469,57 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             </span>
           </button>
 
+          {/* LOCATION SELECTOR — the delivery destination drives the promise
+              above the fold ("Deliver to Dhaka") and is remembered per browser. */}
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => { setShowLocation((v) => !v); setShowAccountMenu(false); setShowLangMenu(false); }}
+              aria-haspopup="listbox"
+              aria-expanded={showLocation}
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-left transition hover:bg-[#f4f5ff]"
+            >
+              <MapPin className="h-[18px] w-[18px] shrink-0" style={{ color: THEME.brand }} />
+              <span className="flex flex-col whitespace-nowrap leading-tight">
+                <span className="text-[10px] text-slate-400">Deliver to</span>
+                <span className="max-w-[110px] truncate text-[12px] font-bold" style={{ color: THEME.ink }}>
+                  {deliverTo}
+                </span>
+              </span>
+              <ChevronDown className={`h-3 w-3 shrink-0 text-slate-400 transition-transform ${showLocation ? 'rotate-180' : ''}`} />
+            </button>
+            {showLocation && (
+              <div
+                role="listbox"
+                aria-label="Choose a delivery district"
+                className="absolute left-0 top-full z-50 mt-2 w-[260px] overflow-hidden rounded-xl border bg-white py-1 shadow-xl"
+                style={{ borderColor: THEME.line }}
+              >
+                <div className="px-3 py-2 text-[10px] font-black uppercase tracking-wide text-slate-400">
+                  Deliver to all 64 districts
+                </div>
+                <div className="max-h-64 overflow-y-auto">
+                  {DISTRICT_PRESETS.map((zone) => (
+                    <button
+                      key={zone}
+                      type="button"
+                      role="option"
+                      aria-selected={deliverTo === zone}
+                      onClick={() => pickLocation(zone)}
+                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-[12.5px] transition hover:bg-[#f4f5ff] ${
+                        deliverTo === zone ? 'font-bold' : 'text-slate-600'
+                      }`}
+                      style={deliverTo === zone ? { color: THEME.brand } : undefined}
+                    >
+                      {zone}
+                      {deliverTo === zone && <Check className="h-3.5 w-3.5" />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* CENTRAL GLOBAL SEARCH */}
           <form onSubmit={submitSearch} className="flex min-w-0 flex-1 items-center">
             <div
@@ -1244,7 +1539,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 ref={searchRef}
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                placeholder="Search across every store — sarees, phones, gadgets…"
+                placeholder={searchPlaceholder}
                 aria-label="Search the marketplace"
                 className="min-w-0 flex-1 px-3 py-2.5 text-[13px] text-slate-800 placeholder:text-slate-400 focus:outline-none"
               />
@@ -1270,25 +1565,156 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             </div>
           </form>
 
-          {/* Shortcuts (desktop only — mobile uses the compact bar above) */}
-          <div className="flex shrink-0 items-center gap-1">
+          {/* ── RIGHT: language · account · orders · wishlist · cart ── */}
+          <div className="flex shrink-0 items-center gap-0.5">
+            {/* LANGUAGE SWITCHER */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => { setShowLangMenu((v) => !v); setShowLocation(false); setShowAccountMenu(false); }}
+                aria-haspopup="menu"
+                aria-expanded={showLangMenu}
+                className="flex items-center gap-1 rounded-lg px-2 py-2 text-[12px] font-bold transition hover:bg-[#f4f5ff]"
+                style={{ color: THEME.ink }}
+                title="Change language"
+              >
+                <Globe className="h-[15px] w-[15px] text-slate-500" />
+                {language === 'en' ? 'EN' : 'বাংলা'}
+                <ChevronDown className={`h-3 w-3 text-slate-400 transition-transform ${showLangMenu ? 'rotate-180' : ''}`} />
+              </button>
+              {showLangMenu && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full z-50 mt-2 w-[168px] overflow-hidden rounded-xl border bg-white py-1 shadow-xl"
+                  style={{ borderColor: THEME.line }}
+                >
+                  {([['en', 'English', 'EN'], ['bn', 'বাংলা', 'BN']] as const).map(([code, label, short]) => (
+                    <button
+                      key={code}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={language === code}
+                      onClick={() => pickLanguage(code)}
+                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-[12.5px] transition hover:bg-[#f4f5ff] ${
+                        language === code ? 'font-bold' : 'text-slate-600'
+                      }`}
+                      style={language === code ? { color: THEME.brand } : undefined}
+                    >
+                      <span>{label} <span className="text-[10px] text-slate-400">({short})</span></span>
+                      {language === code && <Check className="h-3.5 w-3.5" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* ACCOUNT DROPDOWN */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => { setShowAccountMenu((v) => !v); setShowLocation(false); setShowLangMenu(false); }}
+                aria-haspopup="menu"
+                aria-expanded={showAccountMenu}
+                className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition hover:bg-[#f4f5ff]"
+              >
+                <User className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
+                <span className="flex flex-col whitespace-nowrap leading-tight">
+                  <span className="text-[10px] text-slate-400">Hi, sign in</span>
+                  <span className="flex items-center gap-1 text-[12px] font-bold" style={{ color: THEME.ink }}>
+                    Account
+                    <ChevronDown className={`h-3 w-3 text-slate-400 transition-transform ${showAccountMenu ? 'rotate-180' : ''}`} />
+                  </span>
+                </span>
+              </button>
+              {showAccountMenu && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full z-50 mt-2 w-[228px] overflow-hidden rounded-xl border bg-white py-1 shadow-xl"
+                  style={{ borderColor: THEME.line }}
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setShowAccountMenu(false); onOpenAccount?.(); }}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[12.5px] font-semibold text-slate-700 transition hover:bg-[#f4f5ff]"
+                  >
+                    <User className="h-4 w-4 text-slate-400" /> Sign in / Register
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setShowAccountMenu(false); onOpenAccount?.(); }}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[12.5px] text-slate-600 transition hover:bg-[#f4f5ff]"
+                  >
+                    <Receipt className="h-4 w-4 text-slate-400" /> My Orders
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setShowAccountMenu(false); setShowWishlist(true); }}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[12.5px] text-slate-600 transition hover:bg-[#f4f5ff]"
+                  >
+                    <Heart className="h-4 w-4 text-slate-400" /> Wishlist
+                    {wishlist.count > 0 && (
+                      <span className="ml-auto rounded-full bg-[#eef0ff] px-1.5 text-[10px] font-black" style={{ color: THEME.brand }}>
+                        {wishlist.count}
+                      </span>
+                    )}
+                  </button>
+                  {onGoToPlans && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => { setShowAccountMenu(false); onGoToPlans(); }}
+                      className="flex w-full items-center gap-2.5 border-t px-3 py-2.5 text-left text-[12.5px] text-slate-600 transition hover:bg-[#f4f5ff]"
+                      style={{ borderColor: THEME.line }}
+                    >
+                      <Store className="h-4 w-4 text-slate-400" /> Sell on ZID
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ORDERS */}
             <button
               type="button"
               onClick={onOpenAccount}
-              className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left hover:bg-[#f4f5ff]"
+              className="flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition hover:bg-[#f4f5ff]"
+              title="Track your orders"
             >
-              <User className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
-              <span className="flex flex-col leading-tight">
-                <span className="text-[10px] text-slate-400">Hello, sign in</span>
-                <span className="text-[12px] font-bold" style={{ color: THEME.ink }}>My account</span>
-              </span>
+              <Receipt className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
+              <span className="hidden text-[12px] font-bold xl:inline" style={{ color: THEME.ink }}>Orders</span>
             </button>
 
+            {/* WISHLIST */}
+            <button
+              type="button"
+              onClick={() => setShowWishlist(true)}
+              className="relative flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition hover:bg-[#f4f5ff]"
+              aria-label={`Wishlist, ${wishlist.count} saved items`}
+              title="Wishlist"
+            >
+              <div className="relative">
+                <Heart className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
+                {wishlist.count > 0 && (
+                  <span
+                    className="absolute -right-2 -top-1.5 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[9px] font-black text-white"
+                    style={{ backgroundColor: THEME.danger }}
+                  >
+                    {wishlist.count > 99 ? '99+' : wishlist.count}
+                  </span>
+                )}
+              </div>
+              <span className="hidden text-[12px] font-bold xl:inline" style={{ color: THEME.ink }}>Wishlist</span>
+            </button>
+
+            {/* CART */}
             <button
               type="button"
               onClick={() => setShowBasket(true)}
-              className="relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 hover:bg-[#f4f5ff]"
-              aria-label={`Basket, ${basket.itemCount} items`}
+              className="relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition hover:bg-[#f4f5ff]"
+              aria-label={`Cart, ${basket.itemCount} items`}
             >
               <div className="relative">
                 <ShoppingBasket className="h-[22px] w-[22px]" style={{ color: THEME.ink }} />
@@ -1299,9 +1725,14 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                   {basket.itemCount > 99 ? '99+' : basket.itemCount}
                 </span>
               </div>
-              <span className="hidden flex-col leading-tight md:flex">
-                <span className="text-[10px] text-slate-400">Basket</span>
-                <span className="text-[12px] font-bold" style={{ color: THEME.ink }}>{bdt(basket.subtotal)}</span>
+              {/* `whitespace-nowrap` on both lines: the subtitle "৳0" and the
+                  label "Cart" were wrapping onto each other's lines in the
+                  two-line stack, rendering as "Cart" over a stacked "৳ / 0". */}
+              <span className="hidden flex-col leading-tight xl:flex">
+                <span className="whitespace-nowrap text-[10px] text-slate-400">Cart</span>
+                <span className="whitespace-nowrap text-[12px] font-bold tabular-nums" style={{ color: THEME.ink }}>
+                  {bdt(basket.subtotal)}
+                </span>
               </span>
             </button>
           </div>
@@ -1320,7 +1751,11 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           aria-label="Marketplace categories"
           onMouseLeave={scheduleCloseMegaMenu}
         >
-          <div className="mx-auto flex max-w-[1400px] snap-x snap-mandatory items-center gap-1.5 overflow-x-auto overscroll-x-contain px-2 py-2 [scrollbar-width:none] lg:gap-1 lg:px-4 lg:py-1.5 [&::-webkit-scrollbar]:hidden">
+          <div className="mx-auto flex max-w-[1400px] items-center px-2 lg:px-4">
+          {/* Scrollable category list. Promo pills are a SIBLING, not a child, so
+              they stay pinned to the right edge instead of scrolling away with
+              the categories on a narrow desktop. */}
+          <div className="flex min-w-0 flex-1 snap-x snap-mandatory items-center gap-1.5 overflow-x-auto overscroll-x-contain py-2 [scrollbar-width:none] lg:gap-0.5 lg:py-0 [&::-webkit-scrollbar]:hidden">
             <button
               type="button"
               onClick={() => { setOpenMenu(null); setActiveSub(undefined); setFilter({ category: undefined, subCategory: undefined }); }}
@@ -1380,7 +1815,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                         className="mr-1 hidden h-4 w-4 shrink-0 rounded-full object-cover sm:inline-block"
                       />
                     ) : null}
-                    {cat.name}
+                    {displayCategory(cat.name)}
                     {tree && tree.children.length > 0 && (
                       <ChevronDown className={`hidden h-3 w-3 transition-transform lg:block ${isOpen ? 'rotate-180' : ''}`} />
                     )}
@@ -1388,13 +1823,19 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 </div>
               );
             })}
-            <span className="mx-1 h-4 w-px shrink-0" style={{ backgroundColor: THEME.line }} />
+          </div>
+
+          {/* ── PINNED PROMO PILLS (desktop only) ──
+              On a phone these would leave no room for the categories, which are
+              the primary navigation. The same actions stay reachable from the
+              drawer and the filter sheet. */}
+          <div className="ml-2 hidden shrink-0 items-center gap-1.5 border-l pl-3 lg:flex" style={{ borderColor: THEME.line }}>
             <button
               type="button"
               onClick={() => setDealsOnly((v) => !v)}
               aria-pressed={dealsOnly}
-              className={`flex whitespace-nowrap items-center gap-1 rounded-md px-2.5 py-1.5 text-[12px] font-bold transition ${
-                dealsOnly ? 'bg-rose-600 text-white' : 'text-rose-600 hover:bg-rose-50'
+              className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1.5 text-[11.5px] font-bold transition ${
+                dealsOnly ? 'bg-rose-600 text-white' : 'bg-rose-50 text-rose-600 hover:bg-rose-100'
               }`}
             >
               <Flame className="h-3.5 w-3.5" /> Deals
@@ -1402,10 +1843,19 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             <button
               type="button"
               onClick={() => setFilter({ sort: 'newest' })}
-              className="flex whitespace-nowrap items-center gap-1 rounded-md px-2.5 py-1.5 text-[12px] font-bold text-emerald-700 hover:bg-emerald-50"
+              className="flex items-center gap-1 whitespace-nowrap rounded-full bg-emerald-50 px-3 py-1.5 text-[11.5px] font-bold text-emerald-700 transition hover:bg-emerald-100"
             >
               <Sparkles className="h-3.5 w-3.5" /> New in
             </button>
+            <button
+              type="button"
+              onClick={onOpenAccount}
+              className="flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1.5 text-[11.5px] font-black text-white transition hover:brightness-110"
+              style={{ background: `linear-gradient(135deg, ${THEME.brand} 0%, #8b5cf6 100%)` }}
+            >
+              <Truck className="h-3.5 w-3.5" /> Get Free Delivery
+            </button>
+          </div>
           </div>
 
           {/* ═════════ MEGA-MENU PANEL ═════════
@@ -1436,14 +1886,22 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           660px-wide main padded to the left, with the 2-up grid computing
           313px columns. `w-full` pins it to the container and `min-w-0` lets
           it shrink. */}
-      <main className={`mx-auto w-full min-w-0 max-w-[1400px] px-3 py-3 sm:px-4 lg:px-4 lg:py-5 ${basket.itemCount > 0 ? 'pb-28' : 'pb-6'} lg:pb-6`}>
+      <main className={`mx-auto w-full min-w-0 max-w-[1400px] px-3 py-3 sm:px-5 sm:py-4 lg:px-6 lg:py-6 ${basket.itemCount > 0 ? 'pb-28' : 'pb-8'} lg:pb-10`}>
         {/* ═════════ HERO CAROUSEL ═════════ */}
         <HeroCarousel slides={slides} onCta={handleHeroCta} />
 
         {/* ═════════ TRUST STRIP ═════════
-            Mobile: a single swipeable row (4 stacked tiles would eat the whole
-            first screen). Desktop: a 4-up grid. */}
-        <div className="mt-2.5 flex snap-x gap-2 overflow-x-auto overscroll-x-contain pb-0.5 [scrollbar-width:none] sm:mt-3 sm:grid sm:grid-cols-4 sm:overflow-visible [&::-webkit-scrollbar]:hidden">
+            One card holding four EQUAL segments rather than four separate boxes:
+            the dividers land on exact quarter points, which is what makes a
+            benefits bar read as deliberate across the full width instead of as
+            four tiles that happen to be side by side.
+
+            Mobile keeps a 2x2 grid — a 4-across row on a 390px screen leaves
+            ~85px per cell, which truncates every label to "Nationwi…". */}
+        <div
+          className="mt-3 grid grid-cols-2 divide-x divide-y overflow-hidden rounded-2xl border bg-white sm:mt-4 sm:grid-cols-4 sm:divide-y-0"
+          style={{ borderColor: THEME.line }}
+        >
           {[
             { icon: TruckIcon, title: 'Nationwide delivery', sub: 'All 64 districts' },
             { icon: ShieldCheck, title: 'Verified sellers', sub: `${data?.vendors.length ?? 0} active stores` },
@@ -1452,15 +1910,31 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           ].map((item) => (
             <div
               key={item.title}
-              className="flex min-h-[52px] shrink-0 snap-start items-center gap-2 rounded-lg border bg-white px-2.5 py-2 sm:min-h-0 sm:shrink sm:gap-2.5 sm:px-3"
+              // Every cell is icon-then-text, left-aligned with the SAME internal
+              // rhythm, so the four icons line up on one vertical grid across the
+              // strip. Centring each pair individually (the previous treatment)
+              // started every icon at a different x-offset, because the labels
+              // differ in length — that is what made the bar look untidy.
+              //
+              // A 390px phone gives each cell 182px; icon (32) + gap (8) + padding
+              // (20) leaves ~122px, so "Nationwide delivery" at 11px (102px needed)
+              // fits without truncating.
+              className="flex min-h-[64px] items-center gap-2 px-2.5 py-3 sm:gap-3 sm:px-4"
               style={{ borderColor: THEME.line }}
             >
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: '#eef0ff' }}>
-                <item.icon className="h-4 w-4" style={{ color: THEME.brand }} />
+              <span
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl sm:h-10 sm:w-10"
+                style={{ backgroundColor: '#eef0ff' }}
+              >
+                <item.icon className="h-4 w-4 sm:h-[18px] sm:w-[18px]" style={{ color: THEME.brand }} />
               </span>
-              <div className="min-w-0">
-                <div className="truncate text-[11px] font-bold text-slate-800 sm:text-[11.5px]">{item.title}</div>
-                <div className="truncate text-[10px] text-slate-500">{item.sub}</div>
+              <div className="min-w-0 text-left">
+                <div className="text-[11px] font-bold leading-tight text-slate-800 sm:text-[11.5px]">
+                  {item.title}
+                </div>
+                <div className="mt-0.5 text-[10px] leading-tight text-slate-500 sm:text-[10.5px]">
+                  {item.sub}
+                </div>
               </div>
             </div>
           ))}
@@ -1470,16 +1944,28 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             Mobile already has the swipeable chip rail in the sticky header, so
             repeating tiles here would push the products below the fold. */}
         {topCategories.length > 0 && (
-          <section className="mt-5 hidden lg:block">
-            <div className="mb-2 flex items-end justify-between">
-              <h2 className="text-[15px] font-black tracking-tight text-slate-900">Shop by category</h2>
+          <section className="mt-7 hidden lg:block">
+            <div className="mb-3.5 flex items-baseline justify-between gap-3">
+              <h2 className="text-[16px] font-black tracking-[-0.015em] text-slate-900">Shop by category</h2>
               {filters.category && (
-                <button type="button" onClick={() => setFilter({ category: undefined })} className="text-[11px] font-bold" style={{ color: THEME.brand }}>
+                <button
+                  type="button"
+                  onClick={() => setFilter({ category: undefined })}
+                  className="rounded-md px-2 py-1 text-[11.5px] font-bold transition hover:bg-[#f4f5ff]"
+                  style={{ color: THEME.brand }}
+                >
                   Clear
                 </button>
               )}
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+            {/* Tiles distribute the available width evenly and cap at 240px.
+                The tile owns its own `flex-1`/`max-w`; forcing `flex-1` from the
+                parent as well made the cap lose and a 2-category row blew each
+                tile out to ~500px. `justify-start` keeps them flush-left when
+                they hit the cap. `gap-3` (not `gap-2`) is what separates the
+                circles optically, and the vertical padding stops the hover
+                shadow being clipped by the scroll box. */}
+            <div className="flex justify-start gap-3 overflow-x-auto px-0.5 pb-2 pt-0.5 [scrollbar-width:thin]">
               {topCategories.map((cat) => (
                 <CategoryTile
                   key={cat.name}
@@ -1500,18 +1986,18 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             (plus products from the vendors they highlighted). Rendered as a
             horizontal rail so it never competes with the main grid for width. */}
         {featuredList.length > 0 && (
-          <section className="mt-4">
-            <div className="mb-2 flex items-end justify-between gap-3">
+          <section className="mt-7">
+            <div className="mb-3.5 flex items-baseline justify-between gap-3">
               <div className="min-w-0">
-                <h2 className="text-[15px] font-black tracking-tight text-slate-900">
+                <h2 className="text-[16px] font-black tracking-[-0.015em] text-slate-900">
                   {featuredConfig?.featuredTitle || 'Featured picks'}
                 </h2>
                 {featuredConfig?.featuredSubtitle && (
-                  <p className="truncate text-[11px] text-slate-500">{featuredConfig.featuredSubtitle}</p>
+                  <p className="mt-0.5 truncate text-[11.5px] text-slate-500">{featuredConfig.featuredSubtitle}</p>
                 )}
               </div>
             </div>
-            <div className="flex snap-x snap-mandatory gap-2.5 overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div className="flex snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain pb-2 pt-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {featuredList.map((product) => (
                 <div key={`feat-${product.id}`} className="w-[172px] shrink-0 snap-start sm:w-[196px]">
                   <ProductCard
@@ -1519,6 +2005,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     onAdd={handleAdd}
                     onVisitVendor={onVisitVendor}
                     onOpenProduct={setActiveProduct}
+                    isWishlisted={wishlist.has(String(product.id), (product as any).vendor_id)}
+                    onToggleWishlist={handleToggleWishlist}
                   />
                 </div>
               ))}
@@ -1531,19 +2019,19 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             seller. The heading and the on/off switch come from the admin panel;
             when disabled this block disappears entirely. */}
         {dealsList.length > 0 && (
-          <section className="mt-4">
-            <div className="mb-2 flex items-end justify-between gap-3">
+          <section className="mt-7">
+            <div className="mb-3.5 flex items-baseline justify-between gap-3">
               <div className="min-w-0">
-                <h2 className="flex items-center gap-1.5 text-[15px] font-black tracking-tight text-slate-900">
+                <h2 className="flex items-center gap-1.5 text-[16px] font-black tracking-[-0.015em] text-slate-900">
                   <Flame className="h-4 w-4 text-rose-600" />
                   {featuredConfig?.dealsTitle || 'Today’s best deals'}
                 </h2>
                 {featuredConfig?.dealsSubtitle && (
-                  <p className="truncate text-[11px] text-slate-500">{featuredConfig.dealsSubtitle}</p>
+                  <p className="mt-0.5 truncate text-[11.5px] text-slate-500">{featuredConfig.dealsSubtitle}</p>
                 )}
               </div>
             </div>
-            <div className="flex snap-x snap-mandatory gap-2.5 overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div className="flex snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain pb-2 pt-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {dealsList.map((product) => (
                 <div key={`deal-${product.id}`} className="w-[172px] shrink-0 snap-start sm:w-[196px]">
                   <ProductCard
@@ -1551,6 +2039,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     onAdd={handleAdd}
                     onVisitVendor={onVisitVendor}
                     onOpenProduct={setActiveProduct}
+                    isWishlisted={wishlist.has(String(product.id), (product as any).vendor_id)}
+                    onToggleWishlist={handleToggleWishlist}
                   />
                 </div>
               ))}
@@ -1563,7 +2053,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             when the filter rail was shorter than the results column: without
             it the grid stretches every child to the tallest row and the
             results header floated far below the first card row. */}
-        <div className="mt-3 grid items-start gap-4 lg:mt-5 lg:grid-cols-[248px_1fr]">
+        <div className="mt-4 grid items-start gap-4 lg:mt-7 lg:grid-cols-[248px_1fr] lg:gap-6">
           {/* ── Advanced filter rail ── */}
           {/* The filter rail is DESKTOP ONLY — on mobile the same controls live
               in the bottom sheet, triggered by the sticky filter bar below. */}
@@ -1839,7 +2329,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       ? 'Today’s best deals'
                       : activeSub
                         ? `${filters.category} › ${activeSub}`
-                        : filters.category || title}
+                        : filters.category ? displayCategory(filters.category) : title}
                 </h1>
                 <p className="text-[11px] text-slate-500">
                   {loading
@@ -1906,7 +2396,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
             {/* Product grid */}
             {loading && products.length === 0 ? (
-              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3 xl:grid-cols-4 2xl:grid-cols-5">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-4 2xl:grid-cols-5">
                 {Array.from({ length: 10 }).map((_, i) => (
                   <div key={i} className="overflow-hidden rounded-xl border bg-white" style={{ borderColor: THEME.line }}>
                     <div className="aspect-square animate-pulse bg-slate-100" />
@@ -1937,7 +2427,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             ) : (
               <>
                 {/* 2-up on phones, 3 on tablets, 4 (5 on very wide) on desktop. */}
-                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3 xl:grid-cols-4 2xl:grid-cols-5">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-4 2xl:grid-cols-5">
                   {products.map((product) => (
                     <ProductCard
                       key={String(product.id)}
@@ -1945,6 +2435,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       onAdd={handleAdd}
                       onVisitVendor={onVisitVendor}
                       onOpenProduct={setActiveProduct}
+                      isWishlisted={wishlist.has(String(product.id), (product as any).vendor_id)}
+                      onToggleWishlist={handleToggleWishlist}
                     />
                   ))}
                 </div>
@@ -1968,6 +2460,97 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           </section>
         </div>
       </main>
+
+      {/* ═════════ WISHLIST DRAWER ═════════
+          Same sheet mechanics as the basket, but no checkout: a wishlist is
+          saved-for-later, so the only forward action is "move to basket". */}
+      {showWishlist && (
+        <div className="fixed inset-0 z-50 flex items-end justify-end sm:items-stretch" role="dialog" aria-modal="true" aria-label="Wishlist">
+          <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-[2px]" onClick={() => setShowWishlist(false)} />
+          <aside
+            className="relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl sm:max-h-none sm:h-full sm:max-w-md sm:rounded-none"
+            style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)' }}
+          >
+            <div className="flex justify-center pt-2 sm:hidden">
+              <span className="h-1 w-10 rounded-full bg-slate-300" />
+            </div>
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: THEME.line }}>
+              <h2 className="flex items-center gap-2 text-[14px] font-black text-slate-900">
+                <Heart className="h-4 w-4" style={{ color: THEME.danger }} />
+                Wishlist ({wishlist.count})
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowWishlist(false)}
+                className="flex h-11 w-11 items-center justify-center rounded-full text-slate-500 active:bg-slate-100"
+                aria-label="Close wishlist"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-3">
+              {wishlist.items.length === 0 ? (
+                <div className="py-20 text-center">
+                  <Heart className="mx-auto mb-3 h-10 w-10 text-slate-200" />
+                  <div className="text-[13px] font-bold text-slate-700">Your wishlist is empty</div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    Tap the heart on any product to save it for later.
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {wishlist.items.map((item) => {
+                    const p = item.product as any;
+                    return (
+                      <div key={`${item.product.id}-${p.vendor_id || ''}`} className="flex gap-2.5 rounded-lg border p-2.5" style={{ borderColor: THEME.line }}>
+                        <SafeImage
+                          src={p.image || p.image_url || p.imageUrl}
+                          alt={item.product.title}
+                          className="h-16 w-16 shrink-0 rounded-md border object-cover"
+                        />
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <div className="line-clamp-2 text-[11.5px] font-semibold leading-snug text-slate-800">
+                            {item.product.title}
+                          </div>
+                          <div className="mt-0.5 text-[10px] text-slate-500">{item.product.vendor_name}</div>
+                          <div className="mt-auto flex items-center justify-between gap-2 pt-1">
+                            <span className="text-[12px] font-black" style={{ color: THEME.ink }}>
+                              {bdt(Number(item.product.priceBDT || 0))}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  basket.add(item.product, item.quantity || 1);
+                                  wishlist.remove(String(item.product.id), item.product.vendor_id);
+                                  toast.success('Moved to cart', { description: item.product.title });
+                                }}
+                                className="rounded-md px-2 py-1 text-[10.5px] font-black text-white"
+                                style={{ backgroundColor: THEME.brand }}
+                              >
+                                Move to cart
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => wishlist.remove(String(item.product.id), item.product.vendor_id)}
+                                className="rounded-md p-1 text-slate-400 hover:text-red-500"
+                                aria-label={`Remove ${item.product.title}`}
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
 
       {/* ═════════ BASKET DRAWER ═════════ */}
       {showBasket && (
