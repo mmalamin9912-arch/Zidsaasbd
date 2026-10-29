@@ -150,6 +150,30 @@ import {
   upsertCommissionRate,
   deleteCommissionRate,
 } from './marketplace.js';
+// Marketplace STOREFRONT control plane: hero banners, the category rail, the
+// top utility strip and the featured/deals selection. Stored in the
+// `marketplace_config` collection so the PUBLIC read never exposes the
+// platform_config document (which carries gateway secrets). See
+// lib/marketplaceStorefront.ts.
+import {
+  getMarketplaceStorefrontConfig,
+  listMarketplaceBanners,
+  saveMarketplaceBanner,
+  deleteMarketplaceBanner,
+  reorderMarketplaceBanners,
+  listMarketplaceCategories,
+  saveMarketplaceCategory,
+  deleteMarketplaceCategory,
+  reorderMarketplaceCategories,
+  seedMarketplaceCategories,
+  getUtilityStrip,
+  saveUtilityStrip,
+  getFeaturedConfig,
+  saveFeaturedConfig,
+  resolveFeaturedProducts,
+  resolveDealProducts,
+  searchAdminProducts,
+} from './marketplaceStorefront.js';
 // COD reconciliation + vendor wallet. See lib/codLedger.ts.
 import {
   reconcileCodDelivery,
@@ -16538,6 +16562,176 @@ app.post('/api/marketplace/commission/preview', async (req, res) => {
     Array.isArray(body.categories) ? body.categories.map((c: any) => String(c)) : []
   );
   return res.status(200).json({ ok: true, ...result });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MARKETPLACE STOREFRONT CONFIG (public read + admin write)
+//
+// Everything the marketplace SHOWS, as opposed to what it sells:
+//   • hero banners (image, promo title, CTA, target link)
+//   • the category rail / "shop by category" tiles
+//   • the top utility strip ("Deliver to all 64 districts", …)
+//   • the featured products + highlighted vendors + deals section
+//
+// PUBLIC:
+//   GET  /api/marketplace/storefront
+//   GET  /api/marketplace/featured
+//
+// ADMIN (Super Admin portal):
+//   GET/POST/DELETE /api/admin/marketplace/banners[/:id]
+//   POST            /api/admin/marketplace/banners/reorder
+//   GET/POST/DELETE /api/admin/marketplace/categories[/:id]
+//   POST            /api/admin/marketplace/categories/reorder
+//   POST            /api/admin/marketplace/categories/seed
+//   GET/POST        /api/admin/marketplace/strip
+//   GET/POST        /api/admin/marketplace/featured
+//   GET             /api/admin/marketplace/products (picker search)
+//
+// All answer 200 with a shaped envelope, never a 500.
+// ═════════════════════════════════════════════════════════════════════════════
+
+app.get('/api/marketplace/storefront', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const config = await getMarketplaceStorefrontConfig();
+    return res.status(200).json({ ok: true, ...config });
+  } catch (err: any) {
+    console.error('[Server] GET /api/marketplace/storefront error:', err);
+    return res.status(200).json({ ok: false, banners: [], categories: [], error: err?.message || 'Storefront config unavailable.' });
+  }
+});
+
+// The resolved featured + deals product rows. Public because the marketplace
+// renders them to anonymous shoppers; the PINS themselves are admin-only.
+app.get('/api/marketplace/featured', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const featured = await getFeaturedConfig();
+    const limit = Math.min(48, Math.max(1, Number(req.query.limit) || featured.featuredLimit));
+    const [products, deals] = await Promise.all([
+      resolveFeaturedProducts(featured.productIds, featured.vendorRefs, limit),
+      featured.dealsEnabled ? resolveDealProducts(featured.dealsLimit) : Promise.resolve([]),
+    ]);
+    return res.status(200).json({
+      ok: true,
+      config: featured,
+      products,
+      deals,
+      productIds: products.map((p: any) => String(p.id ?? p._id ?? '')),
+      dealIds: deals.map((p: any) => String(p.id ?? p._id ?? '')),
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/marketplace/featured error:', err);
+    return res.status(200).json({ ok: false, products: [], deals: [], productIds: [], dealIds: [], error: err?.message || 'Featured products unavailable.' });
+  }
+});
+
+// ── Admin: banners ───────────────────────────────────────────────────────────
+app.get('/api/admin/marketplace/banners', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await listMarketplaceBanners();
+  return res.status(200).json(result);
+});
+
+app.post('/api/admin/marketplace/banners', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await saveMarketplaceBanner(req.body || {});
+  return res.status(200).json(result);
+});
+
+// NOTE: `/banners/reorder` is declared BEFORE `/banners/:id` so Express does not
+// treat the literal "reorder" as an id.
+app.post('/api/admin/marketplace/banners/reorder', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((v: any) => String(v)) : [];
+  const result = await reorderMarketplaceBanners(ids);
+  return res.status(200).json(result);
+});
+
+app.delete('/api/admin/marketplace/banners/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await deleteMarketplaceBanner(String(req.params.id || ''));
+  return res.status(200).json(result);
+});
+
+// ── Admin: categories ────────────────────────────────────────────────────────
+app.get('/api/admin/marketplace/categories', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await listMarketplaceCategories();
+  return res.status(200).json(result);
+});
+
+app.post('/api/admin/marketplace/categories', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await saveMarketplaceCategory(req.body || {});
+  return res.status(200).json(result);
+});
+
+app.post('/api/admin/marketplace/categories/reorder', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((v: any) => String(v)) : [];
+  const result = await reorderMarketplaceCategories(ids);
+  return res.status(200).json(result);
+});
+
+app.post('/api/admin/marketplace/categories/seed', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await seedMarketplaceCategories();
+  return res.status(200).json(result);
+});
+
+app.delete('/api/admin/marketplace/categories/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await deleteMarketplaceCategory(String(req.params.id || ''));
+  return res.status(200).json(result);
+});
+
+// ── Admin: utility strip ─────────────────────────────────────────────────────
+app.get('/api/admin/marketplace/strip', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const strip = await getUtilityStrip();
+  return res.status(200).json({ ok: true, strip });
+});
+
+app.post('/api/admin/marketplace/strip', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const result = await saveUtilityStrip(body.strip ?? body);
+  return res.status(200).json(result);
+});
+
+// ── Admin: featured products / vendors / deals ───────────────────────────────
+app.get('/api/admin/marketplace/featured', async (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const featured = await getFeaturedConfig();
+    // Resolve the pinned rows so the admin sees exactly what shoppers will see.
+    const [products, deals] = await Promise.all([
+      resolveFeaturedProducts(featured.productIds, featured.vendorRefs, 48),
+      resolveDealProducts(featured.dealsLimit),
+    ]);
+    return res.status(200).json({ ok: true, featured, products, deals });
+  } catch (err: any) {
+    return res.status(200).json({ ok: false, featured: null, products: [], deals: [], error: err?.message || 'Featured config could not be read.' });
+  }
+});
+
+app.post('/api/admin/marketplace/featured', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const result = await saveFeaturedConfig(body.featured ?? body);
+  return res.status(200).json(result);
+});
+
+// Product picker search for the admin "add to featured" control.
+app.get('/api/admin/marketplace/products', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const result = await searchAdminProducts({
+    q: typeof req.query.q === 'string' ? req.query.q : undefined,
+    vendor: typeof req.query.vendor === 'string' ? req.query.vendor : undefined,
+    limit: Number(req.query.limit) || 30,
+  });
+  return res.status(200).json(result);
 });
 
 // ── PUT / PATCH /api/orders/:id — update status / payment_status ──────────────

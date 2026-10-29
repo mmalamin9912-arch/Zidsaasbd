@@ -35,6 +35,15 @@ import {
   type MarketplaceFilters,
   type MarketplaceFacetVendor,
 } from '../lib/marketplaceApi';
+import {
+  fetchMarketplaceStorefront,
+  fetchFeaturedProducts,
+  toMarketplaceProduct,
+  type MarketplaceBanner,
+  type MarketplaceCategoryRow,
+  type UtilityStripConfig,
+  type FeaturedConfig,
+} from '../lib/marketplaceStorefrontApi';
 import { useMarketplaceBasket } from '../lib/useMarketplaceBasket';
 import type { MarketplaceProduct } from '../types';
 
@@ -59,6 +68,17 @@ const THEME = {
 
 const bdt = (value: number) => `৳${Math.round(Number(value) || 0).toLocaleString('en-US')}`;
 
+/** Icon name → component, for the admin-authored utility strip items. */
+const STRIP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
+  MapPin,
+  Truck,
+  RotateCcw,
+  ShieldCheck,
+  BadgePercent,
+  Store,
+  Flame,
+};
+
 /* ───────────────────────────── hero banners ───────────────────────────── */
 
 export interface HeroSlide {
@@ -73,7 +93,25 @@ export interface HeroSlide {
   image?: string;
   /** Category (or search term) the CTA opens. */
   category?: string;
+  /** Free-form search the CTA runs (used when no category is set). */
+  search?: string;
   accentText?: string;
+}
+
+/** Map an admin-authored banner onto the carousel's slide shape. */
+function bannerToSlide(banner: MarketplaceBanner): HeroSlide {
+  return {
+    id: banner.id,
+    eyebrow: banner.eyebrow || '',
+    title: banner.title || '',
+    subtitle: banner.subtitle || '',
+    cta: banner.cta || 'Shop now',
+    gradient: banner.gradient || 'from-[#3b2fd6] via-[#5b4bff] to-[#8b5cf6]',
+    image: banner.image,
+    category: banner.category,
+    search: banner.search,
+    accentText: banner.accentText,
+  };
 }
 
 const DEFAULT_SLIDES: HeroSlide[] = [
@@ -345,6 +383,19 @@ const HeroCarousel: React.FC<{
 
         {/* Horizontal padding keeps the copy clear of the 44px nav arrows that
             sit over the slide on narrow phones. */}
+        {/* Uploaded hero image — rendered UNDER the copy with a dark scrim so
+            the headline keeps its contrast on photography. */}
+        {slide.image && (
+          <>
+            <SafeImage
+              src={slide.image}
+              alt=""
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+            <div className="absolute inset-0 bg-gradient-to-r from-slate-900/80 via-slate-900/55 to-slate-900/25" />
+          </>
+        )}
+
         <div className="relative z-10 min-w-0 max-w-xl px-10 sm:px-0">
           <span className={`text-[10px] font-black uppercase tracking-[0.2em] sm:text-[11px] sm:tracking-[0.28em] ${slide.accentText || 'text-white/80'}`}>
             {slide.eyebrow}
@@ -447,7 +498,9 @@ const CategoryTile: React.FC<{
   active: boolean;
   onClick: () => void;
   emoji: string;
-}> = ({ name, count, active, onClick, emoji }) => (
+  /** Admin-uploaded cover, used instead of the emoji when present. */
+  image?: string;
+}> = ({ name, count, active, onClick, emoji, image }) => (
   <button
     type="button"
     onClick={onClick}
@@ -459,8 +512,12 @@ const CategoryTile: React.FC<{
       backgroundColor: active ? '#eef0ff' : THEME.surface,
     }}
   >
-    <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[#f2f4ff] text-xl">
-      {emoji}
+    <span className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-[#f2f4ff] text-xl">
+      {image ? (
+        <SafeImage src={image} alt={name} className="h-full w-full object-cover" />
+      ) : (
+        emoji
+      )}
     </span>
     <span className="max-w-[84px] truncate text-center text-[11px] font-bold text-slate-700">{name}</span>
     <span className="text-[10px] text-slate-400">({count})</span>
@@ -506,7 +563,11 @@ export interface MegaMarketplaceViewProps {
   onGoToPlans?: () => void;
   /** First path segment already in the URL (e.g. `/marketplace?category=x`). */
   initialFilters?: MarketplaceFilters;
-  /** Promo slides; defaults to the built-in platform set. */
+  /**
+   * Promo slides override. When omitted (the normal case) the slides come from
+   * the Admin → Marketplace Studio banner collection, falling back to the
+   * built-in platform set only if the API returns nothing.
+   */
   slides?: HeroSlide[];
   /** Optional headline override. */
   title?: string;
@@ -518,11 +579,78 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   onOpenAccount,
   onGoToPlans,
   initialFilters,
-  slides = DEFAULT_SLIDES,
+  slides: slidesOverride,
   title = 'Marketplace',
 }) => {
   const toast = useToast();
   const basket = useMarketplaceBasket();
+
+  /* ── Admin-owned storefront config ───────────────────────────────────────
+     Banners, the category rail, the utility strip and the featured/deals
+     selection all come from the Super Admin "Marketplace Studio" panel. They
+     are fetched in parallel with the catalogue so the hero never waits on the
+     product query (and vice-versa). Until the config arrives the built-in
+     defaults render, so the page is never blank. */
+  const [storefront, setStorefront] = useState<{
+    banners: MarketplaceBanner[];
+    categories: MarketplaceCategoryRow[];
+    strip: UtilityStripConfig | null;
+    featured: FeaturedConfig | null;
+  }>({ banners: [], categories: [], strip: null, featured: null });
+  const [featuredProducts, setFeaturedProducts] = useState<MarketplaceProduct[]>([]);
+  const [dealProducts, setDealProducts] = useState<MarketplaceProduct[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    fetchMarketplaceStorefront()
+      .then((config) => {
+        if (!active) return;
+        setStorefront({
+          banners: config.banners,
+          categories: config.categories,
+          strip: config.strip,
+          featured: config.featured,
+        });
+      })
+      .catch(() => { /* defaults stay in place */ });
+
+    fetchFeaturedProducts()
+      .then((res) => {
+        if (!active) return;
+        setFeaturedProducts((res.products || []).map(toMarketplaceProduct));
+        setDealProducts((res.deals || []).map(toMarketplaceProduct));
+      })
+      .catch(() => { /* the strips simply do not render */ });
+
+    return () => { active = false; };
+  }, []);
+
+  /** Admin banners → carousel slides; built-in set is the fallback. */
+  const slides = useMemo<HeroSlide[]>(() => {
+    if (slidesOverride) return slidesOverride;
+    const fromAdmin = storefront.banners.map(bannerToSlide).filter((s) => s.title || s.image);
+    return fromAdmin.length > 0 ? fromAdmin : DEFAULT_SLIDES;
+  }, [slidesOverride, storefront.banners]);
+
+  /** Utility strip — hidden entirely when the admin disabled it. */
+  const strip = storefront.strip;
+  const stripItems = useMemo(
+    () => (strip?.items || []).filter((item) => item.isActive && item.text.trim()),
+    [strip],
+  );
+  const stripVisible = Boolean(strip?.isActive) && stripItems.length > 0;
+
+  /** Pinned/vendor-resolved featured rows, else the best of the catalogue. */
+  const featuredConfig = storefront.featured;
+  const featuredList = useMemo<MarketplaceProduct[]>(() => {
+    const limit = featuredConfig?.featuredLimit ?? 12;
+    if (featuredProducts.length > 0) return featuredProducts.slice(0, limit);
+    return [];
+  }, [featuredProducts, featuredConfig?.featuredLimit]);
+  const dealsList = useMemo<MarketplaceProduct[]>(() => {
+    if (featuredConfig && featuredConfig.dealsEnabled === false) return [];
+    return dealProducts.slice(0, featuredConfig?.dealsLimit ?? 12);
+  }, [dealProducts, featuredConfig]);
 
   const [filters, setFilters] = useState<MarketplaceFilters>(() => ({
     sort: 'newest',
@@ -676,7 +804,47 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
     );
   }, [data?.vendors, vendorQuery]);
 
-  const topCategories = useMemo(() => (data?.categories || []).slice(0, 10), [data?.categories]);
+  /* ── CATEGORY RAIL: admin list OVERLAYS the catalogue facets ──────────────
+     The facets stay the source of truth for what is actually purchasable (and
+     for the count on each tile); the admin collection decides which of those
+     categories are shown, their ORDER, their artwork and whether they get a
+     tile in "Shop by category". A category the admin created but that has no
+     products yet still displays — with a 0 count — so the rail can be staged
+     before stock arrives. */
+  const allCategories = useMemo(() => {
+    const facets = data?.categories || [];
+    const facetByName = new Map(facets.map((c) => [c.name.trim().toLowerCase(), c.product_count]));
+    const adminCategories = storefront.categories;
+
+    if (adminCategories.length === 0) {
+      // No admin configuration yet: the rail is the catalogue facets, as before.
+      return { rail: facets.slice(0, 14), tiles: facets.slice(0, 10), configured: false };
+    }
+
+    const visible = adminCategories.filter((c) => c.isActive);
+    const rail = visible.map((c) => ({
+      name: c.name,
+      product_count: facetByName.get(c.name.toLowerCase()) ?? 0,
+      emoji: c.emoji,
+      image: c.image,
+      isFeatured: c.isFeatured,
+    }));
+    // Anything the admin never touched is appended so no live category goes
+    // missing simply because nobody added it to the list yet.
+    const known = new Set(visible.map((c) => c.name.toLowerCase()));
+    const extras = facets
+      .filter((f) => !known.has(f.name.toLowerCase()))
+      .map((f) => ({ ...f, isFeatured: false as boolean }));
+
+    const ordered = [...rail, ...extras];
+    return {
+      rail: ordered.slice(0, 20),
+      tiles: ordered.filter((c) => c.isFeatured).slice(0, 12),
+      configured: true,
+    };
+  }, [data?.categories, storefront.categories]);
+
+  const topCategories = allCategories.tiles;
   const allProducts = useMemo(() => data?.products || [], [data?.products]);
   const products = useMemo(
     () => (dealsOnly
@@ -691,8 +859,15 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   };
 
   const handleHeroCta = (slide: HeroSlide) => {
-    if (slide.category) setFilter({ category: slide.category });
-    else setFilter({ category: undefined });
+    if (slide.category) {
+      setSearchInput('');
+      setFilter({ category: slide.category, q: undefined });
+    } else if (slide.search) {
+      setSearchInput(slide.search);
+      setFilter({ category: undefined, q: slide.search });
+    } else {
+      setFilter({ category: undefined });
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -702,23 +877,37 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
     <div className="flex min-h-screen w-full min-w-0 flex-col font-sans" style={{ backgroundColor: THEME.bg, color: THEME.ink }}>
       {/* ═════════ MEGA HEADER ═════════ */}
       <header className="sticky top-0 z-40 w-full shadow-sm" style={{ backgroundColor: THEME.surface }}>
-        {/* Utility strip */}
-        <div className="hidden w-full text-white md:block" style={{ backgroundColor: THEME.brandDark }}>
-          <div className="mx-auto flex max-w-[1400px] items-center justify-between px-4 py-1.5 text-[11px]">
-            <div className="flex items-center gap-4">
-              <span className="flex items-center gap-1"><MapPin className="h-3 w-3" /> Deliver to all 64 districts</span>
-              <span className="flex items-center gap-1"><Truck className="h-3 w-3" /> Free delivery over ৳2,000</span>
-              <span className="flex items-center gap-1"><RotateCcw className="h-3 w-3" /> 7-day easy returns</span>
-            </div>
-            <div className="flex items-center gap-4">
-              <button type="button" onClick={onOpenAccount} className="hover:text-amber-300">Sell on ZID</button>
-              {onGoToPlans && (
-                <button type="button" onClick={onGoToPlans} className="hover:text-amber-300">Merchant login</button>
-              )}
-              <span className="flex items-center gap-1"><HeadphonesIcon className="h-3 w-3" /> 09600-000000</span>
+        {/* Utility strip — content + visibility are owned by
+            Admin → Marketplace Studio → Utility Strip. */}
+        {stripVisible && (
+          <div className="hidden w-full text-white md:block" style={{ backgroundColor: THEME.brandDark }}>
+            <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-4 py-1.5 text-[11px]">
+              <div className="flex min-w-0 items-center gap-4 overflow-hidden">
+                {stripItems.map((item) => {
+                  const Icon = STRIP_ICON_MAP[item.icon] || MapPin;
+                  return (
+                    <span key={item.id} className="flex shrink-0 items-center gap-1 whitespace-nowrap">
+                      <Icon className="h-3 w-3" /> {item.text}
+                    </span>
+                  );
+                })}
+              </div>
+              <div className="flex shrink-0 items-center gap-4">
+                <button type="button" onClick={onOpenAccount} className="hover:text-amber-300">
+                  {strip?.sellLabel || 'Sell on ZID'}
+                </button>
+                {onGoToPlans && (
+                  <button type="button" onClick={onGoToPlans} className="hover:text-amber-300">
+                    {strip?.merchantLoginLabel || 'Merchant login'}
+                  </button>
+                )}
+                {strip?.phone && (
+                  <span className="flex items-center gap-1"><HeadphonesIcon className="h-3 w-3" /> {strip.phone}</span>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* ── MOBILE COMPACT BAR (below `lg`) ──────────────────────────
             One row, 56px tall, everything within thumb reach: menu · logo ·
@@ -948,7 +1137,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             >
               All categories
             </button>
-            {(data?.categories || []).slice(0, 14).map((cat) => (
+            {allCategories.rail.map((cat) => (
               <button
                 key={cat.name}
                 type="button"
@@ -1043,10 +1232,74 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                   key={cat.name}
                   name={cat.name}
                   count={cat.product_count}
-                  emoji={categoryEmoji(cat.name)}
+                  emoji={(cat as any).emoji || categoryEmoji(cat.name)}
+                  image={(cat as any).image}
                   active={filters.category === cat.name}
                   onClick={() => setFilter({ category: filters.category === cat.name ? undefined : cat.name })}
                 />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* ═════════ FEATURED PICKS ═════════
+            Products the Super Admin pinned in Marketplace Studio → Featured & Deals
+            (plus products from the vendors they highlighted). Rendered as a
+            horizontal rail so it never competes with the main grid for width. */}
+        {featuredList.length > 0 && (
+          <section className="mt-4">
+            <div className="mb-2 flex items-end justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="text-[15px] font-black tracking-tight text-slate-900">
+                  {featuredConfig?.featuredTitle || 'Featured picks'}
+                </h2>
+                {featuredConfig?.featuredSubtitle && (
+                  <p className="truncate text-[11px] text-slate-500">{featuredConfig.featuredSubtitle}</p>
+                )}
+              </div>
+            </div>
+            <div className="flex snap-x snap-mandatory gap-2.5 overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {featuredList.map((product) => (
+                <div key={`feat-${product.id}`} className="w-[172px] shrink-0 snap-start sm:w-[196px]">
+                  <ProductCard
+                    product={product}
+                    onAdd={handleAdd}
+                    onVisitVendor={onVisitVendor}
+                    onOpenProduct={setActiveProduct}
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* ═════════ TODAY’S BEST DEALS ═════════
+            Auto-aggregated from the biggest live discounts across every active
+            seller. The heading and the on/off switch come from the admin panel;
+            when disabled this block disappears entirely. */}
+        {dealsList.length > 0 && (
+          <section className="mt-4">
+            <div className="mb-2 flex items-end justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="flex items-center gap-1.5 text-[15px] font-black tracking-tight text-slate-900">
+                  <Flame className="h-4 w-4 text-rose-600" />
+                  {featuredConfig?.dealsTitle || 'Today’s best deals'}
+                </h2>
+                {featuredConfig?.dealsSubtitle && (
+                  <p className="truncate text-[11px] text-slate-500">{featuredConfig.dealsSubtitle}</p>
+                )}
+              </div>
+            </div>
+            <div className="flex snap-x snap-mandatory gap-2.5 overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {dealsList.map((product) => (
+                <div key={`deal-${product.id}`} className="w-[172px] shrink-0 snap-start sm:w-[196px]">
+                  <ProductCard
+                    product={product}
+                    onAdd={handleAdd}
+                    onVisitVendor={onVisitVendor}
+                    onOpenProduct={setActiveProduct}
+                  />
+                </div>
               ))}
             </div>
           </section>
