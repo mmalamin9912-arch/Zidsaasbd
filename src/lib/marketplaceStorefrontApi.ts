@@ -217,6 +217,10 @@ export function toMarketplaceProduct(raw: any): any {
     ...raw,
     id,
     title: String(raw?.title || raw?.name || 'Untitled product'),
+    // The seller's Bangla name travels with the product so the marketplace can
+    // render it when the shopper reads Bangla. Kept separate from `title`: the
+    // cards fall back to English, and no search or facet key changes.
+    titleBn: String(raw?.titleBn || raw?.title_bn || raw?.nameBn || ''),
     priceBDT: price,
     image: raw?.image || raw?.image_url || raw?.imageUrl || raw?.thumbnail || '',
     vendor_id: String(raw?.vendor_id || raw?.store_id || raw?.storeId || raw?.store_slug || ''),
