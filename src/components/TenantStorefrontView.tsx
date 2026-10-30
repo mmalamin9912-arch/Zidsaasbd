@@ -2831,6 +2831,55 @@ The render below must not guess. A merchant may paste
     setProfileModal(kind);
   };
 
+  /**
+   * Honour a `?account=<section>` intent from the marketplace's account menu.
+   *
+   * The marketplace is a different route, so it cannot open this view's tabs
+   * directly — it hands off through the URL instead. The intent is applied once
+   * and then stripped from the address bar (via `replaceState`, so Back still
+   * behaves), which keeps a refresh from re-running it and re-opening a modal
+   * the shopper had deliberately closed.
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const intent = params.get('account');
+    if (!intent) return;
+
+    const strip = () => {
+      params.delete('account');
+      const qs = params.toString();
+      window.history.replaceState({}, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    };
+
+    if (intent === 'signin') {
+      if (!customerSession) {
+        setAuthMode('signin');
+        setIsAuthOpen(true);
+      }
+      strip();
+      return;
+    }
+
+    // Every other section is part of the account area, which requires a session.
+    setMobileTab(intent === 'orders' ? 'orders' : 'profile');
+    if (!customerSession) {
+      setAuthMode('signin');
+      setIsAuthOpen(true);
+      strip();
+      return;
+    }
+
+    if (intent === 'addresses') openProfileModal('addresses');
+    if (intent === 'returns') setShowOrderDashboard(true);
+    if (intent === 'profile') {
+      // `profile` lands on the overview itself — no extra modal needed.
+    }
+    strip();
+    // Re-run only when the session flips: the intent is consumed once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerSession?.email]);
+
   const closeProfileModal = () => {
     setProfileModal(null);
     setProfileNotice('');

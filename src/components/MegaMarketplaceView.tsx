@@ -25,7 +25,7 @@ import {
   Search, ShoppingBasket, Store, User, ChevronDown, ChevronLeft, ChevronRight,
   SlidersHorizontal, X, Star, Truck, ShieldCheck, BadgePercent, Loader2,
   MapPin, TruckIcon, HeadphonesIcon, RotateCcw, Check, Plus, Minus,
-  LayoutGrid, Flame, Sparkles, ArrowRight, Menu, ArrowUpDown,
+  LayoutGrid, Flame, Sparkles, ArrowRight, Menu, ArrowUpDown, LogOut,
   Heart, Receipt, Globe, TrendingUp, Clock, Smartphone, Watch, Gamepad2,
 } from 'lucide-react';
 import SafeImage from './SafeImage';
@@ -59,6 +59,7 @@ import {
   categoryName,
   stripText,
 } from '../lib/banglaCatalog';
+
 import type { MarketplaceProduct } from '../types';
 
 /* ─────────────────────────── platform palette ───────────────────────────
@@ -916,6 +917,17 @@ export interface MegaMarketplaceViewProps {
   onCheckout: (vendorSlug: string) => void;
   /** Open the merchant dashboard / sign-in. */
   onOpenAccount?: () => void;
+  /**
+   * Open the shopper's own account area. `section` deep-links to the matching
+   * storefront tab/pane so the account menu can send someone straight to their
+   * orders, returns or saved addresses instead of a generic landing page.
+   */
+  onOpenCustomerAccount?: (section?: 'profile' | 'orders' | 'returns' | 'addresses') => void;
+  /**
+   * Jump straight to sign-in on the shopper's account page. Used by the menu's
+   * honest "Sign In" label when nobody is signed in.
+   */
+  onOpenSignIn?: () => void;
   /** Return to the SaaS pricing landing. */
   onGoToPlans?: () => void;
   /** First path segment already in the URL (e.g. `/marketplace?category=x`). */
@@ -934,6 +946,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   onVisitVendor,
   onCheckout,
   onOpenAccount,
+  onOpenCustomerAccount,
+  onOpenSignIn,
   onGoToPlans,
   initialFilters,
   slides: slidesOverride,
@@ -1105,6 +1119,45 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const [showLocation, setShowLocation] = useState(false);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [showLangMenu, setShowLangMenu] = useState(false);
+
+  /* ── Shopper identity ─────────────────────────────────────────────────
+     The account menu must say who is signed in ("Hi, Rakib") rather than a
+     blanket "Hi, sign in", and must offer Sign Out only to someone who IS
+     signed in. The tenant storefront owns the session, so we read the same
+     localStorage key it writes and re-read when the tab regains focus (a
+     sign-in happens on another page, so no in-page event fires here). */
+  const readShopperSession = useCallback((): { name: string; email: string } | null => {
+    try {
+      const raw = localStorage.getItem('zid_customer_session');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const name = String(parsed?.name || '').trim();
+      const email = String(parsed?.email || '').trim();
+      if (!name && !email) return null;
+      return { name, email };
+    } catch {
+      return null;
+    }
+  }, []);
+  const [shopper, setShopper] = useState<{ name: string; email: string } | null>(() => readShopperSession());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const sync = () => setShopper(readShopperSession());
+    sync();
+    window.addEventListener('focus', sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener('focus', sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, [readShopperSession]);
+
+  /** First name for the greeting — a full name in the trigger would overflow. */
+  const shopperFirstName = useMemo(() => {
+    const raw = shopper?.name || (shopper?.email ? shopper.email.split('@')[0] : '');
+    return raw.trim().split(/\s+/)[0] || '';
+  }, [shopper]);
 
   /* ── Delivery destination ──────────────────────────────────────────────
      Seeded SYNCHRONOUSLY from what this device already knows (a previous
@@ -2064,9 +2117,24 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 aria-expanded={showAccountMenu}
                 className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition hover:bg-[#f4f5ff]"
               >
-                <User className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
+                {/* Signed-in shoppers get their initial; guests get the icon. */}
+                {shopperFirstName ? (
+                  <span
+                    className="flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-black text-white"
+                    style={{ backgroundColor: THEME.brand }}
+                    aria-hidden="true"
+                  >
+                    {shopperFirstName.charAt(0).toUpperCase()}
+                  </span>
+                ) : (
+                  <User className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
+                )}
                 <span className="flex flex-col whitespace-nowrap leading-tight">
-                  <span className="text-[10px] text-slate-400">{copy('hi_sign_in')}</span>
+                  <span className="max-w-[92px] truncate text-[10px] text-slate-400">
+                    {shopperFirstName
+                      ? (language === 'bn' ? `হ্যালো, ${shopperFirstName}` : `Hi, ${shopperFirstName}`)
+                      : copy('hi_sign_in')}
+                  </span>
                   <span className="flex items-center gap-1 text-[12px] font-bold" style={{ color: THEME.ink }}>
                     {copy('account')}
                     <ChevronDown className={`h-3 w-3 text-slate-400 transition-transform ${showAccountMenu ? 'rotate-180' : ''}`} />
@@ -2076,49 +2144,118 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               {showAccountMenu && (
                 <div
                   role="menu"
-                  className="absolute right-0 top-full z-50 mt-2 w-[228px] overflow-hidden rounded-xl border bg-white py-1 shadow-xl"
+                  aria-label={copy('account_menu')}
+                  className="absolute right-0 top-full z-50 mt-2 w-[268px] overflow-hidden rounded-xl border bg-white shadow-2xl"
                   style={{ borderColor: THEME.line }}
                 >
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => { setShowAccountMenu(false); onOpenAccount?.(); }}
-                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[12.5px] font-semibold text-slate-700 transition hover:bg-[#f4f5ff]"
-                  >
-                    <User className="h-4 w-4 text-slate-400" /> Sign in / Register
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => { setShowAccountMenu(false); onOpenAccount?.(); }}
-                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[12.5px] text-slate-600 transition hover:bg-[#f4f5ff]"
-                  >
-                    <Receipt className="h-4 w-4 text-slate-400" /> My Orders
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => { setShowAccountMenu(false); setShowWishlist(true); }}
-                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-[12.5px] text-slate-600 transition hover:bg-[#f4f5ff]"
-                  >
-                    <Heart className="h-4 w-4 text-slate-400" /> Wishlist
-                    {wishlist.count > 0 && (
-                      <span className="ml-auto rounded-full bg-[#eef0ff] px-1.5 text-[10px] font-black" style={{ color: THEME.brand }}>
-                        {wishlist.count}
-                      </span>
+                  {/* Header — the Noon pattern: a greeting block that either
+                      welcomes the shopper by name or invites them to sign in. */}
+                  <div className="border-b px-3.5 py-3" style={{ borderColor: THEME.line }}>
+                    {shopperFirstName ? (
+                      <>
+                        <div className="truncate text-[13px] font-black text-slate-900">
+                          {language === 'bn' ? `হ্যালো, ${shopperFirstName}` : `Hi, ${shopperFirstName}`}
+                        </div>
+                        {shopper?.email && (
+                          <div className="mt-0.5 truncate text-[11px] text-slate-500" lang="en">{shopper.email}</div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <div className="text-[13px] font-black text-slate-900">{copy('welcome_zid')}</div>
+                        <div className="mt-0.5 text-[11px] text-slate-500">{copy('sign_in_desc')}</div>
+                      </>
                     )}
-                  </button>
-                  {onGoToPlans && (
+                    <div className="mt-2.5">
+                      {shopperFirstName ? (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => { setShowAccountMenu(false); onOpenCustomerAccount?.('profile'); }}
+                          className="flex min-h-[34px] w-full items-center justify-center gap-1.5 rounded-lg border text-[12px] font-black transition hover:bg-[#f4f5ff]"
+                          style={{ borderColor: THEME.brand, color: THEME.brand }}
+                        >
+                          <User className="h-3.5 w-3.5" /> {copy('account_overview')}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => { setShowAccountMenu(false); (onOpenSignIn || onOpenAccount)?.(); }}
+                          className="flex min-h-[34px] w-full items-center justify-center gap-1.5 rounded-lg text-[12px] font-black text-white transition hover:brightness-110"
+                          style={{ backgroundColor: THEME.brand }}
+                        >
+                          {copy('sign_in_menu')}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Menu rows — one per account area, each deep-linking. */}
+                  <div className="py-1">
+                    {([
+                      { key: 'orders', label: copy('my_orders'), Icon: Receipt, section: 'orders' as const },
+                      { key: 'returns', label: copy('returns'), Icon: RotateCcw, section: 'returns' as const },
+                      { key: 'addresses', label: copy('addresses'), Icon: MapPin, section: 'addresses' as const },
+                      { key: 'profile', label: copy('profile_menu'), Icon: User, section: 'profile' as const },
+                    ]).map(({ key, label, Icon, section }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => { setShowAccountMenu(false); onOpenCustomerAccount?.(section); }}
+                        className="flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] text-slate-700 transition hover:bg-[#f4f5ff]"
+                      >
+                        <Icon className="h-4 w-4 shrink-0 text-slate-400" />
+                        <span className="min-w-0 flex-1 truncate">{label}</span>
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300" />
+                      </button>
+                    ))}
+
+                    {/* Wishlist opens the in-page drawer — it is marketplace
+                        state, not a storefront page — and carries its count. */}
                     <button
                       type="button"
                       role="menuitem"
-                      onClick={() => { setShowAccountMenu(false); onGoToPlans(); }}
-                      className="flex w-full items-center gap-2.5 border-t px-3 py-2.5 text-left text-[12.5px] text-slate-600 transition hover:bg-[#f4f5ff]"
-                      style={{ borderColor: THEME.line }}
+                      onClick={() => { setShowAccountMenu(false); setShowWishlist(true); }}
+                      className="flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] text-slate-700 transition hover:bg-[#f4f5ff]"
                     >
-                      <Store className="h-4 w-4 text-slate-400" /> {copy('sell_on_zid')}
+                      <Heart className="h-4 w-4 shrink-0 text-slate-400" />
+                      <span className="min-w-0 flex-1 truncate">{copy('wishlist')}</span>
+                      {wishlist.count > 0 && (
+                        <span className="rounded-full bg-[#eef0ff] px-1.5 text-[10px] font-black" style={{ color: THEME.brand }}>
+                          {wishlist.count}
+                        </span>
+                      )}
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300" />
                     </button>
-                  )}
+                  </div>
+
+                  {/* Footer — sell CTA, then sign out / sign in. */}
+                  <div className="border-t" style={{ borderColor: THEME.line }}>
+                    {onGoToPlans && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => { setShowAccountMenu(false); onGoToPlans(); }}
+                        className="flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] text-slate-700 transition hover:bg-[#f4f5ff]"
+                      >
+                        <Store className="h-4 w-4 shrink-0 text-slate-400" />
+                        <span className="min-w-0 flex-1 truncate">{copy('sell_on_zid')}</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => { setShowAccountMenu(false); (shopperFirstName ? onOpenCustomerAccount?.('profile') : (onOpenSignIn || onOpenAccount))?.(); }}
+                      className="flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] font-bold text-rose-600 transition hover:bg-rose-50"
+                    >
+                      <LogOut className="h-4 w-4 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">
+                        {shopperFirstName ? copy('sign_out') : copy('sign_in_menu')}
+                      </span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

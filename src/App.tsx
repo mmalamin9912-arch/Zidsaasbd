@@ -2414,6 +2414,44 @@ onPlaceOrder={async (newOrder) => {
           window.history.pushState({}, '', '/dashboard');
           setCurrentPath('/dashboard');
         }}
+        /*
+         * The account menu's rows send the shopper to their OWN account area.
+         *
+         * There is no platform-wide customer portal: a shopper's orders live in
+         * the storefront they bought from, which owns fulfilment. So we hand
+         * off to the active store's storefront with a `?account=<section>`
+         * intent, which that view reads to open the matching tab. Without a
+         * known store there is nothing to deep-link to, so we fall back to the
+         * merchant dashboard sign-in rather than a dead end.
+         */
+        onOpenCustomerAccount={(section) => {
+          const target = section || 'profile';
+          const slug = String(
+            (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
+          ).trim();
+          if (!slug) {
+            window.history.pushState({}, '', `/store/marketplace?account=${target}`);
+            setCurrentPath('/store/marketplace');
+            return;
+          }
+          const next = `/store/${slug}?account=${target}`;
+          window.history.pushState({}, '', next);
+          setCurrentPath(`/store/${slug}`);
+        }}
+        onOpenSignIn={() => {
+          // Sign-in is a storefront modal; with no active store, use the
+          // dashboard's own auth screen.
+          const slug = String(
+            (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
+          ).trim();
+          if (slug) {
+            window.history.pushState({}, '', `/store/${slug}?account=signin`);
+            setCurrentPath(`/store/${slug}`);
+          } else {
+            window.history.pushState({}, '', '/dashboard');
+            setCurrentPath('/dashboard');
+          }
+        }}
         onGoToPlans={() => {
           window.history.pushState({}, '', '/pricing');
           setCurrentPath('/pricing');
