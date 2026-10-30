@@ -15849,7 +15849,23 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
   const results: any[] = [];
   const db = await getMongoDb(ORDERS_DB_NAME);
 
-  for (const [index, child] of children.entries()) {
+  /*
+   * PERF: vendors are prepared CONCURRENTLY and the child rows are written in
+   * ONE `bulkWrite`.
+   *
+   * The previous loop awaited, per vendor, in series: resolveStoreRef (network),
+   * a `stores` findOne, resolveCommission (3 possible queries), an orders
+   * updateOne, and recordVendorPayout (a findOne + write). A three-seller basket
+   * therefore queued ~18 sequential round-trips before the MASTER row was even
+   * inserted — which is exactly the "order hangs / takes seconds" report, and it
+   * got worse with every extra seller.
+   *
+   * Now the per-vendor lookups run in parallel, the order rows go out as a
+   * single ordered (non-atomic, fine for independent docs) bulkWrite, and the
+   * payout ledger is fire-and-forget so it can never hold up the response.
+   * A failure inside one vendor is isolated — the others still land.
+   */
+  const prepared = await Promise.all(children.map(async (child, index) => {
     // 1. Canonical vendor identity (UUID + slug + code).
     const ref = await resolveStoreRef(child.vendor_id);
     const vendorStoreDoc: any = db
@@ -15933,18 +15949,9 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
       courier_name: courierName,
     });
 
-    if (db) {
-      await db.collection(ORDERS_COLLECTION)
-        .updateOne(
-          { $or: [{ id: childId }, { order_number: childNumber, parent_order_id: masterId }] },
-          { $set: { ...sanitizeMongoPatch(childRecord), updated_at: new Date() }, $setOnInsert: { created_at: childRecord.created_at } },
-          { upsert: true }
-        )
-        .catch((err: any) => console.warn('[Server] child order upsert warning:', err?.message || err));
-    }
-
-    // 4. Commission ledger row → vendor_payouts.
-    await recordVendorPayout({
+    // The payout ledger is NOT awaited: it is bookkeeping the shopper must never
+    // wait on, and it is upsert-idempotent by (master, child).
+    void recordVendorPayout({
       masterOrderId: masterId,
       masterOrderNumber: masterNumber,
       childOrderId: childId,
@@ -15958,7 +15965,7 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
       commissionBDT: commission.commission_bdt,
     }).catch((err: any) => console.warn('[Server] vendor payout warning:', err?.message || err));
 
-    results.push({
+    return {
       id: childId,
       order_number: childNumber,
       vendor_id: vendorStoreId,
@@ -15971,8 +15978,40 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
       net_payout_bdt: commission.net_bdt,
       courier_name: courierName,
       tracking_code: trackingCode,
-    });
+      // Carried for the single bulkWrite below.
+      _record: childRecord,
+    };
+  }));
+
+  /*
+   * ONE round-trip for every child order.
+   *
+   * `upsert` keeps the operation idempotent: a retried request, or two tabs
+   * racing, converge on the SAME child document (matched by id) instead of
+   * inserting a second copy — the previous findOne-then-insert was not atomic
+   * and could double-write under concurrent submits.
+   */
+  if (db && prepared.length > 0) {
+    try {
+      await db.collection(ORDERS_COLLECTION).bulkWrite(
+        prepared.map((p) => ({
+          updateOne: {
+            filter: { $or: [{ id: p.id }, { order_number: p.order_number, parent_order_id: masterId }] },
+            update: {
+              $set: { ...sanitizeMongoPatch(p._record), updated_at: new Date() },
+              $setOnInsert: { created_at: p._record.created_at },
+            },
+            upsert: true,
+          },
+        })),
+        { ordered: false },
+      );
+    } catch (err: any) {
+      console.warn('[Server] child order bulkWrite warning:', err?.message || err);
+    }
   }
+
+  results.push(...prepared.map(({ _record, ...rest }) => rest));
 
   console.log('[Server] vendored order split:', { master_order: masterNumber, vendors: vendorIds.length });
   return results;
@@ -16104,34 +16143,29 @@ app.post('/api/orders', async (req, res) => {
 
       const record = buildOrderRecord(order, { storeId, merchantId, slug, storeCode: identity.storeCode, source, isManual });
 
-      // ── MASTER / CHILD SPLIT ────────────────────────────────────────────
-      // A multi-vendor cart is written as ONE master order (what the shopper
-      // sees) plus ONE child order per selling vendor, each carrying its own
-      // commission and its own courier slip. `persistVendorChildren` never
-      // throws: the master write below still succeeds if splitting fails.
-      if (!order.parent_order_id && !order.parentOrderId) {
-        const split = await persistVendorChildren(order, record).catch((splitErr: any) => {
+      /*
+       * ── MASTER / CHILD SPLIT ────────────────────────────────────────────
+       *
+       * ORDERING MATTERS HERE.
+       *
+       * The split used to run to completion BEFORE the master row was written.
+       * The shopper therefore waited on every vendor's store lookup, commission
+       * resolution, child insert and payout ledger write — the "Place order"
+       * button sat spinning for seconds on a multi-store basket, and the order
+       * did not exist at all until the last vendor had been processed.
+       *
+       * Now the master is persisted FIRST (so the order is immediately visible
+       * to the customer) and the fan-out runs concurrently, patching the master
+       * with its child references when it finishes. `persistVendorChildren`
+       * never throws, so a split failure degrades to a single-vendor order
+       * instead of losing the shopper's order.
+       */
+      const splitPromise = (!order.parent_order_id && !order.parentOrderId)
+        ? persistVendorChildren(order, record).catch((splitErr: any) => {
           console.warn('[Server] vendor split warning:', splitErr?.message || splitErr);
           return [] as any[];
-        });
-        if (split.length > 0) {
-          record.order_type = 'master';
-          record.child_order_ids = split.map((c: any) => c.id);
-          record.child_order_numbers = split.map((c: any) => c.order_number);
-          record.vendor_count = split.length;
-          record.vendor_slips = split.map((c: any) => ({
-            vendor_id: c.vendor_id,
-            vendor_name: c.vendor_name,
-            child_order_id: c.id,
-            child_order_number: c.order_number,
-            courier_name: c.courier_name,
-            tracking_code: c.tracking_code,
-            cod_amount_bdt: c.cod_amount,
-          }));
-        }
-      }
-
-
+        })
+        : Promise.resolve([] as any[]);
 
       // Write through the native driver so the record always lands in
       // zidbdsaas.orders regardless of the connection string's default DB.
@@ -16194,6 +16228,58 @@ app.post('/api/orders', async (req, res) => {
         }
       } catch (insertErr: any) {
         console.warn('[Server] POST /api/orders insert warning:', insertErr?.message || insertErr);
+      }
+
+      /*
+       * Attach the vendor fan-out to the master.
+       *
+       * The split was launched before the master write and left running while
+       * it happened; we only WAIT for it here, once. On a multi-vendor basket
+       * this is the part the shopper still waits on (the vendor child orders
+       * have to exist), but the master is already durable, so the customer's
+       * history is populated no matter what this returns. The patch is a single
+       * updateOne rather than a second full insert.
+       */
+      try {
+        const split = await splitPromise;
+        if (split.length > 0) {
+          record.order_type = 'master';
+          record.child_order_ids = split.map((c: any) => c.id);
+          record.child_order_numbers = split.map((c: any) => c.order_number);
+          record.vendor_count = split.length;
+          record.vendor_slips = split.map((c: any) => ({
+            vendor_id: c.vendor_id,
+            vendor_name: c.vendor_name,
+            child_order_id: c.id,
+            child_order_number: c.order_number,
+            courier_name: c.courier_name,
+            tracking_code: c.tracking_code,
+            cod_amount_bdt: c.cod_amount,
+          }));
+
+          if (persisted) {
+            const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+            if (db) {
+              await db.collection(ORDERS_COLLECTION)
+                .updateOne(
+                  { order_number: record.order_number },
+                  {
+                    $set: {
+                      order_type: record.order_type,
+                      child_order_ids: record.child_order_ids,
+                      child_order_numbers: record.child_order_numbers,
+                      vendor_count: record.vendor_count,
+                      vendor_slips: record.vendor_slips,
+                      updated_at: new Date(),
+                    },
+                  },
+                )
+                .catch((patchErr: any) => console.warn('[Server] master split patch warning:', patchErr?.message || patchErr));
+            }
+          }
+        }
+      } catch (splitWaitErr: any) {
+        console.warn('[Server] vendor split await warning:', splitWaitErr?.message || splitWaitErr);
       }
 
       // ── Order-confirmation SMS ───────────────────────────────────────────

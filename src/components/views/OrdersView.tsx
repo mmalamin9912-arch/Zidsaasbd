@@ -150,7 +150,19 @@ const RETURN_BADGE: Record<ReturnRequest['status'], string> = {
  * costs nothing. Explicit merchant actions (status changes, courier booking,
  * deletes) and the tab-count probe still refresh immediately.
  */
-const ORDERS_POLL_MS = 30000;
+/*
+ * How often the merchant's order list re-reads the server.
+ *
+ * 30s was too slow for the actual complaint: a marketplace order is written by
+ * a different customer in a different tab, so nothing in THIS dashboard fires an
+ * event to announce it. A seller watching the list waited up to half a minute
+ * before the new order appeared. 10s matches the customer-side cadence.
+ *
+ * The cost is bounded, not multiplied: the poll skips hidden tabs (see below)
+ * and the response is diffed against `lastSyncedSignature`, so an unchanged
+ * payload causes no setState and no re-render at all.
+ */
+const ORDERS_POLL_MS = 10000;
 const RETURNS_POLL_MS = 30000;
 
 export type StatusTab =
@@ -420,10 +432,25 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
     };
     void fetchLiveOrders();
-    // 30s cadence (the requested 30–60s band). Explicit merchant actions and
-    // the tab-count probe still refresh immediately.
-    const timer = setInterval(fetchLiveOrders, ORDERS_POLL_MS);
-    return () => clearInterval(timer);
+
+    // Skip the tick entirely while the tab is in the background: the merchant
+    // cannot see the list, and browsers throttle background timers anyway. On
+    // return we fire immediately (`visibilitychange`) so the table is current
+    // the moment it is looked at, rather than up to one interval later.
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void fetchLiveOrders();
+    }, ORDERS_POLL_MS);
+
+    const onVisible = () => {
+      if (typeof document !== 'undefined' && !document.hidden) void fetchLiveOrders();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [merchantId, storeSlug]);
 

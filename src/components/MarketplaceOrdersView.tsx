@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, Package, Truck, CheckCircle2, Clock, XCircle,
   Receipt, ArrowRight, RefreshCw, Search, ShoppingBag, Store,
@@ -140,6 +140,15 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
    * The phone is the identity the server filters on — this call can only ever
    * return that number's orders, so no client-side trust is involved.
    */
+  /**
+   * Monotonic request id.
+   *
+   * Polling and manual refreshes can overlap; without this a SLOW earlier
+   * response could land after a fast newer one and repaint stale data. Every
+   * load takes a ticket and only the newest ticket may write state.
+   */
+  const requestSeq = useRef(0);
+
   const load = useCallback(async (opts: { silent?: boolean } = {}) => {
     const phone = session?.phone || '';
     if (!phone) {
@@ -147,6 +156,7 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
       setLoading(false);
       return;
     }
+    const ticket = ++requestSeq.current;
     if (!opts.silent) setLoading(true);
     try {
       const params = new URLSearchParams({ customer_phone: phone });
@@ -155,24 +165,35 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
         cache: 'no-store',
       });
       const data = await res.json().catch(() => null);
+      // A newer request has already started — discard this answer entirely.
+      if (ticket !== requestSeq.current) return;
       if (!res.ok || !data?.ok) {
         // A failed read must not wipe a list that is already on screen.
         if (!opts.silent) {
           setOrders([]);
-          setError(data?.error || t('Could not load your orders.', 'আপনার অর্ডার লোড করা যায়নি।'));
+          setError(data?.error || 'Could not load your orders.');
         }
         return;
       }
       setError(null);
       setOrders(normalizeOrders(data.orders));
     } catch {
-      if (!opts.silent) {
-        setError(t('Could not load your orders. Please try again.', 'আপনার অর্ডার লোড করা যায়নি। আবার চেষ্টা করুন।'));
-      }
+      if (ticket !== requestSeq.current) return;
+      if (!opts.silent) setError('Could not load your orders. Please try again.');
     } finally {
-      if (!opts.silent) setLoading(false);
+      if (ticket === requestSeq.current && !opts.silent) setLoading(false);
     }
-  }, [session?.phone, t]);
+    /*
+     * `t` is deliberately NOT a dependency.
+     *
+     * It used to be, and because `t` is rebuilt whenever `lang` changes, a
+     * language switch re-created `load` → re-ran the mount effect → re-fetched
+     * the whole order list AND tore down/re-created the poll timer. The messages
+     * above are stored as KEYS-free plain strings rendered at the call site, so
+     * the callback itself does not need the language.
+     */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.phone]);
 
   useEffect(() => {
     void load();
@@ -346,7 +367,17 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
 
             {error && (
               <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700">
-                {error}
+                {/* The loader stores a language-neutral reason; the copy is
+                    chosen HERE so it stays right after a language switch —
+                    the list is not re-fetched just to translate a message. */}
+                {/Could not load/i.test(error) ? (
+                  <>
+                    {t('Could not load your orders.', 'আপনার অর্ডার লোড করা যায়নি।')}{' '}
+                    {t('Please try again.', 'আবার চেষ্টা করুন।')}
+                  </>
+                ) : (
+                  error
+                )}
               </div>
             )}
 

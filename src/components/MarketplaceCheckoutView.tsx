@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, Truck, Wallet, CreditCard, Banknote, ShieldCheck,
   Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail,
@@ -180,6 +180,18 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
   const [payment, setPayment] = useState<'cod' | 'bkash' | 'card'>('cod');
 
   const [placing, setPlacing] = useState(false);
+  /**
+   * THE SUBMISSION LOCK.
+   *
+   * `placing` alone is NOT a guard against a double-click: React state updates
+   * are asynchronous, so two clicks dispatched in the same tick both read
+   * `placing === false` and both fire a request — producing two orders. This ref
+   * is flipped SYNCHRONOUSLY before the first `await`, so the second click is
+   * rejected immediately, and it is only released once the request settles.
+   *
+   * It also survives a re-render, unlike a state value captured in a closure.
+   */
+  const submittingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [placed, setPlaced] = useState<{ id: string; number: string; vendors: number } | null>(null);
 
@@ -210,8 +222,17 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
    * single seller — that keeps one code path for every marketplace order.
    */
   const placeOrder = async () => {
+    // Re-entrancy guard — checked and SET before any await. A second click
+    // (or an Enter keypress on a focused button) is a no-op from here on.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+
     const problem = validate();
-    if (problem) { setError(problem); return; }
+    if (problem) {
+      submittingRef.current = false;
+      setError(problem);
+      return;
+    }
     setError(null);
     setPlacing(true);
 
@@ -294,6 +315,10 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       );
     } finally {
       setPlacing(false);
+      // Released only after the request has fully settled. On success the
+      // component has already switched to the confirmation screen, so the
+      // button no longer exists; on failure the shopper can retry.
+      submittingRef.current = false;
     }
   };
 
@@ -630,7 +655,12 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
               <button
                 type="button"
                 onClick={placeOrder}
+                // Belt and braces: the ref blocks same-tick double clicks, the
+                // disabled state blocks the UI and removes the button from the
+                // tab order while a request is in flight.
                 disabled={placing}
+                aria-busy={placing}
+                aria-disabled={placing}
                 className="flex min-h-[50px] w-full items-center justify-center gap-2 rounded-xl text-[13.5px] font-black text-white transition disabled:opacity-60"
                 style={{ backgroundColor: THEME.brand }}
               >
