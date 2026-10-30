@@ -915,7 +915,11 @@ export interface MegaMarketplaceViewProps {
    * Take the basket to that vendor's checkout. The marketplace itself has no
    * checkout of its own — the selected store's storefront owns fulfilment.
    */
-  onCheckout: (vendorSlug: string) => void;
+  /**
+   * Open the unified marketplace checkout (`/marketplace/checkout`). Takes no
+   * argument: the whole basket is checked out at once, across every vendor.
+   */
+  onCheckout: () => void;
   /** Open the merchant dashboard / sign-in. */
   onOpenAccount?: () => void;
   /**
@@ -3315,22 +3319,33 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                   <span className="text-slate-500">{copy('subtotal')}</span>
                   <span className="text-[15px] font-black" style={{ color: THEME.ink }}>{bdt(basket.subtotal)}</span>
                 </div>
+                {/*
+                  CHECKOUT STAYS IN THE MARKETPLACE.
+
+                  This used to call `onCheckout(first.vendorSlug)`, which sent the
+                  shopper to ONE merchant's storefront to re-enter their details
+                  there — abandoning every other vendor's items in the basket.
+                  The unified checkout at `/marketplace/checkout` collects one
+                  address and one payment choice, then posts a single master
+                  order whose lines each carry their selling vendor; the server
+                  splits it into one child order per merchant.
+                */}
                 <button
                   type="button"
-                  disabled={!basket.vendors[0]?.vendorSlug}
-                  onClick={() => {
-                    const first = basket.vendors[0];
-                    if (!first?.vendorSlug) return;
-                    setShowBasket(false);
-                    onCheckout(first.vendorSlug);
-                  }}
+                  onClick={() => { setShowBasket(false); onCheckout(); }}
                   className="min-h-[48px] w-full rounded-xl text-[13px] font-black text-white disabled:opacity-50"
                   style={{ backgroundColor: THEME.brand }}
                 >
                   {copy('checkout')}
                 </button>
                 <p className="mt-1.5 text-center text-[10px] text-slate-400">
-                  {language === 'bn' ? 'আপনাকে সেলারের নিরাপদ চেকআউটে নিয়ে যাওয়া হবে।' : 'You’ll be taken to the seller’s secure checkout.'}
+                  {basket.vendors.length > 1
+                    ? (language === 'bn'
+                      ? `একবার চেকআউটেই ${basket.vendors.length}টি সেলারের পণ্য — প্রত্যেকে আলাদাভাবে পাঠাবেন।`
+                      : `One checkout for all ${basket.vendors.length} sellers — each ships separately.`)
+                    : (language === 'bn'
+                      ? 'মার্কেটপ্লেসেই নিরাপদে চেকআউট সম্পন্ন করুন।'
+                      : 'Complete your secure checkout right here in the marketplace.')}
                 </p>
               </div>
             )}

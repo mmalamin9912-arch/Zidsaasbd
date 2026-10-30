@@ -41,6 +41,7 @@ import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 // storefront (TenantStorefrontView), deliberately.
 import { MegaMarketplaceView } from './components/MegaMarketplaceView';
 import { MarketplaceOrdersView } from './components/MarketplaceOrdersView';
+import { MarketplaceCheckoutView } from './components/MarketplaceCheckoutView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
@@ -2395,6 +2396,48 @@ onPlaceOrder={async (newOrder) => {
    * so a signed-out visitor still gets a proper "sign in" surface here rather
    * than being redirected anywhere.
    */
+  /*
+   * UNIFIED MARKETPLACE CHECKOUT — also checked before the marketplace
+   * catch-all, for the same reason as the orders route: `/marketplace/checkout`
+   * matches `startsWith('/marketplace/')` and would be rewritten away.
+   *
+   * The shopper stays in the marketplace for the whole flow. Previously the
+   * basket's Checkout button called `onCheckout(vendorSlug)`, which navigated to
+   * ONE merchant's storefront and made them re-enter everything there — losing
+   * every other vendor's items in the basket.
+   */
+  const isMarketplaceCheckoutPath =
+    currentPath === '/marketplace/checkout' || currentPath === '/marketplace/checkout/';
+
+  if (isMarketplaceCheckoutPath) {
+    if (currentPath !== '/marketplace/checkout') {
+      window.history.replaceState({}, '', '/marketplace/checkout');
+    }
+    return (
+      <MarketplaceCheckoutView
+        onBack={() => {
+          window.history.pushState({}, '', '/marketplace');
+          setCurrentPath('/marketplace');
+        }}
+        onOrderPlaced={() => {
+          window.history.pushState({}, '', '/marketplace/orders');
+          setCurrentPath('/marketplace/orders');
+        }}
+        onSignIn={() => {
+          // Sign-in is a storefront modal. With no active store there is nothing
+          // to open, so stay put — the shopper can still order as a guest, which
+          // is the point of this checkout.
+          const slug = String(
+            (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
+          ).trim();
+          if (!slug) return;
+          window.history.pushState({}, '', `/store/${slug}?account=signin`);
+          setCurrentPath(`/store/${slug}`);
+        }}
+      />
+    );
+  }
+
   const isMarketplaceOrdersPath =
     currentPath === '/marketplace/orders' ||
     currentPath === '/marketplace/orders/' ||
@@ -2463,7 +2506,14 @@ onPlaceOrder={async (newOrder) => {
       <MegaMarketplaceView
         initialFilters={{ category: initialCategory, q: initialSearch }}
         onVisitVendor={goToVendor}
-        onCheckout={goToVendor}
+        /* The basket's Checkout button stays INSIDE the marketplace. Sending it
+           to a single vendor's storefront (the old `goToVendor`) made the shopper
+           re-enter their details per store and dropped every other vendor's
+           items from the basket. */
+        onCheckout={() => {
+          window.history.pushState({}, '', '/marketplace/checkout');
+          setCurrentPath('/marketplace/checkout');
+        }}
         onOpenAccount={() => {
           window.history.pushState({}, '', '/dashboard');
           setCurrentPath('/dashboard');
