@@ -121,6 +121,9 @@ export const MARKETPLACE_COPY: Copy = {
   // ── Product card states ──
   sold_out: { en: 'Sold out', bn: 'স্টক শেষ' },
   only_left: { en: 'Only {n} left', bn: 'মাত্র {n}টি বাকি' },
+  in_stock: { en: 'In stock', bn: 'স্টকে আছে' },
+  out_of_stock_hint: { en: 'this item is currently unavailable', bn: 'এই পণ্যটি এখন পাওয়া যাচ্ছে না' },
+  added_to_basket_inline: { en: 'Added to basket', bn: 'কার্টে যোগ হয়েছে' },
   new_badge: { en: 'New', bn: 'নতুন' },
   add_to_cart: { en: 'Add to cart', bn: 'কার্টে যোগ করুন' },
   added_to_basket: { en: 'Added to basket', bn: 'কার্টে যোগ হয়েছে' },

@@ -602,12 +602,15 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                           <div key={`${vendor.vendorId}-${p.id}`} className="mb-2 flex gap-2.5 last:mb-0">
                             <SafeImage
                               src={p.image}
-                              alt={p.title}
+                              alt={p.title || p.name || 'Item'}
                               className="h-11 w-11 shrink-0 rounded-lg border object-cover"
                             />
                             <div className="min-w-0 flex-1">
+                              {/* `name` is the legacy fallback — a basket stored
+                                  by an older build carries it instead of `title`,
+                                  and rendering `undefined` left a blank row. */}
                               <div className="line-clamp-2 text-[11.5px] font-semibold leading-snug text-slate-800">
-                                {p.title}
+                                {p.title || p.name || 'Item'}
                               </div>
                               <div className="text-[10.5px] text-slate-500">
                                 ×{line.quantity} · {bdt(Number(p.priceBDT) * line.quantity)}

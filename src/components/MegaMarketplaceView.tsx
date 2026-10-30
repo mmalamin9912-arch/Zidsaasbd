@@ -3839,15 +3839,54 @@ const QuickView: React.FC<{
             </div>
           </div>
 
+          {/*
+            STOCK FEEDBACK.
+
+            The button is disabled for a genuinely sold-out product, but a greyed
+            control with no explanation reads as a BROKEN button — a shopper
+            clicks it, nothing happens, and they conclude the page is stuck.
+            The status line below states the reason and the available quantity.
+          */}
+          {(() => {
+            const status = String(p.stock_status || 'in_stock');
+            const qty = Number(p.stock_quantity || 0);
+            const soldOut = status === 'out_of_stock' || (!status && qty <= 0);
+            return (
+              <div className="mt-3 flex items-center gap-1.5 text-[11.5px] font-semibold">
+                {soldOut ? (
+                  <span className="text-rose-600">
+                    {marketplaceCopy('sold_out', lang)} — {marketplaceCopy('out_of_stock_hint', lang)}
+                  </span>
+                ) : status === 'low_stock' ? (
+                  <span className="text-amber-700">
+                    {marketplaceCopy('only_left', lang, { n: qty })}
+                  </span>
+                ) : (
+                  <span className="text-emerald-700">
+                    {marketplaceCopy('in_stock', lang)}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+
           <div className="mt-4 flex flex-col gap-2 sm:flex-row">
             <button
               type="button"
-              onClick={() => onAdd(product)}
+              onClick={() => {
+                // Add, then CLOSE the modal: leaving it open made the add look
+                // like it had silently failed, so shoppers clicked again and
+                // added duplicates to the basket.
+                onAdd(product);
+                onClose();
+              }}
               disabled={String(p.stock_status) === 'out_of_stock'}
-              className="min-h-[48px] flex-1 rounded-xl text-[13px] font-black text-white disabled:opacity-45"
+              className="min-h-[48px] flex-1 rounded-xl text-[13px] font-black text-white disabled:cursor-not-allowed disabled:opacity-45"
               style={{ backgroundColor: THEME.brand }}
             >
-              Add to basket
+              {String(p.stock_status) === 'out_of_stock'
+                ? marketplaceCopy('sold_out', lang)
+                : marketplaceCopy('add_to_cart', lang)}
             </button>
             <button
               type="button"

@@ -26,12 +26,69 @@ export interface BasketLine {
   quantity: number;
 }
 
+/**
+ * Normalise ONE stored line into the current shape.
+ *
+ * WHY THIS EXISTS — the "Your basket is empty" report.
+ *
+ * The reader used to require `line.product.id` and silently DROPPED anything
+ * else. Any basket written by an earlier build (product fields at the top level,
+ * `productId` instead of `product.id`, `qty` instead of `quantity`) therefore
+ * read back as an EMPTY array, and the shopper landed on a checkout page saying
+ * their basket was empty while the drawer had just shown them its contents.
+ *
+ * A stored basket is a persistence boundary: the writer is an older version we
+ * no longer control. Coercing known legacy shapes is the correct fix — losing a
+ * shopper's basket to a field rename is not.
+ */
+function normalizeLine(raw: any): BasketLine | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  // 1. Product may be nested (`product`) or spread across the line itself.
+  const source = raw.product && typeof raw.product === 'object' ? raw.product : raw;
+  const id = source?.id ?? source?.productId ?? source?.product_id ?? raw?.productId ?? raw?.product_id;
+  if (id == null || String(id).trim() === '') return null;
+
+  const quantity = Math.max(
+    1,
+    Math.floor(Number(raw.quantity ?? raw.qty ?? raw.count ?? 1) || 1),
+  );
+
+  // 2. Title may be `title`, `name`, or `productName` (older checkout shape).
+  const title = String(
+    source.title ?? source.name ?? source.productName ?? raw.title ?? raw.name ?? '',
+  ).trim();
+
+  const priceBDT = Number(
+    source.priceBDT ?? source.price ?? source.unitPriceBDT ?? source.unit_price ?? raw.priceBDT ?? raw.price ?? 0,
+  ) || 0;
+
+  const vendorId = String(
+    source.vendor_id ?? source.vendorId ?? source.store_id ?? source.storeId ?? raw.vendorId ?? '',
+  ).trim();
+
+  const product = {
+    ...source,
+    id: String(id),
+    title: title || 'Item',
+    priceBDT,
+    image: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
+    vendor_id: vendorId,
+    vendor_name: String(source.vendor_name ?? source.vendorName ?? source.store_name ?? raw.vendorName ?? ''),
+    vendor_slug: String(source.vendor_slug ?? source.vendorSlug ?? source.store_slug ?? raw.vendorSlug ?? ''),
+  } as BasketLine['product'];
+
+  return { product, quantity };
+}
+
 function readBasket(): BasketLine[] {
   try {
     const raw = localStorage.getItem(MARKETPLACE_BASKET_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((line: any) => line?.product?.id);
+    // `map` + `filter`, NOT `filter` on the raw shape: a line is recovered
+    // whenever it carries an id in ANY known spelling.
+    return parsed.map(normalizeLine).filter((line): line is BasketLine => line !== null);
   } catch {
     return [];
   }
