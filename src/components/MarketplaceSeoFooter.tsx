@@ -3,6 +3,8 @@ import {
   Truck, ShieldCheck, RotateCcw, Wallet, Store, ArrowRight,
   Smartphone, Laptop, HeadphonesIcon, Shirt,
   Home as HomeIcon, Sparkles, Users, Package,
+  Facebook, Instagram, Youtube, Twitter, Linkedin, Send,
+  Baby, Crown, CreditCard, Banknote, ChevronRight, Apple, Play,
 } from 'lucide-react';
 
 /**
@@ -113,6 +115,134 @@ const SEARCH_GROUPS: { title: string; titleBn: string; Icon: React.ComponentType
       { label: 'gaming', labelBn: 'গেমিং', q: 'gaming' },
     ],
   },
+];
+
+/* ─────────────────────── multi-column navigation ─────────────────────── */
+
+interface NavLink {
+  label: string;
+  labelBn: string;
+  /** Search term run when clicked; omitted for external/real links. */
+  q?: string;
+}
+
+interface NavColumn {
+  title: string;
+  titleBn: string;
+  Icon: React.ComponentType<{ className?: string }>;
+  links: NavLink[];
+}
+
+/**
+ * The bottom navigation columns.
+ *
+ * Every entry is a keyword that exists in the catalogue taxonomy — a column
+ * linking to a category with no inventory is a dead end for the shopper and a
+ * thin page for a crawler. "Top Brands" is search-driven because brands are a
+ * product attribute, not a taxonomy node.
+ */
+const NAV_COLUMNS: NavColumn[] = [
+  {
+    title: 'Electronics',
+    titleBn: 'ইলেকট্রনিক্স',
+    Icon: Smartphone,
+    links: [
+      { label: 'Mobile Phones', labelBn: 'মোবাইল ফোন', q: 'mobile phone' },
+      { label: 'Laptops', labelBn: 'ল্যাপটপ', q: 'laptop' },
+      { label: 'Headphones', labelBn: 'হেডফোন', q: 'headphones' },
+      { label: 'Smart Watches', labelBn: 'স্মার্ট ওয়াচ', q: 'smart watch' },
+      { label: 'Cameras', labelBn: 'ক্যামেরা', q: 'camera' },
+      { label: 'Gaming', labelBn: 'গেমিং', q: 'gaming' },
+    ],
+  },
+  {
+    title: 'Fashion',
+    titleBn: 'ফ্যাশন',
+    Icon: Shirt,
+    links: [
+      { label: 'Sarees', labelBn: 'শাড়ি', q: 'saree' },
+      { label: 'Panjabi', labelBn: 'পাঞ্জাবি', q: 'panjabi' },
+      { label: 'Kurti', labelBn: 'কুর্তি', q: 'kurti' },
+      { label: 'T-Shirts', labelBn: 'টি-শার্ট', q: 't-shirt' },
+      { label: 'Sneakers', labelBn: 'স্নিকার্স', q: 'sneakers' },
+      { label: 'Handbags', labelBn: 'হ্যান্ডব্যাগ', q: 'handbag' },
+    ],
+  },
+  {
+    title: 'Home & Kitchen',
+    titleBn: 'হোম ও কিচেন',
+    Icon: HomeIcon,
+    links: [
+      { label: 'Kitchen Appliances', labelBn: 'রান্নাঘরের যন্ত্রপাতি', q: 'kitchen' },
+      { label: 'Furniture', labelBn: 'আসবাবপত্র', q: 'furniture' },
+      { label: 'Home Decor', labelBn: 'হোম ডেকোর', q: 'home decor' },
+      { label: 'Bedding', labelBn: 'বিছানার চাদর', q: 'bedding' },
+      { label: 'Cookware', labelBn: 'রান্নার পাত্র', q: 'cookware' },
+    ],
+  },
+  {
+    title: 'Beauty',
+    titleBn: 'বিউটি',
+    Icon: Sparkles,
+    links: [
+      { label: 'Skincare', labelBn: 'স্কিনকেয়ার', q: 'skincare' },
+      { label: 'Makeup', labelBn: 'মেকআপ', q: 'makeup' },
+      { label: 'Haircare', labelBn: 'চুলের যত্ন', q: 'haircare' },
+      { label: 'Fragrance', labelBn: 'সুগন্ধি', q: 'perfume' },
+      { label: 'Health & Wellness', labelBn: 'স্বাস্থ্য ও সুস্থতা', q: 'health' },
+    ],
+  },
+  {
+    title: 'Baby & Toys',
+    titleBn: 'শিশু ও খেলনা',
+    Icon: Baby,
+    links: [
+      { label: 'Baby Care', labelBn: 'শিশু যত্ন', q: 'baby care' },
+      { label: 'Diapers', labelBn: 'ডায়াপার', q: 'diaper' },
+      { label: 'Toys & Games', labelBn: 'খেলনা ও গেম', q: 'toy' },
+      { label: 'Kids Clothing', labelBn: 'শিশুদের পোশাক', q: 'kids clothing' },
+      { label: 'School Supplies', labelBn: 'স্কুল সামগ্রী', q: 'stationery' },
+    ],
+  },
+  {
+    title: 'Top Brands',
+    titleBn: 'শীর্ষ ব্র্যান্ড',
+    Icon: Crown,
+    links: [
+      { label: 'Samsung', labelBn: 'স্যামসাং', q: 'samsung' },
+      { label: 'Xiaomi', labelBn: 'শাওমি', q: 'xiaomi' },
+      { label: 'Walton', labelBn: 'ওয়ালটন', q: 'walton' },
+      { label: 'Aarong', labelBn: 'আড়ং', q: 'aarong' },
+      { label: 'Transcom', labelBn: 'ট্রান্সকম', q: 'transcom' },
+    ],
+  },
+];
+
+/** About / Careers / Terms / Privacy / Sell — the utility strip. */
+const UTILITY_LINKS: { label: string; labelBn: string }[] = [
+  { label: 'About Us', labelBn: 'আমাদের সম্পর্কে' },
+  { label: 'Careers', labelBn: 'ক্যারিয়ার' },
+  { label: 'Terms of Use', labelBn: 'ব্যবহারের শর্তাবলী' },
+  { label: 'Privacy Policy', labelBn: 'গোপনীয়তা নীতি' },
+  { label: 'Sell with Us', labelBn: 'আমাদের সাথে বিক্রি করুন' },
+];
+
+/**
+ * Social destinations.
+ *
+ * These are placeholders pointing at the platform's handle namespace. They are
+ * real anchors (not buttons) because a social profile is a genuine external URL
+ * a crawler can follow; swap the `href` for the live page when the handles are
+ * confirmed. `rel="noopener noreferrer"` is mandatory for `target="_blank"`
+ * so the opened tab cannot reach back through `window.opener`.
+ */
+const SOCIAL_LINKS: { name: string; Icon: React.ComponentType<{ className?: string }>; href: string; color: string }[] = [
+  { name: 'Facebook', Icon: Facebook, href: 'https://facebook.com/zidmarketbd', color: '#1877F2' },
+  { name: 'Instagram', Icon: Instagram, href: 'https://instagram.com/zidmarketbd', color: '#E1306C' },
+  { name: 'YouTube', Icon: Youtube, href: 'https://youtube.com/@zidmarketbd', color: '#FF0000' },
+  { name: 'X', Icon: Twitter, href: 'https://x.com/zidmarketbd', color: '#111827' },
+  { name: 'LinkedIn', Icon: Linkedin, href: 'https://linkedin.com/company/zidmarketbd', color: '#0A66C2' },
+  { name: 'WhatsApp', Icon: Send, href: 'https://wa.me/8809600000000', color: '#25D366' },
 ];
 
 interface Props {
@@ -308,6 +438,190 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           </nav>
         </div>
 
+        {/* ═════════ MULTI-COLUMN CATEGORY NAVIGATION ═════════
+            Noon's signature block: six category columns, then a utility row.
+            Collapsed into an accordion-free grid on phones — the columns are
+            short enough that stacking them is still scannable, and a hidden
+            accordion would bury exactly the internal links this footer exists
+            to expose. */}
+        <nav
+          className="mt-7 border-t pt-6"
+          style={{ borderColor: THEME.line }}
+          aria-labelledby="mm-catnav-heading"
+        >
+          <h3 id="mm-catnav-heading" className="sr-only">
+            {t('Browse categories', 'ক্যাটাগরি দেখুন')}
+          </h3>
+          <div className="grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 lg:grid-cols-6">
+            {NAV_COLUMNS.map(({ title, titleBn, Icon, links }) => (
+              <div key={title}>
+                <div className="mb-2.5 flex items-center gap-1.5 text-[11.5px] font-black uppercase tracking-wide text-slate-800">
+                  <Icon className="h-3.5 w-3.5" style={{ color: THEME.brand }} />
+                  {lang === 'bn' ? titleBn : title}
+                </div>
+                <ul className="space-y-1.5">
+                  {links.map((link) => (
+                    <li key={link.label}>
+                      <button
+                        type="button"
+                        onClick={() => onSearch(link.q || link.label)}
+                        className="group flex w-full items-center justify-between gap-1 text-left text-[11.5px] text-slate-500 transition hover:text-[#3b2fd6]"
+                      >
+                        <span className="truncate group-hover:underline">
+                          {lang === 'bn' ? link.labelBn : link.label}
+                        </span>
+                        <ChevronRight className="h-3 w-3 shrink-0 opacity-0 transition group-hover:opacity-100" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+
+          {/* Utility row — About / Careers / Terms / Privacy / Sell */}
+          <div
+            className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2 border-t pt-4"
+            style={{ borderColor: THEME.line }}
+          >
+            {UTILITY_LINKS.map((link) => {
+              const label = lang === 'bn' ? link.labelBn : link.label;
+              const isSell = link.label === 'Sell with Us';
+              return (
+                <button
+                  key={link.label}
+                  type="button"
+                  onClick={isSell && onGoToPlans ? onGoToPlans : undefined}
+                  disabled={!isSell || !onGoToPlans}
+                  className={`text-[11.5px] font-semibold transition ${isSell
+                    ? 'text-[#3b2fd6] hover:underline'
+                    : 'text-slate-500 hover:text-slate-800'
+                    } disabled:cursor-default`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+
+        {/* ═════════ APPS · SOCIAL · PAYMENTS ═════════
+            The three-column connect band Noon closes with. Each column is a
+            real destination: the store badges are anchors, the social icons
+            are anchors with noreferrer, and the payment marks are static
+            labels (there is no payment page for a shopper to visit). */}
+        <div
+          className="mt-7 grid gap-6 border-t pt-6 sm:grid-cols-3"
+          style={{ borderColor: THEME.line }}
+        >
+          {/* SHOP ON THE GO */}
+          <section aria-labelledby="mm-apps-heading">
+            <h3 id="mm-apps-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em] text-slate-400">
+              {t('Shop on the go', 'অ্যাপে কেনাকাটা করুন')}
+            </h3>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <a
+                href="https://apps.apple.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex h-10 min-w-[132px] items-center gap-2 rounded-lg bg-slate-900 px-2.5 text-white transition hover:bg-slate-800"
+                aria-label={t('Download on the App Store', 'অ্যাপ স্টোর থেকে ডাউনলোড করুন')}
+              >
+                <Apple className="h-5 w-5 shrink-0" />
+                <span className="flex flex-col leading-tight">
+                  <span className="text-[8px] uppercase tracking-wide text-white/70">
+                    {t('Download on the', 'ডাউনলোড করুন')}
+                  </span>
+                  <span className="text-[12.5px] font-bold">App Store</span>
+                </span>
+              </a>
+              <a
+                href="https://play.google.com/store"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex h-10 min-w-[132px] items-center gap-2 rounded-lg bg-slate-900 px-2.5 text-white transition hover:bg-slate-800"
+                aria-label={t('Get it on Google Play', 'গুগল প্লে থেকে নিন')}
+              >
+                <Play className="h-4 w-4 shrink-0" />
+                <span className="flex flex-col leading-tight">
+                  <span className="text-[8px] uppercase tracking-wide text-white/70">
+                    {t('Get it on', 'পান')}
+                  </span>
+                  <span className="text-[12.5px] font-bold">Google Play</span>
+                </span>
+              </a>
+            </div>
+          </section>
+
+          {/* CONNECT WITH US */}
+          <section aria-labelledby="mm-social-heading">
+            <h3 id="mm-social-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em] text-slate-400">
+              {t('Connect with us', 'আমাদের সাথে যুক্ত থাকুন')}
+            </h3>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {SOCIAL_LINKS.map(({ name, Icon, href, color }) => (
+                <a
+                  key={name}
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={name}
+                  title={name}
+                  className="flex h-8 w-8 items-center justify-center rounded-full border transition hover:-translate-y-px hover:shadow-sm"
+                  style={{ borderColor: THEME.line, color }}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                </a>
+              ))}
+            </div>
+            <p className="mt-2.5 text-[11px] text-slate-400">
+              {t('Follow us for deals and new arrivals.', 'ডিল ও নতুন পণ্যের জন্য আমাদের ফলো করুন।')}
+            </p>
+          </section>
+
+          {/* PAYMENT METHODS */}
+          <section aria-labelledby="mm-pay-heading">
+            <h3 id="mm-pay-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em] text-slate-400">
+              {t('We accept', 'আমরা গ্রহণ করি')}
+            </h3>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {/*
+                Payment marks stay in their LATIN brand spelling in both
+                languages. These are logos, not prose: transliterating only
+                some of them ("নগদ" beside "bKash" and "Rocket") reads as a
+                half-finished translation and breaks brand recognition.
+              */}
+              {[
+                { label: 'bKash', bg: '#E2136E', fg: '#fff' },
+                { label: 'Nagad', bg: '#EE1C25', fg: '#fff' },
+                { label: 'Rocket', bg: '#8C3494', fg: '#fff' },
+              ].map((p) => (
+                <span
+                  key={p.label}
+                  className="flex h-7 items-center rounded-md px-2.5 text-[10.5px] font-black"
+                  style={{ backgroundColor: p.bg, color: p.fg }}
+                >
+                  {p.label}
+                </span>
+              ))}
+              <span
+                className="flex h-7 items-center gap-1 rounded-md border bg-white px-2.5 text-[10.5px] font-bold text-slate-700"
+                style={{ borderColor: THEME.line }}
+              >
+                <CreditCard className="h-3.5 w-3.5 text-slate-500" />
+                {t('Cards', 'কার্ড')}
+              </span>
+              <span
+                className="flex h-7 items-center gap-1 rounded-md border bg-white px-2.5 text-[10.5px] font-bold text-slate-700"
+                style={{ borderColor: THEME.line }}
+              >
+                <Banknote className="h-3.5 w-3.5 text-emerald-600" />
+                {t('Cash on Delivery', 'ক্যাশ অন ডেলিভারি')}
+              </span>
+            </div>
+          </section>
+        </div>
+
         {/* ── Legal ── */}
         <div
           className="mt-6 flex flex-col items-center justify-between gap-2 border-t pt-4 text-[11px] text-slate-400 sm:flex-row"
@@ -316,7 +630,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           <span>
             © {new Date().getFullYear()} ZID Market — {t('ZID SAAS Bangladesh', 'জিআইডি সাস বাংলাদেশ')}
           </span>
-          <span className="flex items-center gap-3">
+          <span className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
             <span>{t('All prices in BDT (৳)', 'সব দাম বাংলাদেশি টাকায় (৳)')}</span>
             <span className="flex items-center gap-1">
               <HeadphonesIcon className="h-3 w-3" />
