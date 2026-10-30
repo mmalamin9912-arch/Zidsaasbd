@@ -83,6 +83,7 @@ import { getZidAiSmartFallback } from '../lib/zidAiFallback';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
 import { useToast } from './ToastProvider';
+import { detectLocation, getInitialLocation, saveManualLocation } from '../lib/locationDetection';
 import {
   Sparkles,
   ExternalLink,
@@ -107,7 +108,9 @@ import {
   ShieldAlert,
   HelpCircle,
   Trash2,
-  Copy
+  Copy,
+  MapPin,
+  ChevronDown
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -176,6 +179,49 @@ export const Header: React.FC<HeaderProps> = ({
     m.ownerName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     m.email?.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  // ── Delivery location (auto-detected) ─────────────────────────────────────
+  //
+  // Seeded synchronously from what this device already knows (a previous pick or
+  // cached IP result, else the browser locale / platform region), then refined
+  // by a one-off IP lookup. A manual pick is never overwritten by detection.
+  const [deliverTo, setDeliverTo] = useState<string>(() => getInitialLocation().city);
+  const [showLocationMenu, setShowLocationMenu] = useState(false);
+  const [isLocating, setIsLocating] = useState(false);
+  const locationMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLocating(true);
+    detectLocation()
+      .then((loc) => {
+        if (!cancelled && loc?.city) setDeliverTo(loc.city);
+      })
+      .catch(() => { /* keep the initial/cached city */ })
+      .finally(() => { if (!cancelled) setIsLocating(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Close the location popover on an outside click / Escape.
+  useEffect(() => {
+    if (!showLocationMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!locationMenuRef.current?.contains(e.target as Node)) setShowLocationMenu(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowLocationMenu(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [showLocationMenu]);
+
+  const pickDeliverTo = (city: string) => {
+    setDeliverTo(city);
+    saveManualLocation(city);
+    setShowLocationMenu(false);
+  };
 
   // ── Canonical storefront link ──────────────────────────────────────────────
   //
@@ -958,6 +1004,58 @@ export const Header: React.FC<HeaderProps> = ({
 
           <div className="flex items-center gap-2 shrink-0">
             <BrandLogo size="sm" showSubtitle={false} isDarkMode={isDarkMode} />
+          </div>
+
+          {/* Auto-detected delivery location — no manual input needed on load. */}
+          <div className="relative shrink-0" ref={locationMenuRef}>
+            <button
+              type="button"
+              onClick={() => setShowLocationMenu((v) => !v)}
+              aria-haspopup="listbox"
+              aria-expanded={showLocationMenu}
+              title={isLocating ? 'Detecting your location…' : `Delivering to ${deliverTo}`}
+              className="flex items-center gap-1.5 rounded-xl border border-[#3A435E] bg-[#252B3B] hover:bg-[#2E3548] px-2.5 py-1.5 text-left transition cursor-pointer"
+            >
+              <MapPin className={`w-3.5 h-3.5 shrink-0 text-[#E6C587] ${isLocating ? 'animate-pulse' : ''}`} />
+              <span className="flex flex-col whitespace-nowrap leading-tight">
+                <span className="text-[9px] uppercase tracking-wide text-slate-400">
+                  {isLocating ? 'Locating…' : 'Deliver to'}
+                </span>
+                <span className="max-w-[96px] truncate text-[11px] font-bold text-slate-100">
+                  {deliverTo}
+                </span>
+              </span>
+              <ChevronDown className={`w-3 h-3 shrink-0 text-slate-400 transition-transform ${showLocationMenu ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showLocationMenu && (
+              <div
+                role="listbox"
+                aria-label="Choose a delivery city"
+                className="absolute left-0 top-full z-50 mt-2 w-48 rounded-2xl border border-[#2E3548] bg-[#1D212E] py-1 shadow-xl"
+              >
+                <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Detected: {deliverTo}
+                </div>
+                {[deliverTo, 'Riyadh', 'Jeddah', 'Dammam', 'Dhaka', 'Chattogram']
+                  .filter((city, i, all) => all.indexOf(city) === i)
+                  .map((city) => (
+                    <button
+                      key={city}
+                      type="button"
+                      role="option"
+                      aria-selected={deliverTo === city}
+                      onClick={() => pickDeliverTo(city)}
+                      className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-xs transition hover:bg-[#252B3B] cursor-pointer ${
+                        deliverTo === city ? 'font-bold text-[#E6C587]' : 'text-slate-200'
+                      }`}
+                    >
+                      {city}
+                      {deliverTo === city && <CheckCircle2 className="w-3.5 h-3.5" />}
+                    </button>
+                  ))}
+              </div>
+            )}
           </div>
 
           {/* "+ Add" Quick Action Button */}

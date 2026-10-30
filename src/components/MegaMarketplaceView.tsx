@@ -48,6 +48,11 @@ import {
 import { fetchTaxonomy, type TaxonomyTree } from '../lib/categoryTaxonomyApi';
 import { useMarketplaceBasket } from '../lib/useMarketplaceBasket';
 import { useMarketplaceWishlist } from '../lib/useMarketplaceWishlist';
+import {
+  detectLocation,
+  getInitialLocation,
+  saveManualLocation,
+} from '../lib/locationDetection';
 import type { MarketplaceProduct } from '../types';
 
 /* ─────────────────────────── platform palette ───────────────────────────
@@ -952,9 +957,43 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const [showLocation, setShowLocation] = useState(false);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [showLangMenu, setShowLangMenu] = useState(false);
+
+  /* ── Delivery destination ──────────────────────────────────────────────
+     Seeded SYNCHRONOUSLY from what this device already knows (a previous
+     manual pick, a cached IP result, or the browser locale) so the header
+     never shows a blank or an invented city on first load. The async IP
+     lookup then refines it — see the effect below. */
   const [deliverTo, setDeliverTo] = useState<string>(() => {
-    try { return localStorage.getItem('zid_marketplace_deliver_to') || 'Dhaka'; } catch { return 'Dhaka'; }
+    try {
+      const legacy = localStorage.getItem('zid_marketplace_deliver_to');
+      if (legacy) return legacy;
+    } catch { /* private mode */ }
+    return getInitialLocation().city;
   });
+  /** True while the IP lookup is in flight — drives the subtle "locating" hint. */
+  const [isLocating, setIsLocating] = useState(false);
+
+  /* Resolve the real city from the visitor's IP on first load. `detectLocation`
+     respects a manual pick and caches its own result, so this runs at most once
+     per device per day and NEVER overwrites a destination the shopper chose. */
+  useEffect(() => {
+    let cancelled = false;
+    setIsLocating(true);
+    detectLocation()
+      .then((loc) => {
+        if (cancelled || !loc?.city) return;
+        setDeliverTo((current) => {
+          // Keep a manual choice made while the lookup was in flight.
+          try {
+            if (localStorage.getItem('zid_location_manual')) return current;
+          } catch { /* private mode */ }
+          return loc.city;
+        });
+      })
+      .catch(() => { /* keep the initial/cached city */ })
+      .finally(() => { if (!cancelled) setIsLocating(false); });
+    return () => { cancelled = true; };
+  }, []);
   const [language, setLanguage] = useState<'en' | 'bn'>(() => {
     try { return (localStorage.getItem('zid_marketplace_lang') as 'en' | 'bn') || 'en'; } catch { return 'en'; }
   });
@@ -992,6 +1031,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const pickLocation = (zone: string) => {
     setDeliverTo(zone);
     try { localStorage.setItem('zid_marketplace_deliver_to', zone); } catch { /* private mode */ }
+    // Remembered as an EXPLICIT choice, so automatic detection leaves it alone.
+    saveManualLocation(zone);
     setShowLocation(false);
   };
 
@@ -1479,9 +1520,11 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               aria-expanded={showLocation}
               className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-left transition hover:bg-[#f4f5ff]"
             >
-              <MapPin className="h-[18px] w-[18px] shrink-0" style={{ color: THEME.brand }} />
+              <MapPin className={`h-[18px] w-[18px] shrink-0 ${isLocating ? 'animate-pulse' : ''}`} style={{ color: THEME.brand }} />
               <span className="flex flex-col whitespace-nowrap leading-tight">
-                <span className="text-[10px] text-slate-400">Deliver to</span>
+                <span className="text-[10px] text-slate-400">
+                  {isLocating && !deliverTo ? 'Locating…' : 'Deliver to'}
+                </span>
                 <span className="max-w-[110px] truncate text-[12px] font-bold" style={{ color: THEME.ink }}>
                   {deliverTo}
                 </span>
