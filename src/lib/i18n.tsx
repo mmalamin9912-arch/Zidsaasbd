@@ -701,10 +701,26 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   });
 
+  /*
+   * The MARKETPLACE owns a second, independent language preference
+   * (`zid_marketplace_lang`) — the customer-facing bazaar has its own switcher
+   * and its own copy.
+   *
+   * This provider wraps the WHOLE app, so its mount effect used to write its own
+   * default ('en') into `<html lang>` on every page load, silently overwriting a
+   * Bangla marketplace page. The visible symptom was a fully Bangla page being
+   * announced, hyphenated and indexed as English.
+   *
+   * `<html lang>` is a single global attribute, so exactly one owner is needed:
+   * the provider tracks its own preference ONLY while the app is showing its
+   * own (dashboard / storefront) copy. A page that manages `lang` itself — the
+   * marketplace and the customer orders view — is left alone here and sets the
+   * attribute after this effect has run.
+   */
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, lang);
-      if (typeof document !== 'undefined') {
+      if (typeof document !== 'undefined' && !document.querySelector('[data-owns-lang]')) {
         document.documentElement.lang = lang;
       }
     } catch {

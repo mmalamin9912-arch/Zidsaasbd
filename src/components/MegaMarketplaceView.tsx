@@ -29,6 +29,7 @@ import {
   Heart, Receipt, Globe, TrendingUp, Clock, Smartphone, Watch, Gamepad2,
 } from 'lucide-react';
 import SafeImage from './SafeImage';
+import MarketplaceSeoFooter from './MarketplaceSeoFooter';
 import { useToast } from './ToastProvider';
 import {
   fetchMarketplaceProducts,
@@ -1252,11 +1253,20 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
   /*
    * Keep the document language in sync with the marketplace switch.
-   * `lang` drives hyphenation and screen-reader pronunciation; without this the
-   * whole Bangla catalogue is announced with an English voice.
+   *
+   * `lang` drives hyphenation, screen-reader pronunciation and search-engine
+   * indexing; without this the whole Bangla catalogue is announced as English.
+   *
+   * `data-owns-lang` marks this view as the OWNER of `<html lang>` while it is
+   * mounted, so the app-wide `LanguageProvider` (whose preference is separate)
+   * does not overwrite it. Removed on unmount so the dashboard reclaims it.
    */
   useEffect(() => {
-    if (typeof document !== 'undefined') document.documentElement.lang = language;
+    if (typeof document === 'undefined') return;
+    const root = document.body;
+    root.setAttribute('data-owns-lang', 'marketplace');
+    document.documentElement.lang = language;
+    return () => { root.removeAttribute('data-owns-lang'); };
   }, [language]);
 
   // Any click outside the open header popover closes it. One listener for all
@@ -3076,6 +3086,28 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             )}
           </section>
         </div>
+
+        {/* ═════════ SEO + POPULAR SEARCHES FOOTER ═════════
+            Sits at the very bottom of the page (after the results grid) so it
+            reads as page content rather than competing with the hero. Its
+            keyword tags run the LIVE search, so every tag lands on real
+            results instead of a dead anchor. */}
+        <MarketplaceSeoFooter
+          lang={language}
+          onSearch={(query) => {
+            setSearchInput(query);
+            setFilter({ q: query, category: undefined, subCategory: undefined });
+            setDealsOnly(false);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          productCount={typeof data?.total === 'number' ? data.total : undefined}
+          sellerCount={data?.vendors?.length}
+          onBrowseCategories={() => {
+            setFilter({ category: undefined, subCategory: undefined, q: undefined });
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          onGoToPlans={onGoToPlans}
+        />
       </main>
 
       {/* ═════════ WISHLIST DRAWER ═════════

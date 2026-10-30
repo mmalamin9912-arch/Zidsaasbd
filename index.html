@@ -7,6 +7,37 @@
     <meta name="description" content="Zid SaaS BD - Modern E-Commerce Platform & Merchant Dashboard" />
     <link id="app-favicon" rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#12151F" />
+    <!--
+      Marketplace language bootstrap.
+
+      `lang="en"` is the default for a fresh visitor; a returning Bangla shopper
+      had to wait for React before the page was announced and hyphenated in the
+      right language.
+
+      IMPORTANT: this runs at PARSE time, before the browser has applied the
+      element's own `lang="en"` attribute from the markup — so it with a module
+      takes effect. It registers a one-shot `DOMContentLoaded` hook instead,
+      which fires after the document (and the attribute) is complete but before
+      the app's first paint. This script must also stay AFTER the markup above.
+    -->
+    <script>
+      (function () {
+        function applyLang() {
+          try {
+            var l = localStorage.getItem('zid_marketplace_lang') ||
+                    localStorage.getItem('zid_language');
+            if (l === 'bn' || l === 'en') {
+              document.documentElement.setAttribute('lang', l);
+            }
+          } catch (e) { /* storage unavailable — keep the markup default */ }
+        }
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', applyLang, { once: true });
+        } else {
+          applyLang();
+        }
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">

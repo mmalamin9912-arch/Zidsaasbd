@@ -104,8 +104,14 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
     [lang],
   );
 
+  // This page owns `<html lang>` while mounted — see the matching note in
+  // MegaMarketplaceView. Without the marker the app-wide LanguageProvider
+  // resets the attribute to its own (dashboard) preference.
   useEffect(() => {
-    if (typeof document !== 'undefined') document.documentElement.lang = lang;
+    if (typeof document === 'undefined') return;
+    document.body.setAttribute('data-owns-lang', 'orders');
+    document.documentElement.lang = lang;
+    return () => { document.body.removeAttribute('data-owns-lang'); };
   }, [lang]);
 
   // Re-read the session on focus: the shopper may have signed in on the
