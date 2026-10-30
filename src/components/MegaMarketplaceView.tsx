@@ -26,7 +26,7 @@ import {
   SlidersHorizontal, X, Star, Truck, ShieldCheck, BadgePercent, Loader2,
   MapPin, TruckIcon, HeadphonesIcon, RotateCcw, Check, Plus, Minus,
   LayoutGrid, Flame, Sparkles, ArrowRight, Menu, ArrowUpDown,
-  Heart, Receipt, Globe,
+  Heart, Receipt, Globe, TrendingUp, Clock, Smartphone, Watch, Gamepad2,
 } from 'lucide-react';
 import SafeImage from './SafeImage';
 import { useToast } from './ToastProvider';
@@ -100,6 +100,47 @@ const SEARCH_PLACEHOLDERS = [
   'Try “jamdani”, “smart watch”, “rice”…',
   'Search every store — one basket, delivered nationwide…',
 ] as const;
+
+/**
+ * "Trending searches" shown in the search dropdown.
+ *
+ * A deliberate, hand-picked list rather than a live query log: it has to be
+ * useful on a brand-new marketplace with no traffic yet, and it doubles as a
+ * merchandising surface. Each entry keeps its own icon so the pills read as a
+ * scannable row of categories instead of a wall of text.
+ */
+const TRENDING_SEARCHES: { label: string; icon?: React.ComponentType<{ className?: string }> }[] = [
+  { label: 'mobile phone', icon: Smartphone },
+  { label: 'smart watch', icon: Watch },
+  { label: 'headphones', icon: HeadphonesIcon },
+  { label: 'gaming', icon: Gamepad2 },
+  { label: 'saree' },
+  { label: 'panjabi' },
+  { label: 'laptop' },
+  { label: 'sneakers' },
+];
+
+/** Recently typed queries — the shopper's own history, newest first. */
+const RECENT_SEARCHES_KEY = 'zid_marketplace_recent_searches';
+const MAX_RECENT_SEARCHES = 6;
+
+function readRecentSearches(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_SEARCHES_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string').slice(0, MAX_RECENT_SEARCHES) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentSearches(list: string[]): void {
+  try {
+    localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(list));
+  } catch {
+    /* private mode — history is simply not persisted */
+  }
+}
 
 /**
  * Display name for a category.
@@ -949,6 +990,32 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const [showMenu, setShowMenu] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
 
+  /* ── Noon-style search suggestions ─────────────────────────────────────
+     The dropdown opens on FOCUS or CLICK (not only once a character is typed),
+     because the "Trending searches" pills are the primary navigation aid for a
+     shopper who has no query in mind yet — an empty click is exactly the moment
+     they are most useful. */
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [recentSearches, setRecentSearches] = useState<string[]>(() => readRecentSearches());
+  const searchBoxRef = useRef<HTMLDivElement>(null);
+  /** Highlights the arrow-key selection in the suggestion list. */
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
+
+  // One outside-click listener for the search overlay, registered only while it
+  // is open. `mousedown` (not `click`) so the overlay closes before a click
+  // lands on the page behind it.
+  useEffect(() => {
+    if (!searchFocused) return;
+    const onDown = (e: MouseEvent) => {
+      if (!searchBoxRef.current?.contains(e.target as Node)) {
+        setSearchFocused(false);
+        setActiveSuggestion(-1);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [searchFocused]);
+
   /* ── Noon-style header controls ────────────────────────────────────────
      Location, language and the account menu are all shopper PREFERENCES, so
      they persist in localStorage and survive a reload. They are presentation
@@ -1180,8 +1247,225 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
   const submitSearch = (e?: React.FormEvent) => {
     e?.preventDefault();
-    setFilter({ q: searchInput.trim() || undefined });
+    const q = searchInput.trim();
+    setFilter({ q: q || undefined });
+    setSearchFocused(false);
+    setActiveSuggestion(-1);
     searchRef.current?.blur();
+    if (!q) return;
+    // Remember the query so it appears under "Recent searches" next time.
+    setRecentSearches((prev) => {
+      const next = [q, ...prev.filter((x) => x.toLowerCase() !== q.toLowerCase())].slice(0, MAX_RECENT_SEARCHES);
+      writeRecentSearches(next);
+      return next;
+    });
+  };
+
+  /**
+   * Run a search straight from a suggestion (trending pill or recent query).
+   *
+   * Driving `searchInput` and the filter TOGETHER keeps the visible field in
+   * sync with the results — setting only `filters.q` would render results the
+   * search box does not describe.
+   */
+  const runSuggestion = (term: string) => {
+    const q = term.trim();
+    if (!q) return;
+    setSearchInput(q);
+    setFilter({ q, category: undefined, subCategory: undefined });
+    setSearchFocused(false);
+    setActiveSuggestion(-1);
+    searchRef.current?.blur();
+    setRecentSearches((prev) => {
+      const next = [q, ...prev.filter((x) => x.toLowerCase() !== q.toLowerCase())].slice(0, MAX_RECENT_SEARCHES);
+      writeRecentSearches(next);
+      return next;
+    });
+  };
+
+  const clearRecentSearches = () => {
+    setRecentSearches([]);
+    writeRecentSearches([]);
+  };
+
+  /**
+   * Keywords matched by what has been typed so far.
+   *
+   * Matching is a case-insensitive subsequence on the label, so "phne" still
+   * finds "mobile phone" — the typo-tolerant behaviour shoppers expect from an
+   * autocomplete rather than a strict prefix filter.
+   */
+  const matchedSuggestions = useMemo(() => {
+    const q = searchInput.trim().toLowerCase();
+    if (!q) return [];
+    return TRENDING_SEARCHES
+      .filter(({ label }) => label.toLowerCase().includes(q) || label.toLowerCase().split(/\s+/).some((w) => w.startsWith(q)))
+      .slice(0, 6);
+  }, [searchInput]);
+
+  /** Every option the keyboard can walk through, in render order. */
+  const keyboardOptions = useMemo(() => {
+    const list: string[] = [];
+    if (searchInput.trim()) {
+      list.push(searchInput.trim());
+      matchedSuggestions.forEach((s) => list.push(s.label));
+    } else {
+      TRENDING_SEARCHES.forEach((s) => list.push(s.label));
+    }
+    return list;
+  }, [searchInput, matchedSuggestions]);
+
+  /**
+   * Bold the part of a suggestion that matches the query, the way an
+   * autocomplete should: the shopper sees WHY a row was offered instead of
+   * re-reading the whole label.
+   */
+  const highlightMatch = (label: string) => {
+    const q = searchInput.trim();
+    if (!q) return label;
+    const idx = label.toLowerCase().indexOf(q.toLowerCase());
+    if (idx < 0) return label;
+    return (
+      <>
+        {label.slice(0, idx)}
+        <strong className="font-black" style={{ color: THEME.brand }}>{label.slice(idx, idx + q.length)}</strong>
+        {label.slice(idx + q.length)}
+      </>
+    );
+  };
+
+  /**
+   * The search overlay.
+   *
+   * Three stacked sections, matching the Noon pattern: the query the shopper is
+   * writing ("Search for …"), matched keywords / recent history, then Trending
+   * searches as pills. It renders on focus OR click, so an empty click still
+   * offers somewhere to go. `onMouseDown` with `preventDefault` keeps the input
+   * focused while an option is being chosen — otherwise the blur fires first
+   * and the overlay unmounts before the click registers.
+   */
+  const renderSearchOverlay = (fullWidth?: boolean) => {
+    if (!searchFocused) return null;
+    const typed = searchInput.trim();
+
+    const option = (label: string, key: string, onClick: () => void, leading?: React.ReactNode) => (
+      <button
+        key={key}
+        type="button"
+        role="option"
+        aria-selected={false}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={onClick}
+        className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-[13px] text-slate-700 transition hover:bg-[#f4f5ff]"
+      >
+        <span className="shrink-0 text-slate-400">{leading ?? <Search className="h-3.5 w-3.5" />}</span>
+        <span className="min-w-0 flex-1 truncate">{highlightMatch(label)}</span>
+        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-slate-300" />
+      </button>
+    );
+
+    return (
+      <div
+        role="listbox"
+        aria-label="Search suggestions"
+        onMouseDown={(e) => e.preventDefault()}
+        className={`absolute left-0 top-full z-50 mt-1.5 overflow-hidden rounded-xl border bg-white shadow-2xl ${fullWidth ? 'right-0 w-full' : 'w-full min-w-[320px]'}`}
+        style={{ borderColor: THEME.line }}
+      >
+        {/* 1 — what the shopper is currently typing */}
+        {typed && (
+          <div className="border-b" style={{ borderColor: THEME.line }}>
+            {option(
+              `Search for “${typed}”`,
+              'query',
+              () => { setSearchInput(typed); submitSearch(); },
+            )}
+            {matchedSuggestions.length > 0 && (
+              <div className="pb-1">
+                {matchedSuggestions.map((s) => (
+                  <React.Fragment key={s.label}>
+                    {option(s.label, `m-${s.label}`, () => runSuggestion(s.label), s.icon ? <s.icon className="h-3.5 w-3.5" /> : undefined)}
+                  </React.Fragment>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 2 — recent history (only when the field is empty) */}
+        {!typed && recentSearches.length > 0 && (
+          <div className="border-b py-1" style={{ borderColor: THEME.line }}>
+            <div className="flex items-center justify-between px-3.5 pb-1 pt-2">
+              <span className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wide text-slate-400">
+                <Clock className="h-3 w-3" /> Recent searches
+              </span>
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={clearRecentSearches}
+                className="text-[10.5px] font-bold text-slate-400 transition hover:text-[#e11d48]"
+              >
+                Clear
+              </button>
+            </div>
+            {recentSearches.map((term) => option(term, `r-${term}`, () => runSuggestion(term), <Clock className="h-3.5 w-3.5" />))}
+          </div>
+        )}
+
+        {/* 3 — Trending searches, as clickable pills */}
+        <div className="px-3.5 pb-3 pt-2.5">
+          <div className="mb-2 flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wide text-slate-400">
+            <TrendingUp className="h-3 w-3" style={{ color: THEME.accent }} /> Trending searches
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {TRENDING_SEARCHES.map(({ label, icon: Icon }) => (
+              <button
+                key={label}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => runSuggestion(label)}
+                className="flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:-translate-y-px hover:shadow-sm"
+                style={{ borderColor: THEME.line, backgroundColor: '#fff' }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = THEME.brand;
+                  e.currentTarget.style.color = THEME.brand;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = THEME.line;
+                  e.currentTarget.style.color = '';
+                }}
+              >
+                {Icon && <Icon className="h-3.5 w-3.5" />}
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      setSearchFocused(false);
+      setActiveSuggestion(-1);
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSearchFocused(true);
+      setActiveSuggestion((i) => {
+        const count = keyboardOptions.length;
+        if (!count) return -1;
+        const next = e.key === 'ArrowDown' ? i + 1 : i - 1;
+        return (next + count) % count;
+      });
+      return;
+    }
+    if (e.key === 'Enter' && activeSuggestion >= 0) {
+      e.preventDefault();
+      runSuggestion(keyboardOptions[activeSuggestion]);
+    }
   };
 
   const clearAll = () => {
@@ -1446,7 +1730,12 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
         {/* Collapsible mobile search field */}
         {searchOpen && (
-          <form onSubmit={submitSearch} className="border-t px-2 pb-2 pt-1.5 lg:hidden" style={{ borderColor: THEME.line }}>
+          <form
+            onSubmit={submitSearch}
+            className="relative border-t px-2 pb-2 pt-1.5 lg:hidden"
+            style={{ borderColor: THEME.line }}
+            ref={searchBoxRef}
+          >
             <div
               className="flex w-full items-center overflow-hidden rounded-xl border bg-white"
               style={{ borderColor: THEME.brand }}
@@ -1456,14 +1745,21 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 ref={searchRef}
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                onClick={() => setSearchFocused(true)}
+                onKeyDown={handleSearchKeyDown}
                 placeholder={searchPlaceholder}
                 aria-label="Search the marketplace"
+                aria-autocomplete="list"
+                aria-expanded={searchFocused}
+                autoComplete="off"
                 autoFocus
                 className="min-w-0 flex-1 px-2 py-3 text-[14px] text-slate-800 placeholder:text-slate-400 focus:outline-none"
               />
               {searchInput && (
                 <button
                   type="button"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={() => { setSearchInput(''); setFilter({ q: undefined }); }}
                   className="flex h-11 w-11 items-center justify-center text-slate-400"
                   aria-label="Clear search"
@@ -1479,6 +1775,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 Go
               </button>
             </div>
+            {renderSearchOverlay(true)}
           </form>
         )}
 
@@ -1563,8 +1860,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             )}
           </div>
 
-          {/* CENTRAL GLOBAL SEARCH */}
-          <form onSubmit={submitSearch} className="flex min-w-0 flex-1 items-center">
+          {/* CENTRAL GLOBAL SEARCH — anchored wrapper positions the overlay */}
+          <form onSubmit={submitSearch} className="relative flex min-w-0 flex-1 items-center" ref={searchBoxRef}>
             <div
               className="flex w-full items-center overflow-hidden rounded-xl border-2 bg-white transition-shadow focus-within:shadow-md"
               style={{ borderColor: THEME.brand }}
@@ -1582,13 +1879,20 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 ref={searchRef}
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                onClick={() => setSearchFocused(true)}
+                onKeyDown={handleSearchKeyDown}
                 placeholder={searchPlaceholder}
                 aria-label="Search the marketplace"
+                aria-autocomplete="list"
+                aria-expanded={searchFocused}
+                autoComplete="off"
                 className="min-w-0 flex-1 px-3 py-2.5 text-[13px] text-slate-800 placeholder:text-slate-400 focus:outline-none"
               />
               {searchInput && (
                 <button
                   type="button"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={() => { setSearchInput(''); setFilter({ q: undefined }); }}
                   className="px-2 text-slate-400 hover:text-slate-700"
                   aria-label="Clear search"
@@ -1606,6 +1910,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 <span className="hidden lg:inline">Search</span>
               </button>
             </div>
+            {renderSearchOverlay()}
           </form>
 
           {/* ── RIGHT: language · account · orders · wishlist · cart ── */}
