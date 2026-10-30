@@ -15570,6 +15570,115 @@ app.get('/api/orders/:storeRef', async (req, res) => {
   }
 });
 
+/*
+ * GET /api/customer/orders — the signed-in shopper's own order history.
+ *
+ * WHY THIS ROUTE EXISTS
+ * ---------------------
+ * The customer orders page needs orders from EVERY store the shopper bought
+ * from, but `GET /api/orders` WITHOUT a store reference returns every order on
+ * the platform. A customer page must never issue that request: it would ship
+ * other people's orders (names, phones, addresses) to the browser and rely on
+ * client-side filtering to hide them — not a security boundary.
+ *
+ * This endpoint therefore REFUSES to answer without a phone number, and always
+ * applies it as a server-side predicate. The phone is the identity the storefront
+ * itself uses at checkout (`customer_phone` / `customer_phone_digits`), so a
+ * shopper sees exactly the orders their number placed — nothing else.
+ *
+ * An optional `store`/`store_slug` narrows the result to one shop; omitting it
+ * returns the cross-store history the account page shows by default.
+ */
+app.get('/api/customer/orders', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const phone = String(
+      (req.query.customer_phone as string) ||
+      (req.query.customerPhone as string) ||
+      (req.query.phone as string) ||
+      ''
+    ).trim();
+
+    // Identity is REQUIRED. Answering without one would either leak the whole
+    // collection or hand back a misleading empty list; 400 states the reason.
+    if (!phone) {
+      return res.status(400).json({ ok: false, error: 'A customer phone number is required.' });
+    }
+
+    if (!MONGODB_URI) return res.status(200).json({ ok: true, orders: [] });
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.error('[Server] GET /api/customer/orders DB connection error:', dbErr?.message || dbErr);
+      return res.status(200).json({ ok: false, orders: [], error: 'Database unavailable.' });
+    }
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(200).json({ ok: false, orders: [], error: 'Database unavailable.' });
+    }
+
+    const digits = phoneDigits(phone);
+    // Match any persisted spelling of the number. The last-10-digits form is
+    // what the storefront's own matcher uses, so +8801… / 01… both resolve.
+    const last10 = digits.slice(-10);
+    const phoneClauses: any[] = [
+      { customer_phone: phone },
+      { customerPhone: phone },
+      { customer_phone: digits },
+      { customer_phone_digits: digits },
+    ];
+    if (last10.length >= 10) {
+      // Regex on the tail covers stored numbers with a country prefix.
+      phoneClauses.push({ customer_phone: new RegExp(`${last10}$`) });
+      phoneClauses.push({ customerPhone: new RegExp(`${last10}$`) });
+    }
+
+    const and: any[] = [{ $or: phoneClauses }];
+
+    const storeRef = String(
+      (req.query.store as string) ||
+      (req.query.store_slug as string) ||
+      (req.query.storeSlug as string) ||
+      ''
+    ).trim();
+    if (storeRef) {
+      const storeQuery = await buildOrderQuery(storeRef);
+      if (storeQuery) and.push(storeQuery);
+    }
+
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 200;
+
+    let orders: any[] = [];
+    try {
+      // @ts-ignore — plain Mongo filter object.
+      orders = await (Order as any)
+        .find({ $and: and })
+        .sort({ created_at: -1 })
+        .limit(limit)
+        .lean();
+    } catch (queryErr: any) {
+      console.warn('[Server] GET /api/customer/orders query warning:', queryErr?.message || queryErr);
+      orders = [];
+    }
+
+    // Deduplicate by order identity, the same way the merchant route does.
+    const deduped = Array.from(
+      new Map(
+        (Array.isArray(orders) ? orders : []).map((item: any) => [
+          String(item.id || item.order_number || item._id || '').replace(/^#/, '').trim(),
+          item,
+        ])
+      ).values()
+    );
+
+    res.setHeader('X-Orders-Count', String(deduped.length));
+    return res.status(200).json({ ok: true, orders: deduped });
+  } catch (err: any) {
+    console.error('[Server] GET /api/customer/orders error:', err);
+    return res.status(500).json({ ok: false, orders: [], error: 'Could not load customer orders.' });
+  }
+});
+
 // POST /api/orders — batch sync updated orders into MongoDB.
 //
 // DUPLICATE PREVENTION (5-second window):

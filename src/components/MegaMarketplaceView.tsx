@@ -2260,12 +2260,14 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               )}
             </div>
 
-            {/* ORDERS */}
+            {/* ORDERS — always the customer order history, never the merchant
+                dashboard (`onOpenAccount`). Signed out, the page itself shows
+                its own sign-in prompt. */}
             <button
               type="button"
-              onClick={onOpenAccount}
+              onClick={() => onOpenCustomerAccount?.('orders')}
               className="flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition hover:bg-[#f4f5ff]"
-              title="Track your orders"
+              title={copy('track_orders')}
             >
               <Receipt className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
               <span className="hidden text-[12px] font-bold xl:inline" style={{ color: THEME.ink }}>{copy('orders')}</span>

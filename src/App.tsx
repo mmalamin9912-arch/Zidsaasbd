@@ -40,6 +40,7 @@ import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 // The platform's OWN marketplace theme — a separate design from every tenant
 // storefront (TenantStorefrontView), deliberately.
 import { MegaMarketplaceView } from './components/MegaMarketplaceView';
+import { MarketplaceOrdersView } from './components/MarketplaceOrdersView';
 import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
@@ -2381,6 +2382,59 @@ onPlaceOrder={async (newOrder) => {
   // `/store/<slug>` branch below and render a single merchant theme with the
   // slug "marketplace". It is redirected (not rendered) so old links land on
   // the real marketplace instead of a lookalike tenant shop.
+  /*
+   * CUSTOMER ORDER HISTORY — checked BEFORE the marketplace catch-all.
+   *
+   * `/marketplace/orders` matches `startsWith('/marketplace/')`, and the
+   * self-heal below rewrites every such path to `/marketplace`. That is why an
+   * "Orders" click used to land on the marketplace (or, before that, the
+   * merchant dashboard) instead of the shopper's own orders. This branch has to
+   * come first, and it must NOT depend on `isMarketplacePath`.
+   *
+   * The session lives in localStorage; the page itself reads it and gates on it,
+   * so a signed-out visitor still gets a proper "sign in" surface here rather
+   * than being redirected anywhere.
+   */
+  const isMarketplaceOrdersPath =
+    currentPath === '/marketplace/orders' ||
+    currentPath === '/marketplace/orders/' ||
+    currentPath === '/orders';
+
+  if (isMarketplaceOrdersPath) {
+    // Normalise the legacy alias so the address bar is always canonical.
+    if (currentPath !== '/marketplace/orders') {
+      window.history.replaceState({}, '', '/marketplace/orders');
+    }
+
+    const goToStorefront = (slug: string) => {
+      if (!slug) return;
+      window.history.pushState({}, '', `/store/${slug}`);
+      setCurrentPath(`/store/${slug}`);
+    };
+
+    return (
+      <MarketplaceOrdersView
+        onBack={() => {
+          window.history.pushState({}, '', '/marketplace');
+          setCurrentPath('/marketplace');
+        }}
+        onVisitStore={goToStorefront}
+        onSignIn={() => {
+          const slug = String(
+            (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
+          ).trim();
+          if (slug) {
+            window.history.pushState({}, '', `/store/${slug}?account=signin`);
+            setCurrentPath(`/store/${slug}`);
+          } else {
+            window.history.pushState({}, '', '/marketplace');
+            setCurrentPath('/marketplace');
+          }
+        }}
+      />
+    );
+  }
+
   const isMarketplacePath =
     currentPath === '/' ||
     currentPath === '' ||
@@ -2426,12 +2480,25 @@ onPlaceOrder={async (newOrder) => {
          */
         onOpenCustomerAccount={(section) => {
           const target = section || 'profile';
+
+          // Orders ALWAYS go to the dedicated customer history page. It is
+          // session-gated itself, so signing out of a storefront never turns
+          // this into a redirect to the merchant dashboard.
+          if (target === 'orders') {
+            window.history.pushState({}, '', '/marketplace/orders');
+            setCurrentPath('/marketplace/orders');
+            return;
+          }
+
+          // Returns/addresses/profile are per-store account panes: hand off to
+          // the active store's storefront. With no known store there is nothing
+          // to open, so stay in the customer area rather than the dashboard.
           const slug = String(
             (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
           ).trim();
           if (!slug) {
-            window.history.pushState({}, '', `/store/marketplace?account=${target}`);
-            setCurrentPath('/store/marketplace');
+            window.history.pushState({}, '', '/marketplace/orders');
+            setCurrentPath('/marketplace/orders');
             return;
           }
           const next = `/store/${slug}?account=${target}`;
@@ -2439,8 +2506,9 @@ onPlaceOrder={async (newOrder) => {
           setCurrentPath(`/store/${slug}`);
         }}
         onOpenSignIn={() => {
-          // Sign-in is a storefront modal; with no active store, use the
-          // dashboard's own auth screen.
+          // Sign-in is a storefront modal. With no active store, stay on the
+          // customer orders page (which shows its own sign-in prompt) — never
+          // send a shopper to the merchant dashboard.
           const slug = String(
             (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
           ).trim();
@@ -2448,8 +2516,8 @@ onPlaceOrder={async (newOrder) => {
             window.history.pushState({}, '', `/store/${slug}?account=signin`);
             setCurrentPath(`/store/${slug}`);
           } else {
-            window.history.pushState({}, '', '/dashboard');
-            setCurrentPath('/dashboard');
+            window.history.pushState({}, '', '/marketplace/orders');
+            setCurrentPath('/marketplace/orders');
           }
         }}
         onGoToPlans={() => {

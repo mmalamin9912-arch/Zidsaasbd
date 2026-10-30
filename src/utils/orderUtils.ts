@@ -95,8 +95,19 @@ export function normalizeOrderItems(raw: unknown): OrderItem[] {
 export function normalizeOrder(raw: any): Order {
   const order = raw && typeof raw === 'object' ? raw : {};
 
+  /*
+   * Totals — every spelling the WRITE path can produce.
+   *
+   * The server persists `total_price` (see the order upsert in serverApp.ts),
+   * and marketplace split children carry `total_bdt`. This list previously read
+   * `totalBDT | total_price | totalAmount | total_amount | total` for the total
+   * but OMITTED `total_bdt`, while `subtotalBDT` below DID read it — so a real
+   * order rendered a correct subtotal next to a ৳0 total on the customer's
+   * order cards. Both fields now accept the same set of keys.
+   */
   const totalBDT = toNumber(
-    order.totalBDT ?? order.total_price ?? order.totalAmount ?? order.total_amount ?? order.total ?? 0
+    order.totalBDT ?? order.total_price ?? order.total_bdt ?? order.totalPrice ??
+    order.totalAmount ?? order.total_amount ?? order.grandTotal ?? order.payable ?? order.total ?? 0
   );
 
   // `created_at` is a Date from Mongo; `createdAt` is a display string from the
@@ -129,7 +140,7 @@ export function normalizeOrder(raw: any): Order {
     deliveryZone: order.deliveryZone ?? 'Inside Dhaka',
     address: String(order.address ?? order.shipping_address ?? ''),
     totalBDT,
-    subtotalBDT: toNumber(order.subtotalBDT ?? order.subtotal_bdt, totalBDT),
+    subtotalBDT: toNumber(order.subtotalBDT ?? order.subtotal_bdt ?? order.subtotal ?? totalBDT, totalBDT),
     deliveryCharge: toNumber(order.deliveryCharge ?? order.delivery_charge, 0),
     paymentMethod: order.paymentMethod ?? order.payment_method ?? 'COD',
     paymentStatus: order.paymentStatus ?? order.payment_status ?? 'Unpaid',
