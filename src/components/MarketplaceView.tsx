@@ -1,4 +1,4 @@
-/**
+﻿/**
  * MarketplaceView — the central, multi-vendor marketplace homepage.
  *
  * Lists every PUBLIC product from every ACTIVE merchant in one grid, with the
@@ -8,7 +8,7 @@
  *   • price range         (min / max ± quick bands)
  *   • vendor              (facet list + free-text seller search)
  *
- * Data comes from GET /api/marketplace/products (see lib/marketplaceApi.ts).
+ * Products are read DIRECTLY from the Supabase products table (no MongoDB dependency for the public catalogue) (see lib/marketplaceApi.ts).
  * Every product row already carries `vendor_id` / `vendor_name` / `vendor_slug`
  * so "Add to cart" can tag the line with its seller — that is what lets a cart
  * span several stores and checkout split into per-vendor child orders.
@@ -21,11 +21,8 @@ import {
 import SafeImage from './SafeImage';
 import { useToast } from './ToastProvider';
 import {
-  fetchMarketplaceProducts,
-  type MarketplaceResponse,
-  type MarketplaceFilters,
-  type MarketplaceFacetVendor,
-} from '../lib/marketplaceApi';
+  fetchSupabaseNativeProducts, fetchSupabaseNativeCategories, fetchSupabaseNativePriceRange;
+} from '../lib/supabaseMarketplaceNative';
 import type { MarketplaceProduct } from '../types';
 
 /** Price bands frequent in Bangladeshi storefronts (৳). */
@@ -554,3 +551,8 @@ export const MarketplaceView: React.FC<MarketplaceViewProps> = ({
 };
 
 export default MarketplaceView;
+
+
+
+
+

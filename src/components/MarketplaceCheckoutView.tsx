@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, Truck, Wallet, CreditCard, Banknote, ShieldCheck,
   Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail,
@@ -958,3 +958,4 @@ const Row: React.FC<{ label: string; value: string }> = ({ label, value }) => (
 );
 
 export default MarketplaceCheckoutView;
+
