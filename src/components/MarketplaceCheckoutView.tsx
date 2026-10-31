@@ -135,6 +135,34 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
   const [lang, setLang] = useState<Lang>(() => readLang());
   const [session, setSession] = useState<Session>(() => readSession());
 
+  /**
+   * HYDRATION GUARD — the "Your basket is empty" flash.
+   *
+   * `useMarketplaceBasket` seeds its state from storage in a lazy initialiser,
+   * so the FIRST render already has the lines. This flag keeps the empty-state
+   * card off screen until the basket hook has re-synced after mount, so a
+   * shopper who arrived from the drawer never sees "Your basket is empty" for
+   * a frame before their items appear.
+   */
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const id = window.setTimeout(() => setReady(true), 0);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  /**
+   * TELL THE MARKETPLACE THE BASKET WAS HANDED OVER.
+   *
+   * The drawer navigates here in the same tick as the click; the badge and any
+   * other consumer re-read the persisted basket. Dispatching the same event the
+   * basket hook listens to is what makes the handoff observable rather than
+   * implicit, and it costs nothing when no line changed.
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new Event('zid:marketplace-basket'));
+  }, []);
+
   const t = useCallback((en: string, bn: string) => (lang === 'bn' ? bn : en), [lang]);
 
   // Own `<html lang>` while mounted, same contract as the other customer pages.
@@ -399,7 +427,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       </header>
 
       <main className="mx-auto max-w-[1100px] px-4 py-6">
-        {basket.itemCount === 0 ? (
+        {!ready && basket.itemCount === 0 ? (
+          <div className="flex items-center justify-center rounded-2xl border bg-white p-10 shadow-sm" style={{ borderColor: THEME.line }}>
+            <Loader2 className="h-5 w-5 animate-spin text-slate-300" />
+          </div>
+        ) : basket.itemCount === 0 ? (
           <div className="rounded-2xl border bg-white p-10 text-center shadow-sm" style={{ borderColor: THEME.line }}>
             <Package className="mx-auto mb-3 h-10 w-10 text-slate-300" />
             <div className="text-[15px] font-black text-slate-800">

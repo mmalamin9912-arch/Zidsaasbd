@@ -3332,7 +3332,20 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 */}
                 <button
                   type="button"
-                  onClick={() => { setShowBasket(false); onCheckout(); }}
+                  onClick={() => {
+                    // Nothing to hand over — never navigate into an empty
+                    // checkout page.
+                    if (basket.itemCount === 0) return;
+                    // Give every mounted consumer (badge, sticky bar, checkout)
+                    // the final lines BEFORE the view swaps. The write itself
+                    // is synchronous; this makes the handoff explicit so a
+                    // sibling that mounted mid-navigation cannot seed its
+                    // state from a stale copy.
+                    window.dispatchEvent(new Event('zid:marketplace-basket'));
+                    setShowBasket(false);
+                    onCheckout();
+                  }}
+                  disabled={basket.itemCount === 0}
                   className="min-h-[48px] w-full rounded-xl text-[13px] font-black text-white disabled:opacity-50"
                   style={{ backgroundColor: THEME.brand }}
                 >
@@ -3705,6 +3718,9 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           lang={language}
           product={activeProduct}
           onClose={() => setActiveProduct(null)}
+          /* Add to the central basket, then dismiss the overlay in ONE place.
+             `handleAdd` only mutates the basket (no navigation), so the shopper
+             stays exactly where they were in the grid. */
           onAdd={(p) => { handleAdd(p); setActiveProduct(null); }}
           onVisitVendor={(slug) => { setActiveProduct(null); onVisitVendor(slug); }}
         />
@@ -3873,12 +3889,20 @@ const QuickView: React.FC<{
           <div className="mt-4 flex flex-col gap-2 sm:flex-row">
             <button
               type="button"
-              onClick={() => {
-                // Add, then CLOSE the modal: leaving it open made the add look
-                // like it had silently failed, so shoppers clicked again and
-                // added duplicates to the basket.
+              onClick={(e) => {
+                // Add to the CENTRAL basket, then close the modal.
+                //
+                // `onAdd` is the only handler that runs here. It used to be
+                // followed by `onClose()`, but the parent's `onAdd` handler
+                // ALREADY closes the modal — so the second call unmounted a
+                // dialog that was already gone. The visible symptom was a modal
+                // that lingered, or an "Add to basket" click that appeared to
+                // do nothing at all.
+                //
+                // `stopPropagation` keeps the click from reaching the
+                // backdrop, whose `onClick` closes without adding.
+                e.stopPropagation();
                 onAdd(product);
-                onClose();
               }}
               disabled={String(p.stock_status) === 'out_of_stock'}
               className="min-h-[48px] flex-1 rounded-xl text-[13px] font-black text-white disabled:cursor-not-allowed disabled:opacity-45"

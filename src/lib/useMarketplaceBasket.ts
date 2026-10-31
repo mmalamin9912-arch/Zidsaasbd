@@ -12,7 +12,7 @@
  * basket into one child order (and one courier slip) per merchant — see
  * `persistVendorChildren` in lib/serverApp.ts.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MarketplaceProduct } from '../types';
 
 /** localStorage key. Never shared with a merchant's own single-store cart. */
@@ -81,26 +81,80 @@ function normalizeLine(raw: any): BasketLine | null {
   return { product, quantity };
 }
 
-function readBasket(): BasketLine[] {
-  try {
-    const raw = localStorage.getItem(MARKETPLACE_BASKET_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return [];
-    // `map` + `filter`, NOT `filter` on the raw shape: a line is recovered
-    // whenever it carries an id in ANY known spelling.
-    return parsed.map(normalizeLine).filter((line): line is BasketLine => line !== null);
-  } catch {
-    return [];
-  }
+const memoryBasket = new Map<string, string>();
+
+/** Used only when the primary key cannot be written (private mode / quota). */
+const FALLBACK_KEY = 'zid_marketplace_cart_mirror';
+
+function parseBasket(raw: string | null | undefined): BasketLine[] {
+  if (!raw) return [];
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) return [];
+  // `map` + `filter`, NOT `filter` on the raw shape: a line is recovered
+  // whenever it carries an id in ANY known spelling.
+  return parsed.map(normalizeLine).filter((line): line is BasketLine => line !== null);
 }
 
+/**
+ * Read the basket, in priority order: canonical key → fallback mirror → the
+ * in-memory copy. A key that exists but is CORRUPT falls through to the next
+ * source instead of returning an empty basket that hides a real one.
+ */
+function readBasket(): BasketLine[] {
+  if (typeof window === 'undefined') return parseBasket(memoryBasket.get(MARKETPLACE_BASKET_KEY));
+
+  const sources: Array<() => string | null | undefined> = [
+    () => localStorage.getItem(MARKETPLACE_BASKET_KEY),
+    () => localStorage.getItem(FALLBACK_KEY),
+    () => memoryBasket.get(MARKETPLACE_BASKET_KEY),
+  ];
+
+  for (const load of sources) {
+    let raw: string | null | undefined;
+    try {
+      raw = load();
+    } catch {
+      continue; // localStorage unavailable — try the next source
+    }
+    if (!raw) continue;
+    try {
+      return parseBasket(raw);
+    } catch {
+      /* corrupt entry — fall through to the next source */
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Persist the basket.
+ *
+ * The write happens SYNCHRONOUSLY (localStorage is a blocking API) so that the
+ * unified checkout, which reads the same key on mount, always sees the lines
+ * the shopper just added — even when navigation happens in the same tick.
+ *
+ * A storage failure (private mode, quota, a locked-down WebView) falls back to
+ * an in-memory copy instead of silently dropping the basket, which used to
+ * surface as "Your basket is empty" on the checkout page.
+ */
 function writeBasket(lines: BasketLine[]) {
+  const serialized = JSON.stringify(lines);
+  memoryBasket.set(MARKETPLACE_BASKET_KEY, serialized);
   try {
-    localStorage.setItem(MARKETPLACE_BASKET_KEY, JSON.stringify(lines));
+    if (typeof window !== 'undefined') {
+      // Mirror first, so a read racing this write still finds the lines;
+      // then the canonical key.
+      localStorage.setItem(FALLBACK_KEY, serialized);
+      localStorage.setItem(MARKETPLACE_BASKET_KEY, serialized);
+      localStorage.removeItem(FALLBACK_KEY);
+    }
   } catch (e) {
     console.warn('[Marketplace] basket persist warning:', e);
   }
-  window.dispatchEvent(new Event(BASKET_EVENT));
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(BASKET_EVENT));
+  }
 }
 
 /** Two lines are the same item only when vendor + product agree. */
@@ -120,6 +174,22 @@ export function useMarketplaceBasket() {
       window.removeEventListener(BASKET_EVENT, sync);
       window.removeEventListener('storage', sync);
     };
+  }, []);
+
+  /**
+   * Re-read on every mount.
+   *
+   * The unified checkout and the marketplace header are sibling trees that
+   * unmount/remount on navigation. `useState(() => readBasket())` seeds the
+   * FIRST render from storage, which already covers this, but an explicit sync
+   * afterwards also catches the `storage` event that fires when the write came
+   * from a different tab *before* this consumer subscribed.
+   */
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (mountedRef.current) return;
+    mountedRef.current = true;
+    setLines(readBasket());
   }, []);
 
   const add = useCallback((product: MarketplaceProduct, quantity = 1) => {
