@@ -103,7 +103,9 @@ function groupByVendor(lines: BasketLine[]) {
   const map = new Map<string, { vendorId: string; vendorName: string; vendorSlug: string; lines: BasketLine[]; subtotal: number }>();
   for (const line of lines) {
     const p = line.product as any;
-    const id = String(p.vendor_id || p.vendor_slug || p.store_slug || 'unknown');
+    const id = String(p.vendor_id || p.store_id || p.vendor_slug || p.store_slug || 'unknown');
+    const slug = String(p.vendor_slug || p.store_slug || p.storeSlug || '');
+    const name = String(p.vendor_name || p.store_name || p.storeName || 'Store');
     const amount = (Number(p.priceBDT) || 0) * Number(line.quantity || 0);
     const existing = map.get(id);
     if (existing) {
@@ -112,8 +114,8 @@ function groupByVendor(lines: BasketLine[]) {
     } else {
       map.set(id, {
         vendorId: id,
-        vendorName: String(p.vendor_name || 'Store'),
-        vendorSlug: String(p.vendor_slug || ''),
+        vendorName: name,
+        vendorSlug: slug,
         lines: [line],
         subtotal: amount,
       });
@@ -270,6 +272,9 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
 
       const items = basket.lines.map((line, index) => {
         const p = line.product as any;
+        const vendorId = String(p.vendor_id || p.store_id || p.vendor_slug || p.store_slug || '');
+        const vendorSlug = String(p.vendor_slug || p.store_slug || p.storeSlug || '');
+        const vendorName = String(p.vendor_name || p.store_name || p.storeName || 'Store');
         return {
           id: `${id}-i${index + 1}`,
           productId: String(p.id || ''),
@@ -279,10 +284,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           unitPriceBDT: Number(p.priceBDT) || 0,
           image: String(p.image || ''),
           // ── the routing keys ──
-          vendor_id: String(p.vendor_id || ''),
-          vendor_name: String(p.vendor_name || ''),
-          store_id: String(p.vendor_id || ''),
-          store_slug: String(p.vendor_slug || ''),
+          vendor_id: vendorId,
+          vendor_name: vendorName,
+          vendor_slug: vendorSlug,
+          store_id: vendorId,
+          store_slug: vendorSlug,
           category: String(p.category || ''),
         };
       });
@@ -328,6 +334,22 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       const failed = !res.ok || (data && data.ok === false);
       if (failed) {
         throw new Error(data?.error || data?.message || `Server responded ${res.status}`);
+      }
+
+      // Persist customer session so the customer's orders are immediately visible
+      // on /marketplace/orders without requiring any storefront redirect.
+      try {
+        const sessionPayload = {
+          name: form.name.trim(),
+          phone: form.phone.trim(),
+          email: form.email.trim() || undefined,
+        };
+        localStorage.setItem('zid_customer_session', JSON.stringify(sessionPayload));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('zid:customer-session', { detail: sessionPayload }));
+        }
+      } catch {
+        // ignore storage errors
       }
 
       // The basket has been converted into an order — clear it so a refresh
@@ -712,13 +734,9 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
               </button>
 
               {!session && (
-                <button
-                  type="button"
-                  onClick={() => onSignIn?.()}
-                  className="w-full text-center text-[11.5px] font-semibold text-slate-500 underline decoration-slate-300 underline-offset-2 hover:text-slate-800"
-                >
-                  {t('Sign in to save your details for next time', 'পরেরবারের জন্য তথ্য সংরক্ষণ করতে সাইন ইন করুন')}
-                </button>
+                <p className="text-center text-[11px] font-medium text-slate-500">
+                  {t('Your phone number above automatically tracks all your orders.', 'আপনার উপরের ফোন নম্বরটিতে সকল অর্ডার স্বয়ংক্রিয়ভাবে ট্র্যাক করা যাবে।')}
+                </p>
               )}
 
               <p className="px-1 text-center text-[10.5px] leading-relaxed text-slate-400">

@@ -2424,15 +2424,8 @@ onPlaceOrder={async (newOrder) => {
           setCurrentPath('/marketplace/orders');
         }}
         onSignIn={() => {
-          // Sign-in is a storefront modal. With no active store there is nothing
-          // to open, so stay put — the shopper can still order as a guest, which
-          // is the point of this checkout.
-          const slug = String(
-            (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
-          ).trim();
-          if (!slug) return;
-          window.history.pushState({}, '', `/store/${slug}?account=signin`);
-          setCurrentPath(`/store/${slug}`);
+          // Centralized marketplace checkout does not redirect to storefronts.
+          // Shopper can complete checkout directly as a guest or with their phone.
         }}
       />
     );
@@ -2463,15 +2456,10 @@ onPlaceOrder={async (newOrder) => {
         }}
         onVisitStore={goToStorefront}
         onSignIn={() => {
-          const slug = String(
-            (typeof window !== 'undefined' && localStorage.getItem('zid_active_store_slug')) || ''
-          ).trim();
-          if (slug) {
-            window.history.pushState({}, '', `/store/${slug}?account=signin`);
-            setCurrentPath(`/store/${slug}`);
-          } else {
-            window.history.pushState({}, '', '/marketplace');
-            setCurrentPath('/marketplace');
+          // Centralized marketplace orders remain on /marketplace/orders.
+          if (currentPath !== '/marketplace/orders') {
+            window.history.pushState({}, '', '/marketplace/orders');
+            setCurrentPath('/marketplace/orders');
           }
         }}
       />

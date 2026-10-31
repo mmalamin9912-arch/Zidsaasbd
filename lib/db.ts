@@ -105,6 +105,11 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
     return cached.conn;
   }
 
+  if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
+    cached.promise = null;
+    cached.conn = null;
+  }
+
   if (!cached.promise) {
     const opts = {
       dbName,

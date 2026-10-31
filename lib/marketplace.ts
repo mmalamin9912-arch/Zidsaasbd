@@ -918,11 +918,15 @@ export function splitOrderByVendor(
 
   for (const raw of Array.isArray(items) ? items : []) {
     if (!raw || typeof raw !== 'object') continue;
+    const vendorSlug = String(
+      raw.store_slug || raw.storeSlug || raw.vendor_slug || raw.vendorSlug || (fallback.slug) || ''
+    ).trim().toLowerCase();
     const vendorId = String(
-      raw.vendor_id || raw.vendorId || raw.store_id || raw.storeId || raw.merchant_id || raw.merchantId || fallback.storeId || fallback.slug || 'default'
+      raw.vendor_id || raw.vendorId || raw.store_id || raw.storeId || raw.merchant_id || raw.merchantId || vendorSlug || fallback.storeId || fallback.slug || 'default'
     ).trim();
-    const vendorName = String(raw.vendor_name || raw.vendorName || (vendorId === (fallback.storeId || fallback.slug) ? fallback.name : '') || vendorId).trim();
-    const vendorSlug = String(raw.store_slug || raw.storeSlug || (vendorId === (fallback.storeId || fallback.slug) ? fallback.slug : '') || '').trim().toLowerCase();
+    const vendorName = String(
+      raw.vendor_name || raw.vendorName || raw.store_name || raw.storeName || (vendorId === (fallback.storeId || fallback.slug) ? fallback.name : '') || vendorSlug || vendorId
+    ).trim();
     const unitPrice = toNum(raw.unitPriceBDT ?? raw.unit_price ?? raw.priceBDT ?? raw.price, 0);
     const quantity = Math.max(1, Math.floor(toNum(raw.quantity, 1)));
     const line: SplitChildLine = {
@@ -938,6 +942,7 @@ export function splitOrderByVendor(
     if (existing) {
       existing.items.push(line);
       existing.subtotal_bdt = round2(existing.subtotal_bdt + unitPrice * quantity);
+      if (!existing.vendor_slug && vendorSlug) existing.vendor_slug = vendorSlug;
     } else {
       groups.set(vendorId, {
         vendor_id: vendorId,

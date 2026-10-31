@@ -76,6 +76,9 @@ function normalizeLine(raw: any): BasketLine | null {
     vendor_id: vendorId,
     vendor_name: String(source.vendor_name ?? source.vendorName ?? source.store_name ?? raw.vendorName ?? ''),
     vendor_slug: String(source.vendor_slug ?? source.vendorSlug ?? source.store_slug ?? raw.vendorSlug ?? ''),
+    store_id: vendorId,
+    store_slug: String(source.vendor_slug ?? source.vendorSlug ?? source.store_slug ?? raw.vendorSlug ?? ''),
+    storeSlug: String(source.vendor_slug ?? source.vendorSlug ?? source.store_slug ?? raw.vendorSlug ?? ''),
   } as BasketLine['product'];
 
   return { product, quantity };

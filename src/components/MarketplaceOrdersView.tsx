@@ -128,11 +128,54 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
     setLang(readLang());
     window.addEventListener('focus', sync);
     window.addEventListener('storage', sync);
+    window.addEventListener('zid:customer-session', sync);
     return () => {
       window.removeEventListener('focus', sync);
       window.removeEventListener('storage', sync);
+      window.removeEventListener('zid:customer-session', sync);
     };
   }, []);
+
+  const [phoneInput, setPhoneInput] = useState('');
+  const [lookupError, setLookupError] = useState<string | null>(null);
+
+  const handlePhoneLookup = (e: React.FormEvent) => {
+    e.preventDefault();
+    const digits = phoneInput.replace(/\D/g, '');
+    if (digits.length < 10) {
+      setLookupError(
+        t(
+          'Please enter a valid phone number (at least 10 digits).',
+          'অনুগ্রহ করে একটি সঠিক ফোন নম্বর লিখুন (কমপক্ষে ১০ ডিজিট)।',
+        ),
+      );
+      return;
+    }
+    setLookupError(null);
+    const newSession: Session = {
+      name: '',
+      email: '',
+      phone: digits,
+    };
+    try {
+      localStorage.setItem('zid_customer_session', JSON.stringify(newSession));
+      window.dispatchEvent(new CustomEvent('zid:customer-session', { detail: newSession }));
+    } catch {
+      // ignore storage error
+    }
+    setSession(newSession);
+  };
+
+  const handleSignOut = () => {
+    try {
+      localStorage.removeItem('zid_customer_session');
+      window.dispatchEvent(new CustomEvent('zid:customer-session', { detail: null }));
+    } catch {
+      // ignore storage error
+    }
+    setSession(null);
+    setOrders([]);
+  };
 
   /**
    * Load the shopper's orders.
@@ -279,43 +322,72 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
             <Receipt className="h-5 w-5" style={{ color: THEME.brand }} />
             {t('My Orders', 'আমার অর্ডার')}
           </h1>
-          <p className="mt-1 text-[12.5px] text-slate-500">
-            {session
-              ? t(
-                `Orders placed with ${session.phone || session.email}.`,
-                `${session.phone || session.email} নম্বরের অর্ডারসমূহ।`,
-              )
-              : t('Sign in to see your orders.', 'আপনার অর্ডার দেখতে সাইন ইন করুন।')}
-          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[12.5px] text-slate-500">
+            {session?.phone ? (
+              <>
+                <span>
+                  {t(
+                    `Orders placed with ${session.phone}${session.email ? ` (${session.email})` : ''}.`,
+                    `${session.phone} নম্বরের অর্ডারসমূহ।`,
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  className="font-bold underline decoration-slate-300 underline-offset-2 transition hover:text-slate-900"
+                  style={{ color: THEME.brand }}
+                >
+                  {t('Change phone', 'নম্বর পরিবর্তন')}
+                </button>
+              </>
+            ) : (
+              <span>{t('Look up your orders with your phone number.', 'আপনার ফোন নম্বর দিয়ে অর্ডার খুঁজুন।')}</span>
+            )}
+          </div>
         </div>
 
-        {/* ── Not signed in ── */}
-        {!session && (
-          <div className="rounded-2xl border bg-white p-10 text-center shadow-sm" style={{ borderColor: THEME.line }}>
+        {/* ── Lookup / Guest tracking card ── */}
+        {(!session || !session.phone) && (
+          <div className="mx-auto max-w-lg rounded-2xl border bg-white p-8 text-center shadow-sm" style={{ borderColor: THEME.line }}>
             <ShoppingBag className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-            <div className="text-[15px] font-black text-slate-800">
-              {t('Sign in to view your orders', 'আপনার অর্ডার দেখতে সাইন ইন করুন')}
+            <div className="text-[16px] font-black text-slate-800">
+              {t('Track Your Marketplace Orders', 'মার্কেটপ্লেস অর্ডার ট্র্যাক করুন')}
             </div>
             <p className="mx-auto mt-1.5 max-w-sm text-[12.5px] text-slate-500">
               {t(
-                'Your order history, delivery tracking and returns all live in your account.',
-                'আপনার অর্ডারের ইতিহাস, ডেলিভারি ট্র্যাকিং ও রিটার্ন সবই আপনার অ্যাকাউন্টে।',
+                'Enter the phone number used during checkout to view your order history and live delivery status.',
+                'চেকআউটের সময় ব্যবহৃত ফোন নম্বরটি লিখুন এবং আপনার অর্ডার ও ডেলিভারি স্ট্যাটাস দেখুন।',
               )}
             </p>
-            <button
-              type="button"
-              onClick={() => onSignIn?.()}
-              className="mt-5 inline-flex min-h-[42px] items-center gap-2 rounded-xl px-5 text-[13px] font-black text-white"
-              style={{ backgroundColor: THEME.brand }}
-            >
-              {t('Sign In', 'সাইন ইন করুন')}
-              <ArrowRight className="h-4 w-4" />
-            </button>
+            <form onSubmit={handlePhoneLookup} className="mt-5 space-y-3">
+              <div className="flex gap-2">
+                <input
+                  type="tel"
+                  value={phoneInput}
+                  onChange={(e) => setPhoneInput(e.target.value)}
+                  placeholder="01XXXXXXXXX"
+                  className="min-h-[44px] flex-1 rounded-xl border px-3.5 text-[13px] text-slate-800 placeholder:text-slate-400 focus:border-[#3b2fd6] focus:outline-none"
+                  style={{ borderColor: THEME.line }}
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl px-5 text-[13px] font-black text-white transition hover:opacity-95"
+                  style={{ backgroundColor: THEME.brand }}
+                >
+                  {t('Find Orders', 'অর্ডার খুঁজুন')}
+                  <ArrowRight className="h-4 w-4" />
+                </button>
+              </div>
+              {lookupError && (
+                <p className="text-left text-[11.5px] font-medium text-rose-600">{lookupError}</p>
+              )}
+            </form>
           </div>
         )}
 
         {/* ── Signed in ── */}
-        {session && (
+        {session && session.phone && (
           <>
             {/* Controls: tabs + search */}
             <div className="mb-4 flex flex-wrap items-center gap-2">

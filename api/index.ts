@@ -72,6 +72,10 @@ async function ensureMongo(): Promise<{ ok: boolean; error?: string; code?: stri
 
   if (mongoose.connection.readyState === 1) return { ok: true };
 
+  if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
+    mongoCache.promise = null;
+  }
+
   if (!uri) {
     // Not fatal: routes that are Supabase-only (storefront, products) must keep
     // working. Routes that need Mongo report the missing variable themselves.
