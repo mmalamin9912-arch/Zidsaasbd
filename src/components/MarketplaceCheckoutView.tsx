@@ -68,9 +68,60 @@ const DISTRICTS = [
  * marketplace that reveals delivery cost only on the final screen is the single
  * most common cause of abandoned checkout in this market. Charged once per
  * order, not once per vendor.
+ *
+ * SUB DHAKA is its own band, exactly as the merchant storefront's checkout has
+ * it. The three-zone model is what every Bangladeshi courier actually bills on,
+ * and collapsing it into inside/outside overcharges a Gazipur or Narayanganj
+ * buyer — the single most common complaint about flat-rate delivery.
  */
 const INSIDE_DHAKA = 60;
+const SUB_DHAKA = 90;
 const OUTSIDE_DHAKA = 120;
+
+/** Districts billed at the SUB Dhaka rate (the Dhaka metro ring). */
+const SUB_DHAKA_DISTRICTS = new Set([
+  'Gazipur', 'Narayanganj', 'Manikganj', 'Munshiganj', 'Narsingdi', 'Savar', 'Keraniganj',
+]);
+
+type ShippingZone = 'inside' | 'sub' | 'outside';
+
+function shippingZoneOf(district: string): ShippingZone {
+  if (district === 'Dhaka') return 'inside';
+  if (SUB_DHAKA_DISTRICTS.has(district)) return 'sub';
+  return 'outside';
+}
+
+function deliveryFeeOf(zone: ShippingZone): number {
+  return zone === 'inside' ? INSIDE_DHAKA : zone === 'sub' ? SUB_DHAKA : OUTSIDE_DHAKA;
+}
+
+/**
+ * The payment rails the marketplace checkout offers.
+ *
+ * These mirror the merchant storefront's checkout: COD plus the three mobile
+ * wallets. A marketplace order is NOT paid to the platform — each seller
+ * collects for their own goods — so a wallet choice records the shopper's
+ * intent and the transaction id they used, which is handed to every seller in
+ * that order. Card payments stay with the seller's own gateway and are not
+ * offered here.
+ */
+type MarketplacePayment = 'cod' | 'bkash' | 'nagad' | 'rocket';
+
+const PAYMENT_LABELS: Record<MarketplacePayment, string> = {
+  cod: 'COD',
+  bkash: 'bKash',
+  nagad: 'Nagad',
+  rocket: 'Rocket',
+};
+
+const WALLET_PAYMENTS: MarketplacePayment[] = ['bkash', 'nagad', 'rocket'];
+
+/** Wallet numbers the shopper is told to send to. Placeholder until each seller
+ *  publishes its own number at checkout; the transaction id is what is verified. */
+const WALLET_HELP_LINE =
+  'Send the total to the seller’s wallet, then enter the Transaction ID you receive by SMS. Each seller confirms their own payment.';
+const WALLET_HELP_LINE_BN =
+  'মোট টাকা সেলারের ওয়ালেটে পাঠিয়ে এসএমএস-এ পাওয়া ট্রানজেকশন আইডি লিখুন। প্রত্যেক সেলার নিজের পেমেন্ট নিশ্চিত করবেন।';
 
 type Lang = 'en' | 'bn';
 
@@ -207,8 +258,17 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     }));
   }, [session]);
 
-  /** Cash on delivery for this market; card/bKash kept visible but marked. */
-  const [payment, setPayment] = useState<'cod' | 'bkash' | 'card'>('cod');
+  /**
+   * PAYMENT — same rails as the merchant storefront's own checkout.
+   *
+   * `txId` is the transaction id the shopper pasted from their wallet SMS. It is
+   * required for a wallet payment (the seller has nothing else to reconcile
+   * against) and irrelevant for COD, so it is cleared when COD is reselected
+   * rather than left behind to be attached to an order by accident.
+   */
+  const [payment, setPayment] = useState<MarketplacePayment>('cod');
+  const [txId, setTxId] = useState('');
+  const isWalletPayment = payment !== 'cod';
 
   const [placing, setPlacing] = useState(false);
   /**
@@ -228,8 +288,9 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
 
   const vendors = useMemo(() => groupByVendor(basket.lines), [basket.lines]);
   const subtotal = basket.subtotal;
-  const isInsideDhaka = form.district === 'Dhaka';
-  const deliveryCharge = basket.itemCount === 0 ? 0 : (isInsideDhaka ? INSIDE_DHAKA : OUTSIDE_DHAKA);
+  const shippingZone = shippingZoneOf(form.district);
+  const isInsideDhaka = shippingZone === 'inside';
+  const deliveryCharge = basket.itemCount === 0 ? 0 : deliveryFeeOf(shippingZone);
   const total = subtotal + deliveryCharge;
 
   const validate = (): string | null => {
@@ -240,6 +301,14 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     if (!form.district) return t('Please choose your district.', 'অনুগ্রহ করে আপনার জেলা নির্বাচন করুন।');
     if (!form.area.trim()) return t('Please enter your area or thana.', 'অনুগ্রহ করে আপনার এলাকা বা থানা লিখুন।');
     if (!form.address.trim()) return t('Please enter your delivery address.', 'অনুগ্রহ করে আপনার ডেলিভারি ঠিকানা লিখুন।');
+    // A wallet payment without a transaction id cannot be reconciled by the
+    // seller, and would land in their dashboard as an unverifiable claim.
+    if (isWalletPayment && txId.replace(/\s/g, '').length < 6) {
+      return t(
+        'Please enter the Transaction ID from your wallet payment.',
+        'অনুগ্রহ করে ওয়ালেট পেমেন্টের ট্রানজেকশন আইডি লিখুন।',
+      );
+    }
     return null;
   };
 
@@ -307,12 +376,20 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         cityArea: form.area.trim(),
         address: form.address.trim(),
         customerNote: form.note.trim() || undefined,
-        deliveryZone: isInsideDhaka ? 'Inside Dhaka' : 'Outside Dhaka',
+        deliveryZone:
+          shippingZone === 'inside' ? 'Inside Dhaka'
+            : shippingZone === 'sub' ? 'Sub Dhaka'
+              : 'Outside Dhaka',
         subtotalBDT: subtotal,
         deliveryCharge,
         totalBDT: total,
-        paymentMethod: payment === 'cod' ? 'COD' : payment === 'bkash' ? 'bKash' : 'Bank Transfer',
-        paymentStatus: 'Unpaid',
+        paymentMethod: PAYMENT_LABELS[payment],
+        // A wallet transfer is claimed but not yet verified by the seller; COD is
+        // simply unpaid until the courier collects. Same two states the
+        // merchant storefront's checkout writes, so the dashboard's payment
+        // filter behaves identically for both channels.
+        paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
+        transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
         fulfillmentStatus: 'Unfulfilled',
         status: 'New',
         source: 'Store',
@@ -615,15 +692,22 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                       id: 'bkash' as const,
                       Icon: Wallet,
                       title: 'bKash',
-                      desc: t('Pay a merchant directly — one checkout per store.', 'সেলারের কাছে সরাসরি পরিশোধ করুন।'),
-                      enabled: false,
+                      desc: t('Send the total, then add your Transaction ID.', 'মোট টাকা পাঠিয়ে ট্রানজেকশন আইডি দিন।'),
+                      enabled: true,
                     },
                     {
-                      id: 'card' as const,
-                      Icon: CreditCard,
-                      title: t('Credit / Debit card', 'ক্রেডিট / ডেবিট কার্ড'),
-                      desc: t('Processed by the seller’s own gateway.', 'সেলারের নিজস্ব গেটওয়ে দ্বারা পরিচালিত।'),
-                      enabled: false,
+                      id: 'nagad' as const,
+                      Icon: Wallet,
+                      title: 'Nagad',
+                      desc: t('Send the total, then add your Transaction ID.', 'মোট টাকা পাঠিয়ে ট্রানজেকশন আইডি দিন।'),
+                      enabled: true,
+                    },
+                    {
+                      id: 'rocket' as const,
+                      Icon: Wallet,
+                      title: 'Rocket',
+                      desc: t('Send the total, then add your Transaction ID.', 'মোট টাকা পাঠিয়ে ট্রানজেকশন আইডি দিন।'),
+                      enabled: true,
                     },
                   ]).map(({ id, Icon, title, desc, enabled }) => (
                     <label
@@ -640,7 +724,14 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                         name="payment"
                         checked={payment === id}
                         disabled={!enabled}
-                        onChange={() => setPayment(id)}
+                        onChange={() => {
+                          setPayment(id);
+                          // A transaction id belongs to the wallet that produced
+                          // it. Carrying it across to COD (or to a different
+                          // wallet) would attach a real TrxID to an order that
+                          // was never paid that way.
+                          if (id === 'cod') setTxId('');
+                        }}
                         className="mt-1 h-3.5 w-3.5 accent-[#3b2fd6]"
                       />
                       <Icon className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
@@ -657,11 +748,38 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                       </span>
                     </label>
                   ))}
+                  {/* TRANSACTION ID — required for a wallet payment. Shown only
+                      when a wallet is selected, so the COD path stays a
+                      one-click order. */}
+                  {isWalletPayment && (
+                    <div className="rounded-xl border p-3" style={{ borderColor: THEME.line, backgroundColor: '#fafbff' }}>
+                      <label className="block">
+                        <span className="mb-1 block text-[11px] font-bold text-slate-600">
+                          {t(
+                            `${PAYMENT_LABELS[payment]} Transaction ID`,
+                            `${PAYMENT_LABELS[payment]} ট্রানজেকশন আইডি`,
+                          )} *
+                        </span>
+                        <input
+                          value={txId}
+                          onChange={(e) => setTxId(e.target.value)}
+                          placeholder={t('e.g. 9HK2A7B3XY', 'যেমন: 9HK2A7B3XY')}
+                          autoComplete="off"
+                          className="w-full rounded-lg border bg-white px-3 py-2.5 text-[13px] uppercase tracking-wide text-slate-800 focus:border-[#3b2fd6] focus:outline-none"
+                          style={{ borderColor: THEME.line }}
+                        />
+                      </label>
+                      <p className="mt-1.5 text-[10.5px] leading-relaxed text-slate-500">
+                        {t(WALLET_HELP_LINE, WALLET_HELP_LINE_BN)}
+                      </p>
+                    </div>
+                  )}
+
                   <p className="flex items-start gap-1.5 pt-1 text-[10.5px] leading-relaxed text-slate-400">
                     <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
                     {t(
-                      'Marketplace orders are paid on delivery. For bKash or card, complete payment with each seller after they confirm your order.',
-                      'মার্কেটপ্লেসের অর্ডারে ডেলিভারির সময় পরিশোধ করুন। বিকাশ বা কার্ডের জন্য সেলার অর্ডার নিশ্চিত করার পর পরিশোধ করুন।',
+                      'Payment goes directly to each seller — the marketplace never holds your money. Every seller in this order sees the same address and payment details.',
+                      'পেমেন্ট সরাসরি প্রত্যেক সেলারের কাছে যায় — মার্কেটপ্লেস আপনার টাকা ধরে রাখে না। এই অর্ডারের প্রত্যেক সেলার একই ঠিকানা ও পেমেন্ট তথ্য দেখবেন।',
                     )}
                   </p>
                 </div>
@@ -719,11 +837,23 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                   <Row label={t('Subtotal', 'সাবটোটাল')} value={bdt(subtotal)} />
                   <Row
                     label={
-                      isInsideDhaka
+                      shippingZone === 'inside'
                         ? t('Delivery (inside Dhaka)', 'ডেলিভারি (ঢাকার ভিতরে)')
-                        : t('Delivery (outside Dhaka)', 'ডেলিভারি (ঢাকার বাইরে)')
+                        : shippingZone === 'sub'
+                          ? t('Delivery (sub Dhaka)', 'ডেলিভারি (সাব-ঢাকা)')
+                          : t('Delivery (outside Dhaka)', 'ডেলিভারি (ঢাকার বাইরে)')
                     }
                     value={bdt(deliveryCharge)}
+                  />
+                  {/* The payment rail is restated in the summary so the shopper
+                      confirms what they are about to owe before clicking. */}
+                  <Row
+                    label={t('Payment', 'পেমেন্ট')}
+                    value={
+                      isWalletPayment
+                        ? `${PAYMENT_LABELS[payment]} · ${txId.trim() || t('ID pending', 'আইডি বাকি')}`
+                        : t('Cash on Delivery', 'ক্যাশ অন ডেলিভারি')
+                    }
                   />
                   {vendors.length > 1 && (
                     <p className="pt-1 text-[10.5px] leading-relaxed text-slate-400">
