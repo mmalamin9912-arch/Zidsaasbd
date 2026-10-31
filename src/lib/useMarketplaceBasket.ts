@@ -144,20 +144,31 @@ function readBasket(): BasketLine[] {
 function writeBasket(lines: BasketLine[]) {
   const serialized = JSON.stringify(lines);
   memoryBasket.set(MARKETPLACE_BASKET_KEY, serialized);
+  if (typeof window === 'undefined') return;
+
   try {
-    if (typeof window !== 'undefined') {
-      // Mirror first, so a read racing this write still finds the lines;
-      // then the canonical key.
-      localStorage.setItem(FALLBACK_KEY, serialized);
-      localStorage.setItem(MARKETPLACE_BASKET_KEY, serialized);
+    // Canonical key first — every reader checks it before anything else.
+    localStorage.setItem(MARKETPLACE_BASKET_KEY, serialized);
+    // Canonical write succeeded: a stale mirror is no longer needed.
+    try {
       localStorage.removeItem(FALLBACK_KEY);
+    } catch {
+      /* ignore */
     }
   } catch (e) {
+    // Quota exceeded / private mode / locked WebView: keep a mirror copy so
+    // `readBasket` (canonical → fallback → memory) can still recover the
+    // lines instead of presenting the shopper with an empty basket on the
+    // checkout page.
+    try {
+      localStorage.setItem(FALLBACK_KEY, serialized);
+    } catch (mirrorErr) {
+      console.warn('[Marketplace] basket mirror persist warning:', mirrorErr);
+    }
     console.warn('[Marketplace] basket persist warning:', e);
   }
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new Event(BASKET_EVENT));
-  }
+
+  window.dispatchEvent(new Event(BASKET_EVENT));
 }
 
 /**
