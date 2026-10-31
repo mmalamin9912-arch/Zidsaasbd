@@ -160,10 +160,25 @@ function writeBasket(lines: BasketLine[]) {
   }
 }
 
-/** Two lines are the same item only when vendor + product agree. */
+/**
+ * The identity of one basket line.
+ *
+ * Both halves must agree for two lines to be the same item. The VENDOR half is
+ * resolved through every spelling the surfaces use — the product card stamps
+ * `vendor_id`, the storefront's quick-view may only have `vendor_slug`/`store_id`
+ * — because keying on `vendor_id` alone meant the SAME product arriving by a
+ * different spelling produced a SECOND line instead of incrementing the first:
+ * the visible "my cart shows one product twice" report.
+ */
+const vendorKeyOf = (p: any): string =>
+  String(
+    p?.vendor_id ?? p?.vendorId ?? p?.store_id ?? p?.storeId ??
+    p?.vendor_slug ?? p?.vendorSlug ?? p?.store_slug ?? p?.storeSlug ?? '',
+  ).trim().toLowerCase();
+
 const sameLine = (a: BasketLine, b: { productId: string; vendorId?: string }) =>
   String(a.product.id) === String(b.productId) &&
-  String(a.product.vendor_id || '') === String(b.vendorId || '');
+  vendorKeyOf(a.product) === String(b.vendorId || '').trim().toLowerCase();
 
 export function useMarketplaceBasket() {
   const [lines, setLines] = useState<BasketLine[]>(() => readBasket());
@@ -196,22 +211,48 @@ export function useMarketplaceBasket() {
   }, []);
 
   const add = useCallback((product: MarketplaceProduct, quantity = 1) => {
+    /*
+     * ACCUMULATE, NEVER OVERWRITE.
+     *
+     * `readBasket()` — not the hook's `lines` state — is the source of truth
+     * here. Two products clicked in quick succession (or the same product from
+     * a card and its quick-view) each re-read the persisted basket before
+     * appending, so a stale closure can never replace earlier lines with just
+     * the newest one.
+     *
+     * There is NO upper bound on quantity: this is a general-purpose
+     * marketplace, and some goods (fabric by the yard, rice by the kilo) are
+     * legitimately ordered in the hundreds. The 99 cap that used to live here
+     * silently discarded everything past it.
+     */
+    const qty = Math.max(1, Math.floor(Number(quantity) || 1));
     const current = readBasket();
-    const target = { productId: String(product.id), vendorId: String(product.vendor_id || '') };
+    const target = {
+      productId: String(product.id),
+      // Resolved the same way `sameLine` resolves the stored line, so a
+      // slug-only product matches its own card-added twin.
+      vendorId: vendorKeyOf(product),
+    };
     const existing = current.find((line) => sameLine(line, target));
     const next = existing
       ? current.map((line) => (sameLine(line, target)
-        ? { ...line, quantity: Math.min(99, Number(line.quantity || 1) + quantity) }
+        ? { ...line, quantity: Number(line.quantity || 1) + qty }
         : line))
-      : [...current, { product, quantity }];
+      : [...current, { product, quantity: qty }];
     writeBasket(next);
     setLines(next);
   }, []);
 
   const setQuantity = useCallback((productId: string, vendorId: string, quantity: number) => {
+    /*
+     * `0` removes the line (that is what the drawer's minus button means when
+     * the count is 1). Anything below 0 is clamped to 0. There is NO upper
+     * cap — same reasoning as `add` above.
+     */
+    const wanted = Math.max(0, Math.floor(Number(quantity) || 0));
     const next = readBasket()
       .map((line) => (sameLine(line, { productId, vendorId })
-        ? { ...line, quantity: Math.max(0, Math.min(99, quantity)) }
+        ? { ...line, quantity: wanted }
         : line))
       .filter((line) => line.quantity > 0);
     writeBasket(next);

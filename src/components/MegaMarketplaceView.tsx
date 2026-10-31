@@ -718,6 +718,9 @@ const ProductCard: React.FC<{
 
         <button
           type="button"
+          // Distinct per product: screen readers announce WHICH item is being
+          // added, and tests can address a specific card deterministically.
+          aria-label={`Add ${product.id} to basket`}
           onClick={() => onAdd(product)}
           disabled={soldOut}
           // 44px tall on mobile — a comfortable one-thumb target.
