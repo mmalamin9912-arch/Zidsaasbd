@@ -29,9 +29,8 @@
 // long before this ceiling is ever reached.
 export const maxDuration = 30;
 
-import mongoose from 'mongoose';
 import app from '../lib/serverApp.js';
-import { describeMongoError } from '../lib/db.js';
+import { connectToDatabase, describeMongoError, DB_NAME } from '../lib/db.js';
 
 /**
  * Process-level safety nets. On Vercel a stray unhandled rejection can kill the
@@ -56,55 +55,20 @@ if (!global.__zidProcessGuards) {
 type ExpressApp = (req: any, res: any) => any;
 
 /**
- * Reuse one Mongo connection across warm invocations. The connection promise is
- * cached on `global` so concurrent cold requests share a single in-flight
- * handshake rather than opening one pool each.
+ * Reuse ONE shared Mongo connection across warm invocations.
+ *
+ * Delegates to `lib/db.js`'s `connectToDatabase`, which caches the connection
+ * promise + resolved handle on the Node `global` object (`__mongooseCache`).
+ * Every route module and this entry point now share the SAME pool instead of
+ * each opening its own `mongoose.connect()` — the previous duplicate
+ * `__vercelMongoCache` here created a second pool per container and exhausted
+ * the Atlas M0 connection limit ("too many connections").
  */
-declare global {
-  // eslint-disable-next-line no-var
-  var __vercelMongoCache: { promise: Promise<typeof mongoose> | null } | undefined;
-}
-
-const mongoCache = global.__vercelMongoCache ?? (global.__vercelMongoCache = { promise: null });
-
 async function ensureMongo(): Promise<{ ok: boolean; error?: string; code?: string }> {
-  const uri = process.env.MONGODB_URI || process.env.MONGODB_URL || process.env.DATABASE_URL;
-
-  if (mongoose.connection.readyState === 1) return { ok: true };
-
-  if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
-    mongoCache.promise = null;
-  }
-
-  if (!uri) {
-    // Not fatal: routes that are Supabase-only (storefront, products) must keep
-    // working. Routes that need Mongo report the missing variable themselves.
-    const failure = describeMongoError(new Error('MONGODB_URI is not set'));
-    return { ok: false, error: failure.message, code: failure.code };
-  }
-
-  if (!mongoCache.promise) {
-    mongoCache.promise = mongoose
-      .connect(uri, {
-        dbName: process.env.MONGODB_DB || 'zidbdsaas',
-        bufferCommands: false,
-        maxPoolSize: 10,
-        serverSelectionTimeoutMS: 10000,
-        socketTimeoutMS: 45000,
-      })
-      .catch((err) => {
-        mongoCache.promise = null; // allow the next request to retry
-        throw err;
-      });
-  }
-
   try {
-    await mongoCache.promise;
+    await connectToDatabase(DB_NAME);
     return { ok: true };
   } catch (err: any) {
-    mongoCache.promise = null;
-    // Report WHY the connection failed (bad credentials, DNS, timeout, …) in an
-    // actionable sentence rather than a raw driver stack.
     const failure = describeMongoError(err);
     return { ok: false, error: failure.message, code: failure.code };
   }

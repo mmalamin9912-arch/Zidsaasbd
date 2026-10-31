@@ -105,6 +105,14 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
     return cached.conn;
   }
 
+  // Another module (e.g. the Vercel entry point) already opened the global
+  // mongoose connection. Adopt it instead of opening a second redundant pool.
+  if (mongoose.connection.readyState === 1 && !cached.conn) {
+    cached.conn = mongoose;
+    return cached.conn;
+  }
+
+  // Connection is disconnected / unreachable — reset so we can retry.
   if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
     cached.promise = null;
     cached.conn = null;
