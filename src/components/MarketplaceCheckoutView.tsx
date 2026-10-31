@@ -9,6 +9,7 @@ import {
   useMarketplaceBasket,
   type BasketLine,
 } from '../lib/useMarketplaceBasket';
+import { notifyOrdersChanged } from '../lib/orderSync';
 
 /**
  * The UNIFIED marketplace checkout — `/marketplace/checkout`.
@@ -329,11 +330,32 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       });
       const data = await res.json().catch(() => null);
 
-      // The API answers 200 with a skipped/duplicate marker for a repeat; only
-      // an explicit failure should block the success screen.
-      const failed = !res.ok || (data && data.ok === false);
+      /*
+       * SUCCESS MEANS THE SERVER ACTUALLY SAVED SOMETHING.
+       *
+       * The API used to answer `200 { ok: false }` (or even `200 { ok: true,
+       * synced: 0 }`) for a payload it rejected or could not persist, and this
+       * page — which only checked `res.ok` plus an explicit `ok: false` — could
+       * show "Order placed successfully" for an order that was never written.
+       *
+       * Now: a non-2xx is a failure; `ok: false` is a failure; and `synced: 0`
+       * with nothing refused is a failure. A `duplicate: true` acknowledgement
+       * is genuinely a success (the first submission landed), and rejection
+       * details are surfaced verbatim so the shopper can fix the input.
+       */
+      const rejectedList: { index: number; error: string }[] = Array.isArray(data?.rejected) ? data.rejected : [];
+      const savedCount = Number(data?.synced);
+      const failed =
+        !res.ok ||
+        (data && data.ok === false) ||
+        (!Number.isNaN(savedCount) && savedCount === 0 && rejectedList.length === 0);
       if (failed) {
-        throw new Error(data?.error || data?.message || `Server responded ${res.status}`);
+        const detail = rejectedList.length
+          ? rejectedList.map((r) => r.error).join(' ')
+          : '';
+        throw new Error(
+          detail || data?.error || data?.message || `Server responded ${res.status}`,
+        );
       }
 
       // Persist customer session so the customer's orders are immediately visible
@@ -355,6 +377,22 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       // The basket has been converted into an order — clear it so a refresh
       // cannot submit it twice.
       basket.clear();
+
+      // TELL EVERY OPEN DASHBOARD.
+      //
+      // The merchant's `/dashboard` may be open in another tab. Firing this
+      // signal (not a fetch — the reader owns its own authoritative query)
+      // makes the order table refetch immediately instead of waiting out its
+      // poll interval, and it is scoped per selling vendor so only the stores
+      // that actually got an order react.
+      for (const vendor of vendors) {
+        notifyOrdersChanged({
+          storeRef: vendor.vendorSlug || vendor.vendorId,
+          reason: 'placed',
+          count: 1,
+        });
+      }
+
       setPlaced({ id, number: orderNumber, vendors: vendors.length });
     } catch (e: any) {
       setError(

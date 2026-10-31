@@ -815,6 +815,37 @@ const orderSchema = new mongoose.Schema({
   created_at: { type: Date, default: Date.now },
 }, { strict: false });
 
+/*
+ * COMPOUND INDEXES for the vendor dashboard query.
+ *
+ * Every order read is `{ $or: [store_*…, vendor_id…] }` sorted by `created_at`.
+ * Single-field indexes exist above, but with a sort the engine cannot use them
+ * to satisfy both the filter and the ORDER BY — it falls back to a collection
+ * scan plus an in-memory sort, which caps out at 32MB and silently fails to
+ * paginate on a busy marketplace. These pairs are exactly what the two GET
+ * routes ask for: filter by the store column, walk the time index in order.
+ *
+ * `background: true` so creating them never blocks a running production server,
+ * and both failures are swallowed: an index that cannot be built (a permissions
+ * -restricted user, a hosted provider that manages indexes itself) must not stop
+ * the API from booting.
+ */
+for (const [field] of [
+  ['store_slug'],
+  ['storeSlug'],
+  ['store_id'],
+  ['storeId'],
+  ['merchant_id'],
+  ['merchantId'],
+  ['vendor_id'],
+] as const) {
+  try {
+    orderSchema.index({ [field]: 1, created_at: -1 }, { background: true });
+  } catch {
+    /* duplicate declaration or unsupported option — the query still works */
+  }
+}
+
 const Order = mongoose.models.Order || mongoose.model('Order', orderSchema, 'orders');
 
 const productSchema = new mongoose.Schema({
@@ -15335,44 +15366,85 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
     .filter(Boolean);
   if (refs.length === 0) return null;
 
-  const storeIdCandidates: string[] = [];
-  const slugCandidates: string[] = [];
-  const refValueCandidatesSet = new Set<string>();
+  // Ref values as supplied, PLUS every canonical form of each.
+  const supplied = new Set<string>();
+  // Canonical identity for the WHOLE merchant (all refs, resolved together).
+  const canonical = new Set<string>();
+  // The vendor UUIDs, tracked separately: these are the only values that may be
+  // compared against `vendor_id` on a CHILD order.
+  const vendorIds = new Set<string>();
+  const slugs = new Set<string>();
 
   for (const raw of refs) {
-    refValueCandidatesSet.add(raw);
-    refValueCandidatesSet.add(raw.toLowerCase());
+    supplied.add(raw);
+    supplied.add(raw.toLowerCase());
     const identity = await resolveStoreIdentity(raw);
     if (identity.storeId) {
-      storeIdCandidates.push(identity.storeId);
-      refValueCandidatesSet.add(identity.storeId);
+      canonical.add(identity.storeId);
+      vendorIds.add(identity.storeId);
+      supplied.add(identity.storeId);
     }
     if (identity.storeSlug) {
-      slugCandidates.push(identity.storeSlug);
-      refValueCandidatesSet.add(identity.storeSlug);
-      refValueCandidatesSet.add(identity.storeSlug.toLowerCase());
+      canonical.add(identity.storeSlug);
+      canonical.add(identity.storeSlug.toLowerCase());
+      slugs.add(identity.storeSlug.toLowerCase());
+      supplied.add(identity.storeSlug);
+      supplied.add(identity.storeSlug.toLowerCase());
     }
     if (identity.storeCode) {
-      refValueCandidatesSet.add(identity.storeCode);
-      refValueCandidatesSet.add(identity.storeCode.toUpperCase());
+      canonical.add(identity.storeCode);
+      canonical.add(identity.storeCode.toUpperCase());
+      supplied.add(identity.storeCode);
+      supplied.add(identity.storeCode.toUpperCase());
+    }
+    // A ref that resolves to nothing is used verbatim — a store the lookup
+    // cannot see must still be able to read orders written under that exact key.
+    if (!identity.storeId && !identity.storeSlug && !identity.storeCode) {
+      canonical.add(raw);
+      canonical.add(raw.toLowerCase());
+      // A bare ref that is not a UUID/code is a slug in practice.
+      if (!isUuidLike(raw) && !STORE_CODE_RE.test(raw)) slugs.add(raw.toLowerCase());
     }
   }
 
-  const refValueCandidates = Array.from(refValueCandidatesSet);
+  const all = Array.from(new Set([...supplied, ...canonical]));
+  const slugValues = Array.from(slugs);
+  const vendorValues = Array.from(vendorIds);
 
   const or: Record<string, { $in: string[] }>[] = [
-    { store_id: { $in: refValueCandidates } },
-    { storeId: { $in: refValueCandidates } },
-    { store_slug: { $in: refValueCandidates } },
-    { storeSlug: { $in: refValueCandidates } },
-    { merchant_id: { $in: refValueCandidates } },
-    { merchantId: { $in: refValueCandidates } },
-    { store_code: { $in: refValueCandidates } },
-    { storeCode: { $in: refValueCandidates } },
-    { vendor_id: { $in: refValueCandidates } },
-    { vendorId: { $in: refValueCandidates } },
+    { store_id: { $in: all } },
+    { storeId: { $in: all } },
+    { store_slug: { $in: all } },
+    { storeSlug: { $in: all } },
+    { merchant_id: { $in: all } },
+    { merchantId: { $in: all } },
   ];
 
+  // `vendor_id` is a CHILD-order attribution column. Only compare it against the
+  // merchant's own canonical ids/slugs — the dashboard sends both
+  // `merchant_id=<uuid>` and `store_slug=<slug>`, and a UUID in `vendor_id` must
+  // not be compared against a sibling store's random slug value.
+  if (vendorValues.length) or.push({ vendor_id: { $in: vendorValues } }, { vendorId: { $in: vendorValues } });
+  if (slugValues.length) or.push({ vendor_id: { $in: slugValues } }, { vendorId: { $in: slugValues } });
+
+  // Store codes: match the canonical upper-case form (the resolver normalises it).
+  const codeValues = all.filter((v) => STORE_CODE_RE.test(v));
+  if (codeValues.length) {
+    or.push({ store_code: { $in: codeValues } }, { storeCode: { $in: codeValues } });
+  }
+
+  /*
+   * THE MERCHANT BOUNDARY.
+   *
+   * A dashboard order is EITHER the store's own order (any store_* / merchant_*
+   * column) OR a marketplace CHILD order whose `vendor_id` is this store. The
+   * two sets were previously one flat `$or`, so any document that merely carried
+   * a matching slug in an unrelated column was pulled in — a three-seller basket
+   * put every sibling's child order on every sibling's dashboard, and the list
+   * grew without bound as the marketplace got busier.
+   *
+   * `$or` keeps both cases while removing nothing that legitimately belongs.
+   */
   return { $or: or };
 }
 
@@ -15617,17 +15689,23 @@ app.get('/api/orders', async (req, res) => {
     }
 
     let orders: any[] = [];
+    let queryFailed = false;
     if (dbConnected) {
       try {
         // @ts-ignore — query is a plain Mongo filter object.
         orders = await (Order as any)
           .find(query || {})
-          .sort({ created_at: -1 })
+          // `_id` is the tie-breaker: it is monotonic for a freshly inserted
+          // document, so two orders created in the SAME millisecond still sort
+          // with the newest last-read-first. Without it the newest transaction
+          // could fall off the end of a capped list.
+          .sort({ created_at: -1, updated_at: -1, _id: -1 })
           .limit(limit)
           .lean();
       } catch (queryErr: any) {
         console.warn('[Server] GET /api/orders query warning:', queryErr?.message || queryErr);
         orders = [];
+        queryFailed = true;
       }
     }
 
@@ -15647,10 +15725,30 @@ app.get('/api/orders', async (req, res) => {
 
     res.setHeader('X-Orders-Count', String(dedupedOrders.length));
     res.setHeader('X-Orders-Filtered', filterClauses ? 'true' : 'false');
+    /*
+     * A DEGRADED ANSWER MUST SAY SO.
+     *
+     * When the database could not be read the handler still answers 200 with
+     * whatever the process cache holds. That is the right fallback, but the
+     * caller had to INFER it from the absence of a header, and a client that did
+     * not know to look treated `[]` as "this store has no orders" — which is how
+     * a merchant's recent transactions appeared to vanish. The header the client
+     * already inspects is now always explicit, and a failed query is reported
+     * rather than swallowed into an empty array.
+     */
+    const degraded = !dbConnected || queryFailed;
+    res.setHeader('X-Orders-Source', degraded ? 'cache' : 'mongodb');
+    if (degraded) {
+      res.setHeader('X-Orders-Degraded', 'true');
+      res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
+    }
     return res.status(200).json(dedupedOrders);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
-    return res.status(200).json([]);
+    // 500, never a silent empty list: the client keeps its previous data on a
+    // non-OK response and shows its retry state instead of "No orders found".
+    res.setHeader('X-Orders-Source', 'error');
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not load orders.', orders: [] });
   }
 });
 
@@ -15702,17 +15800,19 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 1000;
 
     let orders: any[] = [];
+    let routeQueryFailed = false;
     if (dbConnected) {
       try {
         // @ts-ignore — query is a plain Mongo filter object.
         orders = await (Order as any)
           .find(query || {})
-          .sort({ created_at: -1 })
+          .sort({ created_at: -1, updated_at: -1, _id: -1 })
           .limit(limit)
           .lean();
       } catch (queryErr: any) {
         console.warn('[Server] GET /api/orders/:storeRef query warning:', queryErr?.message || queryErr);
         orders = [];
+        routeQueryFailed = true;
       }
     }
 
@@ -15732,10 +15832,19 @@ app.get('/api/orders/:storeRef', async (req, res) => {
 
     res.setHeader('X-Orders-Count', String(dedupedOrders.length));
     res.setHeader('X-Orders-Filtered', filterClauses ? 'true' : 'false');
+    // Degraded state is explicit, never inferred from a missing header: the
+    // client's "keep previous data" guard relies on X-Orders-Source.
+    const routeDegraded = !dbConnected || routeQueryFailed;
+    res.setHeader('X-Orders-Source', routeDegraded ? 'cache' : 'mongodb');
+    if (routeDegraded) {
+      res.setHeader('X-Orders-Degraded', 'true');
+      res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
+    }
     return res.status(200).json(dedupedOrders);
   } catch (err: any) {
-    console.error('[Server] GET /api/orders error:', err);
-    return res.status(200).json([]);
+    console.error('[Server] GET /api/orders/:storeRef error:', err);
+    res.setHeader('X-Orders-Source', 'error');
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not load orders.', orders: [] });
   }
 });
 
@@ -15977,6 +16086,90 @@ function buildOrderRecord(
   return record;
 }
 
+/**
+ * Validate ONE order payload before it is shaped into a document.
+ *
+ * Returns a list of human-readable problems; an empty list means the order is
+ * safe to write. The checks are the minimum every downstream consumer relies
+ * on: `buildOrderRecord` will happily default `customer_phone` to `''` and
+ * `items` to `[]`, and the result is a row the merchant cannot contact or
+ * fulfil. Failing here turns that into a specific error the caller can fix.
+ */
+function validateOrderPayload(order: any): string[] {
+  const problems: string[] = [];
+
+  if (!order || typeof order !== 'object' || Array.isArray(order)) {
+    return ['Order is not an object.'];
+  }
+
+  // `items` may arrive as a JSON string (the dashboard POSTs that shape).
+  let items: any[] = [];
+  if (typeof order.items === 'string') {
+    try {
+      const parsed = JSON.parse(order.items);
+      items = Array.isArray(parsed) ? parsed : [];
+      if (!Array.isArray(parsed)) problems.push('`items` must be an array or a JSON array string.');
+    } catch {
+      problems.push('`items` is a string but not valid JSON.');
+    }
+  } else if (Array.isArray(order.items)) {
+    items = order.items;
+  } else {
+    problems.push('`items` is required and must be an array.');
+  }
+
+  if (items.length === 0 && problems.length === 0) {
+    problems.push('`items` is empty — an order needs at least one line.');
+  }
+
+  items.forEach((line, i) => {
+    if (!line || typeof line !== 'object') {
+      problems.push(`items[${i}] is not an object.`);
+      return;
+    }
+    const qty = Number(line.quantity ?? line.qty ?? 0);
+    if (!Number.isFinite(qty) || qty < 1) problems.push(`items[${i}].quantity must be at least 1.`);
+    const price = Number(
+      line.unitPriceBDT ?? line.unit_price ?? line.priceBDT ?? line.price ?? NaN,
+    );
+    if (!Number.isFinite(price) || price < 0) problems.push(`items[${i}] has no valid unit price.`);
+    // Vendor attribution is what routes a marketplace line to its seller. A line
+    // without it is still accepted (a single-store checkout has only one
+    // possible seller), but a MIXED basket must not contain one.
+  });
+
+  if (!String(order.customerName ?? order.customer_name ?? '').trim()) {
+    problems.push('`customerName` is required.');
+  }
+  const phone = String(order.customerPhone ?? order.customer_phone ?? '').replace(/\D/g, '');
+  if (phone.length < 10) problems.push('`customerPhone` must contain at least 10 digits.');
+
+  const total = Number(
+    order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total ?? NaN,
+  );
+  if (!Number.isFinite(total) || total < 0) {
+    problems.push('`totalBDT` is required and must be a non-negative number.');
+  }
+
+  /*
+   * A multi-vendor basket must say WHO sells each line. Without it the server
+   * would fan the whole bag out to whichever store happened to be on the order.
+   */
+  const splitRequested = order.split_by_vendor === true || order.splitByVendor === true || order.marketplace_order === true;
+  if (splitRequested && items.length > 0) {
+    const anonymous = items
+      .map((line: any, i: number) => ({ line, i }))
+      .filter(({ line }) => line && typeof line === 'object'
+        && !String(line.vendor_id || line.vendorId || line.store_id || line.storeId || line.vendor_slug || line.store_slug || '').trim())
+      .map(({ i }) => i);
+    if (anonymous.length > 0) {
+      problems.push(`items[${anonymous.join(', ')}] carry no vendor_id / vendor_slug, so they cannot be routed to a seller.`);
+    }
+  }
+
+  return problems;
+}
+
 /** A locally generated courier tracking code for one vendor's slip. */
 function makeVendorTrackingCode(courierName: string, orderNumber: string): string {
   const key = String(courierName || '').toLowerCase();
@@ -16048,15 +16241,50 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
    */
   const prepared = await Promise.all(children.map(async (child, index) => {
     // 1. Canonical vendor identity (UUID + slug + code).
+    //
+    // `child.vendor_id` is whatever the cart grouped by — often a SLUG, because
+    // that is all a product row carries. Resolving it here turns the slug into
+    // the canonical UUID so the CHILD ORDER is keyed on the same id the
+    // merchant dashboard polls with (`merchant.id`); without this one half of the
+    // pair could stay a slug and the other a UUID, and the vendor's `$or` query
+    // matched on one spelling only.
     const ref = await resolveStoreRef(child.vendor_id);
     const vendorStoreDoc: any = db
       ? await db.collection('stores').findOne({ $or: storeMatchClauses(ref) }).catch(() => null)
       : null;
+
+    /*
+     * FALLBACK RESOLUTION — the case the admin-panel lookup above misses.
+     *
+     * `resolveStoreRef` / `storeMatchClauses` query the Mongo `stores` mirror,
+     * which is not always populated in the same deployment as Supabase. When the
+     * line only carried a slug, that leaves `vendorStoreId` equal to the SLUG
+     * and `vendorSlug` empty — a child order that the dashboard's UUID poll can
+     * never find. `resolveStoreIdentity` reads the authoritative Supabase row
+     * (and `resolveStoreIdBySlug` is its Mongo fallback) and yields BOTH halves.
+     */
+    if (!vendorStoreDoc) {
+      const identity = await resolveStoreIdentity(child.vendor_id).catch(() => ({} as StoreIdentity));
+      if (identity.storeId) ref.storeId = identity.storeId;
+      if (identity.storeSlug) ref.slug = identity.storeSlug;
+      if (identity.storeCode) ref.code = identity.storeCode;
+    }
+
+    const resolvedId = String(
+      vendorStoreDoc?.id || vendorStoreDoc?.store_id || ref.storeId || ''
+    ).trim();
     const vendorStoreId = String(
-      vendorStoreDoc?.id || vendorStoreDoc?.store_id || ref.storeId || child.store_id || child.vendor_id
+      // NEVER let the negotiated id be the vendor's display name or a bare
+      // placeholder: a slug in the UUID column is what broke the join.
+      (resolvedId && !/^default$/i.test(resolvedId) ? resolvedId : '') ||
+      child.store_id ||
+      child.vendor_id
     ).trim();
     const vendorSlug = String(
-      vendorStoreDoc?.store_slug || vendorStoreDoc?.storeSlug || ref.slug || child.vendor_slug || ''
+      vendorStoreDoc?.store_slug || vendorStoreDoc?.storeSlug || ref.slug || child.vendor_slug ||
+      // If the id we are about to persist IS a slug, mirror it into the slug
+      // column too, so both spellings agree instead of one being blank.
+      (!isUuidLike(vendorStoreId) && !STORE_CODE_RE.test(vendorStoreId) ? vendorStoreId : '')
     ).trim().toLowerCase();
     const vendorName = String(
       vendorStoreDoc?.store_name || vendorStoreDoc?.storeName || child.vendor_name || vendorSlug || 'Store'
@@ -16094,7 +16322,18 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
       store_slug: vendorSlug || masterOrder.storeSlug || masterOrder.store_slug,
       merchantId: vendorStoreId,
       storeCode: vendorStoreDoc?.store_code || ref.code || '',
-      items: child.items,
+      // STAMP THE VENDOR ON EVERY LINE.
+      // The split keeps the vendor on the line when the cart supplied it; this
+      // guarantees it even for a legacy payload whose lines carried only the
+      // product, so no child order ever has unattributed line-items.
+      items: child.items.map((line: any) => ({
+        ...line,
+        vendor_id: line.vendor_id || vendorStoreId,
+        vendor_name: line.vendor_name || vendorName,
+        vendor_slug: line.vendor_slug || vendorSlug || undefined,
+        store_id: line.store_id || vendorStoreId,
+        store_slug: line.store_slug || vendorSlug || undefined,
+      })),
       subtotalBDT: child.subtotal_bdt,
       deliveryCharge: child.delivery_charge,
       totalBDT: child.cod_amount,
@@ -16189,11 +16428,39 @@ app.post('/api/orders', async (req, res) => {
           ? [req.body]
           : [];
 
+    /*
+     * VALIDATION — refuse loudly instead of accepting and dropping.
+     *
+     * The loop below used to `continue` past anything that was not an object,
+     * and the route answered 200 regardless. A payload whose `items` was a
+     * string, whose total was missing, or that was not an object at all was
+     * therefore reported to the shopper as "Order placed successfully" while
+     * nothing was written — the merchant simply never saw the sale, with no
+     * signal on either side. Everything that would have been skipped is now
+     * described in the response, and an empty batch is a 400.
+     */
+    if (arr.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        synced: 0,
+        error: 'No order payload was supplied. Send an order object or { orders: [...] }.',
+        code: 'EMPTY_PAYLOAD',
+      });
+    }
+
     const inserted: any[] = [];
+    const rejected: { index: number; error: string }[] = [];
     const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
 
-    for (const order of arr) {
-      if (!order || typeof order !== 'object') continue;
+    for (let index = 0; index < arr.length; index += 1) {
+      const order = arr[index];
+      const problems = validateOrderPayload(order);
+      if (problems.length > 0) {
+        console.warn('[Server] POST /api/orders rejected payload:', { index, problems });
+        rejected.push({ index, error: problems.join(' ') });
+        continue;
+      }
 
       // Collect EVERY store reference the client sent
       const refs = [
@@ -16227,6 +16494,12 @@ app.post('/api/orders', async (req, res) => {
           'marketplace'
       ).split(':')[0].trim().toLowerCase() || 'marketplace';
 
+      /*
+       * The master order's store: the canonical UUID when one is known, otherwise
+       * a slug. `vendor_ids` / `vendor_slugs` are stamped onto the master below
+       * once the split has run, so the master itself is attributable to the
+       * marketplace rather than to a single seller — see `vendor_spans` there.
+       */
       const storeId = identity.storeId || refs.find((r) => isUuidLike(r)) || identity.storeCode || slug;
       const merchantId = String(
         order.merchantId ||
@@ -16257,25 +16530,67 @@ app.post('/api/orders', async (req, res) => {
       }
       const previous = recentOrderSubmissions.get(dedupKey);
       if (previous && now - previous.at < ORDER_DEDUP_WINDOW_MS) {
+        /*
+         * DROPPED TRANSACTION — a real bug, not just a log line.
+         *
+         * The duplicate is correctly skipped as a WRITE, but it must still be
+         * reported in `inserted`. The route persists every entry of `inserted`
+         * into the in-memory/local order cache (and that cache feeds the
+         * dashboard's read path). A `continue` sent the pasted-in order number
+         * only, so a client that re-submitted after a timeout — the exact case
+         * this guard exists for — got a 200 back and the order was then missing
+         * from BOTH the cache and the dashboard list until Mongo was re-read.
+         *
+         * The previously cached master is therefore re-broadcast under the same
+         * identity, flagged `duplicate` so the caller can tell it was not a new
+         * row.
+         */
         console.log('[Server] POST /api/orders duplicate submission ignored:', {
           order_number: previous.orderNumber,
           age_ms: now - previous.at,
           store: slug,
         });
-        inserted.push({ order_number: previous.orderNumber, duplicate: true });
+        const cached = recentOrdersCache.get(String(previous.orderNumber || '').replace(/^#/, '').trim());
+        inserted.push(cached
+          ? { ...cached, order_number: previous.orderNumber, duplicate: true }
+          : { order_number: previous.orderNumber, duplicate: true });
         continue;
       }
       const dedupOrderNumber = String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, '');
       recentOrderSubmissions.set(dedupKey, { orderNumber: dedupOrderNumber, at: now });
 
-      const masterRecord = buildOrderRecord(order, { storeId, merchantId, slug, storeCode: identity.storeCode, source, isManual });
+      /*
+       * A line is attributable to its vendor from the moment it enters the API.
+       *
+       * The checkout sends `vendor_id` / `vendor_slug` per line, but the store's
+       * own single-store checkout does not. Filling the gap with the order's own
+       * store means the MASTER record is never left with anonymous line-items,
+       * and `splitOrderByVendor` has a fallback (see its `fallback` argument) for
+       * baskets that genuinely have several sellers.
+       */
+      const linesWithVendor = (Array.isArray(order.items) ? order.items : []).map((line: any) => {
+        if (!line || typeof line !== 'object') return line;
+        const vSlug = String(line.vendor_slug || line.vendorSlug || line.store_slug || line.storeSlug || '').trim().toLowerCase();
+        const vId = String(line.vendor_id || line.vendorId || line.store_id || line.storeId || '').trim();
+        return {
+          ...line,
+          vendor_id: vId || slug,
+          vendor_slug: vSlug || slug,
+          store_id: vId || slug,
+          store_slug: vSlug || slug,
+          vendor_name: String(line.vendor_name || line.vendorName || line.store_name || line.storeName || '').trim() || undefined,
+        };
+      });
+      const orderForPersist = { ...order, items: linesWithVendor };
+
+      const masterRecord = buildOrderRecord(orderForPersist, { storeId, merchantId, slug, storeCode: identity.storeCode, source, isManual });
 
       // ── Prepare multi-vendor split if requested or if order contains vendor items ──
       let preparedChildren: any[] = [];
       const isMarketplaceOrSplit = order.split_by_vendor === true || order.splitByVendor === true || order.marketplace_order === true;
       if (isMarketplaceOrSplit && !order.parent_order_id && !order.parentOrderId) {
         try {
-          preparedChildren = await persistVendorChildren(order, masterRecord);
+          preparedChildren = await persistVendorChildren(orderForPersist, masterRecord);
         } catch (splitErr: any) {
           console.warn('[Server] vendor split preparation warning:', splitErr?.message || splitErr);
           preparedChildren = [];
@@ -16287,8 +16602,16 @@ app.post('/api/orders', async (req, res) => {
         masterRecord.child_order_ids = preparedChildren.map((c: any) => c.id);
         masterRecord.child_order_numbers = preparedChildren.map((c: any) => c.order_number);
         masterRecord.vendor_count = preparedChildren.length;
-        masterRecord.vendor_ids = preparedChildren.map((c: any) => c.vendor_id);
-        masterRecord.vendor_slugs = preparedChildren.map((c: any) => c.store_slug);
+        masterRecord.vendor_ids = preparedChildren.map((c: any) => c.vendor_id).filter(Boolean);
+        masterRecord.vendor_slugs = preparedChildren.map((c: any) => c.store_slug).filter(Boolean);
+        // `vendor_id` on the MASTER is a multi-valued field here — one id per
+        // seller. Written as an array so a reader that groups by vendor_id still
+        // gets every participant, and so it is never mistaken for "this order
+        // belongs to exactly one store".
+        masterRecord.vendor_id = masterRecord.vendor_ids;
+        masterRecord.vendorIds = masterRecord.vendor_ids;
+        // The master's OWN lines keep whichever seller each line came from.
+        masterRecord.items = JSON.stringify(preparedChildren.flatMap((c: any) => c.items));
         masterRecord.vendor_slips = preparedChildren.map((c: any) => ({
           vendor_id: c.vendor_id,
           vendor_name: c.vendor_name,
@@ -16389,10 +16712,42 @@ app.post('/api/orders', async (req, res) => {
       }
     }
 
-    return res.status(200).json({ ok: true, success: true, synced: inserted.length, message: 'Order placed successfully' });
+    /*
+     * NEVER answer 200 for a batch that produced nothing.
+     *
+     * `ok: true` with an empty `inserted` told the checkout the order had been
+     * placed when every row had been rejected or the write had failed. A partial
+     * batch still succeeds, but it lists exactly what was refused — and the
+     * vendor's dashboard sees the rows that did land.
+     */
+    if (inserted.length === 0) {
+      return res.status(422).json({
+        ok: false,
+        success: false,
+        synced: 0,
+        error: rejected.length
+          ? `No order was saved. ${rejected.map((r) => `#${r.index}: ${r.error}`).join(' ')}`
+          : 'No order was saved: the payload could not be persisted.',
+        code: rejected.length ? 'INVALID_PAYLOAD' : 'NOT_PERSISTED',
+        rejected,
+      });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      synced: inserted.length,
+      rejected,
+      ...(rejected.length > 0
+        ? { warning: `${rejected.length} payload(s) were rejected and not saved.` }
+        : {}),
+      message: 'Order placed successfully',
+    });
   } catch (err: any) {
     console.error('[Server] POST /api/orders error:', err);
-    return res.status(200).json({ ok: false, success: false, synced: 0, error: err?.message || 'Order sync failed' });
+    // A server fault is a 500, not a 200 with ok:false — a 200 is what let the
+    // checkout's `res.ok` guard wave a failed order through.
+    return res.status(500).json({ ok: false, success: false, synced: 0, error: err?.message || 'Order sync failed' });
   }
 });
 

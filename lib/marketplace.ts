@@ -884,6 +884,21 @@ export interface SplitChildLine {
   quantity: number;
   unitPriceBDT: number;
   image: string;
+  /**
+   * The SELLING vendor, carried on the line itself.
+   *
+   * It used to live only on the child order header, so the stored line-items
+   * had no vendor attribution at all. The merchant dashboard renders per-line
+   * seller information, and anything that re-groups a child's items (a refund, a
+   * re-split, a payout reconciliation) would fall back to the order's own store
+   * — silently crediting one seller's goods to another.
+   */
+  vendor_id?: string;
+  vendor_name?: string;
+  vendor_slug?: string;
+  store_id?: string;
+  store_slug?: string;
+  category?: string;
 }
 
 export interface SplitChildOrder {
@@ -937,6 +952,14 @@ export function splitOrderByVendor(
       quantity,
       unitPriceBDT: unitPrice,
       image: String(raw.image || raw.image_url || ''),
+      // Both spellings, so the order query's `$or` and the UI normaliser match
+      // without a translation step.
+      vendor_id: vendorId,
+      vendor_name: vendorName,
+      vendor_slug: vendorSlug || undefined,
+      store_id: String(raw.store_id || raw.storeId || vendorId),
+      store_slug: vendorSlug || undefined,
+      category: raw.category ? String(raw.category) : undefined,
     };
     const existing = groups.get(vendorId);
     if (existing) {

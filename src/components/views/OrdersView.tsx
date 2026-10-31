@@ -4,6 +4,9 @@ import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canoni
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
 import { loadCourierConfig } from '../../lib/logisticsApi';
+// Cross-tab order invalidation — a checkout in another tab refetches this table
+// immediately instead of waiting out the poll interval.
+import { subscribeOrdersChanged, notifyOrdersChanged } from '../../lib/orderSync';
 // A4 print template + shared token/QR helpers (see components/orders/PrintLabel.tsx).
 import { buildA4InvoiceHtml, resolvePrintStoreInfo, getOrderToken, generateQRCodeSVG } from '../orders/PrintLabel';
 // F-commerce share helpers: invoice/tracking links + Messenger message builder.
@@ -277,6 +280,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    * and is reserved for explicit merchant actions; using it for poll merges is
    * what produced the endless GET → POST loop.
    */
+  // Set inside the polling effect so the toolbar's manual refresh can invoke
+  // the SAME fetch (with its signature cache and merge rules) on demand.
+  const fetchLiveOrdersRef = useRef<() => void>(() => undefined);
+
   const syncOrders = onSyncOrders || onUpdateOrders;
   const mergeServerOrders = (serverOrders: Order[]) => {
     // Deduplicate incoming serverOrders by unique ID
@@ -356,6 +363,24 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [filterPaymentStatus, setFilterPaymentStatus] = useState<string>('All');
   const [filterCourier, setFilterCourier] = useState<string>('All');
 
+  /**
+   * LIVE SYNC STATE — shown in the toolbar so "is this list current?" is
+   * answerable at a glance.
+   *
+   * `live`     the last poll was served by the database;
+   * `degraded` the API answered from its cache (a Mongo outage); the rows are
+   *            still real, just possibly a few seconds behind;
+   * `error`    the request failed; the table is showing its last good copy.
+   *
+   * Before this existed every failure path only `console.warn`ed, so a merchant
+   * whose API was failing saw a normal-looking table and assumed it was current.
+   */
+  const [liveSync, setLiveSync] = useState<{
+    state: 'live' | 'degraded' | 'error';
+    at: number;
+    message?: string;
+  }>({ state: 'live', at: 0 });
+
   // Live polling effect for orders sync from MongoDB.
   // Uses the flexible GET /api/orders endpoint and sends BOTH merchant_id and
   // store_slug, so an order placed by the storefront (which may only carry the
@@ -368,6 +393,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     // the filter memos — on every tick, which is what made the page look like
     // it was fetching endlessly even when the database had not changed.
     let lastSyncedSignature = '';
+    // Exposed to the manual-refresh button (below) without re-running this
+    // effect — calling `notifyOrdersChanged` from the same tab would just be a
+    // slower way of invoking this function.
+    fetchLiveOrdersRef.current = () => { void fetchLiveOrders(); };
     const fetchLiveOrders = async () => {
       try {
         const params = new URLSearchParams();
@@ -383,11 +412,22 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // live database — a cached EMPTY answer is what made orders disappear.
         const res = await fetch(`/api/orders${params.toString() ? `?${params.toString()}` : ''}`, { cache: 'no-store' });
         if (!res.ok) {
+          // A real failure must be VISIBLE. The list is kept (stale-but-present
+          // beats an empty table) but the merchant is told the table is not
+          // current, and the poll keeps retrying on its normal cadence.
           console.warn(`Live order fetch returned ${res.status} — keeping the current list.`);
+          setLiveSync({ state: 'error', at: Date.now(), message: `Server responded ${res.status}` });
           return;
         }
         const data = await res.json();
-        if (!Array.isArray(data)) return;
+        // GET /api/orders returns a plain array; a degraded/failed shape carries
+        // `{ ok: false, orders: [] }`. Read the array either way so the table is
+        // never handed a non-array.
+        const rows = Array.isArray(data) ? data : Array.isArray((data as any)?.orders) ? (data as any).orders : null;
+        if (!rows) {
+          setLiveSync({ state: 'error', at: Date.now(), message: 'Unexpected response shape' });
+          return;
+        }
 
         // ── Authority guard ─────────────────────────────────────────────────
         // GET /api/orders answers 200 + [] BOTH for "this store truly has no
@@ -397,16 +437,23 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // API hiccuped. Keep the previous data — the equivalent of SWR's
         // keepPreviousData — unless the answer is confirmed authoritative:
         // non-empty, or the DB headers prove the database was actually read.
+        const degraded = res.headers.get('X-Orders-Degraded') === 'true';
         const authoritative =
-          data.length > 0 ||
+          rows.length > 0 ||
           res.headers.get('X-Orders-Source') === 'mongodb' ||
           res.headers.get('X-Orders-Count') !== null;
         if (!authoritative) {
           console.warn('Orders poll returned a non-authoritative empty list — keeping the current orders.');
+          setLiveSync({ state: 'degraded', at: Date.now(), message: 'Database unavailable' });
           return;
         }
+        setLiveSync({
+          state: degraded ? 'degraded' : 'live',
+          at: Date.now(),
+          message: degraded ? (res.headers.get('X-Orders-Warning') || 'Serving cached orders') : undefined,
+        });
 
-        const signature = JSON.stringify(data);
+        const signature = JSON.stringify(rows);
         // Reconcile on every tick while a write is in flight or a previous
         // write failed: the merge keeps optimistically painted rows and lets
         // server truth revert the failed ones. Identical payloads with no
@@ -424,11 +471,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // renders `undefined.toLocaleString()` and blanks the whole app.
         // The merge is a READ-ONLY sync (onSyncOrders) — the poll never writes
         // the list back to the server.
-        const normalized = normalizeOrders(data);
+        const normalized = normalizeOrders(rows);
         const uniqueFetched = Array.from(new Map(normalized.map(item => [item.id, item])).values());
         mergeServerOrders(uniqueFetched);
       } catch (err) {
         console.warn('Error fetching live orders:', err);
+        setLiveSync({ state: 'error', at: Date.now(), message: err instanceof Error ? err.message : 'Network error' });
       }
     };
     void fetchLiveOrders();
@@ -447,12 +495,31 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     };
     document.addEventListener('visibilitychange', onVisible);
 
+    // EVENT-DRIVEN REFETCH (the invalidation half of the poll).
+    //
+    // A checkout in another tab — or an order that just landed while the
+    // merchant is looking at this page — posts a signal; we refetch NOW instead
+    // of waiting out the interval. The poll still runs as the safety net for a
+    // signal that was never delivered (a tab that was asleep, a dropped
+    // BroadcastChannel message).
+    const unsubscribe = subscribeOrdersChanged(() => {
+      if (typeof document !== 'undefined' && document.hidden) {
+        // If the tab is hidden the poll will fire on `visibilitychange`
+        // anyway; a hidden refetch would just duplicate it.
+        return;
+      }
+      void fetchLiveOrders();
+    }, storeSlug || merchantId);
+
     return () => {
       clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
+      unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [merchantId, storeSlug]);
+
+
 
   // Live poll for return requests. Runs regardless of the active sub-menu so the
   // tab's PENDING badge stays accurate while the merchant works in another tab.
@@ -2328,6 +2395,38 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 </select>
                 <ArrowUpDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
+
+              {/* LIVE SYNC INDICATOR
+                  Answers "is this list current?" without opening devtools. A
+                  failed or degraded poll used to be silent, so a stale table
+                  looked exactly like a live one. Clicking it forces a refetch. */}
+              <button
+                type="button"
+                onClick={() => fetchLiveOrdersRef.current()}
+                title={
+                  liveSync.state === 'error'
+                    ? `Could not reach the server${liveSync.message ? ` (${liveSync.message})` : ''}. Showing the last loaded orders — click to retry.`
+                    : liveSync.state === 'degraded'
+                      ? `The database is unavailable${liveSync.message ? ` (${liveSync.message})` : ''}. Showing cached orders — click to retry.`
+                      : 'Orders sync automatically when a new one is placed. Click to refresh now.'
+                }
+                className={`flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition cursor-pointer ${
+                  liveSync.state === 'error'
+                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/15'
+                    : liveSync.state === 'degraded'
+                      ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/15'
+                      : 'border-[#2E3548] bg-[#181B26] text-slate-300 hover:bg-[#252B3B]'
+                }`}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${liveSync.state === 'live' ? '' : 'animate-spin'}`} />
+                <span>
+                  {liveSync.state === 'error'
+                    ? 'Sync failed'
+                    : liveSync.state === 'degraded'
+                      ? 'Showing cached orders'
+                      : 'Live'}
+                </span>
+              </button>
 
               {/* Export Orders Button */}
               <button
