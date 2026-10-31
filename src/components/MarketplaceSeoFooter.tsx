@@ -38,14 +38,38 @@ import {
 
 type Lang = 'en' | 'bn';
 
-const THEME = {
+/**
+ * The footer's palette.
+ *
+ * The marketplace owns the runtime theme, so the footer RECEIVES its colours
+ * instead of declaring its own. Only a fallback lives here, for the (unlikely)
+ * case it is rendered standalone.
+ */
+export interface FooterTheme {
+  ink: string;
+  inkMuted: string;
+  inkSubtle: string;
+  line: string;
+  brand: string;
+  brandTint: string;
+  surface: string;
+  chip: string;
+  bg: string;
+}
+
+const LIGHT: FooterTheme = {
   ink: '#111827',
   inkMuted: '#6b7280',
+  inkSubtle: '#9ca3af',
   line: '#e5e7eb',
   brand: '#3b2fd6',
+  brandTint: '#eef0ff',
   surface: '#ffffff',
+  chip: '#ffffff',
   bg: '#f6f7fb',
-} as const;
+};
+
+const THEME: FooterTheme = LIGHT;
 
 /** A keyword tag. `q` is the query actually run — keep it the search term. */
 interface SearchTag {
@@ -257,6 +281,8 @@ interface Props {
   onBrowseCategories?: () => void;
   /** Open the merchant signup / plans page. */
   onGoToPlans?: () => void;
+  /** Runtime palette from the marketplace. Falls back to the light set. */
+  theme?: Partial<FooterTheme>;
 }
 
 export const MarketplaceSeoFooter: React.FC<Props> = ({
@@ -266,7 +292,9 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
   sellerCount,
   onBrowseCategories,
   onGoToPlans,
+  theme,
 }) => {
+  const THEME: FooterTheme = { ...LIGHT, ...(theme || {}) };
   const t = (en: string, bn: string) => (lang === 'bn' ? bn : en);
 
   const totalTags = useMemo(
@@ -301,8 +329,8 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
 
   return (
     <footer
-      className="mt-8 border-t bg-white"
-      style={{ borderColor: THEME.line }}
+      className="mt-8 border-t"
+      style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}
       aria-labelledby="mm-seo-footer-heading"
     >
       <div className="mx-auto max-w-[1400px] px-4 py-7 sm:py-8">
@@ -312,16 +340,16 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           style={{ borderColor: THEME.line, backgroundColor: THEME.line }}
         >
           {trust.map(({ Icon, title, sub }) => (
-            <div key={title} className="flex items-center gap-2.5 bg-white px-3 py-3.5 sm:px-4">
+            <div key={title} className="flex items-center gap-2.5 px-3 py-3.5 sm:px-4" style={{ backgroundColor: THEME.surface }}>
               <span
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
-                style={{ backgroundColor: '#eef0ff' }}
+                style={{ backgroundColor: THEME.brandTint }}
               >
                 <Icon className="h-4 w-4" style={{ color: THEME.brand }} />
               </span>
               <div className="min-w-0">
-                <div className="truncate text-[12px] font-black text-slate-800">{title}</div>
-                <div className="truncate text-[10.5px] text-slate-500">{sub}</div>
+                <div className="truncate text-[12px] font-black" style={{ color: THEME.ink }}>{title}</div>
+                <div className="truncate text-[10.5px]" style={{ color: THEME.inkMuted }}>{sub}</div>
               </div>
             </div>
           ))}
@@ -332,12 +360,13 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h2
               id="mm-seo-footer-heading"
-              className="flex items-center gap-2 text-[15px] font-black tracking-tight text-slate-900"
+              className="flex items-center gap-2 text-[15px] font-black tracking-tight"
+              style={{ color: THEME.ink }}
             >
               <Sparkles className="h-4 w-4" style={{ color: '#ff9f1c' }} />
               {t('Popular Searches', 'জনপ্রিয় সার্চ')}
             </h2>
-            <p className="text-[11px] text-slate-400">
+            <p className="text-[11px]" style={{ color: THEME.inkSubtle }}>
               {t(`${totalTags} keywords across ${SEARCH_GROUPS.length} groups`, `${SEARCH_GROUPS.length}টি গ্রুপে ${totalTags}টি কীওয়ার্ড`)}
             </p>
           </div>
@@ -345,7 +374,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {SEARCH_GROUPS.map(({ title, titleBn, Icon, tags }) => (
               <div key={title}>
-                <div className="mb-2 flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wide text-slate-500">
+                <div className="mb-2 flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>
                   <Icon className="h-3.5 w-3.5" style={{ color: THEME.brand }} />
                   {lang === 'bn' ? titleBn : title}
                 </div>
@@ -357,8 +386,8 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                       onClick={() => onSearch(tag.q)}
                       // `text-wrap` keeps a long tag on one line inside its pill
                       // without the pill stretching its column.
-                      className="rounded-full border px-2.5 py-1 text-[11.5px] font-semibold text-slate-600 transition hover:-translate-y-px hover:border-[#3b2fd6] hover:text-[#3b2fd6] hover:shadow-sm"
-                      style={{ borderColor: THEME.line, backgroundColor: '#fff' }}
+                      className="well-tag rounded-full border px-2.5 py-1 text-[11.5px] font-semibold transition hover:-translate-y-px hover:shadow-sm"
+                      style={{ borderColor: THEME.line, backgroundColor: THEME.chip, color: THEME.inkMuted }}
                     >
                       {lang === 'bn' ? tag.labelBn : tag.label}
                     </button>
@@ -372,10 +401,10 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
         {/* ── 3. Overview + links ── */}
         <div className="mt-7 grid gap-6 border-t pt-6 lg:grid-cols-[1.6fr_1fr_1fr]" style={{ borderColor: THEME.line }}>
           <section aria-labelledby="mm-about-heading">
-            <h3 id="mm-about-heading" className="text-[12.5px] font-black text-slate-900">
+            <h3 id="mm-about-heading" className="text-[12.5px] font-black" style={{ color: THEME.ink }}>
               {t('Shop Bangladesh’s multi-vendor marketplace', 'বাংলাদেশের মাল্টি-ভেন্ডর মার্কেটপ্লেসে কিনুন')}
             </h3>
-            <p className="mt-2 max-w-prose text-[12px] leading-relaxed text-slate-600">
+            <p className="mt-2 max-w-prose text-[12px] leading-relaxed" style={{ color: THEME.inkMuted }}>
               {productCount != null && productCount > 0
                 ? t(
                   `Browse ${productCount.toLocaleString()} products from ${sellerCount ?? 0} verified stores across Bangladesh — all in one basket. Every seller is checked before they list, prices are shown in Bangladeshi Taka (৳), and delivery reaches all 64 districts with cash on delivery available. Filter by category, compare prices side by side, and pay the way you prefer: bKash, Nagad, Rocket, bank transfer or cash on delivery. If something isn’t right, request a return within 7 days of delivery.`,
@@ -389,7 +418,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           </section>
 
           <nav aria-labelledby="mm-shoplinks-heading">
-            <h3 id="mm-shoplinks-heading" className="text-[12.5px] font-black text-slate-900">
+            <h3 id="mm-shoplinks-heading" className="text-[12.5px] font-black" style={{ color: THEME.ink }}>
               {t('Shop', 'কেনাকাটা')}
             </h3>
             <ul className="mt-2 space-y-1.5">
@@ -402,9 +431,10 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                   <button
                     type="button"
                     onClick={onClick}
-                    className="flex items-center gap-1.5 text-[12px] text-slate-600 transition hover:text-[#3b2fd6] hover:underline"
+                    className="well-link flex items-center gap-1.5 text-[12px] transition hover:underline"
+                    style={{ color: THEME.inkMuted }}
                   >
-                    <Icon className="h-3 w-3 shrink-0 text-slate-400" />
+                    <Icon className="h-3 w-3 shrink-0" style={{ color: THEME.inkSubtle }} />
                     {label}
                   </button>
                 </li>
@@ -413,7 +443,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           </nav>
 
           <nav aria-labelledby="mm-sellerlinks-heading">
-            <h3 id="mm-sellerlinks-heading" className="text-[12.5px] font-black text-slate-900">
+            <h3 id="mm-sellerlinks-heading" className="text-[12.5px] font-black" style={{ color: THEME.ink }}>
               {t('Sell with us', 'আমাদের সাথে বিক্রি করুন')}
             </h3>
             <ul className="mt-2 space-y-1.5">
@@ -427,9 +457,10 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                     type="button"
                     onClick={onClick}
                     disabled={!onClick}
-                    className="flex items-center gap-1.5 text-[12px] text-slate-600 transition hover:text-[#3b2fd6] hover:underline disabled:cursor-default disabled:opacity-60"
+                    className="well-link flex items-center gap-1.5 text-[12px] transition hover:underline disabled:cursor-default disabled:opacity-60"
+                    style={{ color: THEME.inkMuted }}
                   >
-                    <Icon className="h-3 w-3 shrink-0 text-slate-400" />
+                    <Icon className="h-3 w-3 shrink-0" style={{ color: THEME.inkSubtle }} />
                     {label}
                   </button>
                 </li>
@@ -455,7 +486,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           <div className="grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 lg:grid-cols-6">
             {NAV_COLUMNS.map(({ title, titleBn, Icon, links }) => (
               <div key={title}>
-                <div className="mb-2.5 flex items-center gap-1.5 text-[11.5px] font-black uppercase tracking-wide text-slate-800">
+                <div className="mb-2.5 flex items-center gap-1.5 text-[11.5px] font-black uppercase tracking-wide" style={{ color: THEME.ink }}>
                   <Icon className="h-3.5 w-3.5" style={{ color: THEME.brand }} />
                   {lang === 'bn' ? titleBn : title}
                 </div>
@@ -465,7 +496,8 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                       <button
                         type="button"
                         onClick={() => onSearch(link.q || link.label)}
-                        className="group flex w-full items-center justify-between gap-1 text-left text-[11.5px] text-slate-500 transition hover:text-[#3b2fd6]"
+                        className="well-link group flex w-full items-center justify-between gap-1 text-left text-[11.5px] transition"
+                        style={{ color: THEME.inkMuted }}
                       >
                         <span className="truncate group-hover:underline">
                           {lang === 'bn' ? link.labelBn : link.label}
@@ -493,10 +525,8 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                   type="button"
                   onClick={isSell && onGoToPlans ? onGoToPlans : undefined}
                   disabled={!isSell || !onGoToPlans}
-                  className={`text-[11.5px] font-semibold transition ${isSell
-                    ? 'text-[#3b2fd6] hover:underline'
-                    : 'text-slate-500 hover:text-slate-800'
-                    } disabled:cursor-default`}
+                  className={`text-[11.5px] font-semibold transition ${isSell ? 'hover:underline' : 'well-link'} disabled:cursor-default`}
+                  style={{ color: isSell ? THEME.brand : THEME.inkMuted }}
                 >
                   {label}
                 </button>
@@ -516,7 +546,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
         >
           {/* SHOP ON THE GO */}
           <section aria-labelledby="mm-apps-heading">
-            <h3 id="mm-apps-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em] text-slate-400">
+            <h3 id="mm-apps-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em]" style={{ color: THEME.inkSubtle }}>
               {t('Shop on the go', 'অ্যাপে কেনাকাটা করুন')}
             </h3>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -555,7 +585,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
 
           {/* CONNECT WITH US */}
           <section aria-labelledby="mm-social-heading">
-            <h3 id="mm-social-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em] text-slate-400">
+            <h3 id="mm-social-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em]" style={{ color: THEME.inkSubtle }}>
               {t('Connect with us', 'আমাদের সাথে যুক্ত থাকুন')}
             </h3>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -574,14 +604,14 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                 </a>
               ))}
             </div>
-            <p className="mt-2.5 text-[11px] text-slate-400">
+            <p className="mt-2.5 text-[11px]" style={{ color: THEME.inkSubtle }}>
               {t('Follow us for deals and new arrivals.', 'ডিল ও নতুন পণ্যের জন্য আমাদের ফলো করুন।')}
             </p>
           </section>
 
           {/* PAYMENT METHODS */}
           <section aria-labelledby="mm-pay-heading">
-            <h3 id="mm-pay-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em] text-slate-400">
+            <h3 id="mm-pay-heading" className="text-[10.5px] font-black uppercase tracking-[0.16em]" style={{ color: THEME.inkSubtle }}>
               {t('We accept', 'আমরা গ্রহণ করি')}
             </h3>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -605,15 +635,15 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                 </span>
               ))}
               <span
-                className="flex h-7 items-center gap-1 rounded-md border bg-white px-2.5 text-[10.5px] font-bold text-slate-700"
-                style={{ borderColor: THEME.line }}
+                className="flex h-7 items-center gap-1 rounded-md border px-2.5 text-[10.5px] font-bold"
+                style={{ borderColor: THEME.line, backgroundColor: THEME.chip, color: THEME.ink }}
               >
-                <CreditCard className="h-3.5 w-3.5 text-slate-500" />
+                <CreditCard className="h-3.5 w-3.5" style={{ color: THEME.inkMuted }} />
                 {t('Cards', 'কার্ড')}
               </span>
               <span
-                className="flex h-7 items-center gap-1 rounded-md border bg-white px-2.5 text-[10.5px] font-bold text-slate-700"
-                style={{ borderColor: THEME.line }}
+                className="flex h-7 items-center gap-1 rounded-md border px-2.5 text-[10.5px] font-bold"
+                style={{ borderColor: THEME.line, backgroundColor: THEME.chip, color: THEME.ink }}
               >
                 <Banknote className="h-3.5 w-3.5 text-emerald-600" />
                 {t('Cash on Delivery', 'ক্যাশ অন ডেলিভারি')}
@@ -624,8 +654,8 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
 
         {/* ── Legal ── */}
         <div
-          className="mt-6 flex flex-col items-center justify-between gap-2 border-t pt-4 text-[11px] text-slate-400 sm:flex-row"
-          style={{ borderColor: THEME.line }}
+          className="mt-6 flex flex-col items-center justify-between gap-2 border-t pt-4 text-[11px] sm:flex-row"
+          style={{ borderColor: THEME.line, color: THEME.inkSubtle }}
         >
           <span>
             © {new Date().getFullYear()} ZID Market — {t('ZID SAAS Bangladesh', 'জিআইডি সাস বাংলাদেশ')}

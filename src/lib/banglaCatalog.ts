@@ -51,6 +51,10 @@ export const MARKETPLACE_COPY: Copy = {
   save_to_wishlist: { en: 'Save {name} to wishlist', bn: '{name} উইশলিস্টে রাখুন' },
   remove_from_wishlist: { en: 'Remove {name} from wishlist', bn: '{name} উইশলিস্ট থেকে সরান' },
 
+  // ── Appearance ──
+  switch_to_dark: { en: 'Switch to dark mode', bn: 'ডার্ক মোডে যান' },
+  switch_to_light: { en: 'Switch to light mode', bn: 'লাইট মোডে যান' },
+
   // ── Language / account ──
   language: { en: 'Change language', bn: 'ভাষা পরিবর্তন' },
   hi_sign_in: { en: 'Hi, sign in', bn: 'হ্যালো, সাইন ইন করুন' },

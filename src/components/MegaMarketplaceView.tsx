@@ -27,6 +27,7 @@ import {
   MapPin, TruckIcon, HeadphonesIcon, RotateCcw, Check, Plus, Minus,
   LayoutGrid, Flame, Sparkles, ArrowRight, Menu, ArrowUpDown, LogOut,
   Heart, Receipt, Globe, TrendingUp, Clock, Smartphone, Watch, Gamepad2,
+  Sun, Moon,
 } from 'lucide-react';
 import SafeImage from './SafeImage';
 import MarketplaceSeoFooter from './MarketplaceSeoFooter';
@@ -63,24 +64,207 @@ import {
 
 import type { MarketplaceProduct } from '../types';
 
+/* ─────────────────────────── dark mode hook ─────────────────────────────
+   Reads/writes `zid_marketplace_dark` in localStorage and toggles the
+   `dark` class on `<html>` so Tailwind's `dark:` utilities activate.     */
+const DARK_KEY = 'zid_marketplace_dark';
+
+function useDarkMode(): [boolean, () => void] {
+  const [dark, setDark] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(DARK_KEY);
+      if (stored !== null) return stored === '1';
+      return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (dark) {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    try { localStorage.setItem(DARK_KEY, dark ? '1' : '0'); } catch { /* private mode */ }
+  }, [dark]);
+
+  const toggle = useCallback(() => setDark((v) => !v), []);
+  return [dark, toggle];
+}
+
 /* ─────────────────────────── platform palette ───────────────────────────
    The marketplace's OWN identity. Keyed off `mm-*` CSS variables so the rest
    of the app's Tailwind tokens cannot bleed in and no tenant theme can
    override it. Deep indigo + amber is distinct from every tenant template
-   (which are gold/slate, emerald, or white-minimal).                      */
-const THEME = {
-  bg: '#f6f7fb',
+   (which are gold/slate, emerald, or white-minimal).
+
+   LIGHT and DARK variants are defined here so every inline `style={{ }}` that
+   needs a token can pick the right shade by simply using the `dark` boolean.  */
+/* Explicit string-valued shape, NOT `typeof LIGHT_THEME`: the `as const` on the
+   literal would pin every token to its light-mode value, so DARK_THEME (and any
+   future theme) would fail to type-check. */
+type ThemeTokens = { [K in keyof typeof LIGHT_THEME]: string };
+const LIGHT_THEME = {
+  bg: '#f3f4fb',
+  bgMesh: 'radial-gradient(ellipse at 20% 10%, rgba(59,47,214,0.07) 0%, transparent 55%), radial-gradient(ellipse at 80% 90%, rgba(139,92,246,0.07) 0%, transparent 55%), radial-gradient(ellipse at 60% 40%, rgba(255,159,28,0.05) 0%, transparent 45%), #f3f4fb',
   surface: '#ffffff',
+  surfaceHover: '#f8f8ff',
   ink: '#111827',
   inkMuted: '#6b7280',
+  inkSubtle: '#9ca3af',
   line: '#e5e7eb',
+  lineSubtle: '#f3f4f6',
   brand: '#3b2fd6',
   brandDark: '#2a219d',
+  brandSoft: '#eef0ff',
   accent: '#ff9f1c',
   accentSoft: '#fff4e0',
   success: '#0f9d58',
   danger: '#e11d48',
+  skeleton: '#e5e7eb',
+  /* Interaction tints.
+     Everything below used to be hard-coded utility classes
+     (`hover:bg-[#f4f5ff]`, `bg-white`, `text-slate-900`, …) which stayed white
+     and black in dark mode. Inline styles driven by these tokens are what make
+     the whole page — header, cards, rail, drawers, menus — follow the theme. */
+  hover: '#f4f5ff',
+  /** Neutral chip / pill background (category rail, filter buttons). */
+  chip: '#f4f5ff',
+  /** Brand-tinted chip (active sub-category, wishlist count). */
+  brandTint: '#eef0ff',
+  /** Dashed "sold by" border on a product card. */
+  cardBorder: '#d9dcf5',
+  /** Soft neutral block — image wells, empty-thumb backgrounds. */
+  well: '#f8fafc',
+  /** Dropdown / drawer shadow. */
+  shadow: '0 18px 40px -12px rgba(17,24,39,0.28)',
+  /** Elevated panel shadow for cards on hover. */
+  shadowCard: '0 12px 28px -10px rgba(17,24,39,0.25)',
+  overlay: 'rgba(15,23,42,0.55)',
+  warningFg: '#92400e',
 } as const;
+
+const DARK_THEME: ThemeTokens = {
+  bg: '#0d0f1a',
+  bgMesh: 'radial-gradient(ellipse at 20% 10%, rgba(91,75,255,0.18) 0%, transparent 55%), radial-gradient(ellipse at 80% 90%, rgba(139,92,246,0.15) 0%, transparent 55%), radial-gradient(ellipse at 60% 40%, rgba(255,159,28,0.07) 0%, transparent 45%), #0d0f1a',
+  surface: '#161829',
+  surfaceHover: '#1e2035',
+  ink: '#e8eaf5',
+  inkMuted: '#9fa3c0',
+  inkSubtle: '#6b7098',
+  line: '#252840',
+  lineSubtle: '#1a1d30',
+  brand: '#6d63ff',
+  brandDark: '#5b4bff',
+  brandSoft: '#1e1f3a',
+  accent: '#ffb84d',
+  accentSoft: '#2a1f0a',
+  success: '#34d470',
+  danger: '#f05070',
+  skeleton: '#252840',
+  hover: '#20233a',
+  chip: '#1c1f33',
+  brandTint: '#23244a',
+  cardBorder: '#2b2f4c',
+  well: '#12141f',
+  shadow: '0 18px 40px -12px rgba(0,0,0,0.75)',
+  shadowCard: '0 12px 28px -10px rgba(0,0,0,0.7)',
+  overlay: 'rgba(3,5,12,0.72)',
+  warningFg: '#fbbf24',
+} as const;
+
+/* Module-level alias used by sub-components that don't receive the dark flag.
+   The main component overrides this with its runtime `THEME` derived from dark. */
+const THEME = LIGHT_THEME;
+
+/**
+ * THE DARK / LIGHT SWITCH.
+ *
+ * A pill with a sliding knob, not a bare icon button: the knob's POSITION is
+ * the state (`aria-checked` mirrors it for assistive tech), so a shopper can
+ * read the current mode at a glance without decoding an icon. The sun sits on
+ * the light side, the moon on the dark side, and the active one gains contrast.
+ *
+ * Used twice — compact in the mobile bar, labelled in the desktop header — so
+ * the whole appearance is driven by tokens rather than by per-placement CSS.
+ */
+const ThemeSwitch: React.FC<{
+  isDark: boolean;
+  onToggle: () => void;
+  theme: ThemeTokens;
+  /** `sm` for the icon-only mobile bar. */
+  size?: 'sm' | 'md';
+  label: string;
+}> = ({ isDark, onToggle, theme, size = 'md', label }) => {
+  const compact = size === 'sm';
+  const width = compact ? 52 : 60;
+  const height = compact ? 28 : 32;
+  const knob = compact ? 22 : 26;
+  const pad = (height - knob) / 2;
+
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={isDark}
+      aria-label={label}
+      title={label}
+      onClick={onToggle}
+      className="relative shrink-0 rounded-full border transition-colors duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1"
+      style={{
+        width,
+        height,
+        borderColor: theme.line,
+        backgroundColor: theme.chip,
+        // Ring colour has to come from the palette too: a hard-coded Tailwind
+        // ring would be invisible on the dark surface.
+        ['--tw-ring-color' as any]: theme.brand,
+      }}
+    >
+      {/* Track icons — both always rendered so the switch reads as a choice.
+          Each sits on the side the knob slides AWAY from; the knob covers the
+          other. That is why the icons fade: an icon under a 26px knob shows as a
+          coloured smudge around its edge otherwise. */}
+      <span className="pointer-events-none absolute inset-0 flex items-center justify-between px-[7px]">
+        <Sun
+          className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'}
+          style={{
+            color: theme.accent,
+            opacity: isDark ? 0.55 : 0,
+            transition: 'opacity .2s ease',
+          }}
+        />
+        <Moon
+          className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'}
+          style={{
+            color: theme.brand,
+            opacity: isDark ? 0 : 0.55,
+            transition: 'opacity .2s ease',
+          }}
+        />
+      </span>
+      {/* Sliding knob */}
+      <span
+        aria-hidden="true"
+        className="absolute top-1/2 flex items-center justify-center rounded-full shadow-md transition-transform duration-300 ease-out"
+        style={{
+          width: knob,
+          height: knob,
+          backgroundColor: isDark ? theme.brand : theme.surface,
+          border: `1px solid ${isDark ? theme.brand : theme.line}`,
+          transform: `translate(${isDark ? width - knob - pad * 2 : 0}px, -50%)`,
+          left: pad,
+        }}
+      >
+        {isDark
+          ? <Moon className="h-3 w-3 text-white" />
+          : <Sun className="h-3 w-3" style={{ color: theme.accent }} />}
+      </span>
+    </button>
+  );
+};
 
 const bdt = (value: number) => `৳${Math.round(Number(value) || 0).toLocaleString('en-US')}`;
 
@@ -352,7 +536,10 @@ const ProductCard: React.FC<{
   onToggleWishlist?: (product: MarketplaceProduct) => void;
   /** Active marketplace language — switches titles and card states to Bangla. */
   lang?: 'en' | 'bn';
-}> = ({ product, onAdd, onVisitVendor, onOpenProduct, isWishlisted, onToggleWishlist, lang: langProp }) => {
+  /** Runtime palette — light or dark. */
+  theme?: ThemeTokens;
+}> = ({ product, onAdd, onVisitVendor, onOpenProduct, isWishlisted, onToggleWishlist, lang: langProp, theme }) => {
+  const THEME = theme || LIGHT_THEME;
   // Explicit literal type: a bare `lang = 'en'` default infers `string`, which
   // then fails to match the `'en' | 'bn'` parameters below.
   const lang: 'en' | 'bn' = langProp === 'bn' ? 'bn' : 'en';
@@ -373,6 +560,7 @@ const ProductCard: React.FC<{
     ? p.category_tags
     : [p.category].filter(Boolean);
   const soldOut = stockStatus === 'out_of_stock';
+  const isDarkCard = (theme || LIGHT_THEME).bg !== LIGHT_THEME.bg;
 
   return (
     <article
@@ -384,14 +572,19 @@ const ProductCard: React.FC<{
       // `min-w-0` on flex children is what actually stops long vendor names
       // and prices from overflowing — without it a flex item refuses to shrink
       // below its content width and the layout breaks horizontally.
-      className="group relative flex min-w-0 flex-col overflow-hidden rounded-xl border bg-white transition-all duration-200 sm:hover:-translate-y-0.5 sm:hover:shadow-[0_12px_28px_-10px_rgba(17,24,39,0.25)]"
-      style={{ borderColor: THEME.line }}
+      className="group relative flex min-w-0 flex-col overflow-hidden rounded-xl border transition-all duration-200 sm:hover:-translate-y-0.5"
+      style={{
+        borderColor: THEME.line,
+        backgroundColor: THEME.surface,
+        ['--mm-card-shadow' as any]: THEME.shadowCard,
+      }}
     >
       {/* Media */}
       <button
         type="button"
         onClick={() => onOpenProduct(product)}
-        className="relative block aspect-square w-full overflow-hidden bg-[#f8fafc]"
+        className="relative block aspect-square w-full overflow-hidden"
+        style={{ backgroundColor: THEME.well }}
         aria-label={t('view_product', { name: title })}
       >
         <SafeImage
@@ -413,7 +606,15 @@ const ProductCard: React.FC<{
           </span>
         )}
         {!soldOut && stockStatus === 'low_stock' && (
-          <span className="absolute bottom-2 left-2 rounded-md bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
+          // Amber-on-amber vanishes in dark mode, so the badge is driven by the
+          // palette rather than by two fixed utilities.
+          <span
+            className="absolute bottom-2 left-2 rounded-md px-1.5 py-0.5 text-[10px] font-bold"
+            style={{
+              backgroundColor: isDarkCard ? 'rgba(251,191,36,0.18)' : '#fef3c7',
+              color: isDarkCard ? '#fcd34d' : '#b45309',
+            }}
+          >
             {t('only_left', { n: Number(p.stock_quantity || 0) })}
           </span>
         )}
@@ -427,10 +628,12 @@ const ProductCard: React.FC<{
           onClick={(e) => { e.stopPropagation(); onToggleWishlist(product); }}
           aria-pressed={Boolean(isWishlisted)}
           aria-label={isWishlisted ? t('remove_from_wishlist', { name: title }) : t('save_to_wishlist', { name: title })}
-          className="absolute right-2 top-2 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-white/95 shadow-sm ring-1 ring-black/5 transition hover:scale-105"
+          className="absolute right-2 top-2 z-10 flex h-9 w-9 items-center justify-center rounded-full shadow-sm ring-1 ring-black/5 transition hover:scale-105"
+          style={{ backgroundColor: THEME.surface, color: THEME.inkMuted }}
         >
           <Heart
-            className={`h-4 w-4 transition-colors ${isWishlisted ? 'fill-[#e11d48] text-[#e11d48]' : 'text-slate-500'}`}
+            className={`h-4 w-4 transition-colors ${isWishlisted ? 'fill-[#e11d48] text-[#e11d48]' : ''}`}
+            style={isWishlisted ? undefined : { color: THEME.inkMuted }}
           />
         </button>
       )}
@@ -443,7 +646,7 @@ const ProductCard: React.FC<{
             <span
               key={tag}
               className="max-w-full truncate rounded px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide sm:text-[10px]"
-              style={{ backgroundColor: '#eef0ff', color: THEME.brand }}
+              style={{ backgroundColor: THEME.brandTint, color: THEME.brand }}
             >
               {tag}
             </span>
@@ -457,12 +660,13 @@ const ProductCard: React.FC<{
           // URL-ish SKU) wraps instead of forcing the grid column wider.
           // `min-h-[44px]` keeps the tap target legal even for a one-line title
           // (it measured 33px for short names).
-          className="flex min-h-[44px] items-start break-words text-left text-[12px] font-semibold leading-snug text-slate-800 sm:min-h-0 sm:text-[13px]"
+          className="flex min-h-[44px] items-start break-words text-left text-[12px] font-semibold leading-snug sm:min-h-0 sm:text-[13px]"
+          style={{ color: THEME.ink }}
         >
           <span className="line-clamp-2 min-w-0">{title}</span>
         </button>
         {altTitle && (
-          <div className="mt-0.5 truncate text-[10.5px] font-medium text-slate-400" lang="en">
+          <div className="mt-0.5 truncate text-[10.5px] font-medium" style={{ color: THEME.inkSubtle }} lang="en">
             {altTitle}
           </div>
         )}
@@ -476,7 +680,7 @@ const ProductCard: React.FC<{
             {bdt(Number(product.priceBDT || 0))}
           </span>
           {compareAt > Number(product.priceBDT || 0) && (
-            <span className="text-[10px] text-slate-400 line-through sm:text-[11px]">{bdt(compareAt)}</span>
+            <span className="text-[10px] line-through sm:text-[11px]" style={{ color: THEME.inkSubtle }}>{bdt(compareAt)}</span>
           )}
         </div>
 
@@ -492,8 +696,8 @@ const ProductCard: React.FC<{
             if (product.vendor_slug) onVisitVendor(product.vendor_slug);
           }}
           // 44px minimum touch height on mobile, compact from `sm` up.
-          className="mt-auto flex min-h-[44px] w-full min-w-0 items-center gap-1 rounded-md border border-dashed px-1.5 py-1 text-left transition-colors active:bg-[#eef0ff] sm:min-h-0 sm:gap-1.5 sm:px-2"
-          style={{ borderColor: '#d9dcf5' }}
+          className="mt-auto flex min-h-[44px] w-full min-w-0 items-center gap-1 rounded-md border border-dashed px-1.5 py-1 text-left transition-colors hover:opacity-80 sm:min-h-0 sm:gap-1.5 sm:px-2"
+          style={{ borderColor: THEME.cardBorder }}
           title={`Sold by ${product.vendor_name} — visit store`}
           aria-label={`Sold by ${product.vendor_name}. Visit store.`}
         >
@@ -502,7 +706,7 @@ const ProductCard: React.FC<{
               used with explicit `display` utilities so exactly ONE variant is
               ever in the accessibility tree — previously both spans rendered
               and the badge read "Sold by: by dhaka-weaves". */}
-          <span className="min-w-0 flex-1 truncate text-[9.5px] leading-tight text-slate-500 sm:text-[10.5px]">
+          <span className="min-w-0 flex-1 truncate text-[9.5px] leading-tight sm:text-[10.5px]" style={{ color: THEME.inkMuted }}>
             {/* Rendered via a media-query'd ::before rather than two spans:
                 Tailwind's `hidden`/`inline` are ordered so the later wins, and
                 having two sibling spans emitted BOTH labels. One text node
@@ -703,7 +907,10 @@ const MegaMenuPanel: React.FC<{
   onSelectPrimary: (primary: string) => void;
   onClose: () => void;
   lang?: 'en' | 'bn';
-}> = ({ node, counts, onSelectSub, onSelectPrimary, onClose, lang: menuLang }) => {
+  /** Runtime palette — light or dark. */
+  theme?: ThemeTokens;
+}> = ({ node, counts, onSelectSub, onSelectPrimary, onClose, lang: menuLang, theme }) => {
+  const THEME = theme || LIGHT_THEME;
   const lang: 'en' | 'bn' = menuLang === 'bn' ? 'bn' : 'en';
   const total = counts.get(node.name.toLowerCase()) ?? 0;
   // Display names are translated; the `node.name` HANDED TO THE CALLBACKS stays
@@ -712,15 +919,18 @@ const MegaMenuPanel: React.FC<{
 
   return (
     <div
-      className="absolute left-0 right-0 top-full z-50 border-t bg-white shadow-[0_18px_40px_-12px_rgba(17,24,39,0.28)]"
-      style={{ borderColor: THEME.line }}
+      className="absolute left-0 right-0 top-full z-50 border-t"
+      style={{ borderColor: THEME.line, backgroundColor: THEME.surface, boxShadow: THEME.shadow }}
       onMouseLeave={onClose}
     >
       <div className="mx-auto flex max-w-[1400px] gap-6 px-4 py-4">
         {/* Left: the primary category itself */}
         <div className="w-[210px] shrink-0 border-r pr-4" style={{ borderColor: THEME.line }}>
           <div className="mb-2 flex items-center gap-2">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-[#eef0ff] text-lg">
+            <span
+              className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg text-lg"
+              style={{ backgroundColor: THEME.brandTint }}
+            >
               {node.image ? (
                 <SafeImage src={node.image} alt={node.name} className="h-full w-full object-cover" />
               ) : (
@@ -728,19 +938,19 @@ const MegaMenuPanel: React.FC<{
               )}
             </span>
             <div className="min-w-0">
-              <div className="truncate text-[13px] font-black text-slate-900">{label(node.name)}</div>
-              <div className="text-[10px] text-slate-500">
+              <div className="truncate text-[13px] font-black" style={{ color: THEME.ink }}>{label(node.name)}</div>
+              <div className="text-[10px]" style={{ color: THEME.inkMuted }}>
                 {lang === 'bn' ? `${total}টি পণ্য` : `${total} products`}
               </div>
             </div>
           </div>
           {node.description && (
-            <p className="mb-2 text-[11px] leading-relaxed text-slate-500">{node.description}</p>
+            <p className="mb-2 text-[11px] leading-relaxed" style={{ color: THEME.inkMuted }}>{node.description}</p>
           )}
           <button
             type="button"
             onClick={() => onSelectPrimary(node.name)}
-            className="flex min-h-[32px] w-full items-center justify-between rounded-md px-2 text-left text-[11.5px] font-bold transition hover:bg-[#f4f5ff]"
+            className="mm-hover flex min-h-[32px] w-full items-center justify-between rounded-md px-2 text-left text-[11.5px] font-bold transition"
             style={{ color: THEME.brand }}
           >
             {lang === 'bn' ? `${label(node.name)} — সব দেখুন` : `Shop all ${node.name}`}
@@ -751,7 +961,7 @@ const MegaMenuPanel: React.FC<{
         {/* Right: the sub-category columns */}
         <div className="min-w-0 flex-1">
           {node.children.length === 0 ? (
-            <div className="flex h-full items-center text-[11.5px] text-slate-400">
+            <div className="flex h-full items-center text-[11.5px]" style={{ color: THEME.inkSubtle }}>
               {lang === 'bn' ? 'কোনো উপ-ক্যাটাগরি নেই।' : `No sub-categories — use “Shop all ${node.name}”.`}
             </div>
           ) : (
@@ -764,12 +974,15 @@ const MegaMenuPanel: React.FC<{
                     <button
                       type="button"
                       onClick={() => onSelectSub(node.name, sub.name)}
-                      className="group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition hover:bg-[#f4f5ff]"
+                      className="mm-hover group flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left transition"
                     >
-                      <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-slate-700 group-hover:underline">
+                      <span
+                        className="min-w-0 flex-1 truncate text-[12px] font-semibold group-hover:underline"
+                        style={{ color: THEME.inkMuted }}
+                      >
                         {label(sub.name)}
                       </span>
-                      <span className="shrink-0 text-[10px] tabular-nums text-slate-400">{count}</span>
+                      <span className="shrink-0 text-[10px] tabular-nums" style={{ color: THEME.inkSubtle }}>{count}</span>
                     </button>
                     {/* Third level (sub-types), indented under their parent */}
                     {sub.children.length > 0 && (
@@ -779,7 +992,8 @@ const MegaMenuPanel: React.FC<{
                             key={type.id}
                             type="button"
                             onClick={() => onSelectSub(node.name, type.name)}
-                            className="block w-full truncate rounded px-1 py-0.5 text-left text-[11px] text-slate-500 transition hover:text-slate-900 hover:underline"
+                            className="block w-full truncate rounded px-1 py-0.5 text-left text-[11px] transition hover:underline"
+                            style={{ color: THEME.inkMuted }}
                           >
                             {label(type.name)}
                           </button>
@@ -831,7 +1045,10 @@ const CategoryTile: React.FC<{
   image?: string;
   /** "bn" renders the category through the Bangla glossary. */
   lang?: 'en' | 'bn';
-}> = ({ name: rawName, count, active, onClick, emoji, image, lang: tileLang }) => {
+  /** Runtime palette — light or dark. */
+  theme?: ThemeTokens;
+}> = ({ name: rawName, count, active, onClick, emoji, image, lang: tileLang, theme }) => {
+  const THEME = theme || LIGHT_THEME;
   const name = displayCategory(rawName, tileLang === 'bn' ? 'bn' : 'en');
   return (
   <button
@@ -848,18 +1065,25 @@ const CategoryTile: React.FC<{
     // circle, and with nine they were cramped. A fixed 112x124 tile reads the
     // same row whether there are two categories or twenty, and a short row simply
     // ends early — which is the normal e-commerce pattern, not a defect.
-    className={`group flex h-[124px] w-[112px] shrink-0 flex-col items-center justify-start rounded-2xl border bg-white px-2 py-3 transition-all duration-200 ${
+    className={`group flex h-[124px] w-[112px] shrink-0 flex-col items-center justify-start rounded-2xl border px-2 py-3 transition-all duration-200 ${
       active
-        ? 'border-transparent shadow-[0_2px_10px_-2px_rgba(59,47,214,0.28)] ring-2 ring-[#3b2fd6]'
-        : 'border-[#e5e7eb] hover:-translate-y-0.5 hover:border-[#c7cbf5] hover:shadow-[0_10px_22px_-10px_rgba(17,24,39,0.28)]'
+        ? 'border-transparent'
+        : 'hover:-translate-y-0.5'
     }`}
-    style={active ? { backgroundColor: '#f5f6ff' } : undefined}
+    style={{
+      backgroundColor: active ? THEME.brandTint : THEME.surface,
+      borderColor: active ? 'transparent' : THEME.line,
+      boxShadow: active
+        ? `0 0 0 2px ${THEME.brand}, 0 2px 10px -2px ${THEME.brand}45`
+        : undefined,
+    }}
   >
     {/* Fixed 56px circle so every tile in the row has identical optical weight.
         `shrink-0` + a fixed box stops a wide source image (a photo rather than
         an icon) from stretching the circle into an ellipse. */}
     <span
-      className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#f4f5fb] text-[26px] leading-none"
+      className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full text-[26px] leading-none"
+      style={{ backgroundColor: THEME.chip }}
       aria-hidden="true"
     >
       {image ? (
@@ -872,11 +1096,12 @@ const CategoryTile: React.FC<{
         single word from overrunning the tile, and the fixed `h-7` block stops a
         one-line name from making that tile 14px shorter than its neighbours. */}
     <span
-      className="mt-2 flex h-7 w-full max-w-[150px] items-center justify-center text-center text-[11.5px] font-semibold leading-[1.15] tracking-[-0.01em] text-slate-700 [text-wrap:balance]"
+      className="mt-2 flex h-7 w-full max-w-[150px] items-center justify-center text-center text-[11.5px] font-semibold leading-[1.15] tracking-[-0.01em] [text-wrap:balance]"
+      style={{ color: THEME.ink }}
     >
       <span className="line-clamp-2 break-words">{name}</span>
     </span>
-    <span className="mt-1 text-[10px] font-medium leading-none tabular-nums text-slate-400">
+    <span className="mt-1 text-[10px] font-medium leading-none tabular-nums" style={{ color: THEME.inkSubtle }}>
       {tileLang === 'bn' ? `${count}টি পণ্য` : `${count} ${count === 1 ? 'item' : 'items'}`}
     </span>
   </button>
@@ -960,6 +1185,22 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 }) => {
   const toast = useToast();
   const basket = useMarketplaceBasket();
+
+  /* ── Dark / Light mode ────────────────────────────────────────────────── */
+  const [isDark, toggleDark] = useDarkMode();
+  /* The theme engine writes ONE attribute that both our own tokens and every
+     Tailwind `dark:` utility key off: `data-mm-theme` on <html>. The class is
+     kept in sync as well so `darkMode: 'class'` still works for any consumer
+     that relies on it. */
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    root.setAttribute('data-mm-theme', isDark ? 'dark' : 'light');
+    root.style.colorScheme = isDark ? 'dark' : 'light';
+  }, [isDark]);
+  // Shadow the module-level THEME with the runtime dark-aware version.
+  // eslint-disable-next-line @typescript-eslint/no-shadow
+  const THEME = isDark ? DARK_THEME : LIGHT_THEME;
 
   /* ── Admin-owned storefront config ───────────────────────────────────────
      Banners, the category rail, the utility strip and the featured/deals
@@ -1340,7 +1581,13 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
       document.documentElement.style.backgroundColor = prevHtml;
       if (root) root.style.backgroundColor = prevRoot;
     };
-  }, []);
+    // `THEME.bg` MUST be a dependency. With `[]` the effect captured the LIGHT
+    // palette on first mount and never re-ran, so toggling to dark repainted the
+    // component but left body/html/#root painted light — a bright gutter down
+    // the side of a dark page, and a white flash on overscroll. The cleanup also
+    // restores the COLOUR THAT WAS THERE when this run started, which is what
+    // keeps a tenant storefront intact after navigating away.
+  }, [THEME.bg]);
 
   const setFilter = useCallback((patch: Partial<MarketplaceFilters>) => {
     setFilters((prev) => ({ ...prev, ...patch, page: 1 }));
@@ -1520,11 +1767,12 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
         aria-selected={false}
         onMouseDown={(e) => e.preventDefault()}
         onClick={onClick}
-        className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-[13px] text-slate-700 transition hover:bg-[#f4f5ff]"
+        className="mm-hover flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-[13px] transition"
+        style={{ color: THEME.inkMuted }}
       >
-        <span className="shrink-0 text-slate-400">{leading ?? <Search className="h-3.5 w-3.5" />}</span>
+        <span className="shrink-0" style={{ color: THEME.inkSubtle }}>{leading ?? <Search className="h-3.5 w-3.5" />}</span>
         <span className="min-w-0 flex-1 truncate">{highlightMatch(label)}</span>
-        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-slate-300" />
+        <ArrowRight className="h-3.5 w-3.5 shrink-0" style={{ color: THEME.inkSubtle }} />
       </button>
     );
 
@@ -1533,8 +1781,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
         role="listbox"
         aria-label={copy('search_suggestions')}
         onMouseDown={(e) => e.preventDefault()}
-        className={`absolute left-0 top-full z-50 mt-1.5 overflow-hidden rounded-xl border bg-white shadow-2xl ${fullWidth ? 'right-0 w-full' : 'w-full min-w-[320px]'}`}
-        style={{ borderColor: THEME.line }}
+        className={`absolute left-0 top-full z-50 mt-1.5 overflow-hidden rounded-xl border ${fullWidth ? 'right-0 w-full' : 'w-full min-w-[320px]'}`}
+        style={{ borderColor: THEME.line, backgroundColor: THEME.surface, boxShadow: THEME.shadow }}
       >
         {/* 1 — what the shopper is currently typing */}
         {typed && (
@@ -1588,16 +1836,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => runSuggestion(label)}
-                className="flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:-translate-y-px hover:shadow-sm"
-                style={{ borderColor: THEME.line, backgroundColor: '#fff' }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = THEME.brand;
-                  e.currentTarget.style.color = THEME.brand;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = THEME.line;
-                  e.currentTarget.style.color = '';
-                }}
+                className="mm-pill flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[12px] font-semibold transition hover:-translate-y-px hover:shadow-sm"
+                style={{ borderColor: THEME.line, backgroundColor: THEME.surface, color: THEME.inkMuted }}
               >
                 {Icon && <Icon className="h-3.5 w-3.5" />}
                 {language === 'bn' ? labelBn : label}
@@ -1781,9 +2021,34 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   /* ───────────────────────────── render ───────────────────────────── */
 
   return (
-    <div className="flex min-h-screen w-full min-w-0 flex-col font-sans" style={{ backgroundColor: THEME.bg, color: THEME.ink }}>
+    <div
+      className="mm-backdrop relative flex min-h-screen w-full min-w-0 flex-col font-sans transition-colors duration-300"
+      // Inline custom properties let the scoped <style> block (dot grid, glow,
+      // hover tint) follow the same palette as every inline `style={{}}` — one
+      // source of truth instead of a parallel set of dark: utilities.
+      style={{
+        background: THEME.bgMesh,
+        color: THEME.ink,
+        ['--mm-hover' as any]: THEME.hover,
+        ['--mm-brand' as any]: THEME.brand,
+        ['--mm-dot' as any]: isDark ? 'rgba(140,150,200,0.10)' : 'rgba(59,47,214,0.055)',
+        ['--mm-glow-a' as any]: isDark ? 'rgba(109,99,255,0.13)' : 'rgba(59,47,214,0.055)',
+        ['--mm-glow-b' as any]: isDark ? 'rgba(255,184,77,0.07)' : 'rgba(255,159,28,0.045)',
+      }}
+    >
       {/* ═════════ MEGA HEADER ═════════ */}
-      <header className="sticky top-0 z-40 w-full shadow-sm" style={{ backgroundColor: THEME.surface }}>
+      <header
+        className="sticky top-0 z-40 w-full"
+        style={{
+          backgroundColor: THEME.surface,
+          borderBottom: `1px solid ${THEME.line}`,
+          // The header floats over the textured backdrop: a soft shadow keeps
+          // the boundary crisp without a hard 1px rule on every row.
+          boxShadow: isDark
+            ? '0 1px 0 rgba(255,255,255,0.03), 0 8px 24px -16px rgba(0,0,0,0.9)'
+            : '0 1px 2px rgba(17,24,39,0.04), 0 8px 24px -18px rgba(17,24,39,0.35)',
+        }}
+      >
         {/* Utility strip — content + visibility are owned by
             Admin → Marketplace Studio → Utility Strip. */}
         {stripVisible && (
@@ -1824,7 +2089,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           <button
             type="button"
             onClick={() => setShowMenu(true)}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-700 active:bg-[#f4f5ff]"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl active:opacity-80"
+            style={{ color: THEME.ink }}
             aria-label="Open menu"
           >
             <Menu className="h-5 w-5" />
@@ -1849,10 +2115,23 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
           <div className="flex-1" />
 
+          {/* Dark / light toggle — first-class in the mobile bar, because on a
+              phone there is no other place the shopper would find it. */}
+          <div className="flex h-11 shrink-0 items-center pr-0.5">
+            <ThemeSwitch
+              isDark={isDark}
+              onToggle={toggleDark}
+              theme={THEME}
+              size="sm"
+              label={isDark ? copy('switch_to_light') : copy('switch_to_dark')}
+            />
+          </div>
+
           <button
             type="button"
             onClick={() => setSearchOpen((v) => !v)}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-700 active:bg-[#f4f5ff]"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl active:opacity-80"
+            style={{ color: THEME.ink }}
             aria-label="Search products"
             aria-expanded={searchOpen}
           >
@@ -1862,7 +2141,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           <button
             type="button"
             onClick={() => setShowWishlist(true)}
-            className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-700 active:bg-[#f4f5ff]"
+            className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl active:opacity-80"
+            style={{ color: THEME.ink }}
             aria-label={`Wishlist, ${wishlist.count} saved items`}
           >
             <Heart className="h-5 w-5" />
@@ -1879,7 +2159,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           <button
             type="button"
             onClick={() => setShowBasket(true)}
-            className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-700 active:bg-[#f4f5ff]"
+            className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl active:opacity-80"
+            style={{ color: THEME.ink }}
             aria-label={`Cart, ${basket.itemCount} items`}
           >
             <ShoppingBasket className="h-5 w-5" />
@@ -1903,10 +2184,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             ref={searchBoxRef}
           >
             <div
-              className="flex w-full items-center overflow-hidden rounded-xl border bg-white"
-              style={{ borderColor: THEME.brand }}
+              className="flex w-full items-center overflow-hidden rounded-xl border"
+              style={{ borderColor: THEME.brand, backgroundColor: THEME.surface }}
             >
-              <Search className="ml-2.5 h-4 w-4 shrink-0 text-slate-400" />
+              <Search className="ml-2.5 h-4 w-4 shrink-0" style={{ color: THEME.inkSubtle }} />
               <input
                 ref={searchRef}
                 value={searchInput}
@@ -1920,14 +2201,16 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 aria-expanded={searchFocused}
                 autoComplete="off"
                 autoFocus
-                className="min-w-0 flex-1 px-2 py-3 text-[14px] text-slate-800 placeholder:text-slate-400 focus:outline-none"
+                className="min-w-0 flex-1 bg-transparent px-2 py-3 text-[14px] placeholder:opacity-70 focus:outline-none"
+                style={{ color: THEME.ink }}
               />
               {searchInput && (
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => { setSearchInput(''); setFilter({ q: undefined }); }}
-                  className="flex h-11 w-11 items-center justify-center text-slate-400"
+                  className="flex h-11 w-11 items-center justify-center"
+                  style={{ color: THEME.inkSubtle }}
                   aria-label="Clear search"
                 >
                   <X className="h-4 w-4" />
@@ -1981,7 +2264,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               onClick={() => { setShowLocation((v) => !v); setShowAccountMenu(false); setShowLangMenu(false); }}
               aria-haspopup="listbox"
               aria-expanded={showLocation}
-              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-left transition hover:bg-[#f4f5ff]"
+              className="mm-hover flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-left transition"
+              style={{ backgroundColor: showLocation ? THEME.hover : 'transparent' }}
             >
               <MapPin className={`h-[18px] w-[18px] shrink-0 ${isLocating ? 'animate-pulse' : ''}`} style={{ color: THEME.brand }} />
               <span className="flex flex-col whitespace-nowrap leading-tight">
@@ -1998,10 +2282,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               <div
                 role="listbox"
                 aria-label="Choose a delivery district"
-                className="absolute left-0 top-full z-50 mt-2 w-[260px] overflow-hidden rounded-xl border bg-white py-1 shadow-xl"
-                style={{ borderColor: THEME.line }}
+                className="absolute left-0 top-full z-50 mt-2 w-[260px] overflow-hidden rounded-xl border py-1 shadow-xl"
+                style={{ borderColor: THEME.line, backgroundColor: THEME.surface, boxShadow: THEME.shadow }}
               >
-                <div className="px-3 py-2 text-[10px] font-black uppercase tracking-wide text-slate-400">
+                <div className="px-3 py-2 text-[10px] font-black uppercase tracking-wide" style={{ color: THEME.inkSubtle }}>
                   {copy('deliver_to_all')}
                 </div>
                 <div className="max-h-64 overflow-y-auto">
@@ -2012,10 +2296,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       role="option"
                       aria-selected={deliverTo === zone}
                       onClick={() => pickLocation(zone)}
-                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-[12.5px] transition hover:bg-[#f4f5ff] ${
-                        deliverTo === zone ? 'font-bold' : 'text-slate-600'
+                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-[12.5px] transition hover:opacity-80 ${
+                        deliverTo === zone ? 'font-bold' : ''
                       }`}
-                      style={deliverTo === zone ? { color: THEME.brand } : undefined}
+                      style={deliverTo === zone ? { color: THEME.brand, backgroundColor: THEME.brandTint } : { color: THEME.inkMuted }}
                     >
                       {zone}
                       {deliverTo === zone && <Check className="h-3.5 w-3.5" />}
@@ -2029,13 +2313,14 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           {/* CENTRAL GLOBAL SEARCH — anchored wrapper positions the overlay */}
           <form onSubmit={submitSearch} className="relative flex min-w-0 flex-1 items-center" ref={searchBoxRef}>
             <div
-              className="flex w-full items-center overflow-hidden rounded-xl border-2 bg-white transition-shadow focus-within:shadow-md"
-              style={{ borderColor: THEME.brand }}
+              className="flex w-full items-center overflow-hidden rounded-xl border-2 transition-shadow focus-within:shadow-md"
+              style={{ borderColor: THEME.brand, backgroundColor: THEME.surface }}
             >
               <button
                 type="button"
                 onClick={submitSearch}
-                className="flex h-10 items-center gap-1 px-3 text-[12px] font-bold text-slate-600 hover:bg-[#f4f5ff]"
+                className="mm-hover flex h-10 items-center gap-1 px-3 text-[12px] font-bold"
+                style={{ color: THEME.inkMuted }}
               >
                 All
                 <ChevronDown className="h-3 w-3" />
@@ -2053,14 +2338,16 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 aria-autocomplete="list"
                 aria-expanded={searchFocused}
                 autoComplete="off"
-                className="min-w-0 flex-1 px-3 py-2.5 text-[13px] text-slate-800 placeholder:text-slate-400 focus:outline-none"
+                className="min-w-0 flex-1 bg-transparent px-3 py-2.5 text-[13px] placeholder:opacity-70 focus:outline-none"
+                style={{ color: THEME.ink }}
               />
               {searchInput && (
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => { setSearchInput(''); setFilter({ q: undefined }); }}
-                  className="px-2 text-slate-400 hover:text-slate-700"
+                  className="px-2 transition hover:opacity-60"
+                  style={{ color: THEME.inkSubtle }}
                   aria-label="Clear search"
                 >
                   <X className="h-4 w-4" />
@@ -2088,19 +2375,22 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 onClick={() => { setShowLangMenu((v) => !v); setShowLocation(false); setShowAccountMenu(false); }}
                 aria-haspopup="menu"
                 aria-expanded={showLangMenu}
-                className="flex items-center gap-1 rounded-lg px-2 py-2 text-[12px] font-bold transition hover:bg-[#f4f5ff]"
+                className="mm-hover flex items-center gap-1 rounded-lg px-2 py-2 text-[12px] font-bold transition"
                 style={{ color: THEME.ink }}
                 title="Change language"
               >
-                <Globe className="h-[15px] w-[15px] text-slate-500" />
+                <Globe className="h-[15px] w-[15px]" style={{ color: THEME.inkMuted }} />
                 {language === 'en' ? 'EN' : 'বাংলা'}
-                <ChevronDown className={`h-3 w-3 text-slate-400 transition-transform ${showLangMenu ? 'rotate-180' : ''}`} />
+                <ChevronDown
+                  className={`h-3 w-3 transition-transform ${showLangMenu ? 'rotate-180' : ''}`}
+                  style={{ color: THEME.inkSubtle }}
+                />
               </button>
               {showLangMenu && (
                 <div
                   role="menu"
-                  className="absolute right-0 top-full z-50 mt-2 w-[168px] overflow-hidden rounded-xl border bg-white py-1 shadow-xl"
-                  style={{ borderColor: THEME.line }}
+                  className="absolute right-0 top-full z-50 mt-2 w-[168px] overflow-hidden rounded-xl border py-1"
+                  style={{ borderColor: THEME.line, backgroundColor: THEME.surface, boxShadow: THEME.shadow }}
                 >
                   {([['en', 'English', 'EN'], ['bn', 'বাংলা', 'BN']] as const).map(([code, label, short]) => (
                     <button
@@ -2109,17 +2399,28 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       role="menuitemradio"
                       aria-checked={language === code}
                       onClick={() => pickLanguage(code)}
-                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-[12.5px] transition hover:bg-[#f4f5ff] ${
-                        language === code ? 'font-bold' : 'text-slate-600'
+                      className={`mm-hover flex w-full items-center justify-between px-3 py-2 text-left text-[12.5px] transition ${
+                        language === code ? 'font-bold' : ''
                       }`}
-                      style={language === code ? { color: THEME.brand } : undefined}
+                      style={language === code ? { color: THEME.brand } : { color: THEME.inkMuted }}
                     >
-                      <span>{label} <span className="text-[10px] text-slate-400">({short})</span></span>
+                      <span>{label} <span className="text-[10px]" style={{ color: THEME.inkSubtle }}>({short})</span></span>
                       {language === code && <Check className="h-3.5 w-3.5" />}
                     </button>
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* DARK / LIGHT TOGGLE — sits with the other appearance controls
+                (language, account) rather than floating over the page. */}
+            <div className="flex items-center pl-0.5 pr-1">
+              <ThemeSwitch
+                isDark={isDark}
+                onToggle={toggleDark}
+                theme={THEME}
+                label={isDark ? copy('switch_to_light') : copy('switch_to_dark')}
+              />
             </div>
 
             {/* ACCOUNT DROPDOWN */}
@@ -2129,7 +2430,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 onClick={() => { setShowAccountMenu((v) => !v); setShowLocation(false); setShowLangMenu(false); }}
                 aria-haspopup="menu"
                 aria-expanded={showAccountMenu}
-                className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition hover:bg-[#f4f5ff]"
+                className="mm-hover flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition"
+                style={{ backgroundColor: showAccountMenu ? THEME.hover : undefined }}
               >
                 {/* Signed-in shoppers get their initial; guests get the icon. */}
                 {shopperFirstName ? (
@@ -2144,14 +2446,17 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                   <User className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
                 )}
                 <span className="flex flex-col whitespace-nowrap leading-tight">
-                  <span className="max-w-[92px] truncate text-[10px] text-slate-400">
+                  <span className="max-w-[92px] truncate text-[10px]" style={{ color: THEME.inkSubtle }}>
                     {shopperFirstName
                       ? (language === 'bn' ? `হ্যালো, ${shopperFirstName}` : `Hi, ${shopperFirstName}`)
                       : copy('hi_sign_in')}
                   </span>
                   <span className="flex items-center gap-1 text-[12px] font-bold" style={{ color: THEME.ink }}>
                     {copy('account')}
-                    <ChevronDown className={`h-3 w-3 text-slate-400 transition-transform ${showAccountMenu ? 'rotate-180' : ''}`} />
+                    <ChevronDown
+                      className={`h-3 w-3 transition-transform ${showAccountMenu ? 'rotate-180' : ''}`}
+                      style={{ color: THEME.inkSubtle }}
+                    />
                   </span>
                 </span>
               </button>
@@ -2159,25 +2464,25 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 <div
                   role="menu"
                   aria-label={copy('account_menu')}
-                  className="absolute right-0 top-full z-50 mt-2 w-[268px] overflow-hidden rounded-xl border bg-white shadow-2xl"
-                  style={{ borderColor: THEME.line }}
+                  className="absolute right-0 top-full z-50 mt-2 w-[268px] overflow-hidden rounded-xl border"
+                  style={{ borderColor: THEME.line, backgroundColor: THEME.surface, boxShadow: THEME.shadow }}
                 >
                   {/* Header — the Noon pattern: a greeting block that either
                       welcomes the shopper by name or invites them to sign in. */}
                   <div className="border-b px-3.5 py-3" style={{ borderColor: THEME.line }}>
                     {shopperFirstName ? (
                       <>
-                        <div className="truncate text-[13px] font-black text-slate-900">
+                        <div className="truncate text-[13px] font-black" style={{ color: THEME.ink }}>
                           {language === 'bn' ? `হ্যালো, ${shopperFirstName}` : `Hi, ${shopperFirstName}`}
                         </div>
                         {shopper?.email && (
-                          <div className="mt-0.5 truncate text-[11px] text-slate-500" lang="en">{shopper.email}</div>
+                          <div className="mt-0.5 truncate text-[11px]" style={{ color: THEME.inkMuted }} lang="en">{shopper.email}</div>
                         )}
                       </>
                     ) : (
                       <>
-                        <div className="text-[13px] font-black text-slate-900">{copy('welcome_zid')}</div>
-                        <div className="mt-0.5 text-[11px] text-slate-500">{copy('sign_in_desc')}</div>
+                        <div className="text-[13px] font-black" style={{ color: THEME.ink }}>{copy('welcome_zid')}</div>
+                        <div className="mt-0.5 text-[11px]" style={{ color: THEME.inkMuted }}>{copy('sign_in_desc')}</div>
                       </>
                     )}
                     <div className="mt-2.5">
@@ -2186,7 +2491,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                           type="button"
                           role="menuitem"
                           onClick={() => { setShowAccountMenu(false); onOpenCustomerAccount?.('profile'); }}
-                          className="flex min-h-[34px] w-full items-center justify-center gap-1.5 rounded-lg border text-[12px] font-black transition hover:bg-[#f4f5ff]"
+                          className="mm-hover flex min-h-[34px] w-full items-center justify-center gap-1.5 rounded-lg border text-[12px] font-black transition"
                           style={{ borderColor: THEME.brand, color: THEME.brand }}
                         >
                           <User className="h-3.5 w-3.5" /> {copy('account_overview')}
@@ -2218,11 +2523,12 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                         type="button"
                         role="menuitem"
                         onClick={() => { setShowAccountMenu(false); onOpenCustomerAccount?.(section); }}
-                        className="flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] text-slate-700 transition hover:bg-[#f4f5ff]"
+                        className="mm-hover flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] transition"
+                        style={{ color: THEME.inkMuted }}
                       >
-                        <Icon className="h-4 w-4 shrink-0 text-slate-400" />
+                        <Icon className="h-4 w-4 shrink-0" style={{ color: THEME.inkSubtle }} />
                         <span className="min-w-0 flex-1 truncate">{label}</span>
-                        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300" />
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0" style={{ color: THEME.inkSubtle }} />
                       </button>
                     ))}
 
@@ -2232,16 +2538,17 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       type="button"
                       role="menuitem"
                       onClick={() => { setShowAccountMenu(false); setShowWishlist(true); }}
-                      className="flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] text-slate-700 transition hover:bg-[#f4f5ff]"
+                      className="mm-hover flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] transition"
+                      style={{ color: THEME.inkMuted }}
                     >
-                      <Heart className="h-4 w-4 shrink-0 text-slate-400" />
+                      <Heart className="h-4 w-4 shrink-0" style={{ color: THEME.inkSubtle }} />
                       <span className="min-w-0 flex-1 truncate">{copy('wishlist')}</span>
                       {wishlist.count > 0 && (
-                        <span className="rounded-full bg-[#eef0ff] px-1.5 text-[10px] font-black" style={{ color: THEME.brand }}>
+                        <span className="rounded-full px-1.5 text-[10px] font-black" style={{ backgroundColor: THEME.brandTint, color: THEME.brand }}>
                           {wishlist.count}
                         </span>
                       )}
-                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300" />
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0" style={{ color: THEME.inkSubtle }} />
                     </button>
                   </div>
 
@@ -2252,9 +2559,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                         type="button"
                         role="menuitem"
                         onClick={() => { setShowAccountMenu(false); onGoToPlans(); }}
-                        className="flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] text-slate-700 transition hover:bg-[#f4f5ff]"
+                        className="mm-hover flex min-h-[38px] w-full items-center gap-2.5 px-3.5 text-left text-[12.5px] transition"
+                        style={{ color: THEME.inkMuted }}
                       >
-                        <Store className="h-4 w-4 shrink-0 text-slate-400" />
+                        <Store className="h-4 w-4 shrink-0" style={{ color: THEME.inkSubtle }} />
                         <span className="min-w-0 flex-1 truncate">{copy('sell_on_zid')}</span>
                       </button>
                     )}
@@ -2280,7 +2588,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             <button
               type="button"
               onClick={() => onOpenCustomerAccount?.('orders')}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition hover:bg-[#f4f5ff]"
+              className="mm-hover flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition"
               title={copy('track_orders')}
             >
               <Receipt className="h-[18px] w-[18px]" style={{ color: THEME.ink }} />
@@ -2291,7 +2599,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             <button
               type="button"
               onClick={() => setShowWishlist(true)}
-              className="relative flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition hover:bg-[#f4f5ff]"
+              className="mm-hover relative flex items-center gap-1.5 rounded-lg px-2.5 py-2 transition"
               aria-label={`${copy('wishlist')}, ${wishlist.count}`}
               title={copy('wishlist')}
             >
@@ -2313,7 +2621,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             <button
               type="button"
               onClick={() => setShowBasket(true)}
-              className="relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition hover:bg-[#f4f5ff]"
+              className="mm-hover relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition"
               aria-label={`Cart, ${basket.itemCount} items`}
             >
               <div className="relative">
@@ -2329,7 +2637,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                   label "Cart" were wrapping onto each other's lines in the
                   two-line stack, rendering as "Cart" over a stacked "৳ / 0". */}
               <span className="hidden flex-col leading-tight xl:flex">
-                <span className="whitespace-nowrap text-[10px] text-slate-400">{copy('cart')}</span>
+                <span className="whitespace-nowrap text-[10px]" style={{ color: THEME.inkSubtle }}>{copy('cart')}</span>
                 <span className="whitespace-nowrap text-[12px] font-bold tabular-nums" style={{ color: THEME.ink }}>
                   {bdt(basket.subtotal)}
                 </span>
@@ -2360,10 +2668,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               type="button"
               onClick={() => { setOpenMenu(null); setActiveSub(undefined); setFilter({ category: undefined, subCategory: undefined }); }}
               // 44px tap height on mobile, compact on desktop.
-              className={`flex shrink-0 snap-start items-center whitespace-nowrap rounded-full px-3.5 text-[12px] font-bold transition min-h-[36px] lg:min-h-0 lg:rounded-md lg:px-2.5 lg:py-1.5 ${
-                !filters.category ? 'text-white' : 'text-slate-600 active:bg-[#eef0ff] lg:hover:bg-[#f4f5ff]'
-              }`}
-              style={!filters.category ? { backgroundColor: THEME.brand } : { backgroundColor: '#f4f5ff' }}
+              className="mm-hover flex min-h-[36px] shrink-0 snap-start items-center whitespace-nowrap rounded-full px-3.5 text-[12px] font-bold transition lg:min-h-0 lg:rounded-md lg:px-2.5 lg:py-1.5"
+              style={!filters.category
+                ? { backgroundColor: THEME.brand, color: '#fff' }
+                : { backgroundColor: THEME.chip, color: THEME.inkMuted }}
             >
               {copy('all_categories')}
             </button>
@@ -2400,10 +2708,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     }}
                     aria-haspopup={tree && tree.children.length > 0 ? 'menu' : undefined}
                     aria-expanded={tree && tree.children.length > 0 ? isOpen : undefined}
-                    className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3.5 text-[12px] font-semibold transition min-h-[36px] lg:min-h-0 lg:rounded-md lg:px-2.5 lg:py-1.5 ${
-                      isActive ? 'text-white' : 'text-slate-600 active:bg-[#eef0ff] lg:hover:bg-[#f4f5ff]'
-                    }`}
-                    style={isActive || isOpen ? { backgroundColor: isActive ? THEME.brand : '#eef0ff', color: isActive ? '#fff' : THEME.brand } : { backgroundColor: '#f4f5ff' }}
+                    className="mm-hover flex min-h-[36px] items-center gap-1 whitespace-nowrap rounded-full px-3.5 text-[12px] font-semibold transition lg:min-h-0 lg:rounded-md lg:px-2.5 lg:py-1.5"
+                    style={isActive || isOpen
+                      ? { backgroundColor: isActive ? THEME.brand : THEME.brandTint, color: isActive ? '#fff' : THEME.brand }
+                      : { backgroundColor: THEME.chip, color: THEME.inkMuted }}
                   >
                     {/* Category artwork from Marketplace Studio. Shown only from
                         `lg` up: on a phone the circular `sm` thumb would eat the
@@ -2434,16 +2742,21 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               type="button"
               onClick={() => setDealsOnly((v) => !v)}
               aria-pressed={dealsOnly}
-              className={`flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1.5 text-[11.5px] font-bold transition ${
-                dealsOnly ? 'bg-rose-600 text-white' : 'bg-rose-50 text-rose-600 hover:bg-rose-100'
-              }`}
+              className="flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1.5 text-[11.5px] font-bold transition hover:brightness-105"
+              style={dealsOnly
+                ? { backgroundColor: '#e11d48', color: '#fff' }
+                : { backgroundColor: isDark ? 'rgba(225,29,72,0.16)' : '#fff1f2', color: isDark ? '#fda4af' : '#e11d48' }}
             >
               <Flame className="h-3.5 w-3.5" /> {copy('deals_tab')}
             </button>
             <button
               type="button"
               onClick={() => setFilter({ sort: 'newest' })}
-              className="flex items-center gap-1 whitespace-nowrap rounded-full bg-emerald-50 px-3 py-1.5 text-[11.5px] font-bold text-emerald-700 transition hover:bg-emerald-100"
+              className="flex items-center gap-1 whitespace-nowrap rounded-full px-3 py-1.5 text-[11.5px] font-bold transition hover:brightness-105"
+              style={{
+                backgroundColor: isDark ? 'rgba(16,185,129,0.16)' : '#ecfdf5',
+                color: isDark ? '#6ee7b7' : '#047857',
+              }}
             >
               <Sparkles className="h-3.5 w-3.5" /> {copy('new_in_tab')}
             </button>
@@ -2470,6 +2783,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 onSelectPrimary={selectPrimaryCategory}
                 onClose={scheduleCloseMegaMenu}
                 lang={language}
+                theme={THEME}
               />
             </div>
           )}
@@ -2500,8 +2814,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             Mobile keeps a 2x2 grid — a 4-across row on a 390px screen leaves
             ~85px per cell, which truncates every label to "Nationwi…". */}
         <div
-          className="mt-3 grid grid-cols-2 divide-x divide-y overflow-hidden rounded-2xl border bg-white sm:mt-4 sm:grid-cols-4 sm:divide-y-0"
-          style={{ borderColor: THEME.line }}
+          className="mt-3 grid grid-cols-2 divide-x divide-y overflow-hidden rounded-2xl border sm:mt-4 sm:grid-cols-4 sm:divide-y-0"
+          style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}
         >
           {[
             {
@@ -2543,15 +2857,15 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             >
               <span
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl sm:h-10 sm:w-10"
-                style={{ backgroundColor: '#eef0ff' }}
+                style={{ backgroundColor: THEME.brandTint }}
               >
                 <item.icon className="h-4 w-4 sm:h-[18px] sm:w-[18px]" style={{ color: THEME.brand }} />
               </span>
               <div className="min-w-0 text-left">
-                <div className="text-[11px] font-bold leading-tight text-slate-800 sm:text-[11.5px]">
+                <div className="text-[11px] font-bold leading-tight sm:text-[11.5px]" style={{ color: THEME.ink }}>
                   {item.title}
                 </div>
-                <div className="mt-0.5 text-[10px] leading-tight text-slate-500 sm:text-[10.5px]">
+                <div className="mt-0.5 text-[10px] leading-tight sm:text-[10.5px]" style={{ color: THEME.inkMuted }}>
                   {item.sub}
                 </div>
               </div>
@@ -2565,12 +2879,12 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
         {topCategories.length > 0 && (
           <section className="mt-7 hidden lg:block">
             <div className="mb-3.5 flex items-baseline justify-between gap-3">
-              <h2 className="text-[16px] font-black tracking-[-0.015em] text-slate-900">{copy('shop_by_category')}</h2>
+              <h2 className="text-[16px] font-black tracking-[-0.015em]" style={{ color: THEME.ink }}>{copy('shop_by_category')}</h2>
               {filters.category && (
                 <button
                   type="button"
                   onClick={() => setFilter({ category: undefined })}
-                  className="rounded-md px-2 py-1 text-[11.5px] font-bold transition hover:bg-[#f4f5ff]"
+                  className="mm-hover rounded-md px-2 py-1 text-[11.5px] font-bold transition"
                   style={{ color: THEME.brand }}
                 >
                   Clear
@@ -2592,7 +2906,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                   count={cat.product_count}
                   emoji={(cat as any).emoji || categoryEmoji(cat.name)}
                   image={(cat as any).image}
-                lang={language}
+                  lang={language}
+                  theme={THEME}
                   active={filters.category === cat.name}
                   onClick={() => setFilter({ category: filters.category === cat.name ? undefined : cat.name })}
                 />
@@ -2609,11 +2924,11 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           <section className="mt-7">
             <div className="mb-3.5 flex items-baseline justify-between gap-3">
               <div className="min-w-0">
-                <h2 className="text-[16px] font-black tracking-[-0.015em] text-slate-900">
+                <h2 className="text-[16px] font-black tracking-[-0.015em]" style={{ color: THEME.ink }}>
                   {featuredConfig?.featuredTitle || copy('featured_picks')}
                 </h2>
                 {featuredConfig?.featuredSubtitle && (
-                  <p className="mt-0.5 truncate text-[11.5px] text-slate-500">{featuredConfig.featuredSubtitle}</p>
+                  <p className="mt-0.5 truncate text-[11.5px]" style={{ color: THEME.inkMuted }}>{featuredConfig.featuredSubtitle}</p>
                 )}
               </div>
             </div>
@@ -2628,6 +2943,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     isWishlisted={wishlist.has(String(product.id), (product as any).vendor_id)}
                     onToggleWishlist={handleToggleWishlist}
                     lang={language}
+                    theme={THEME}
                   />
                 </div>
               ))}
@@ -2663,6 +2979,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     isWishlisted={wishlist.has(String(product.id), (product as any).vendor_id)}
                     onToggleWishlist={handleToggleWishlist}
                     lang={language}
+                    theme={THEME}
                   />
                 </div>
               ))}
@@ -2681,13 +2998,18 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               in the bottom sheet, triggered by the sticky filter bar below. */}
           <aside className="hidden lg:block">
             <div className="sticky top-[150px] space-y-3">
-              <div className="rounded-xl border bg-white" style={{ borderColor: THEME.line }}>
+              <div className="rounded-xl border" style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}>
                 <div className="flex items-center justify-between border-b px-3 py-2.5" style={{ borderColor: THEME.line }}>
-                  <h3 className="flex items-center gap-1.5 text-[12px] font-black uppercase tracking-wide text-slate-700">
+                  <h3 className="flex items-center gap-1.5 text-[12px] font-black uppercase tracking-wide" style={{ color: THEME.ink }}>
                     <SlidersHorizontal className="h-3.5 w-3.5" /> {copy('filters')}
                   </h3>
                   {activeFilterCount > 0 && (
-                    <button type="button" onClick={clearAll} className="text-[10px] font-bold text-rose-600 hover:underline">
+                    <button
+                      type="button"
+                      onClick={clearAll}
+                      className="text-[10px] font-bold hover:underline"
+                      style={{ color: THEME.danger }}
+                    >
                       {copy('clear_all')}
                     </button>
                   )}
@@ -2695,7 +3017,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
                 {/* Category */}
                 <div className="border-b px-3 py-3" style={{ borderColor: THEME.line }}>
-                  <div className="mb-2 text-[11px] font-black uppercase tracking-wide text-slate-500">{copy('categories')}</div>
+                  <div className="mb-2 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>{copy('categories')}</div>
                   <div className="max-h-52 space-y-0.5 overflow-y-auto pr-1">
                     {(data?.categories || []).map((cat) => {
                       const active = filters.category === cat.name;
@@ -2704,16 +3026,17 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                           key={cat.name}
                           type="button"
                           onClick={() => setFilter({ category: active ? undefined : cat.name })}
-                          className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] transition ${
-                            active ? 'font-bold' : 'text-slate-600 hover:bg-slate-50'
+                          className={`mm-hover flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] transition ${
+                            active ? 'font-bold' : ''
                           }`}
-                          style={active ? { backgroundColor: '#eef0ff', color: THEME.brand } : undefined}
+                          style={active ? { backgroundColor: THEME.brandTint, color: THEME.brand } : { color: THEME.inkMuted }}
                         >
                           <span
-                            className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
-                              active ? 'border-transparent' : 'border-slate-300'
-                            }`}
-                            style={active ? { backgroundColor: THEME.brand } : undefined}
+                            className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border"
+                            style={{
+                              borderColor: active ? 'transparent' : THEME.inkSubtle,
+                              backgroundColor: active ? THEME.brand : undefined,
+                            }}
                           >
                             {active && <Check className="h-2.5 w-2.5 text-white" />}
                           </span>
@@ -2771,7 +3094,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
                 {/* Price */}
                 <div className="border-b px-3 py-3" style={{ borderColor: THEME.line }}>
-                  <div className="mb-2 text-[11px] font-black uppercase tracking-wide text-slate-500">{copy('price')}</div>
+                  <div className="mb-2 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>{copy('price')}</div>
                   <div className="space-y-0.5">
                     {PRICE_BANDS.map((band, idx) => {
                       const active = priceBandIndex === idx;
@@ -2780,15 +3103,17 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                           key={band.label}
                           type="button"
                           onClick={() => setFilter({ minPrice: band.min, maxPrice: band.max })}
-                          className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] transition ${
-                            active ? 'font-bold' : 'text-slate-600 hover:bg-slate-50'
+                          className={`mm-hover flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] transition ${
+                            active ? 'font-bold' : ''
                           }`}
-                          style={active ? { backgroundColor: '#eef0ff', color: THEME.brand } : undefined}
+                          style={active ? { backgroundColor: THEME.brandTint, color: THEME.brand } : { color: THEME.inkMuted }}
                         >
                           <span
-                            className={`h-3.5 w-3.5 shrink-0 rounded-full border-2 ${
-                              active ? 'border-[#3b2fd6] bg-[#3b2fd6]' : 'border-slate-300'
-                            }`}
+                            className="h-3.5 w-3.5 shrink-0 rounded-full border-2"
+                            style={{
+                              borderColor: active ? THEME.brand : THEME.inkSubtle,
+                              backgroundColor: active ? THEME.brand : 'transparent',
+                            }}
                           />
                           {language === 'bn' ? band.labelBn : band.label}
                         </button>
@@ -2803,10 +3128,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       onChange={(e) => setFilter({ minPrice: e.target.value === '' ? null : Number(e.target.value) })}
                       placeholder="Min ৳"
                       aria-label={language === 'bn' ? 'সর্বনিম্ন দাম' : 'Minimum price'}
-                      className="w-full rounded-md border px-2 py-1.5 text-[11px] focus:border-[#3b2fd6] focus:outline-none"
-                      style={{ borderColor: THEME.line }}
+                      className="w-full rounded-md border bg-transparent px-2 py-1.5 text-[11px] focus:outline-none"
+                      style={{ borderColor: THEME.line, color: THEME.ink }}
                     />
-                    <span className="text-slate-400">–</span>
+                    <span style={{ color: THEME.inkSubtle }}>–</span>
                     <input
                       type="number"
                       min={0}
@@ -2814,34 +3139,35 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       onChange={(e) => setFilter({ maxPrice: e.target.value === '' ? null : Number(e.target.value) })}
                       placeholder="Max ৳"
                       aria-label={language === 'bn' ? 'সর্বোচ্চ দাম' : 'Maximum price'}
-                      className="w-full rounded-md border px-2 py-1.5 text-[11px] focus:border-[#3b2fd6] focus:outline-none"
-                      style={{ borderColor: THEME.line }}
+                      className="w-full rounded-md border bg-transparent px-2 py-1.5 text-[11px] focus:outline-none"
+                      style={{ borderColor: THEME.line, color: THEME.ink }}
                     />
                   </div>
                 </div>
 
                 {/* Vendor */}
                 <div className="px-3 py-3">
-                  <div className="mb-2 text-[11px] font-black uppercase tracking-wide text-slate-500">{copy('vendors')}</div>
+                  <div className="mb-2 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>{copy('vendors')}</div>
                   {filters.vendor && (
                     <button
                       type="button"
                       onClick={() => setFilter({ vendor: undefined })}
-                      className="mb-1.5 flex w-full items-center justify-between rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] font-bold text-rose-700"
+                      className="mb-1.5 flex w-full items-center justify-between rounded-md border px-2 py-1.5 text-[11px] font-bold"
+                      style={{ borderColor: 'rgba(225,29,72,0.35)', backgroundColor: 'rgba(225,29,72,0.10)', color: THEME.danger }}
                     >
                       <span className="truncate">{activeVendor?.vendor_name || filters.vendor}</span>
                       <X className="h-3 w-3 shrink-0" />
                     </button>
                   )}
                   <div className="relative mb-1.5">
-                    <Store className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-slate-400" />
+                    <Store className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2" style={{ color: THEME.inkSubtle }} />
                     <input
                       value={vendorQuery}
                       onChange={(e) => setVendorQuery(e.target.value)}
                       placeholder={language === 'bn' ? 'সেলার খুঁজুন…' : 'Find a seller…'}
                       aria-label="Filter by vendor"
-                      className="w-full rounded-md border py-1.5 pl-6.5 pr-2 text-[11px] focus:border-[#3b2fd6] focus:outline-none"
-                      style={{ borderColor: THEME.line, paddingLeft: '1.6rem' }}
+                      className="w-full rounded-md border bg-transparent py-1.5 pr-2 text-[11px] focus:outline-none"
+                      style={{ borderColor: THEME.line, paddingLeft: '1.6rem', color: THEME.ink }}
                     />
                   </div>
                   <div className="max-h-56 space-y-0.5 overflow-y-auto pr-1">
@@ -2852,16 +3178,17 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                           key={vendor.vendor_id}
                           type="button"
                           onClick={() => setFilter({ vendor: active ? undefined : vendor.vendor_id })}
-                          className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] transition ${
-                            active ? 'font-bold' : 'text-slate-600 hover:bg-slate-50'
+                          className={`mm-hover flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] transition ${
+                            active ? 'font-bold' : ''
                           }`}
-                          style={active ? { backgroundColor: '#eef0ff', color: THEME.brand } : undefined}
+                          style={active ? { backgroundColor: THEME.brandTint, color: THEME.brand } : { color: THEME.inkMuted }}
                         >
                           <span
-                            className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
-                              active ? 'border-transparent' : 'border-slate-300'
-                            }`}
-                            style={active ? { backgroundColor: THEME.brand } : undefined}
+                            className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border"
+                            style={{
+                              borderColor: active ? 'transparent' : THEME.inkSubtle,
+                              backgroundColor: active ? THEME.brand : undefined,
+                            }}
                           >
                             {active && <Check className="h-2.5 w-2.5 text-white" />}
                           </span>
@@ -2872,7 +3199,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       );
                     })}
                     {vendorFacets.length === 0 && (
-                      <div className="px-1.5 py-1 text-[11px] text-slate-400">No sellers match.</div>
+                      <div className="px-1.5 py-1 text-[11px]" style={{ color: THEME.inkSubtle }}>No sellers match.</div>
                     )}
                   </div>
                 </div>
@@ -2912,14 +3239,14 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 with one thumb. Both controls open a BOTTOM SHEET — no dropdown
                 navigation escapes off-screen on a small phone. */}
             <div
-              className="sticky top-[112px] z-30 -mx-1 mb-2 flex items-stretch gap-2 rounded-xl border bg-white/95 px-2 py-1.5 backdrop-blur lg:hidden"
-              style={{ borderColor: THEME.line }}
+              className="sticky top-[112px] z-30 -mx-1 mb-2 flex items-stretch gap-2 rounded-xl border px-2 py-1.5 backdrop-blur lg:hidden"
+              style={{ borderColor: THEME.line, backgroundColor: isDark ? 'rgba(22,24,41,0.92)' : 'rgba(255,255,255,0.95)' }}
             >
               <button
                 type="button"
                 onClick={() => setShowFilterSheet(true)}
-                className="relative flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-lg border text-[12.5px] font-bold text-slate-700 active:bg-[#f4f5ff]"
-                style={{ borderColor: THEME.line }}
+                className="relative flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-lg border text-[12.5px] font-bold active:opacity-80"
+                style={{ borderColor: THEME.line, color: THEME.ink }}
                 aria-haspopup="dialog"
               >
                 <SlidersHorizontal className="h-4 w-4" />
@@ -2933,8 +3260,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               <button
                 type="button"
                 onClick={() => setShowFilterSheet(true)}
-                className="flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-lg border text-[12.5px] font-bold text-slate-700 active:bg-[#f4f5ff]"
-                style={{ borderColor: THEME.line }}
+                className="flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-lg border text-[12.5px] font-bold active:opacity-80"
+                style={{ borderColor: THEME.line, color: THEME.ink }}
                 aria-haspopup="dialog"
               >
                 <ArrowUpDown className="h-4 w-4" />
@@ -2944,11 +3271,11 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
             {/* Results toolbar (desktop) */}
             <div
-              className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-white px-3 py-2"
-              style={{ borderColor: THEME.line }}
+              className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3 py-2"
+              style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}
             >
               <div className="min-w-0">
-                <h1 className="truncate text-[14px] font-black tracking-tight text-slate-900 sm:text-[15px]">
+                <h1 className="truncate text-[14px] font-black tracking-tight sm:text-[15px]" style={{ color: THEME.ink }}>
                   {filters.q
                     ? copy('results_for', { q: filters.q })
                     : dealsOnly
@@ -2959,7 +3286,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                           ? displayCategory(filters.category, language)
                           : copy('marketplace_title')}
                 </h1>
-                <p className="text-[11px] text-slate-500">
+                <p className="text-[11px]" style={{ color: THEME.inkMuted }}>
                   {loading
                     ? copy('loading')
                     : language === 'bn'
@@ -2971,12 +3298,13 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
               <div className="hidden items-center gap-1.5 lg:flex">
                 <label className="flex items-center gap-1.5 rounded-lg border px-2 py-1.5" style={{ borderColor: THEME.line }}>
-                  <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{copy('sort_by')}</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wide" style={{ color: THEME.inkSubtle }}>{copy('sort_by')}</span>
                   <select
                     value={filters.sort}
                     onChange={(e) => setFilter({ sort: e.target.value as MarketplaceSortValue })}
                     aria-label="Sort products"
-                    className="bg-transparent text-[11px] font-bold text-slate-700 focus:outline-none"
+                    className="bg-transparent text-[11px] font-bold focus:outline-none"
+                    style={{ color: THEME.ink }}
                   >
                     {SORTS.map((s) => (
                       <option key={s.value} value={s.value}>{language === 'bn' ? s.labelBn : s.label}</option>
@@ -2990,34 +3318,44 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             {activeFilterCount > 0 && (
               <div className="mb-3 flex flex-wrap items-center gap-1.5">
                 {filters.q && (
-                  <Chip label={`“${filters.q}”`} onRemove={() => { setSearchInput(''); setFilter({ q: undefined }); }} />
+                  <Chip theme={THEME} label={`“${filters.q}”`} onRemove={() => { setSearchInput(''); setFilter({ q: undefined }); }} />
                 )}
                 {filters.category && (
                   <Chip
+                    theme={THEME}
                     label={activeSub ? `${filters.category} › ${activeSub}` : filters.category}
                     onRemove={() => { setActiveSub(undefined); setFilter({ category: undefined, subCategory: undefined }); }}
                   />
                 )}
                 {(filters.minPrice != null || filters.maxPrice != null) && (
                   <Chip
+                    theme={THEME}
                     label={`৳${filters.minPrice ?? 0} – ${filters.maxPrice != null ? bdt(filters.maxPrice) : '∞'}`}
                     onRemove={() => setFilter({ minPrice: null, maxPrice: null })}
                   />
                 )}
-                {activeVendor && <Chip label={activeVendor.vendor_name} onRemove={() => setFilter({ vendor: undefined })} />}
-                {dealsOnly && <Chip label="Deals only" onRemove={() => setDealsOnly(false)} />}
+                {activeVendor && <Chip theme={THEME} label={activeVendor.vendor_name} onRemove={() => setFilter({ vendor: undefined })} />}
+                {dealsOnly && <Chip theme={THEME} label="Deals only" onRemove={() => setDealsOnly(false)} />}
               </div>
             )}
 
             {error && (
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+              <div
+                className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-[12px]"
+                style={{
+                  borderColor: isDark ? 'rgba(251,191,36,0.3)' : '#fde68a',
+                  backgroundColor: isDark ? 'rgba(251,191,36,0.10)' : '#fffbeb',
+                  color: THEME.warningFg,
+                }}
+              >
                 <span>
                   <b>Products are temporarily unavailable.</b> {error}
                 </span>
                 <button
                   type="button"
                   onClick={() => setFilter({})}
-                  className="rounded-md border border-amber-300 bg-white px-2 py-1 text-[11px] font-bold text-amber-800"
+                  className="rounded-md border px-2 py-1 text-[11px] font-bold"
+                  style={{ borderColor: THEME.warningFg, backgroundColor: THEME.surface, color: THEME.warningFg }}
                 >
                   Try again
                 </button>
@@ -3028,21 +3366,21 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             {loading && products.length === 0 ? (
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-4 2xl:grid-cols-5">
                 {Array.from({ length: 10 }).map((_, i) => (
-                  <div key={i} className="overflow-hidden rounded-xl border bg-white" style={{ borderColor: THEME.line }}>
-                    <div className="aspect-square animate-pulse bg-slate-100" />
+                  <div key={i} className="overflow-hidden rounded-xl border" style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}>
+                    <div className="aspect-square animate-pulse" style={{ backgroundColor: THEME.skeleton }} />
                     <div className="space-y-2 p-3">
-                      <div className="h-2.5 w-4/5 animate-pulse rounded bg-slate-100" />
-                      <div className="h-2.5 w-2/5 animate-pulse rounded bg-slate-100" />
-                      <div className="h-6 w-full animate-pulse rounded bg-slate-100" />
+                      <div className="h-2.5 w-4/5 animate-pulse rounded" style={{ backgroundColor: THEME.skeleton }} />
+                      <div className="h-2.5 w-2/5 animate-pulse rounded" style={{ backgroundColor: THEME.skeleton }} />
+                      <div className="h-6 w-full animate-pulse rounded" style={{ backgroundColor: THEME.skeleton }} />
                     </div>
                   </div>
                 ))}
               </div>
             ) : products.length === 0 ? (
-              <div className="rounded-xl border bg-white py-16 text-center" style={{ borderColor: THEME.line }}>
-                <LayoutGrid className="mx-auto mb-3 h-9 w-9 text-slate-300" />
-                <div className="text-[13px] font-bold text-slate-700">No products match these filters</div>
-                <div className="mt-1 text-[11px] text-slate-500">Try a wider price range or another category.</div>
+              <div className="rounded-xl border py-16 text-center" style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}>
+                <LayoutGrid className="mx-auto mb-3 h-9 w-9" style={{ color: THEME.inkSubtle }} />
+                <div className="text-[13px] font-bold" style={{ color: THEME.ink }}>No products match these filters</div>
+                <div className="mt-1 text-[11px]" style={{ color: THEME.inkMuted }}>Try a wider price range or another category.</div>
                 {activeFilterCount > 0 && (
                   <button
                     type="button"
@@ -3068,6 +3406,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       isWishlisted={wishlist.has(String(product.id), (product as any).vendor_id)}
                       onToggleWishlist={handleToggleWishlist}
                       lang={language}
+                      theme={THEME}
                     />
                   ))}
                 </div>
@@ -3078,8 +3417,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                       type="button"
                       onClick={loadMore}
                       disabled={appending}
-                      className="flex items-center gap-2 rounded-xl border bg-white px-6 py-2.5 text-[12px] font-black text-slate-700 hover:border-[#3b2fd6] disabled:opacity-60"
-                      style={{ borderColor: THEME.line }}
+                      className="mm-hover flex items-center gap-2 rounded-xl border px-6 py-2.5 text-[12px] font-black transition disabled:opacity-60"
+                      style={{ borderColor: THEME.line, backgroundColor: THEME.surface, color: THEME.ink }}
                     >
                       {appending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
                       {copy('load_more')}
@@ -3111,6 +3450,17 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
           onGoToPlans={onGoToPlans}
+          theme={{
+            ink: THEME.ink,
+            inkMuted: THEME.inkMuted,
+            inkSubtle: THEME.inkSubtle,
+            line: THEME.line,
+            brand: THEME.brand,
+            brandTint: THEME.brandTint,
+            surface: THEME.surface,
+            chip: THEME.chip,
+            bg: THEME.bg,
+          }}
         />
       </main>
 
@@ -3121,21 +3471,22 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
         <div className="fixed inset-0 z-50 flex items-end justify-end sm:items-stretch" role="dialog" aria-modal="true" aria-label={copy('wishlist')}>
           <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-[2px]" onClick={() => setShowWishlist(false)} />
           <aside
-            className="relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl sm:max-h-none sm:h-full sm:max-w-md sm:rounded-none"
-            style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)' }}
+            className="relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-2xl shadow-2xl sm:max-h-none sm:h-full sm:max-w-md sm:rounded-none"
+            style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)', backgroundColor: THEME.surface }}
           >
             <div className="flex justify-center pt-2 sm:hidden">
-              <span className="h-1 w-10 rounded-full bg-slate-300" />
+              <span className="h-1 w-10 rounded-full" style={{ backgroundColor: THEME.inkSubtle }} />
             </div>
             <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: THEME.line }}>
-              <h2 className="flex items-center gap-2 text-[14px] font-black text-slate-900">
+              <h2 className="flex items-center gap-2 text-[14px] font-black" style={{ color: THEME.ink }}>
                 <Heart className="h-4 w-4" style={{ color: THEME.danger }} />
                 Wishlist ({wishlist.count})
               </h2>
               <button
                 type="button"
                 onClick={() => setShowWishlist(false)}
-                className="flex h-11 w-11 items-center justify-center rounded-full text-slate-500 active:bg-slate-100"
+                className="flex h-11 w-11 items-center justify-center rounded-full active:opacity-70"
+                style={{ color: THEME.inkMuted }}
                 aria-label="Close wishlist"
               >
                 <X className="h-5 w-5" />
@@ -3145,9 +3496,9 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             <div className="flex-1 overflow-y-auto px-4 py-3">
               {wishlist.items.length === 0 ? (
                 <div className="py-20 text-center">
-                  <Heart className="mx-auto mb-3 h-10 w-10 text-slate-200" />
-                  <div className="text-[13px] font-bold text-slate-700">{copy('wishlist_empty')}</div>
-                  <div className="mt-1 text-[11px] text-slate-500">
+                  <Heart className="mx-auto mb-3 h-10 w-10" style={{ color: THEME.inkSubtle }} />
+                  <div className="text-[13px] font-bold" style={{ color: THEME.ink }}>{copy('wishlist_empty')}</div>
+                  <div className="mt-1 text-[11px]" style={{ color: THEME.inkMuted }}>
                     {copy('wishlist_empty_desc')}
                   </div>
                 </div>
@@ -3163,10 +3514,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                           className="h-16 w-16 shrink-0 rounded-md border object-cover"
                         />
                         <div className="flex min-w-0 flex-1 flex-col">
-                          <div className="line-clamp-2 text-[11.5px] font-semibold leading-snug text-slate-800">
+                          <div className="line-clamp-2 text-[11.5px] font-semibold leading-snug" style={{ color: THEME.ink }}>
                             {productTitle(item.product, language)}
                           </div>
-                          <div className="mt-0.5 text-[10px] text-slate-500">{item.product.vendor_name}</div>
+                          <div className="mt-0.5 text-[10px]" style={{ color: THEME.inkMuted }}>{item.product.vendor_name}</div>
                           <div className="mt-auto flex items-center justify-between gap-2 pt-1">
                             <span className="text-[12px] font-black" style={{ color: THEME.ink }}>
                               {bdt(Number(item.product.priceBDT || 0))}
@@ -3187,7 +3538,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                               <button
                                 type="button"
                                 onClick={() => wishlist.remove(String(item.product.id), item.product.vendor_id)}
-                                className="rounded-md p-1 text-slate-400 hover:text-red-500"
+                                className="rounded-md p-1 transition hover:opacity-70"
+                                style={{ color: THEME.inkSubtle }}
                                 aria-label={`${copy('remove')} ${productTitle(item.product, language)}`}
                               >
                                 <X className="h-3.5 w-3.5" />
@@ -3212,22 +3564,23 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
         <div className="fixed inset-0 z-50 flex items-end justify-end sm:items-stretch" role="dialog" aria-modal="true" aria-label={copy('basket')}>
           <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-[2px]" onClick={() => setShowBasket(false)} />
           <aside
-            className="relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl sm:max-h-none sm:h-full sm:max-w-md sm:rounded-none"
-            style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)' }}
+            className="relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-2xl shadow-2xl sm:max-h-none sm:h-full sm:max-w-md sm:rounded-none"
+            style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)', backgroundColor: THEME.surface }}
           >
             {/* Grab handle (mobile only) */}
             <div className="flex justify-center pt-2 sm:hidden">
-              <span className="h-1 w-10 rounded-full bg-slate-300" />
+              <span className="h-1 w-10 rounded-full" style={{ backgroundColor: THEME.inkSubtle }} />
             </div>
             <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: THEME.line }}>
-              <h2 className="flex items-center gap-2 text-[14px] font-black text-slate-900">
+              <h2 className="flex items-center gap-2 text-[14px] font-black" style={{ color: THEME.ink }}>
                 <ShoppingBasket className="h-4 w-4" style={{ color: THEME.brand }} />
                 Your basket ({basket.itemCount})
               </h2>
               <button
                 type="button"
                 onClick={() => setShowBasket(false)}
-                className="flex h-11 w-11 items-center justify-center rounded-full text-slate-500 active:bg-slate-100"
+                className="flex h-11 w-11 items-center justify-center rounded-full active:opacity-70"
+                style={{ color: THEME.inkMuted }}
                 aria-label="Close basket"
               >
                 <X className="h-5 w-5" />
@@ -3237,21 +3590,21 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             <div className="flex-1 overflow-y-auto px-4 py-3">
               {basket.lines.length === 0 ? (
                 <div className="py-20 text-center">
-                  <ShoppingBasket className="mx-auto mb-3 h-10 w-10 text-slate-200" />
-                  <div className="text-[13px] font-bold text-slate-700">Your basket is empty</div>
-                  <div className="mt-1 text-[11px] text-slate-500">Add products from any seller to get started.</div>
+                  <ShoppingBasket className="mx-auto mb-3 h-10 w-10" style={{ color: THEME.inkSubtle }} />
+                  <div className="text-[13px] font-bold" style={{ color: THEME.ink }}>Your basket is empty</div>
+                  <div className="mt-1 text-[11px]" style={{ color: THEME.inkMuted }}>Add products from any seller to get started.</div>
                 </div>
               ) : (
                 <div className="space-y-3">
                   {/* Per-vendor grouping makes the split visible BEFORE checkout */}
                   {basket.vendors.map((vendor) => (
                     <div key={vendor.vendorId} className="rounded-lg border" style={{ borderColor: THEME.line }}>
-                      <div className="flex items-center justify-between border-b bg-[#fafbff] px-2.5 py-1.5" style={{ borderColor: THEME.line }}>
-                        <span className="flex items-center gap-1.5 text-[11px] font-bold text-slate-700">
+                      <div className="flex items-center justify-between border-b px-2.5 py-1.5" style={{ borderColor: THEME.line, backgroundColor: THEME.surfaceHover }}>
+                        <span className="flex items-center gap-1.5 text-[11px] font-bold" style={{ color: THEME.ink }}>
                           <Store className="h-3 w-3" style={{ color: THEME.brand }} />
                           {vendor.vendorName}
                         </span>
-                        <span className="text-[10px] text-slate-500">{bdt(vendor.subtotal)}</span>
+                        <span className="text-[10px]" style={{ color: THEME.inkMuted }}>{bdt(vendor.subtotal)}</span>
                       </div>
                       <div className="divide-y" style={{ borderColor: THEME.line }}>
                         {basket.lines
@@ -3266,7 +3619,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                                   className="h-14 w-14 shrink-0 rounded-md border object-cover"
                                 />
                                 <div className="min-w-0 flex-1">
-                                  <div className="line-clamp-2 text-[11.5px] font-semibold leading-snug text-slate-800">
+                                  <div className="line-clamp-2 text-[11.5px] font-semibold leading-snug" style={{ color: THEME.ink }}>
                                     {productTitle(line.product, language)}
                                   </div>
                                   <div className="mt-1 flex items-center justify-between">
@@ -3277,19 +3630,19 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                                       <button
                                         type="button"
                                         onClick={() => basket.setQuantity(String(line.product.id), vendor.vendorId, line.quantity - 1)}
-                                        className="rounded border p-0.5 text-slate-600 hover:bg-slate-50"
+                                        className="mm-hover rounded border p-0.5"
                                         aria-label="Decrease quantity"
-                                        style={{ borderColor: THEME.line }}
+                                        style={{ borderColor: THEME.line, color: THEME.inkMuted }}
                                       >
                                         <Minus className="h-3 w-3" />
                                       </button>
-                                      <span className="w-6 text-center text-[11px] font-bold">{line.quantity}</span>
+                                      <span className="w-6 text-center text-[11px] font-bold" style={{ color: THEME.ink }}>{line.quantity}</span>
                                       <button
                                         type="button"
                                         onClick={() => basket.setQuantity(String(line.product.id), vendor.vendorId, line.quantity + 1)}
-                                        className="rounded border p-0.5 text-slate-600 hover:bg-slate-50"
+                                        className="mm-hover rounded border p-0.5"
                                         aria-label="Increase quantity"
-                                        style={{ borderColor: THEME.line }}
+                                        style={{ borderColor: THEME.line, color: THEME.inkMuted }}
                                       >
                                         <Plus className="h-3 w-3" />
                                       </button>
@@ -3309,14 +3662,14 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             {basket.lines.length > 0 && (
               <div className="border-t px-4 pb-[max(12px,env(safe-area-inset-bottom))] pt-3" style={{ borderColor: THEME.line }}>
                 {basket.vendors.length > 1 && (
-                  <div className="mb-2 rounded-lg px-2.5 py-2 text-[10.5px]" style={{ backgroundColor: THEME.accentSoft, color: '#92400e' }}>
+                  <div className="mb-2 rounded-lg px-2.5 py-2 text-[10.5px]" style={{ backgroundColor: THEME.accentSoft, color: THEME.warningFg }}>
                     {language === 'bn'
                       ? <><b>{basket.vendors.length}টি সেলার</b> এই কার্টে — প্রত্যেকে আলাদা ট্র্যাকিং নম্বর সহ পাঠাবে।</>
                       : <><b>{basket.vendors.length} sellers</b> in this basket — each ships separately with its own tracking number.</>}
                   </div>
                 )}
                 <div className="mb-2 flex items-center justify-between text-[13px]">
-                  <span className="text-slate-500">{copy('subtotal')}</span>
+                  <span style={{ color: THEME.inkMuted }}>{copy('subtotal')}</span>
                   <span className="text-[15px] font-black" style={{ color: THEME.ink }}>{bdt(basket.subtotal)}</span>
                 </div>
                 {/*
@@ -3351,7 +3704,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 >
                   {copy('checkout')}
                 </button>
-                <p className="mt-1.5 text-center text-[10px] text-slate-400">
+                <p className="mt-1.5 text-center text-[10px]" style={{ color: THEME.inkSubtle }}>
                   {basket.vendors.length > 1
                     ? (language === 'bn'
                       ? `একবার চেকআউটেই ${basket.vendors.length}টি সেলারের পণ্য — প্রত্যেকে আলাদাভাবে পাঠাবেন।`
@@ -3373,8 +3726,14 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           so the last row is never hidden underneath it. */}
       {basket.itemCount > 0 && !showBasket && (
         <div
-          className="fixed inset-x-0 bottom-0 z-40 border-t bg-white/95 px-3 pb-[max(10px,env(safe-area-inset-bottom))] pt-2 shadow-[0_-4px_20px_-6px_rgba(17,24,39,0.25)] backdrop-blur lg:hidden"
-          style={{ borderColor: THEME.line }}
+          className="fixed inset-x-0 bottom-0 z-40 border-t px-3 pb-[max(10px,env(safe-area-inset-bottom))] pt-2 backdrop-blur lg:hidden"
+          style={{
+            borderColor: THEME.line,
+            backgroundColor: isDark ? 'rgba(22,24,41,0.94)' : 'rgba(255,255,255,0.95)',
+            boxShadow: isDark
+              ? '0 -4px 20px -6px rgba(0,0,0,0.8)'
+              : '0 -4px 20px -6px rgba(17,24,39,0.25)',
+          }}
         >
           <button
             type="button"
@@ -3386,8 +3745,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               <span className="relative">
                 <ShoppingBasket className="h-5 w-5" />
                 <span
-                  className="absolute -right-2 -top-2 flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[9px] font-black text-slate-900"
-                  style={{ backgroundColor: THEME.accent }}
+                  className="absolute -right-2 -top-2 flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-[9px] font-black"
+                  style={{ backgroundColor: THEME.accent, color: '#111827' }}
                 >
                   {basket.itemCount > 99 ? '99+' : basket.itemCount}
                 </span>
@@ -3414,22 +3773,23 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
       {/* ═════════ MOBILE FILTER / SORT BOTTOM SHEET ═════════ */}
       {showFilterSheet && (
         <div className="fixed inset-0 z-50 flex items-end lg:hidden" role="dialog" aria-modal="true" aria-label={copy('filters')}>
-          <div className="absolute inset-0 bg-slate-900/50" onClick={() => setShowFilterSheet(false)} />
+          <div className="absolute inset-0" style={{ backgroundColor: THEME.overlay }} onClick={() => setShowFilterSheet(false)} />
           <div
-            className="relative flex max-h-[88vh] w-full flex-col rounded-t-2xl bg-white"
-            style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)' }}
+            className="relative flex max-h-[88vh] w-full flex-col rounded-t-2xl"
+            style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)', backgroundColor: THEME.surface }}
           >
             {/* Grab handle */}
             <div className="flex justify-center pb-1 pt-2.5">
-              <span className="h-1 w-10 rounded-full bg-slate-300" />
+              <span className="h-1 w-10 rounded-full" style={{ backgroundColor: THEME.inkSubtle }} />
             </div>
 
             <div className="flex items-center justify-between px-4 pb-2">
-              <h2 className="text-[15px] font-black text-slate-900">Filter &amp; sort</h2>
+              <h2 className="text-[15px] font-black" style={{ color: THEME.ink }}>Filter &amp; sort</h2>
               <button
                 type="button"
                 onClick={() => setShowFilterSheet(false)}
-                className="flex h-11 w-11 items-center justify-center rounded-full text-slate-500 active:bg-slate-100"
+                className="flex h-11 w-11 items-center justify-center rounded-full active:opacity-70"
+                style={{ color: THEME.inkMuted }}
                 aria-label="Close filters"
               >
                 <X className="h-5 w-5" />
@@ -3439,7 +3799,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             <div className="flex-1 overflow-y-auto overscroll-contain px-4 pb-2">
               {/* Sort */}
               <section className="mb-4">
-                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide text-slate-500">Sort by</h3>
+                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>Sort by</h3>
                 <div className="grid grid-cols-2 gap-2">
                   {SORTS.map((s) => {
                     const active = filters.sort === s.value;
@@ -3451,8 +3811,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                         className="flex min-h-[44px] items-center justify-between gap-2 rounded-lg border px-3 text-left text-[12.5px] font-semibold"
                         style={{
                           borderColor: active ? THEME.brand : THEME.line,
-                          backgroundColor: active ? '#eef0ff' : '#fff',
-                          color: active ? THEME.brand : '#475569',
+                          backgroundColor: active ? THEME.brandTint : THEME.surface,
+                          color: active ? THEME.brand : THEME.inkMuted,
                         }}
                       >
                         <span className="truncate">{language === 'bn' ? s.labelBn : s.label}</span>
@@ -3465,7 +3825,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
               {/* Price */}
               <section className="mb-4">
-                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide text-slate-500">Price range</h3>
+                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>Price range</h3>
                 <div className="mb-2 grid grid-cols-2 gap-2">
                   <input
                     type="number"
@@ -3475,8 +3835,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     onChange={(e) => setFilter({ minPrice: e.target.value === '' ? null : Number(e.target.value) })}
                     placeholder="Min ৳"
                     aria-label={language === 'bn' ? 'সর্বনিম্ন দাম' : 'Minimum price'}
-                    className="min-h-[44px] w-full rounded-lg border px-3 text-[13px] focus:border-[#3b2fd6] focus:outline-none"
-                    style={{ borderColor: THEME.line }}
+                    className="min-h-[44px] w-full rounded-lg border bg-transparent px-3 text-[13px] focus:outline-none"
+                    style={{ borderColor: THEME.line, color: THEME.ink }}
                   />
                   <input
                     type="number"
@@ -3486,8 +3846,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     onChange={(e) => setFilter({ maxPrice: e.target.value === '' ? null : Number(e.target.value) })}
                     placeholder="Max ৳"
                     aria-label={language === 'bn' ? 'সর্বোচ্চ দাম' : 'Maximum price'}
-                    className="min-h-[44px] w-full rounded-lg border px-3 text-[13px] focus:border-[#3b2fd6] focus:outline-none"
-                    style={{ borderColor: THEME.line }}
+                    className="min-h-[44px] w-full rounded-lg border bg-transparent px-3 text-[13px] focus:outline-none"
+                    style={{ borderColor: THEME.line, color: THEME.ink }}
                   />
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -3501,8 +3861,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                         className="min-h-[40px] rounded-full border px-3 text-[12px] font-semibold"
                         style={{
                           borderColor: active ? THEME.brand : THEME.line,
-                          backgroundColor: active ? '#eef0ff' : '#fff',
-                          color: active ? THEME.brand : '#475569',
+                          backgroundColor: active ? THEME.brandTint : THEME.surface,
+                          color: active ? THEME.brand : THEME.inkMuted,
                         }}
                       >
                         {band.label}
@@ -3514,7 +3874,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
               {/* Categories */}
               <section className="mb-4">
-                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide text-slate-500">{copy('categories')}</h3>
+                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>{copy('categories')}</h3>
                 <div className="flex flex-wrap gap-2">
                   {(data?.categories || []).map((cat) => {
                     const active = filters.category === cat.name;
@@ -3526,12 +3886,12 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                         className="min-h-[40px] rounded-full border px-3 text-[12px] font-semibold"
                         style={{
                           borderColor: active ? THEME.brand : THEME.line,
-                          backgroundColor: active ? '#eef0ff' : '#fff',
-                          color: active ? THEME.brand : '#475569',
+                          backgroundColor: active ? THEME.brandTint : THEME.surface,
+                          color: active ? THEME.brand : THEME.inkMuted,
                         }}
                       >
                         {cat.name}
-                        <span className="ml-1 text-[10px] text-slate-400">({cat.product_count})</span>
+                        <span className="ml-1 text-[10px]" style={{ color: THEME.inkSubtle }}>({cat.product_count})</span>
                       </button>
                     );
                   })}
@@ -3540,16 +3900,16 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
               {/* Vendors */}
               <section className="mb-2">
-                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide text-slate-500">Sellers</h3>
+                <h3 className="mb-2 text-[11px] font-black uppercase tracking-wide" style={{ color: THEME.inkMuted }}>Sellers</h3>
                 <div className="relative mb-2">
-                  <Store className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Store className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" style={{ color: THEME.inkSubtle }} />
                   <input
                     value={vendorQuery}
                     onChange={(e) => setVendorQuery(e.target.value)}
                     placeholder="Search sellers"
                     aria-label="Filter by vendor"
-                    className="min-h-[44px] w-full rounded-lg border pl-9 pr-3 text-[13px] focus:border-[#3b2fd6] focus:outline-none"
-                    style={{ borderColor: THEME.line }}
+                    className="min-h-[44px] w-full rounded-lg border bg-transparent pl-9 pr-3 text-[13px] focus:outline-none"
+                    style={{ borderColor: THEME.line, color: THEME.ink }}
                   />
                 </div>
                 <div className="max-h-64 space-y-1 overflow-y-auto">
@@ -3563,24 +3923,27 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                         className="flex min-h-[44px] w-full items-center gap-2.5 rounded-lg border px-3 text-left"
                         style={{
                           borderColor: active ? THEME.brand : THEME.line,
-                          backgroundColor: active ? '#eef0ff' : '#fff',
+                          backgroundColor: active ? THEME.brandTint : THEME.surface,
                         }}
                       >
                         <span
                           className="flex h-5 w-5 shrink-0 items-center justify-center rounded border"
-                          style={{ borderColor: active ? THEME.brand : '#cbd5e1', backgroundColor: active ? THEME.brand : '#fff' }}
+                          style={{
+                            borderColor: active ? THEME.brand : THEME.inkSubtle,
+                            backgroundColor: active ? THEME.brand : 'transparent',
+                          }}
                         >
                           {active && <Check className="h-3 w-3 text-white" />}
                         </span>
-                        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" style={{ color: active ? THEME.brand : '#475569' }}>
+                        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" style={{ color: active ? THEME.brand : THEME.inkMuted }}>
                           {vendor.vendor_name}
-                          <span className="ml-1 text-[11px] font-normal text-slate-400">({vendor.product_count})</span>
+                          <span className="ml-1 text-[11px] font-normal" style={{ color: THEME.inkSubtle }}>({vendor.product_count})</span>
                         </span>
                       </button>
                     );
                   })}
                   {vendorFacets.length === 0 && (
-                    <div className="py-2 text-center text-[12px] text-slate-400">No sellers match.</div>
+                    <div className="py-2 text-center text-[12px]" style={{ color: THEME.inkSubtle }}>No sellers match.</div>
                   )}
                 </div>
               </section>
@@ -3591,8 +3954,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               <button
                 type="button"
                 onClick={() => { clearAll(); }}
-                className="min-h-[48px] flex-1 rounded-xl border text-[13px] font-bold text-slate-700 active:bg-slate-50"
-                style={{ borderColor: THEME.line }}
+                className="min-h-[48px] flex-1 rounded-xl border text-[13px] font-bold active:opacity-80"
+                style={{ borderColor: THEME.line, color: THEME.ink }}
               >
                 Reset
               </button>
@@ -3612,10 +3975,10 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
       {/* ═════════ MOBILE MENU DRAWER ═════════ */}
       {showMenu && (
         <div className="fixed inset-0 z-50 flex lg:hidden" role="dialog" aria-modal="true" aria-label="Menu">
-          <div className="absolute inset-0 bg-slate-900/50" onClick={() => setShowMenu(false)} />
+          <div className="absolute inset-0" style={{ backgroundColor: THEME.overlay }} onClick={() => setShowMenu(false)} />
           <aside
-            className="relative flex h-full w-[82%] max-w-[320px] flex-col bg-white shadow-2xl"
-            style={{ animation: 'mmDrawerIn .22s ease-out' }}
+            className="relative flex h-full w-[82%] max-w-[320px] flex-col shadow-2xl"
+            style={{ animation: 'mmDrawerIn .22s ease-out', backgroundColor: THEME.surface }}
           >
             <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: THEME.line }}>
               <span className="text-[15px] font-black" style={{ color: THEME.ink }}>
@@ -3624,7 +3987,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               <button
                 type="button"
                 onClick={() => setShowMenu(false)}
-                className="flex h-11 w-11 items-center justify-center rounded-full text-slate-500 active:bg-slate-100"
+                className="flex h-11 w-11 items-center justify-center rounded-full active:opacity-70"
+                style={{ color: THEME.inkMuted }}
                 aria-label="Close menu"
               >
                 <X className="h-5 w-5" />
@@ -3635,29 +3999,32 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               <button
                 type="button"
                 onClick={() => { setShowMenu(false); onOpenAccount?.(); }}
-                className="flex min-h-[52px] w-full items-center gap-3 px-4 text-left text-[14px] font-bold text-slate-800 active:bg-slate-50"
+                className="mm-hover flex min-h-[52px] w-full items-center gap-3 px-4 text-left text-[14px] font-bold"
+                style={{ color: THEME.ink }}
               >
-                <User className="h-5 w-5 text-slate-500" />
+                <User className="h-5 w-5" style={{ color: THEME.inkMuted }} />
                 My account
               </button>
               <button
                 type="button"
                 onClick={() => { setShowMenu(false); setShowBasket(true); }}
-                className="flex min-h-[52px] w-full items-center gap-3 px-4 text-left text-[14px] font-bold text-slate-800 active:bg-slate-50"
+                className="mm-hover flex min-h-[52px] w-full items-center gap-3 px-4 text-left text-[14px] font-bold"
+                style={{ color: THEME.ink }}
               >
-                <ShoppingBasket className="h-5 w-5 text-slate-500" />
+                <ShoppingBasket className="h-5 w-5" style={{ color: THEME.inkMuted }} />
                 Basket ({basket.itemCount})
               </button>
 
               <div className="my-2 border-t" style={{ borderColor: THEME.line }} />
 
-              <div className="px-4 pb-1 pt-1 text-[10px] font-black uppercase tracking-widest text-slate-400">
+              <div className="px-4 pb-1 pt-1 text-[10px] font-black uppercase tracking-widest" style={{ color: THEME.inkSubtle }}>
                 Shop by category
               </div>
               <button
                 type="button"
                 onClick={() => { setShowMenu(false); setFilter({ category: undefined }); }}
-                className="flex min-h-[48px] w-full items-center px-4 text-left text-[13.5px] font-semibold text-slate-700 active:bg-slate-50"
+                className="mm-hover flex min-h-[48px] w-full items-center px-4 text-left text-[13.5px] font-semibold"
+                style={{ color: THEME.inkMuted }}
               >
                 {copy('all_categories')}
               </button>
@@ -3668,11 +4035,11 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     <button
                       type="button"
                       onClick={() => { setShowMenu(false); selectPrimaryCategory(cat.name); }}
-                      className="flex min-h-[48px] w-full items-center justify-between px-4 text-left text-[13.5px] font-semibold active:bg-slate-50"
-                      style={{ color: filters.category === cat.name ? THEME.brand : '#334155' }}
+                      className="mm-hover flex min-h-[48px] w-full items-center justify-between px-4 text-left text-[13.5px] font-semibold"
+                      style={{ color: filters.category === cat.name ? THEME.brand : THEME.ink }}
                     >
                       <span className="truncate">{cat.name}</span>
-                      <span className="ml-2 text-[11px] text-slate-400">({cat.product_count})</span>
+                      <span className="ml-2 text-[11px]" style={{ color: THEME.inkSubtle }}>({cat.product_count})</span>
                     </button>
                     {/* On mobile the drawer — not a hover panel — is where the
                         sub-categories live, so they are listed inline here. */}
@@ -3683,8 +4050,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                             key={sub.id}
                             type="button"
                             onClick={() => { setShowMenu(false); selectSubCategory(cat.name, sub.name); }}
-                            className="flex min-h-[40px] w-full items-center justify-between rounded-md px-3 text-left text-[12.5px] active:bg-slate-50"
-                            style={{ color: activeSub === sub.name ? THEME.brand : '#64748b' }}
+                            className="mm-hover flex min-h-[40px] w-full items-center justify-between rounded-md px-3 text-left text-[12.5px]"
+                            style={{ color: activeSub === sub.name ? THEME.brand : THEME.inkMuted }}
                           >
                             <span className="truncate">{sub.name}</span>
                           </button>
@@ -3701,7 +4068,8 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                   <button
                     type="button"
                     onClick={() => { setShowMenu(false); onGoToPlans(); }}
-                    className="flex min-h-[48px] w-full items-center px-4 text-left text-[13.5px] font-semibold text-slate-700 active:bg-slate-50"
+                    className="mm-hover flex min-h-[48px] w-full items-center px-4 text-left text-[13.5px] font-semibold"
+                    style={{ color: THEME.inkMuted }}
                   >
                     {copy('sell_on_zid')}
                   </button>
@@ -3723,6 +4091,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
              stays exactly where they were in the grid. */
           onAdd={(p) => { handleAdd(p); setActiveProduct(null); }}
           onVisitVendor={(slug) => { setActiveProduct(null); onVisitVendor(slug); }}
+          theme={THEME}
         />
       )}
 
@@ -3751,6 +4120,65 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             animation: none !important;
           }
         }
+
+        /* ── Premium backdrop ─────────────────────────────────────────────
+           Two layers UNDER the content, both position:fixed so the effect
+           stays put while the grid scrolls:
+             1. a faint dot grid — reads as texture at 100%, never as "noise";
+             2. a slow-drifting colour bloom that gives the page depth.
+           Both are pointer-events:none and opacity-tuned so text contrast is
+           untouched, and both are switched off for reduced-motion users. */
+        .mm-backdrop::before,
+        .mm-backdrop::after {
+          content: '';
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          z-index: 0;
+        }
+        .mm-backdrop::before {
+          background-image: radial-gradient(var(--mm-dot) 1px, transparent 1px);
+          background-size: 22px 22px;
+          mask-image: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.25) 60%, transparent);
+          -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.25) 60%, transparent);
+        }
+        .mm-backdrop::after {
+          background:
+            radial-gradient(600px 420px at 12% 4%, var(--mm-glow-a), transparent 70%),
+            radial-gradient(680px 460px at 88% 22%, var(--mm-glow-b), transparent 72%);
+          animation: mmDrift 26s ease-in-out infinite alternate;
+        }
+        @keyframes mmDrift {
+          from { transform: translate3d(0, 0, 0) scale(1); }
+          to { transform: translate3d(0, -18px, 0) scale(1.04); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .mm-backdrop::after { animation: none; }
+        }
+
+        /* Theme-aware hover for the interactive chrome (header buttons, menu
+           rows, rail chips). One rule instead of dozens of hard-coded
+           utilities that stayed white in dark mode. */
+        .mm-hover:hover { background-color: var(--mm-hover) !important; }
+        @media (hover: none) {
+          .mm-hover:hover { background-color: transparent !important; }
+        }
+
+        /* Trending-search pills take the brand tint on hover without the caller
+           having to re-implement enter/leave handlers (the old version mutated
+           element.style directly, which React overwrote on the next render). */
+        .mm-pill:hover { border-color: var(--mm-brand) !important; color: var(--mm-brand) !important; }
+
+        /* Footer keyword pills and text links: brand colour on hover. Scoped to
+           the footer so the same helper cannot repaint marketplace chrome. */
+        .well-tag:hover { border-color: var(--mm-brand) !important; color: var(--mm-brand) !important; }
+        .well-link:hover { color: var(--mm-brand) !important; }
+
+        /* Product card lift on pointer devices; the shadow colour comes from the
+           palette so dark mode gets a deep shadow, not a grey haze. */
+        @media (hover: hover) and (min-width: 640px) {
+          article.group:hover { box-shadow: var(--mm-card-shadow); }
+        }
       `}</style>
     </div>
   );
@@ -3758,17 +4186,26 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
 
 /* ─────────────────────────── helper components ─────────────────────────── */
 
-const Chip: React.FC<{ label: string; onRemove: () => void }> = ({ label, onRemove }) => (
+const Chip: React.FC<{ label: string; onRemove: () => void; theme?: ThemeTokens }> = ({ label, onRemove, theme }) => {
+  const THEME = theme || LIGHT_THEME;
+  return (
   <span
-    className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-bold text-slate-600"
-    style={{ borderColor: THEME.line, backgroundColor: THEME.surface }}
+    className="flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-bold"
+    style={{ borderColor: THEME.line, backgroundColor: THEME.surface, color: THEME.inkMuted }}
   >
     {label}
-    <button type="button" onClick={onRemove} aria-label={`Remove ${label} filter`} className="text-slate-400 hover:text-rose-600">
+    <button
+      type="button"
+      onClick={onRemove}
+      aria-label={`Remove ${label} filter`}
+      className="transition hover:opacity-70"
+      style={{ color: THEME.inkSubtle }}
+    >
       <X className="h-3 w-3" />
     </button>
   </span>
-);
+  );
+};
 
 /** Compact product detail overlay — comparison review without leaving the grid. */
 const QuickView: React.FC<{
@@ -3777,7 +4214,10 @@ const QuickView: React.FC<{
   onAdd: (product: MarketplaceProduct) => void;
   onVisitVendor: (slug: string) => void;
   lang?: 'en' | 'bn';
-}> = ({ product, onClose, onAdd, onVisitVendor, lang: qvLang }) => {
+  /** Runtime palette — light or dark. */
+  theme?: ThemeTokens;
+}> = ({ product, onClose, onAdd, onVisitVendor, lang: qvLang, theme }) => {
+  const THEME = theme || LIGHT_THEME;
   const lang: 'en' | 'bn' = qvLang === 'bn' ? 'bn' : 'en';
   const p = product as any;
   const image = p.image || p.image_url || p.imageUrl;
@@ -3789,31 +4229,32 @@ const QuickView: React.FC<{
     // Mobile: bottom sheet anchored to the bottom edge (natural thumb reach) and
     // scrollable. Desktop: a centred two-column dialog.
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="absolute inset-0 bg-slate-900/55 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="absolute inset-0 backdrop-blur-[2px]" style={{ backgroundColor: THEME.overlay }} onClick={onClose} />
       <div
-        className="relative grid max-h-[90vh] w-full overflow-y-auto overscroll-contain rounded-t-2xl bg-white shadow-2xl sm:max-h-[92vh] sm:max-w-3xl sm:rounded-2xl md:grid-cols-2"
-        style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)' }}
+        className="relative grid max-h-[90vh] w-full overflow-y-auto overscroll-contain rounded-t-2xl shadow-2xl sm:max-h-[92vh] sm:max-w-3xl sm:rounded-2xl md:grid-cols-2"
+        style={{ animation: 'mmSheetUp .24s cubic-bezier(.2,.8,.2,1)', backgroundColor: THEME.surface }}
       >
         <button
           type="button"
           onClick={onClose}
-          className="absolute right-2 top-2 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-white/95 text-slate-600 shadow active:bg-slate-100 sm:right-3 sm:top-3 sm:h-9 sm:w-9"
+          className="absolute right-2 top-2 z-10 flex h-11 w-11 items-center justify-center rounded-full shadow active:opacity-70 sm:right-3 sm:top-3 sm:h-9 sm:w-9"
+          style={{ backgroundColor: THEME.surface, color: THEME.inkMuted }}
           aria-label="Close"
         >
           <X className="h-5 w-5 sm:h-4 sm:w-4" />
         </button>
-        <div className="aspect-[4/3] bg-[#f8fafc] sm:aspect-square">
+        <div className="aspect-[4/3] sm:aspect-square" style={{ backgroundColor: THEME.well }}>
           <SafeImage src={image} alt={title} className="h-full w-full object-cover" />
         </div>
         <div className="flex flex-col p-4 pb-[max(16px,env(safe-area-inset-bottom))] sm:p-5">
           <div className="flex flex-wrap gap-1">
             {tags.slice(0, 3).map((tag) => (
-              <span key={tag} className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide" style={{ backgroundColor: '#eef0ff', color: THEME.brand }}>
+              <span key={tag} className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide" style={{ backgroundColor: THEME.brandTint, color: THEME.brand }}>
                 {tag}
               </span>
             ))}
           </div>
-          <h2 className="mt-2 text-lg font-black leading-tight text-slate-900">{title}</h2>
+          <h2 className="mt-2 text-lg font-black leading-tight" style={{ color: THEME.ink }}>{title}</h2>
           <div className="mt-1.5">
             <RatingStars rating={Number(p.rating || 0)} count={Number(p.review_count || 0)} />
           </div>
@@ -3822,7 +4263,7 @@ const QuickView: React.FC<{
             <span className="text-2xl font-black" style={{ color: THEME.ink }}>{bdt(Number(product.priceBDT || 0))}</span>
             {Number(p.compare_at_price || 0) > Number(product.priceBDT || 0) && (
               <>
-                <span className="text-sm text-slate-400 line-through">{bdt(Number(p.compare_at_price))}</span>
+                <span className="text-sm line-through" style={{ color: THEME.inkSubtle }}>{bdt(Number(p.compare_at_price))}</span>
                 <span className="rounded px-1.5 py-0.5 text-[11px] font-black text-white" style={{ backgroundColor: THEME.danger }}>
                   -{p.discount_percent}%
                 </span>
@@ -3831,17 +4272,17 @@ const QuickView: React.FC<{
           </div>
 
           {p.descriptionEn || p.description_en ? (
-            <p className="mt-3 line-clamp-4 text-[12px] leading-relaxed text-slate-600">
+            <p className="mt-3 line-clamp-4 text-[12px] leading-relaxed" style={{ color: THEME.inkMuted }}>
               {p.descriptionEn || p.description_en}
             </p>
           ) : null}
 
           <div className="mt-4 rounded-xl border p-3" style={{ borderColor: THEME.line }}>
-            <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Sold by</div>
+            <div className="text-[10px] font-black uppercase tracking-wide" style={{ color: THEME.inkSubtle }}>Sold by</div>
             <div className="mt-1 flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1.5">
                 <Store className="h-4 w-4 shrink-0" style={{ color: THEME.brand }} />
-                <span className="truncate text-[13px] font-black text-slate-800">{product.vendor_name}</span>
+                <span className="truncate text-[13px] font-black" style={{ color: THEME.ink }}>{product.vendor_name}</span>
                 {p.vendor_verified && <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-emerald-500" />}
               </span>
               <button
@@ -3870,15 +4311,15 @@ const QuickView: React.FC<{
             return (
               <div className="mt-3 flex items-center gap-1.5 text-[11.5px] font-semibold">
                 {soldOut ? (
-                  <span className="text-rose-600">
+                  <span style={{ color: THEME.danger }}>
                     {marketplaceCopy('sold_out', lang)} — {marketplaceCopy('out_of_stock_hint', lang)}
                   </span>
                 ) : status === 'low_stock' ? (
-                  <span className="text-amber-700">
+                  <span style={{ color: THEME.warningFg }}>
                     {marketplaceCopy('only_left', lang, { n: qty })}
                   </span>
                 ) : (
-                  <span className="text-emerald-700">
+                  <span style={{ color: THEME.success }}>
                     {marketplaceCopy('in_stock', lang)}
                   </span>
                 )}
@@ -3915,8 +4356,8 @@ const QuickView: React.FC<{
             <button
               type="button"
               onClick={() => product.vendor_slug && onVisitVendor(product.vendor_slug)}
-              className="min-h-[48px] rounded-xl border px-4 text-[13px] font-bold text-slate-700 active:bg-slate-50"
-              style={{ borderColor: THEME.line }}
+              className="min-h-[48px] rounded-xl border px-4 text-[13px] font-bold active:opacity-80"
+              style={{ borderColor: THEME.line, color: THEME.ink }}
             >
               Buy from store
             </button>
