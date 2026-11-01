@@ -1891,12 +1891,16 @@ export default function App() {
     safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: allMerchants.length });
   }, [allMerchants]);
 
-  // Enforce Tab Title strictly to "Zid SaaS BD" across all dashboard routing and layout views
+  // Enforce the platform tab title across all dashboard routing and layout views.
+  // Must match the <title> in index.html: Google indexes the static head, and a
+  // client-side title that disagrees with it is a competing signal for the site
+  // name. A per-merchant storefront sets its own title and is left alone.
   React.useEffect(() => {
-    document.title = "Zid SaaS BD";
+    const PLATFORM_TITLE = "Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS";
+    document.title = PLATFORM_TITLE;
     const interval = setInterval(() => {
-      if (document.title !== "Zid SaaS BD") {
-        document.title = "Zid SaaS BD";
+      if (document.title !== PLATFORM_TITLE && !document.body.hasAttribute('data-owns-title')) {
+        document.title = PLATFORM_TITLE;
       }
     }, 500);
     return () => clearInterval(interval);
@@ -1909,7 +1913,7 @@ export default function App() {
   }, [authLoading]);
 
   React.useEffect(() => {
-    document.title = "Zid SaaS BD";
+    document.title = "Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS";
 
     const faviconEl = document.getElementById('app-favicon') as HTMLLinkElement | null;
     if (faviconEl) {

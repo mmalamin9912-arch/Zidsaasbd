@@ -3,8 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Zid SaaS BD</title>
-    <meta name="description" content="Zid SaaS BD - Modern E-Commerce Platform & Merchant Dashboard" />
+    <title>Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS</title>
+    <meta
+      name="description"
+      content="Zid SaaS BD is Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly."
+    />
+    <meta
+      name="keywords"
+      content="Zid SaaS BD, Bangladesh Marketplace, Multi-Vendor SaaS, Online Shopping BD"
+    />
+    <!--
+      DISAMBIGUATION FROM SAUDI ARABIA'S "ZID" (zid.sa).
+
+      Our brand name collides with an unrelated Saudi platform, which is why
+      Search can fold us into that entity's AI Overview. These tags state the
+      country, language and audience explicitly, and the JSON-LD below declares
+      an `Organization` with our own `sameAs` + `areaServed` so the crawler has
+      a distinct entity to attach the site name to instead of merging the two.
+      Keep every fact here consistent with the schema and the page content —
+      contradicting signals are what make engines fall back to a generic label.
+    -->
+    <meta name="geo.region" content="BD" />
+    <meta name="geo.placename" content="Dhaka, Bangladesh" />
+    <meta name="language" content="en" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
     <!--
       Brand metadata for Google Search.
 
@@ -28,33 +50,66 @@
     <link rel="icon" type="image/png" href="/logo.png" />
 
     <meta property="og:site_name" content="Zid SaaS BD" />
-    <meta property="og:title" content="Zid SaaS BD" />
-    <meta property="og:description" content="Modern E-Commerce Platform & Merchant Dashboard" />
+    <meta property="og:title" content="Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS" />
+    <meta
+      property="og:description"
+      content="Zid SaaS BD is Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly."
+    />
     <meta property="og:url" content="https://zidbdsaas.vercel.app/" />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="https://zidbdsaas.vercel.app/logo.png" />
+    <meta property="og:image:alt" content="Zid SaaS BD logo" />
+    <meta property="og:locale" content="en_BD" />
+    <meta property="og:locale:alternate" content="bn_BD" />
     <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS" />
+    <meta
+      name="twitter:description"
+      content="Zid SaaS BD is Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly."
+    />
+    <meta name="twitter:image" content="https://zidbdsaas.vercel.app/logo.png" />
     <link rel="canonical" href="https://zidbdsaas.vercel.app/" />
 
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@type": "WebSite",
+        "@id": "https://zidbdsaas.vercel.app/#website",
         "name": "Zid SaaS BD",
-        "alternateName": ["Zid SaaS BD", "Zid BD", "Zid SaaS"],
+        "alternateName": ["Zid SaaS BD", "Zid BD", "Zid SaaS Bangladesh"],
         "url": "https://zidbdsaas.vercel.app/",
-        "logo": "https://zidbdsaas.vercel.app/logo.png"
+        "description": "Multi-Vendor Marketplace and E-Commerce SaaS in Bangladesh",
+        "inLanguage": ["en", "bn"],
+        "publisher": { "@id": "https://zidbdsaas.vercel.app/#organization" }
       }
     </script>
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@type": "Organization",
+        "@id": "https://zidbdsaas.vercel.app/#organization",
         "name": "Zid SaaS BD",
+        "legalName": "Zid SaaS BD",
         "alternateName": ["Zid SaaS BD", "Zid BD"],
         "url": "https://zidbdsaas.vercel.app/",
+        "description": "Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly.",
         "logo": "https://zidbdsaas.vercel.app/logo.png",
-        "image": "https://zidbdsaas.vercel.app/logo.png"
+        "image": "https://zidbdsaas.vercel.app/logo.png",
+        "sameAs": ["https://github.com/mmalamin9912-arch/Zidsaasbd"],
+        "address": {
+          "@type": "PostalAddress",
+          "addressLocality": "Dhaka",
+          "addressCountry": "BD"
+        },
+        "areaServed": { "@type": "Country", "name": "Bangladesh" },
+        "knowsLanguage": ["en", "bn"],
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "contactType": "customer support",
+          "telephone": "+8801844990011",
+          "areaServed": "BD",
+          "availableLanguage": ["en", "bn"]
+        }
       }
     </script>
     <!-- Google Search Console / Merchant Center site ownership verification.
