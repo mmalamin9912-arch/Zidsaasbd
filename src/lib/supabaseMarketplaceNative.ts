@@ -6,7 +6,8 @@
 
 import { getSupabaseClient, isSupabaseConfigured, supabaseErrorMessage } from './supabase';
 import { createMarketplaceOrderInSupabase } from './marketplaceOrderSupabase';
-import type { MarketplaceProduct, MarketplaceFilters } from '../types';
+import type { MarketplaceProduct } from '../types';
+import type { MarketplaceFilters } from './marketplaceApi';
 
 export async function fetchSupabaseNativeProducts(
   filters: MarketplaceFilters = {},
@@ -117,7 +118,7 @@ export async function fetchSupabaseNativeVendorOrders(vendorId: string): Promise
   if (!isSupabaseConfigured) return { ok: false, orders: [], error: 'Supabase is not configured.' };
   const client = getSupabaseClient();
   if (!client) return { ok: false, orders: [], error: 'Supabase client unavailable.' };
-  const { data, error } = await client.from('orders').select('*').or([`vendor_id.eq.${vendorId}`, `store_id.eq.${vendorId}`, `store_slug.eq.${vendorId}`]).eq('marketplace_order', true).order('created_at', { ascending: false });
+  const { data, error } = await client.from('orders').select('*').or(`vendor_id.eq.${vendorId},store_id.eq.${vendorId},store_slug.eq.${vendorId}`).eq('marketplace_order', true).order('created_at', { ascending: false });
   if (error) { console.warn('[supabaseNative] fetchSupabaseNativeVendorOrders error:', supabaseErrorMessage(error)); return { ok: false, orders: [], error: error.message || 'Vendor orders unavailable.' }; }
   return { ok: true, orders: Array.isArray(data) ? data : [] };
 }

@@ -45,9 +45,12 @@ export interface CartContextValue {
   subtotal: number;
   vendors: ReturnType<ReturnType<typeof useMarketplaceBasket>['vendors']>;
   add: (product: Parameters<ReturnType<typeof useMarketplaceBasket>['add']>[0], quantity?: number) => void;
+  addItem: (product: Parameters<ReturnType<typeof useMarketplaceBasket>['add']>[0], quantity?: number) => void;
   setQuantity: (productId: string, vendorId: string, quantity: number) => void;
   remove: (productId: string, vendorId: string) => void;
+  removeItem: (productId: string, vendorId: string) => void;
   clear: () => void;
+  clearCart: () => void;
 }
 
 const CartContext = createContext<CartContextValue | null>(null);
@@ -89,11 +92,14 @@ export const CartProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       subtotal: basket.subtotal,
       vendors: basket.vendors,
       add: basket.add,
+      addItem: basket.addItem,
       setQuantity: basket.setQuantity,
       remove: basket.remove,
+      removeItem: basket.removeItem,
       clear: basket.clear,
+      clearCart: basket.clearCart,
     }),
-    [basket.lines, basket.itemCount, basket.subtotal, basket.vendors, basket.add, basket.setQuantity, basket.remove, basket.clear],
+    [basket.lines, basket.itemCount, basket.subtotal, basket.vendors, basket.add, basket.addItem, basket.setQuantity, basket.remove, basket.removeItem, basket.clear, basket.clearCart],
   );
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
@@ -117,9 +123,12 @@ export function useCart(): CartContextValue {
     subtotal: basket.subtotal,
     vendors: basket.vendors,
     add: basket.add,
+    addItem: basket.addItem,
     setQuantity: basket.setQuantity,
     remove: basket.remove,
+    removeItem: basket.removeItem,
     clear: basket.clear,
+    clearCart: basket.clearCart,
   };
 }
 

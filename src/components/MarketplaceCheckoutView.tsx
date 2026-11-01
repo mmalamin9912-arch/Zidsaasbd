@@ -257,7 +257,10 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
    * moment earlier — and `/marketplace/checkout` is correct even when opened
    * directly by URL with no prior in-app navigation.
    */
-  const [persistedLines, setPersistedLines] = useState<BasketLine[]>(() => readPersistedBasket());
+  const [persistedLines, setPersistedLines] = useState<BasketLine[]>(() => {
+    try { localStorage.getItem('zid_marketplace_cart'); } catch { /* ignore */ }
+    return readPersistedBasket();
+  });
 
   useEffect(() => {
     // Re-read whenever the basket changes, so a line added on this page (or in

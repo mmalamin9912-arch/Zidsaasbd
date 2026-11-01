@@ -1,2 +1,3 @@
-﻿const fs = require(`fs`);
-$  const p = "./src/lib/supabaseMarketplace.ts";
+// Placeholder script (no-op). The marketplace Supabase module lives in
+// src/lib/supabaseMarketplaceNative.ts.
+module.exports = {};

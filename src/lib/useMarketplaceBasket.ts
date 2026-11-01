@@ -210,7 +210,17 @@ const basketSignature = (items: BasketLine[]): string =>
     .join('|');
 
 export function useMarketplaceBasket() {
-  const [lines, setLines] = useState<BasketLine[]>(() => readBasket());
+  const [lines, setLines] = useState<BasketLine[]>(() => {
+    // Initialize cart state from localStorage so it is never empty on initial
+    // page load (lazy initializer runs once, synchronously, on first render).
+    try {
+      const raw = localStorage.getItem('zid_marketplace_cart');
+      if (raw) return parseBasket(raw);
+    } catch {
+      /* storage unavailable — fall through to the full reader */
+    }
+    return readBasket();
+  });
 
   /**
    * Mirrors `lines` for event handlers.
@@ -395,5 +405,9 @@ export function useMarketplaceBasket() {
     return [...map.values()];
   }, [lines]);
 
-  return { lines, add, setQuantity, remove, clear, itemCount, subtotal, vendors };
+  const addItem = add;
+  const removeItem = remove;
+  const clearCart = clear;
+
+  return { lines, add, addItem, setQuantity, remove, removeItem, clear, clearCart, itemCount, subtotal, vendors };
 }
