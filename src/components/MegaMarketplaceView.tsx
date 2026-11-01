@@ -1140,14 +1140,15 @@ export interface MegaMarketplaceViewProps {
   /** Jump to a vendor's own storefront (`/store/<slug>`). */
   onVisitVendor: (vendorSlug: string) => void;
   /**
-   * Take the basket to that vendor's checkout. The marketplace itself has no
-   * checkout of its own — the selected store's storefront owns fulfilment.
+   * Open the unified marketplace checkout (`/marketplace/checkout`). The whole
+   * basket is checked out at once, across every vendor — there is NO handoff to
+   * a single merchant's storefront (`/store/<slug>`) anywhere in this flow.
+   *
+   * Optional at runtime: a deep link or preview shell may render this view
+   * without the parent router, and `goToMarketplaceCheckout` below then
+   * performs the navigation itself.
    */
-  /**
-   * Open the unified marketplace checkout (`/marketplace/checkout`). Takes no
-   * argument: the whole basket is checked out at once, across every vendor.
-   */
-  onCheckout: () => void;
+  onCheckout?: () => void;
   /** Open the merchant dashboard / sign-in. */
   onOpenAccount?: () => void;
   /**
@@ -1999,6 +2000,25 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
     toast.success(marketplaceCopy('added_to_basket', language), {
       description: `${productTitle(product, language)} — ${product.vendor_name}`,
     });
+  };
+
+  /**
+   * Navigate to the UNIFIED checkout — the ONLY purchase destination in the
+   * marketplace.
+   *
+   * Used by the basket drawer's Checkout button and by the quick-view's
+   * "Buy now". The parent router is preferred (it swaps the route without a
+   * full reload, so the mounted `CartProvider` keeps its lines); when the prop
+   * is missing — a deep link, a preview shell — the browser navigates instead.
+   * Formerly these paths passed a vendor slug and landed on `/store/<slug>`.
+   */
+  const goToMarketplaceCheckout = () => {
+    if (typeof onCheckout === 'function') {
+      onCheckout();
+    }
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/marketplace/checkout')) {
+      window.location.assign('/marketplace/checkout');
+    }
   };
 
   const handleToggleWishlist = (product: MarketplaceProduct) => {
@@ -3699,7 +3719,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     // state from a stale copy.
                     window.dispatchEvent(new Event('zid:marketplace-basket'));
                     setShowBasket(false);
-                    onCheckout();
+                    goToMarketplaceCheckout();
                   }}
                   disabled={basket.itemCount === 0}
                   className="min-h-[48px] w-full rounded-xl text-[13px] font-black text-white disabled:opacity-50"
@@ -4094,14 +4114,23 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
              stays exactly where they were in the grid. */
           onAdd={(p) => { handleAdd(p); setActiveProduct(null); }}
           /* BUY NOW: one line in the shared basket, then straight to checkout.
-             `basket.add` writes `zid_marketplace_cart` synchronously, so the
-             checkout page reads the line on mount — the same handoff the
-             drawer's Checkout button uses (see `onCheckout` in App.tsx). The
-             modal is closed first so it is not still mounted over the new page. */
+             `basket.add` writes `zid_marketplace_cart` SYNCHRONOUSLY (see
+             `writeBasket` in lib/useMarketplaceBasket.ts), so the checkout page
+             reads the line on mount — the same handoff the drawer's Checkout
+             button uses (see `onCheckout` in App.tsx).
+
+             This button used to call `onVisitVendor(slug)`, which is what sent
+             the shopper to `/store/<vendorSlug>` instead of buying anything.
+             It MUST NEVER navigate to a storefront: every path from here goes
+             to `/marketplace/checkout`. */
           onBuyNow={(p) => {
             handleAdd(p);
             setActiveProduct(null);
-            onCheckout();
+            /* ONE call: persist the line, then route to `/marketplace/checkout`.
+               `goToMarketplaceCheckout` prefers the app router (no reload, the
+               mounted CartProvider keeps its lines) and falls back to a browser
+               navigation when the parent did not pass `onCheckout`. */
+            goToMarketplaceCheckout();
           }}
           onVisitVendor={(slug) => { setActiveProduct(null); onVisitVendor(slug); }}
           theme={THEME}
@@ -4392,7 +4421,11 @@ const QuickView: React.FC<{
               className="min-h-[48px] rounded-xl border px-4 text-[13px] font-bold active:opacity-80 disabled:cursor-not-allowed disabled:opacity-45"
               style={{ borderColor: THEME.line, color: THEME.ink }}
             >
-              Buy from store
+              {/* The label names what the button DOES. It read "Buy from store"
+                  while its old handler navigated to `/store/<vendorSlug>`; the
+                  handler now buys directly, so the label follows: this adds the
+                  item and opens `/marketplace/checkout` in one click. */}
+              {lang === 'bn' ? 'এখনই কিনুন' : 'Buy now'}
             </button>
           </div>
         </div>

@@ -27,6 +27,18 @@ export interface BasketLine {
 }
 
 /**
+ * Read the persisted basket straight from localStorage.
+ *
+ * Exported so a page that must be right on its FIRST render (`/marketplace/
+ * checkout`, a freshly opened checkout tab) can seed itself from storage
+ * itself, without waiting for a Context update or a sibling hook's effect.
+ * Returns `[]` — never throws — when storage is unavailable or corrupt.
+ */
+export function readPersistedBasket(): BasketLine[] {
+  return readBasket();
+}
+
+/**
  * Normalise ONE stored line into the current shape.
  *
  * WHY THIS EXISTS — the "Your basket is empty" report.
@@ -254,7 +266,7 @@ export function useMarketplaceBasket() {
   }, [syncFromStorage]);
 
   /**
-   * Re-read on every mount.
+   * Re-read on every mount, and keep a listener alive for the whole mount.
    *
    * The unified checkout and the marketplace header are sibling trees that
    * unmount/remount on navigation. `useState(() => readBasket())` seeds the
@@ -268,6 +280,27 @@ export function useMarketplaceBasket() {
     mountedRef.current = true;
     syncFromStorage();
   }, [syncFromStorage]);
+
+  /**
+   * POLL WHILE THE BASKET IS EMPTY.
+   *
+   * The event and `storage` listeners above only fire when the WRITER follows
+   * the convention — a write that lands silently (a restored session, a
+   * prefilled link, an older bundle, a write from the same tab) updates
+   * localStorage and nothing tells this hook. On an empty basket that is
+   * indistinguishable from a genuinely empty one, which is the recurring
+   * "checkout says my basket is empty" report.
+   *
+   * So an empty consumer re-reads storage on a short interval until lines
+   * appear, then stops. The cost is a few synchronous reads while the basket
+   * holds nothing, and it makes the checkout correct regardless of how the
+   * basket was written.
+   */
+  useEffect(() => {
+    if (lines.length > 0) return;
+    const id = window.setInterval(syncFromStorage, 400);
+    return () => window.clearInterval(id);
+  }, [lines.length, syncFromStorage]);
 
   const add = useCallback((product: MarketplaceProduct, quantity = 1) => {
     /*

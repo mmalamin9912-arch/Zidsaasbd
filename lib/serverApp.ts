@@ -15434,6 +15434,28 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
   }
 
   /*
+   * A marketplace MASTER order is a MULTI-VENDOR row: the unified checkout
+   * posts one order whose lines each carry their seller, and the server splits
+   * it into children. The master's `vendor_id` / `vendor_slugs` are therefore
+   * ARRAYS, and `{ vendor_id: { $in: [...] } }` compares an array field against
+   * a list of scalars — it does not reliably match.
+   *
+   * Without this clause the master row (the one the shopper sees on
+   * `/marketplace/orders`) never appeared on any seller's dashboard, even
+   * though its children did. `$elemMatch`-style `$in` keeps the scalar match
+   * above intact and adds the array case.
+   */
+  const vendorRefValues = Array.from(new Set([...vendorValues, ...slugValues]));
+  if (vendorRefValues.length) {
+    or.push(
+      { vendor_ids: { $in: vendorRefValues } },
+      { vendorIds: { $in: vendorRefValues } },
+      { vendor_slugs: { $in: vendorRefValues } },
+      { vendorSlugs: { $in: vendorRefValues } },
+    );
+  }
+
+  /*
    * THE MERCHANT BOUNDARY.
    *
    * A dashboard order is EITHER the store's own order (any store_* / merchant_*
@@ -16078,6 +16100,28 @@ function buildOrderRecord(
     order_source: source,
     order_source_channel: order.order_source_channel || order.orderSourceChannel || 'marketplace',
     marketplace_order: Boolean(order.marketplace_order || order.marketplaceOrder),
+    /*
+     * VENDOR ATTRIBUTION ON THE MASTER.
+     *
+     * The unified checkout posts ONE master order whose lines each carry their
+     * selling vendor, plus the vendor ids/slugs/count. The split below then
+     * fans it into one child order per merchant — but the MASTER row itself
+     * carried none of that, so a merchant whose `buildOrderQuery` matches on
+     * `vendor_slugs` could not see the parent of their own child order, and any
+     * reader grouping by vendor saw an unattributed marketplace row.
+     *
+     * Only written when the caller actually sent them, so an ordinary
+     * single-store checkout keeps its existing shape.
+     */
+    ...(Array.isArray(order.vendor_ids || order.vendorIds)
+      ? { vendor_ids: order.vendor_ids || order.vendorIds, vendorIds: order.vendor_ids || order.vendorIds }
+      : {}),
+    ...(Array.isArray(order.vendor_slugs || order.vendorSlugs)
+      ? { vendor_slugs: order.vendor_slugs || order.vendorSlugs, vendorSlugs: order.vendor_slugs || order.vendorSlugs }
+      : {}),
+    ...(Number(order.vendor_count || order.vendorCount) > 0
+      ? { vendor_count: Number(order.vendor_count || order.vendorCount) }
+      : {}),
     is_manual: isManual,
     isManual,
     created_at: toValidDate(order.createdAt ?? order.created_at ?? order.date),

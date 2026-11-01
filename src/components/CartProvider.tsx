@@ -60,6 +60,28 @@ const CartContext = createContext<CartContextValue | null>(null);
 export const CartProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const basket = useMarketplaceBasket();
 
+  /**
+   * SYNC WITH `zid_marketplace_cart` ON MOUNT.
+   *
+   * The hook seeds itself synchronously in a lazy initialiser, but a provider
+   * that mounted a tick BEFORE the basket was written (a hard navigation, a
+   * restored tab, a second window) would otherwise sit on an empty array while
+   * `/marketplace/checkout` renders its "basket is empty" card over lines that
+   * are already in storage.
+   *
+   * Running once after mount, and again whenever the tab is refocused, closes
+   * that gap: the provider is at the root of the tree (main.tsx), so this is
+   * the single point at which every consumer — drawer badge, sticky bar,
+   * checkout page — is reconciled with what the shopper actually saved.
+   */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const sync = () => window.dispatchEvent(new Event('zid:marketplace-basket'));
+    sync();
+    window.addEventListener('focus', sync);
+    return () => window.removeEventListener('focus', sync);
+  }, []);
+
   const value = useMemo(
     () => ({
       lines: basket.lines,

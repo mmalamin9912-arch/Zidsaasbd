@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import SafeImage from './SafeImage';
 import { useCart } from './CartProvider';
-import { type BasketLine } from '../lib/useMarketplaceBasket';
+import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
 
 /**
@@ -148,6 +148,17 @@ function readLang(): Lang {
   }
 }
 
+/**
+ * How many lines are persisted under `zid_marketplace_cart` right now.
+ *
+ * Tolerant by design: a corrupt or absent value reads as 0 rather than
+ * throwing during render, and the legacy mirror key is honoured so a basket
+ * saved by an older build still counts.
+ */
+function readPersistedLineCount(): number {
+  return readPersistedBasket().length;
+}
+
 /** Group the basket by selling vendor — mirrors the server's split rule. */
 function groupByVendor(lines: BasketLine[]) {
   const map = new Map<string, { vendorId: string; vendorName: string; vendorSlug: string; lines: BasketLine[]; subtotal: number }>();
@@ -216,6 +227,56 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
    */
   const [waitingForBasket, setWaitingForBasket] = useState(true);
 
+  /**
+   * MOUNT-TIME STORAGE READ — independent of the provider tree.
+   *
+   * The cart context already seeds from `zid_marketplace_cart` synchronously,
+   * so this normally agrees with it immediately. It exists so the checkout page
+   * renders the right thing even if it is mounted somewhere the provider is not
+   * (a deep link, a preview shell, an error boundary): the persisted basket is
+   * then read straight from localStorage instead of showing "Your basket is
+   * empty" over lines that are sitting right there in storage.
+   */
+  const [persistedCount, setPersistedCount] = useState<number>(() => readPersistedLineCount());
+
+  /**
+   * THE PERSISTED BASKET ITSELF — read on the FIRST render.
+   *
+   * `readPersistedLineCount()` only proves the basket is non-empty; the page
+   * still rendered its items from the Context. When the Context's hook instance
+   * had not yet adopted the freshly-written basket (a hard navigation, a fresh
+   * tab, a provider that mounted a tick later), the page showed the loading
+   * card and then "Your basket is empty" over lines sitting in localStorage.
+   *
+   * Seeding the LINES from storage in a lazy initialiser means the very first
+   * paint already shows the shopper's items — exactly what the drawer showed a
+   * moment earlier — and `/marketplace/checkout` is correct even when opened
+   * directly by URL with no prior in-app navigation.
+   */
+  const [persistedLines, setPersistedLines] = useState<BasketLine[]>(() => readPersistedBasket());
+
+  useEffect(() => {
+    // Re-read whenever the basket changes, so a line added on this page (or in
+    // another tab) is reflected without waiting for a context update.
+    const stored = readPersistedBasket();
+    setPersistedLines(stored);
+    setPersistedCount(stored.length);
+  }, [basket.itemCount]);
+
+  /**
+   * The lines this page renders.
+   *
+   * The Context is authoritative once it holds anything (it is the same basket
+   * the drawer mutates); the persisted copy is the fallback for the frames
+   * before the Context has adopted it, so an empty Context can never blank a
+   * checkout whose lines are already in storage.
+   */
+  const lines = basket.itemCount > 0 || persistedLines.length === 0 ? basket.lines : persistedLines;
+  const itemCount = lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+
+  /** Lines the page can actually render: the context's, or storage's. */
+  const hasItems = basket.itemCount > 0 || persistedCount > 0;
+
   useEffect(() => {
     const id = window.setTimeout(() => setReady(true), 0);
     return () => window.clearTimeout(id);
@@ -232,13 +293,13 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
    * quantities and vendor groups all re-derive from `basket.lines`.
    */
   useEffect(() => {
-    if (basket.itemCount > 0) {
+    if (hasItems) {
       setWaitingForBasket(false);
       return;
     }
     const id = window.setTimeout(() => setWaitingForBasket(false), 600);
     return () => window.clearTimeout(id);
-  }, [basket.itemCount]);
+  }, [hasItems]);
 
   /**
    * TELL THE MARKETPLACE THE BASKET WAS HANDED OVER.
@@ -322,15 +383,18 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
   const [error, setError] = useState<string | null>(null);
   const [placed, setPlaced] = useState<{ id: string; number: string; vendors: number } | null>(null);
 
-  const vendors = useMemo(() => groupByVendor(basket.lines), [basket.lines]);
-  const subtotal = basket.subtotal;
+  const vendors = useMemo(() => groupByVendor(lines), [lines]);
+  const subtotal = useMemo(
+    () => lines.reduce((sum, line) => sum + (Number(line.product?.priceBDT) || 0) * Number(line.quantity || 0), 0),
+    [lines],
+  );
   const shippingZone = shippingZoneOf(form.district);
   const isInsideDhaka = shippingZone === 'inside';
-  const deliveryCharge = basket.itemCount === 0 ? 0 : deliveryFeeOf(shippingZone);
+  const deliveryCharge = itemCount === 0 ? 0 : deliveryFeeOf(shippingZone);
   const total = subtotal + deliveryCharge;
 
   const validate = (): string | null => {
-    if (basket.itemCount === 0) return t('Your basket is empty.', 'আপনার কার্ট খালি।');
+    if (itemCount === 0) return t('Your basket is empty.', 'আপনার কার্ট খালি।');
     if (!form.name.trim()) return t('Please enter your full name.', 'অনুগ্রহ করে আপনার পুরো নাম লিখুন।');
     const digits = form.phone.replace(/\D/g, '');
     if (digits.length < 10) return t('Please enter a valid phone number.', 'অনুগ্রহ করে সঠিক ফোন নম্বর লিখুন।');
@@ -376,7 +440,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       const id = `MP-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const orderNumber = `ZID-${Date.now().toString().slice(-9)}`;
 
-      const items = basket.lines.map((line, index) => {
+      const items = lines.map((line, index) => {
         const p = line.product as any;
         const vendorId = String(p.vendor_id || p.store_id || p.vendor_slug || p.store_slug || '');
         const vendorSlug = String(p.vendor_slug || p.store_slug || p.storeSlug || '');
@@ -432,6 +496,12 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         items,
         // Fan-out + provenance flags read by the server.
         split_by_vendor: true,
+        // Vendor attribution ON THE MASTER, not just per line: the server keeps
+        // the parent row attributable to every participating seller so it shows
+        // up on each of their dashboards (see `buildOrderRecord`).
+        vendor_ids: vendors.map((v) => v.vendorId).filter(Boolean),
+        vendor_slugs: vendors.map((v) => v.vendorSlug).filter(Boolean),
+        vendor_count: vendors.length,
         order_source_channel: 'marketplace',
         marketplace_order: true,
       };
@@ -600,11 +670,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       </header>
 
       <main className="mx-auto max-w-[1100px] px-4 py-6">
-        {(!ready || waitingForBasket) && basket.itemCount === 0 ? (
+        {(!ready || waitingForBasket) && !hasItems ? (
           <div className="flex items-center justify-center rounded-2xl border bg-white p-10 shadow-sm" style={{ borderColor: THEME.line }}>
             <Loader2 className="h-5 w-5 animate-spin text-slate-300" />
           </div>
-        ) : basket.itemCount === 0 ? (
+        ) : itemCount === 0 ? (
           <div className="rounded-2xl border bg-white p-10 text-center shadow-sm" style={{ borderColor: THEME.line }}>
             <Package className="mx-auto mb-3 h-10 w-10 text-slate-300" />
             <div className="text-[15px] font-black text-slate-800">
@@ -830,7 +900,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                     {t('Order summary', 'অর্ডার সারাংশ')}
                   </h2>
                   <span className="text-[10.5px] font-bold text-slate-400">
-                    {basket.itemCount} {t('items', 'পণ্য')}
+                    {itemCount} {t('items', 'পণ্য')}
                   </span>
                 </div>
 
