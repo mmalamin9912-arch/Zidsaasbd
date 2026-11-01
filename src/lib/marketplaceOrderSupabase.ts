@@ -76,6 +76,12 @@ export interface MarketplaceOrderLine {
   vendor_slug?: string;
   store_id?: string;
   store_slug?: string;
+  // ── Commission / wallet split (centralized admin payment) ────────────────
+  platformFeePercent?: number;
+  commissionBdt?: number;
+  netAmountBdt?: number;
+  adminPaymentMethod?: string;
+  adminPaymentNumber?: string;
 }
 
 export interface MarketplaceOrderInput {
@@ -102,6 +108,17 @@ export interface MarketplaceOrderInput {
   vendor_count?: number;
   order_source_channel?: string;
   marketplace_order?: boolean;
+  // ── Commission / wallet split (centralized admin payment) ────────────────
+  /** Platform commission percentage applied (e.g. 10 for 10%). */
+  platformFeePercent?: number;
+  /** Commission amount in BDT deducted from the vendor's gross. */
+  commissionBdt?: number;
+  /** Net amount payable to the vendor after commission (gross − commission). */
+  netAmountBdt?: number;
+  /** Which admin payment method was used (e.g. 'bkash', 'cod', 'nagad', 'rocket'). */
+  adminPaymentMethod?: string;
+  /** Central admin wallet / merchant number the customer paid into. */
+  adminPaymentNumber?: string;
 }
 
 export interface SupabaseOrderResult {
@@ -244,6 +261,12 @@ export async function createMarketplaceOrderInSupabase(
     vendor_id: line.vendor_id || line.store_id || '',
     vendor_name: line.vendor_name || '',
     vendor_slug: line.vendor_slug || line.store_slug || '',
+    // ── Commission / wallet split (centralized admin payment) ──────────────
+    platformFeePercent: line.platformFeePercent ?? input.platformFeePercent,
+    commissionBdt: line.commissionBdt ?? input.commissionBdt,
+    netAmountBdt: line.netAmountBdt ?? input.netAmountBdt,
+    adminPaymentMethod: line.adminPaymentMethod ?? input.adminPaymentMethod,
+    adminPaymentNumber: line.adminPaymentNumber ?? input.adminPaymentNumber,
   }));
 
   const row: Record<string, any> = {
