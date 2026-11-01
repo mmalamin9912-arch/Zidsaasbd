@@ -8,6 +8,10 @@ import SafeImage from './SafeImage';
 import { useCart } from './CartProvider';
 import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
+import {
+  createMarketplaceOrderInSupabase,
+  type SupabaseOrderResult,
+} from '../lib/marketplaceOrderSupabase';
 
 /**
  * The UNIFIED marketplace checkout — `/marketplace/checkout`.
@@ -20,11 +24,11 @@ import { notifyOrdersChanged } from '../lib/orderSync';
  * simply left behind.
  *
  * This page keeps the shopper inside the marketplace. It collects ONE delivery
- * address and ONE payment choice for the whole basket, then posts a single
- * master order whose lines each carry their selling vendor. The server
- * (`persistVendorChildren`) already fans that out into one child order per
- * merchant, each with its own commission and courier slip — so a seller sees
- * the order in `/dashboard/orders` immediately, with no manual re-search.
+ * address and ONE payment choice for the whole basket, then writes ONE order to
+ * the Supabase `orders` table whose items each keep their selling vendor (see
+ * `createMarketplaceOrderInSupabase`), mirrored to the app server which fans it
+ * out into one child order per merchant — so a seller sees the order in
+ * `/dashboard/orders` immediately, with no manual re-search.
  *
  * ── What the shopper is shown ─────────────────────────────────────────────
  * A per-vendor split preview, because the biggest real risk in a multi-vendor
@@ -506,39 +510,101 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         marketplace_order: true,
       };
 
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ orders: [payload] }),
+      /*
+       * ── 1. WRITE THE ORDER TO THE SUPABASE DATABASE ──────────────────────
+       *
+       * This is the order of record. It was previously missing entirely: the
+       * page only POSTed `/api/orders`, which persists MongoDB and never
+       * INSERTs into Supabase — so the `orders` table stayed empty and the
+       * Network tab showed no database write on checkout.
+       *
+       * `createMarketplaceOrderInSupabase` writes ONE row into `orders` (with
+       * the lines, each keeping its `vendor_id`, inside `orders.items`) and
+       * then the per-line rows into `order_items`. It never throws: a failure
+       * comes back as `{ ok: false, error }`.
+       */
+      const supabaseResult: SupabaseOrderResult = await createMarketplaceOrderInSupabase({
+        orderNumber,
+        customerName: form.name.trim(),
+        customerPhone: form.phone.trim(),
+        customerEmail: form.email.trim() || undefined,
+        district: form.district,
+        cityArea: form.area.trim(),
+        address: form.address.trim(),
+        customerNote: form.note.trim() || undefined,
+        subtotalBDT: subtotal,
+        deliveryCharge,
+        totalBDT: total,
+        paymentMethod: PAYMENT_LABELS[payment],
+        paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
+        transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
+        lines: items.map((line) => ({
+          productId: line.productId,
+          productName: line.productName,
+          variant: line.variant,
+          quantity: line.quantity,
+          unitPriceBDT: line.unitPriceBDT,
+          image: line.image,
+          category: line.category,
+          vendor_id: line.vendor_id,
+          vendor_name: line.vendor_name,
+          vendor_slug: line.vendor_slug,
+          store_id: line.store_id,
+          store_slug: line.store_slug,
+        })),
       });
-      const data = await res.json().catch(() => null);
+
+      if (!supabaseResult.ok) {
+        /*
+         * The database write is the order. If it failed there is nothing for
+         * the merchant to fulfil, so the shopper is told so — with the real
+         * reason returned by PostgREST — instead of seeing "Order placed" over
+         * an order that does not exist. Their basket is left intact.
+         */
+        throw new Error(
+          supabaseResult.error
+            || 'Your order could not be saved. Please try again.',
+        );
+      }
+
+      // ── 2. MIRROR TO THE APP SERVER (MongoDB / split child orders) ───────
+      //
+      // Best-effort: the order of record is already in Supabase above. A
+      // failure here must not turn a saved order into a failed checkout, so it
+      // is logged and the shipper/merchant dashboards that read the server
+      // store are reconciled by the next sync.
+      let data: any = null;
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ orders: [payload] }),
+        });
+        data = await res.json().catch(() => null);
 
       /*
-       * SUCCESS MEANS THE SERVER ACTUALLY SAVED SOMETHING.
+       * A rejected mirror is NOT a failed checkout.
        *
-       * The API used to answer `200 { ok: false }` (or even `200 { ok: true,
-       * synced: 0 }`) for a payload it rejected or could not persist, and this
-       * page — which only checked `res.ok` plus an explicit `ok: false` — could
-       * show "Order placed successfully" for an order that was never written.
-       *
-       * Now: a non-2xx is a failure; `ok: false` is a failure; and `synced: 0`
-       * with nothing refused is a failure. A `duplicate: true` acknowledgement
-       * is genuinely a success (the first submission landed), and rejection
-       * details are surfaced verbatim so the shopper can fix the input.
+       * The order is already committed to Supabase above — the row exists and
+       * the merchant can fulfil it. Throwing here would show the shopper an
+       * error for an order that WAS saved, and invite a duplicate submission.
+       * The reason is logged so the server-side store can be reconciled.
        */
       const rejectedList: { index: number; error: string }[] = Array.isArray(data?.rejected) ? data.rejected : [];
       const savedCount = Number(data?.synced);
-      const failed =
+      const mirrorFailed =
         !res.ok ||
         (data && data.ok === false) ||
         (!Number.isNaN(savedCount) && savedCount === 0 && rejectedList.length === 0);
-      if (failed) {
-        const detail = rejectedList.length
-          ? rejectedList.map((r) => r.error).join(' ')
-          : '';
-        throw new Error(
-          detail || data?.error || data?.message || `Server responded ${res.status}`,
+      if (mirrorFailed) {
+        console.warn(
+          '[MarketplaceCheckout] /api/orders mirror rejected:',
+          rejectedList.map((r) => r.error).join(' ') || data?.error || data?.message || `HTTP ${res.status}`,
         );
+      }
+      } catch (mirrorErr: any) {
+        // Network failure while mirroring — same reasoning: the order is saved.
+        console.warn('[MarketplaceCheckout] /api/orders mirror failed:', mirrorErr?.message || mirrorErr);
       }
 
       // Persist customer session so the customer's orders are immediately visible

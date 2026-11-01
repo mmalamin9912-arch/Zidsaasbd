@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import SafeImage from './SafeImage';
 import { normalizeOrders } from '../utils/orderUtils';
+import { fetchSupabaseOrdersForPhone } from '../lib/marketplaceOrderSupabase';
 import {
   getOrderStatusBadge,
   getPaymentBadge,
@@ -219,7 +220,43 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
         return;
       }
       setError(null);
-      setOrders(normalizeOrders(data.orders));
+      /*
+       * MERGE THE SUPABASE ROWS.
+       *
+       * `/api/customer/orders` is served from MongoDB, but the unified checkout
+       * writes the order of record to Supabase (see
+       * `createMarketplaceOrderInSupabase`). Without this merge an order placed
+       * at `/marketplace/checkout` exists in the database and on the merchant's
+       * dashboard, yet the shopper's own history shows nothing.
+       *
+       * The server list wins on a key collision, so nothing the API returns is
+       * ever replaced by a thinner Supabase projection.
+       */
+      const serverOrders = normalizeOrders(data.orders);
+      const supabaseRows = await fetchSupabaseOrdersForPhone(phone);
+      if (ticket !== requestSeq.current) return;
+      if (supabaseRows.length === 0) {
+        setOrders(serverOrders);
+        return;
+      }
+      const seen = new Set(
+        serverOrders.map((o: any) =>
+          String(o.orderNumber || o.order_number || o.id || '').replace(/^#/, '').trim(),
+        ),
+      );
+      const extras = normalizeOrders(
+        supabaseRows.filter((row) => {
+          const key = String(row.order_number || row.id || '').replace(/^#/, '').trim();
+          return key && !seen.has(key);
+        }),
+      );
+      setOrders(
+        [...serverOrders, ...extras].sort((a: any, b: any) => {
+          const at = new Date(a.createdAt || a.created_at || 0).getTime();
+          const bt = new Date(b.createdAt || b.created_at || 0).getTime();
+          return (Number.isFinite(bt) ? bt : 0) - (Number.isFinite(at) ? at : 0);
+        }),
+      );
     } catch {
       if (ticket !== requestSeq.current) return;
       if (!opts.silent) setError('Could not load your orders. Please try again.');

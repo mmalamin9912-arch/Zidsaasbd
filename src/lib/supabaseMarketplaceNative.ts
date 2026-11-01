@@ -5,6 +5,7 @@
  */
 
 import { getSupabaseClient, isSupabaseConfigured, supabaseErrorMessage } from './supabase';
+import { createMarketplaceOrderInSupabase } from './marketplaceOrderSupabase';
 import type { MarketplaceProduct, MarketplaceFilters } from '../types';
 
 export async function fetchSupabaseNativeProducts(
@@ -46,21 +47,60 @@ export async function fetchSupabaseNativeCategories(): Promise<any[]> {
   return Array.isArray(data) ? data : [];
 }
 
+/**
+ * Persist a marketplace order to Supabase.
+ *
+ * Thin adapter over `createMarketplaceOrderInSupabase`, which owns the real
+ * schema. The previous implementation inline-built a row with columns this
+ * project's `orders` table does not have (`customer_email`, `address`,
+ * `subtotal_bdt`, `total_bdt`, `delivery_zone`, `fulfillment_status`,
+ * `status`, `vendor_id`, `store_slug`, `marketplace_order`, …) and inserted
+ * `items` as an ARRAY into a TEXT column — every call 400'd with PGRST204 and
+ * no order was ever written. It also wrote to an `order_items` table that does
+ * not exist.
+ *
+ * Accepts the same loosely-typed input as before so existing callers keep
+ * working.
+ */
 export async function createSupabaseNativeOrder(input: any): Promise<{ ok: boolean; order?: any; error?: string }> {
   if (!isSupabaseConfigured) return { ok: false, error: 'Supabase is not configured.' };
   const client = getSupabaseClient();
   if (!client) return { ok: false, error: 'Supabase client unavailable.' };
-  const orderRow: Record<string, any> = {
-    order_number: input.orderNumber, customer_name: input.customerName, customer_phone: input.customerPhone, customer_email: input.customerEmail || null, district: input.district || null, city_area: input.cityArea || null, address: input.address, delivery_zone: input.deliveryZone || null, subtotal_bdt: Number(input.subtotalBDT || 0), delivery_charge: Number(input.deliveryCharge || 0), total_bdt: Number(input.totalBDT || 0), payment_method: input.paymentMethod || '', payment_status: input.paymentStatus || '', fulfillment_status: input.fulfillmentStatus || null, status: input.status || 'New', vendor_id: input.vendorId || null, store_id: input.storeId || null, store_slug: input.storeSlug || null, items: input.items || [], split_by_vendor: Boolean(input.split_by_vendor), order_source_channel: input.order_source_channel || 'marketplace', marketplace_order: input.marketplace_order ?? true, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
-  const { data: orderData, error: orderError } = await client.from('orders').insert(orderRow).select('id, order_number').single();
-  if (orderError) { console.warn('[supabaseNative] createSupabaseNativeOrder (orders) error:', supabaseErrorMessage(orderError)); return { ok: false, error: orderError.message || 'Order could not be persisted.' }; }
-  const orderItems = input.items || [];
-  if (orderItems.length > 0) {
-    const itemRows = orderItems.map((item) => ({ order_id: (orderData as any)?.id || null, order_number: input.orderNumber, product_id: item.productId || null, product_name: item.productName || 'Item', variant: item.variant || null, quantity: Number(item.quantity || 0), unit_price_bdt: Number(item.unitPriceBDT || 0), image: item.image || null, vendor_id: item.vendor_id || null, vendor_name: item.vendor_name || null, vendor_slug: item.vendor_slug || null, store_id: item.store_id || null, store_slug: item.store_slug || null, category: item.category || null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }));
-    const { error: itemsError } = await client.from('order_items').insert(itemRows);
-    if (itemsError) console.warn('[supabaseNative] createSupabaseNativeOrder (order_items) error:', supabaseErrorMessage(itemsError));
-  }
-  return { ok: true, order: orderData };
+
+  const rawItems = Array.isArray(input.items) ? input.items : [];
+  const result = await createMarketplaceOrderInSupabase({
+    orderNumber: String(input.orderNumber || ''),
+    customerName: String(input.customerName || ''),
+    customerPhone: String(input.customerPhone || ''),
+    customerEmail: input.customerEmail || undefined,
+    district: String(input.district || ''),
+    cityArea: String(input.cityArea || ''),
+    address: String(input.address || input.shipping_address || ''),
+    customerNote: input.customerNote || undefined,
+    subtotalBDT: Number(input.subtotalBDT || 0),
+    deliveryCharge: Number(input.deliveryCharge || 0),
+    totalBDT: Number(input.totalBDT || 0),
+    paymentMethod: String(input.paymentMethod || 'COD'),
+    paymentStatus: String(input.paymentStatus || 'Unpaid'),
+    transactionId: input.transactionId || undefined,
+    lines: rawItems.map((item: any) => ({
+      productId: item.productId ?? item.product_id ?? '',
+      productName: String(item.productName || item.product_name || 'Item'),
+      variant: item.variant || undefined,
+      quantity: Number(item.quantity || 0),
+      unitPriceBDT: Number(item.unitPriceBDT ?? item.unit_price_bdt ?? 0),
+      image: item.image || undefined,
+      category: item.category || undefined,
+      vendor_id: item.vendor_id || undefined,
+      vendor_name: item.vendor_name || undefined,
+      vendor_slug: item.vendor_slug || undefined,
+      store_id: item.store_id || input.storeId || undefined,
+      store_slug: item.store_slug || input.storeSlug || undefined,
+    })),
+  });
+
+  if (!result.ok) return { ok: false, error: result.error };
+  return { ok: true, order: { id: result.orderId, order_number: result.orderNumber } };
 }
 
 export async function fetchSupabaseNativeAllOrders(): Promise<{ ok: boolean; orders: any[]; error?: string }> {
