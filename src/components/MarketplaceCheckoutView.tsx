@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, Truck, Wallet, CreditCard, Banknote, ShieldCheck,
   Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail,
@@ -395,10 +395,19 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     () => lines.reduce((sum, line) => sum + (Number(line.product?.priceBDT) || 0) * Number(line.quantity || 0), 0),
     [lines],
   );
-  const shippingZone = shippingZoneOf(form.district);
-  const isInsideDhaka = shippingZone === 'inside';
-  const deliveryCharge = itemCount === 0 ? 0 : deliveryFeeOf(shippingZone);
-  const total = subtotal + deliveryCharge;
+  // Delivery zone: derived from district, overridable by the shopper
+  const [shippingZone, setShippingZone] = useState<ShippingZone | null>(null);
+  const resolvedZone = shippingZone ?? shippingZoneOf(form.district);
+  const isInsideDhaka = resolvedZone === 'inside';
+
+  // Per-vendor delivery: each store charges its own delivery fee for the zone.
+  const perVendorDelivery = itemCount === 0 ? 0 : deliveryFeeOf(resolvedZone);
+  const totalDeliveryCharge = perVendorDelivery * vendors.length;
+
+  // bKash cash-out charge (merchant-configured percentage, default 1%).
+  const isBkash = payment === 'bkash';
+  const bkashCashOutFee = isBkash ? Math.round((subtotal + totalDeliveryCharge) * 0.01) : 0;
+  const total = subtotal + totalDeliveryCharge + bkashCashOutFee;
 
   const validate = (): string | null => {
     if (itemCount === 0) return t('Your basket is empty.', 'আপনার কার্ট খালি।');
@@ -473,45 +482,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       // The master's own store fields are intentionally OMITTED: this order has
       // no single seller. The server falls back to a platform bucket for the
       // master row and routes each child to its own vendor.
-      const payload = {
-        id,
-        orderNumber,
-        customerName: form.name.trim(),
-        customerPhone: form.phone.trim(),
-        customerEmail: form.email.trim() || undefined,
-        district: form.district,
-        cityArea: form.area.trim(),
-        address: form.address.trim(),
-        customerNote: form.note.trim() || undefined,
-        deliveryZone:
-          shippingZone === 'inside' ? 'Inside Dhaka'
-            : shippingZone === 'sub' ? 'Sub Dhaka'
-              : 'Outside Dhaka',
-        subtotalBDT: subtotal,
-        deliveryCharge,
-        totalBDT: total,
-        paymentMethod: PAYMENT_LABELS[payment],
-        // A wallet transfer is claimed but not yet verified by the seller; COD is
-        // simply unpaid until the courier collects. Same two states the
-        // merchant storefront's checkout writes, so the dashboard's payment
-        // filter behaves identically for both channels.
-        paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
-        transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
-        fulfillmentStatus: 'Unfulfilled',
-        status: 'New',
-        source: 'Store',
-        items,
-        // Fan-out + provenance flags read by the server.
-        split_by_vendor: true,
-        // Vendor attribution ON THE MASTER, not just per line: the server keeps
-        // the parent row attributable to every participating seller so it shows
-        // up on each of their dashboards (see `buildOrderRecord`).
-        vendor_ids: vendors.map((v) => v.vendorId).filter(Boolean),
-        vendor_slugs: vendors.map((v) => v.vendorSlug).filter(Boolean),
-        vendor_count: vendors.length,
-        order_source_channel: 'marketplace',
-        marketplace_order: true,
-      };
+      // (payload is no longer used — orders are written per-vendor above)
 
       /*
        * ── 1. WRITE THE ORDER TO THE SUPABASE DATABASE ──────────────────────
@@ -526,48 +497,80 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
        * then the per-line rows into `order_items`. It never throws: a failure
        * comes back as `{ ok: false, error }`.
        */
-      const supabaseResult: SupabaseOrderResult = await createMarketplaceOrderInSupabase({
-        orderNumber,
-        customerName: form.name.trim(),
-        customerPhone: form.phone.trim(),
-        customerEmail: form.email.trim() || undefined,
-        district: form.district,
-        cityArea: form.area.trim(),
-        address: form.address.trim(),
-        customerNote: form.note.trim() || undefined,
-        subtotalBDT: subtotal,
-        deliveryCharge,
-        totalBDT: total,
+      const orderResults = [];
+      const placedOrders = [];
+      for (const vendor of vendors) {
+        const vendorId = `MP-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const vendorOrderNumber = `ZID-${Date.now().toString().slice(-9)}-${vendor.vendorSlug || vendor.vendorId}`;
+        const vendorItems = vendor.lines.map((line, index) => {
+          const p = line.product as any;
+          return {
+            id: `${vendorId}-i${index + 1}`,
+            productId: String(p.id || ''),
+            productName: String(p.title || p.name || 'Item'),
+            variant: String(p.variant || 'Standard'),
+            quantity: Number(line.quantity || 1),
+            unitPriceBDT: Number(p.priceBDT) || 0,
+            image: String(p.image || ''),
+            vendor_id: String(p.vendor_id || p.store_id || p.vendor_slug || p.store_slug || ''),
+            vendor_name: vendor.vendorName,
+            vendor_slug: String(p.vendor_slug || p.store_slug || p.storeSlug || ''),
+            store_id: String(p.store_id || p.vendor_id || ''),
+            store_slug: String(p.store_slug || p.vendor_slug || ''),
+            category: String(p.category || ''),
+          };
+        });
+        const vendorSubtotal = vendor.subtotal;
+        const vendorDelivery = itemCount === 0 ? 0 : deliveryFeeOf(resolvedZone);
+        const vendorBkashFee = isBkash ? Math.round((vendorSubtotal + vendorDelivery) * 0.01) : 0;
+        const vendorTotal = vendorSubtotal + vendorDelivery + vendorBkashFee;
+        const zoneLabel = resolvedZone === 'inside' ? 'Inside Dhaka' : resolvedZone === 'sub' ? 'Sub Dhaka' : 'Outside Dhaka';
+        const supabaseResult: SupabaseOrderResult = await createMarketplaceOrderInSupabase({
+          orderNumber: vendorOrderNumber,
+          customerName: form.name.trim(),
+          customerPhone: form.phone.trim(),
+          customerEmail: form.email.trim() || undefined,
+          district: form.district,
+          cityArea: form.area.trim(),
+          address: form.address.trim(),
+          customerNote: form.note.trim() || undefined,
+          subtotalBDT: vendorSubtotal,
+          deliveryCharge: vendorDelivery,
+          totalBDT: vendorTotal,
         paymentMethod: PAYMENT_LABELS[payment],
         paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
         transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
-        lines: items.map((line) => ({
-          productId: line.productId,
-          productName: line.productName,
-          variant: line.variant,
-          quantity: line.quantity,
-          unitPriceBDT: line.unitPriceBDT,
-          image: line.image,
-          category: line.category,
-          vendor_id: line.vendor_id,
-          vendor_name: line.vendor_name,
-          vendor_slug: line.vendor_slug,
-          store_id: line.store_id,
-          store_slug: line.store_slug,
-        })),
-      });
-
-      if (!supabaseResult.ok) {
-        /*
-         * The database write is the order. If it failed there is nothing for
-         * the merchant to fulfil, so the shopper is told so — with the real
-         * reason returned by PostgREST — instead of seeing "Order placed" over
-         * an order that does not exist. Their basket is left intact.
-         */
-        throw new Error(
-          supabaseResult.error
-            || 'Your order could not be saved. Please try again.',
-        );
+          lines: vendorItems.map((line) => ({
+            productId: line.productId,
+            productName: line.productName,
+            variant: line.variant,
+            quantity: line.quantity,
+            unitPriceBDT: line.unitPriceBDT,
+            image: line.image,
+            category: line.category,
+            vendor_id: line.vendor_id,
+            vendor_name: line.vendor_name,
+            vendor_slug: line.vendor_slug,
+            store_id: line.store_id,
+            store_slug: line.store_slug,
+          })),
+          deliveryZone: zoneLabel,
+          split_by_vendor: true,
+          vendor_ids: [vendor.vendorId].filter(Boolean),
+          vendor_slugs: [vendor.vendorSlug].filter(Boolean),
+          vendor_count: 1,
+          order_source_channel: 'marketplace',
+          marketplace_order: true,
+        });
+        orderResults.push({ ok: supabaseResult.ok, orderId: supabaseResult.orderId, orderNumber: vendorOrderNumber, error: supabaseResult.error });
+        if (supabaseResult.ok) {
+          placedOrders.push({ id: vendorId, orderNumber: vendorOrderNumber, vendorId: vendor.vendorId, vendorName: vendor.vendorName, total: vendorTotal });
+        }
+      }
+      const successes = orderResults.filter((r) => r.ok);
+      if (successes.length === 0) {
+        const firstError = orderResults[0]?.error || 'Your order could not be saved. Please try again.';
+        throw new Error(firstError);
       }
 
       // ── 2. MIRROR TO THE APP SERVER (MongoDB / split child orders) ───────
@@ -576,38 +579,68 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       // failure here must not turn a saved order into a failed checkout, so it
       // is logged and the shipper/merchant dashboards that read the server
       // store are reconciled by the next sync.
-      let data: any = null;
-      try {
-        const res = await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ orders: [payload] }),
-        });
-        data = await res.json().catch(() => null);
-
-      /*
-       * A rejected mirror is NOT a failed checkout.
-       *
-       * The order is already committed to Supabase above — the row exists and
-       * the merchant can fulfil it. Throwing here would show the shopper an
-       * error for an order that WAS saved, and invite a duplicate submission.
-       * The reason is logged so the server-side store can be reconciled.
-       */
-      const rejectedList: { index: number; error: string }[] = Array.isArray(data?.rejected) ? data.rejected : [];
-      const savedCount = Number(data?.synced);
-      const mirrorFailed =
-        !res.ok ||
-        (data && data.ok === false) ||
-        (!Number.isNaN(savedCount) && savedCount === 0 && rejectedList.length === 0);
-      if (mirrorFailed) {
-        console.warn(
-          '[MarketplaceCheckout] /api/orders mirror rejected:',
-          rejectedList.map((r) => r.error).join(' ') || data?.error || data?.message || `HTTP ${res.status}`,
-        );
-      }
-      } catch (mirrorErr: any) {
-        // Network failure while mirroring — same reasoning: the order is saved.
-        console.warn('[MarketplaceCheckout] /api/orders mirror failed:', mirrorErr?.message || mirrorErr);
+      for (const order of placedOrders) {
+        const mirrorPayload = {
+          id: order.id,
+          orderNumber: order.orderNumber,
+          customerName: form.name.trim(),
+          customerPhone: form.phone.trim(),
+          customerEmail: form.email.trim() || undefined,
+          district: form.district,
+          cityArea: form.area.trim(),
+          address: form.address.trim(),
+          customerNote: form.note.trim() || undefined,
+          deliveryZone:
+            resolvedZone === 'inside' ? 'Inside Dhaka'
+              : resolvedZone === 'sub' ? 'Sub Dhaka'
+                : 'Outside Dhaka',
+          subtotalBDT: subtotal,
+          deliveryCharge: totalDeliveryCharge,
+          totalBDT: total,
+          paymentMethod: PAYMENT_LABELS[payment],
+          paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
+          transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
+          fulfillmentStatus: 'Unfulfilled',
+          status: 'New',
+          source: 'Store',
+          items: lines.map((line, index) => {
+            const p = line.product as any;
+            return {
+              id: `MP-${Date.now()}-${index + 1}`,
+              productId: String(p.id || ''),
+              productName: String(p.title || p.name || 'Item'),
+              variant: String(p.variant || 'Standard'),
+              quantity: Number(line.quantity || 1),
+              unitPriceBDT: Number(p.priceBDT) || 0,
+              image: String(p.image || ''),
+              vendor_id: String(p.vendor_id || p.store_id || p.vendor_slug || p.store_slug || ''),
+              vendor_name: String(p.vendor_name || p.store_name || p.storeName || 'Store'),
+              vendor_slug: String(p.vendor_slug || p.store_slug || p.storeSlug || ''),
+              store_id: String(p.store_id || p.vendor_id || ''),
+              store_slug: String(p.store_slug || p.vendor_slug || ''),
+              category: String(p.category || ''),
+            };
+          }),
+          split_by_vendor: true,
+          vendor_ids: vendors.map((v) => v.vendorId).filter(Boolean),
+          vendor_slugs: vendors.map((v) => v.vendorSlug).filter(Boolean),
+          vendor_count: vendors.length,
+          order_source_channel: 'marketplace',
+          marketplace_order: true,
+        };
+        try {
+          const res = await fetch('/api/orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ orders: [mirrorPayload] }),
+          });
+          await res.json().catch(() => null);
+          if (!res.ok) {
+            console.warn('[MarketplaceCheckout] /api/orders mirror HTTP', res.status);
+          }
+        } catch (mirrorErr: any) {
+          console.warn('[MarketplaceCheckout] /api/orders mirror failed:', mirrorErr?.message || mirrorErr);
+        }
       }
 
       // Persist customer session so the customer's orders are immediately visible
@@ -813,6 +846,28 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                       ))}
                     </select>
                   </label>
+                  {/* ── DELIVERY ZONE SELECTOR ── */}
+                  <label className="block">
+                    <span className="mb-1 flex items-center gap-1 text-[11px] font-bold text-slate-600">
+                      <Truck className="h-3 w-3" /> {t('Delivery zone', 'ডেলিভারি ज़োন')} *
+                    </span>
+                    <select
+                      value={resolvedZone}
+                      onChange={(e) => setShippingZone(e.target.value as ShippingZone)}
+                      className="w-full rounded-lg border px-3 py-2.5 text-[13px] text-slate-800 focus:border-[#3b2fd6] focus:outline-none"
+                      style={{ borderColor: THEME.line }}
+                    >
+                      <option value="inside">{t('Inside City', 'শহরের ভিতরে')}</option>
+                      <option value="sub">{t('Sub-Dhaka / Suburbs', 'সাব-ঢাকা / উপশহর')}</option>
+                      <option value="outside">{t('Outside City', 'শহরের বাইরে')}</option>
+                    </select>
+                    <p className="mt-1 text-[10.5px] text-slate-500">
+                      {t(
+                        'Delivery fee applies per seller store.',
+ 'ডেলিভারি ফি প্রতিটি সেলার স্টোরের জন্য लागू হয়।'
+                      )}
+                    </p>
+                  </label>
                   <Field
                     label={t('Area / Thana', 'এলাকা / থানা')}
                     Icon={MapPin}
@@ -1010,16 +1065,36 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
 
                 <div className="space-y-1.5 border-t px-4 py-3 text-[12px]" style={{ borderColor: THEME.line }}>
                   <Row label={t('Subtotal', 'সাবটোটাল')} value={bdt(subtotal)} />
-                  <Row
-                    label={
-                      shippingZone === 'inside'
-                        ? t('Delivery (inside Dhaka)', 'ডেলিভারি (ঢাকার ভিতরে)')
-                        : shippingZone === 'sub'
-                          ? t('Delivery (sub Dhaka)', 'ডেলিভারি (সাব-ঢাকা)')
-                          : t('Delivery (outside Dhaka)', 'ডেলিভারি (ঢাকার বাইরে)')
-                    }
-                    value={bdt(deliveryCharge)}
-                  />
+                  {vendors.length > 1 && (
+                    <Row
+                      label={
+                        resolvedZone === 'inside'
+                          ? t('Delivery (per store)', 'ডেলিভারি (প্রতি স্টোর)')
+                          : resolvedZone === 'sub'
+                            ? t('Delivery (per store)', 'ডেলিভারি (প্রতি স্টোর)')
+                            : t('Delivery (per store)', 'ডেলিভারি (প্রতি স্টোর)')
+                      }
+                      value={bdt(perVendorDelivery) + t(' per store', 'প্রতি স্টোর')}
+                    />
+                  )}
+                  {vendors.length === 1 && (
+                    <Row
+                      label={
+                        resolvedZone === 'inside'
+                          ? t('Delivery (inside Dhaka)', 'ডেলিভারি (ঢাকার ভিতরে)')
+                          : resolvedZone === 'sub'
+                            ? t('Delivery (sub Dhaka)', 'ডেলিভারি (সাব-ঢাকা)')
+                            : t('Delivery (outside Dhaka)', 'ডেলিভারি (ঢাকার বাইরে)')
+                      }
+                      value={bdt(totalDeliveryCharge)}
+                    />
+                  )}
+                  {isBkash && (
+                    <Row
+                      label={t('bKash cash-out fee', 'বিকাশ ক্যাশ-আউট ফি')}
+                      value={bdt(bkashCashOutFee)}
+                    />
+                  )}
                   {/* The payment rail is restated in the summary so the shopper
                       confirms what they are about to owe before clicking. */}
                   <Row
@@ -1033,8 +1108,8 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                   {vendors.length > 1 && (
                     <p className="pt-1 text-[10.5px] leading-relaxed text-slate-400">
                       {t(
-                        `One delivery charge covers all ${vendors.length} sellers. Each seller ships separately with its own tracking number.`,
-                        `একটি ডেলিভারি চার্জেই ${vendors.length}টি সেলারের পণ্য কভার হবে। প্রত্যেকে আলাদা ট্র্যাকিং নম্বর সহ পাঠাবেন।`,
+                        `Each seller charges its own delivery fee. Every seller ships separately with its own tracking number.`,
+                        `প্রত্যেক সেলার আলাদা ডেলিভারি চার্জ নেবেন। প্রত্যেকে আলাদা ট্র্যাকিং নম্বর সহ পাঠাবেন।`,
                       )}
                     </p>
                   )}

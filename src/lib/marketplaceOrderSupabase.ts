@@ -94,6 +94,14 @@ export interface MarketplaceOrderInput {
   paymentStatus: string;
   transactionId?: string;
   lines: MarketplaceOrderLine[];
+  // Per-vendor split and routing fields (optional, used by server fan-out).
+  deliveryZone?: string;
+  split_by_vendor?: boolean;
+  vendor_ids?: string[];
+  vendor_slugs?: string[];
+  vendor_count?: number;
+  order_source_channel?: string;
+  marketplace_order?: boolean;
 }
 
 export interface SupabaseOrderResult {
