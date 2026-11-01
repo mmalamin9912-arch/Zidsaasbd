@@ -5,12 +5,63 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Zid SaaS BD</title>
     <meta name="description" content="Zid SaaS BD - Modern E-Commerce Platform & Merchant Dashboard" />
+    <!--
+      Brand metadata for Google Search.
+
+      Google decides the site name (and the favicon shown next to a result) from
+      crawlable markup in the static <head>, not from the client-rendered React
+      bundle. `og:site_name` + the WebSite JSON-LD are the signals it reads for
+      the brand name — without them the domain can be labelled with the host
+      (e.g. "Vercel"). Icon tags below must point at raster files: Google does
+      not use SVG favicons.
+    -->
+    <link id="app-favicon" rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <!--
+      NOTE: no `type` here. The generated brand mark is a PNG served from
+      /logo.png; unless the server sets Content-Type: image/png for it (Vercel
+      treats it as octet-stream), a declared image/svg+xml type would make
+      browsers reject the icon.
+    -->
+    <link rel="icon" type="image/png" href="/logo.png" />
+
+    <meta property="og:site_name" content="Zid SaaS BD" />
+    <meta property="og:title" content="Zid SaaS BD" />
+    <meta property="og:description" content="Modern E-Commerce Platform & Merchant Dashboard" />
+    <meta property="og:url" content="https://zidbdsaas.vercel.app/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://zidbdsaas.vercel.app/logo.png" />
+    <meta name="twitter:card" content="summary" />
+    <link rel="canonical" href="https://zidbdsaas.vercel.app/" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Zid SaaS BD",
+        "alternateName": ["Zid SaaS BD", "Zid BD", "Zid SaaS"],
+        "url": "https://zidbdsaas.vercel.app/",
+        "logo": "https://zidbdsaas.vercel.app/logo.png"
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Zid SaaS BD",
+        "alternateName": ["Zid SaaS BD", "Zid BD"],
+        "url": "https://zidbdsaas.vercel.app/",
+        "logo": "https://zidbdsaas.vercel.app/logo.png",
+        "image": "https://zidbdsaas.vercel.app/logo.png"
+      }
+    </script>
     <!-- Google Search Console / Merchant Center site ownership verification.
          Must stay in the static <head>: Google's crawler reads the raw HTML and
          never executes the React bundle, so a tag injected at runtime would not
          be seen. -->
     <meta name="google-site-verification" content="_3GUXjJBEeN8CRNT24ED0yvQ0vwI1pt7mqk0ur9mdiI" />
-    <link id="app-favicon" rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#12151F" />
     <!--
       Marketplace language bootstrap.
