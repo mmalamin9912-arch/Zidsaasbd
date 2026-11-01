@@ -153,31 +153,74 @@ function readBasket(): BasketLine[] {
  * an in-memory copy instead of silently dropping the basket, which used to
  * surface as "Your basket is empty" on the checkout page.
  */
+function compactBasketLines(lines: BasketLine[]): any[] {
+  return lines.map((line) => {
+    const p: any = line?.product || {};
+    const image = String(p.image ?? p.image_url ?? p.imageUrl ?? p.thumbnail ?? '');
+    // Never persist heavy base64/data-URL images or large descriptions in
+    // localStorage — they are what push the cart past the ~5MB quota.
+    const safeImage = image.startsWith('data:') ? '' : image;
+    return {
+      productId: String(p.id ?? p.productId ?? p.product_id ?? ''),
+      title: String(p.title ?? p.name ?? p.productName ?? 'Item'),
+      priceBDT: Number(p.priceBDT ?? p.price ?? p.unitPriceBDT ?? 0) || 0,
+      quantity: Math.max(1, Math.floor(Number(line?.quantity) || 1)),
+      vendorId: String(p.vendor_id ?? p.vendorId ?? p.store_id ?? p.storeId ?? p.vendor_slug ?? p.store_slug ?? ''),
+      vendorName: String(p.vendor_name ?? p.vendorName ?? p.store_name ?? ''),
+      vendorSlug: String(p.vendor_slug ?? p.vendorSlug ?? p.store_slug ?? p.storeSlug ?? ''),
+      image: safeImage,
+    };
+  });
+}
+
 function writeBasket(lines: BasketLine[]) {
-  const serialized = JSON.stringify(lines);
+  const serialized = JSON.stringify(compactBasketLines(lines));
   memoryBasket.set(MARKETPLACE_BASKET_KEY, serialized);
   if (typeof window === 'undefined') return;
 
+  const persist = (key: string) => {
+    try {
+      localStorage.setItem(key, serialized);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   try {
     // Canonical key first — every reader checks it before anything else.
-    localStorage.setItem(MARKETPLACE_BASKET_KEY, serialized);
-    // Canonical write succeeded: a stale mirror is no longer needed.
-    try {
-      localStorage.removeItem(FALLBACK_KEY);
-    } catch {
-      /* ignore */
+    if (persist(MARKETPLACE_BASKET_KEY)) {
+      // Canonical write succeeded: a stale mirror is no longer needed.
+      try {
+        localStorage.removeItem(FALLBACK_KEY);
+      } catch {
+        /* ignore */
+      }
+    } else {
+      throw new Error('quota');
     }
   } catch (e) {
-    // Quota exceeded / private mode / locked WebView: keep a mirror copy so
-    // `readBasket` (canonical → fallback → memory) can still recover the
-    // lines instead of presenting the shopper with an empty basket on the
-    // checkout page.
+    // Quota exceeded / private mode / locked WebView: try the fallback mirror,
+    // and if that also fails, drop obsolete large keys and retry once.
+    let wrote = false;
     try {
-      localStorage.setItem(FALLBACK_KEY, serialized);
-    } catch (mirrorErr) {
-      console.warn('[Marketplace] basket mirror persist warning:', mirrorErr);
+      wrote = persist(FALLBACK_KEY);
+    } catch {
+      wrote = false;
     }
-    console.warn('[Marketplace] basket persist warning:', e);
+    if (!wrote) {
+      // Clear obsolete/large keys to free space, then retry the canonical write.
+      try {
+        localStorage.removeItem(FALLBACK_KEY);
+        localStorage.removeItem('zid_marketplace_cart_mirror');
+        wrote = persist(MARKETPLACE_BASKET_KEY);
+      } catch {
+        wrote = false;
+      }
+    }
+    if (!wrote) {
+      console.warn('[Marketplace] basket persist warning: localStorage quota exceeded; keeping in-memory copy only.', e);
+    }
   }
 
   window.dispatchEvent(new Event(BASKET_EVENT));
