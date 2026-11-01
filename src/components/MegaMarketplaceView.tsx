@@ -4093,6 +4093,16 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
              `handleAdd` only mutates the basket (no navigation), so the shopper
              stays exactly where they were in the grid. */
           onAdd={(p) => { handleAdd(p); setActiveProduct(null); }}
+          /* BUY NOW: one line in the shared basket, then straight to checkout.
+             `basket.add` writes `zid_marketplace_cart` synchronously, so the
+             checkout page reads the line on mount — the same handoff the
+             drawer's Checkout button uses (see `onCheckout` in App.tsx). The
+             modal is closed first so it is not still mounted over the new page. */
+          onBuyNow={(p) => {
+            handleAdd(p);
+            setActiveProduct(null);
+            onCheckout();
+          }}
           onVisitVendor={(slug) => { setActiveProduct(null); onVisitVendor(slug); }}
           theme={THEME}
         />
@@ -4215,11 +4225,26 @@ const QuickView: React.FC<{
   product: MarketplaceProduct;
   onClose: () => void;
   onAdd: (product: MarketplaceProduct) => void;
+  /**
+   * "Buy from store" — add this product to the basket and go straight to the
+   * unified checkout.
+   *
+   * It used to call `onVisitVendor(slug)`, which sent the shopper to that ONE
+   * merchant's storefront and made them find the product and buy it again
+   * there — abandoning everything else already in the basket. Buying now means
+   * the same thing it means on a product card: a line in the shared basket.
+   */
+  onBuyNow: (product: MarketplaceProduct) => void;
+  /**
+   * "Visit store" — open the selling vendor's own storefront. This is a
+   * browsing action, not a purchase, and is the ONLY navigation left in the
+   * modal now that "Buy from store" goes straight to checkout.
+   */
   onVisitVendor: (slug: string) => void;
   lang?: 'en' | 'bn';
   /** Runtime palette — light or dark. */
   theme?: ThemeTokens;
-}> = ({ product, onClose, onAdd, onVisitVendor, lang: qvLang, theme }) => {
+}> = ({ product, onClose, onAdd, onBuyNow, onVisitVendor, lang: qvLang, theme }) => {
   const THEME = theme || LIGHT_THEME;
   const lang: 'en' | 'bn' = qvLang === 'bn' ? 'bn' : 'en';
   const p = product as any;
@@ -4358,8 +4383,13 @@ const QuickView: React.FC<{
             </button>
             <button
               type="button"
-              onClick={() => product.vendor_slug && onVisitVendor(product.vendor_slug)}
-              className="min-h-[48px] rounded-xl border px-4 text-[13px] font-bold active:opacity-80"
+              onClick={(e) => {
+                // Same backdrop guard as "Add to basket" above.
+                e.stopPropagation();
+                onBuyNow(product);
+              }}
+              disabled={String(p.stock_status) === 'out_of_stock'}
+              className="min-h-[48px] rounded-xl border px-4 text-[13px] font-bold active:opacity-80 disabled:cursor-not-allowed disabled:opacity-45"
               style={{ borderColor: THEME.line, color: THEME.ink }}
             >
               Buy from store
