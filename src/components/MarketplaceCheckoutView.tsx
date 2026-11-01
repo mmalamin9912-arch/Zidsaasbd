@@ -5,10 +5,8 @@ import {
   AlertCircle, ArrowRight,
 } from 'lucide-react';
 import SafeImage from './SafeImage';
-import {
-  useMarketplaceBasket,
-  type BasketLine,
-} from '../lib/useMarketplaceBasket';
+import { useCart } from './CartProvider';
+import { type BasketLine } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
 
 /**
@@ -185,7 +183,15 @@ interface Props {
 }
 
 export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced, onSignIn }) => {
-  const basket = useMarketplaceBasket();
+  /**
+   * BOUND TO THE GLOBAL CART CONTEXT.
+   *
+   * `CartProvider` is mounted at the root (main.tsx), so this page reads the
+   * SAME live basket the drawer and badge mutate instead of spinning up a
+   * second, independently-seeded hook instance. `useCart` falls back to the
+   * hook when no provider is present, so this is safe either way.
+   */
+  const basket = useCart();
   const [lang, setLang] = useState<Lang>(() => readLang());
   const [session, setSession] = useState<Session>(() => readSession());
 
@@ -197,12 +203,42 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
    * card off screen until the basket hook has re-synced after mount, so a
    * shopper who arrived from the drawer never sees "Your basket is empty" for
    * a frame before their items appear.
+   *
+   * A REAL EMPTY BASKET still resolves quickly: the wait only lasts a few
+   * frames before the empty state is shown, so a shopper who genuinely has
+   * nothing in the basket is not left on a spinner.
    */
   const [ready, setReady] = useState(false);
+  /**
+   * True while an empty basket might still be a basket that is about to land.
+   * Cleared by the effect below as soon as lines arrive, or after a short
+   * grace period so a genuinely empty basket still reaches its empty state.
+   */
+  const [waitingForBasket, setWaitingForBasket] = useState(true);
+
   useEffect(() => {
     const id = window.setTimeout(() => setReady(true), 0);
     return () => window.clearTimeout(id);
   }, []);
+
+  /**
+   * A BASKET THAT ARRIVES AFTER MOUNT IS STILL OURS.
+   *
+   * The drawer hands off to this page in the same click, and the persisted
+   * basket can be re-written a moment later (another consumer's effect, a
+   * restored session, slow hydration). When that happens the hook adopts the
+   * new lines — and this stops treating the page as empty so the checkout
+   * renders the basket instead of the "Your basket is empty" card. Items,
+   * quantities and vendor groups all re-derive from `basket.lines`.
+   */
+  useEffect(() => {
+    if (basket.itemCount > 0) {
+      setWaitingForBasket(false);
+      return;
+    }
+    const id = window.setTimeout(() => setWaitingForBasket(false), 600);
+    return () => window.clearTimeout(id);
+  }, [basket.itemCount]);
 
   /**
    * TELL THE MARKETPLACE THE BASKET WAS HANDED OVER.
@@ -564,7 +600,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       </header>
 
       <main className="mx-auto max-w-[1100px] px-4 py-6">
-        {!ready && basket.itemCount === 0 ? (
+        {(!ready || waitingForBasket) && basket.itemCount === 0 ? (
           <div className="flex items-center justify-center rounded-2xl border bg-white p-10 shadow-sm" style={{ borderColor: THEME.line }}>
             <Loader2 className="h-5 w-5 animate-spin text-slate-300" />
           </div>

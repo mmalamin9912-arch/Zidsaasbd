@@ -191,19 +191,67 @@ const sameLine = (a: BasketLine, b: { productId: string; vendorId?: string }) =>
   String(a.product.id) === String(b.productId) &&
   vendorKeyOf(a.product) === String(b.vendorId || '').trim().toLowerCase();
 
+const basketSignature = (items: BasketLine[]): string =>
+  items
+    .map((line) => `${line.product?.id}:${line.quantity}`)
+    .sort()
+    .join('|');
+
 export function useMarketplaceBasket() {
   const [lines, setLines] = useState<BasketLine[]>(() => readBasket());
 
+  /**
+   * Mirrors `lines` for event handlers.
+   *
+   * The listeners below are registered once (empty dependency list), so they
+   * would otherwise close over the FIRST render's `lines` forever and could
+   * only ever re-read storage — comparing against a stale array is what made
+   * a re-read overwrite the good state held in this tab.
+   */
+  const linesRef = useRef<BasketLine[]>(lines);
+
+  /**
+   * ADOPT A BASKET THAT LANDS AFTER THIS HOOK MOUNTED.
+   *
+   * This is the `/marketplace/checkout` "Your basket is empty" bug. The
+   * checkout mounts in the same click that navigates away from the drawer, and
+   * the basket it needs is often written by code that runs after that render
+   * (another consumer's effect, a restored session, a slow hydration). The
+   * hook seeded from storage and then sat still: the persisted basket arrived
+   * moments later and nothing re-read it, so the checkout kept rendering the
+   * empty state for a shopper whose drawer had just listed every item.
+   *
+   * A later event is therefore adopted whenever it carries lines, and an empty
+   * copy is never allowed to replace a non-empty one from storage — losing a
+   * shopper's basket to a race is exactly what this guards against.
+   */
+  const commit = useCallback((next: BasketLine[]) => {
+    linesRef.current = next;
+    setLines(next);
+  }, []);
+
+  const syncFromStorage = useCallback(() => {
+    const stored = readBasket();
+    const current = linesRef.current;
+    if (stored.length === 0 && current.length > 0) return;
+    if (basketSignature(stored) === basketSignature(current)) return;
+    commit(stored);
+  }, [commit]);
+
   // Re-read on our own event and on another tab's write (`storage`).
   useEffect(() => {
-    const sync = () => setLines(readBasket());
-    window.addEventListener(BASKET_EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(BASKET_EVENT, sync);
-      window.removeEventListener('storage', sync);
+    const onStorage = (e: StorageEvent) => {
+      // Only our keys, so unrelated dashboard writes do not churn the basket.
+      if (e.key && e.key !== MARKETPLACE_BASKET_KEY && e.key !== FALLBACK_KEY) return;
+      syncFromStorage();
     };
-  }, []);
+    window.addEventListener(BASKET_EVENT, syncFromStorage);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(BASKET_EVENT, syncFromStorage);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [syncFromStorage]);
 
   /**
    * Re-read on every mount.
@@ -218,8 +266,8 @@ export function useMarketplaceBasket() {
   useEffect(() => {
     if (mountedRef.current) return;
     mountedRef.current = true;
-    setLines(readBasket());
-  }, []);
+    syncFromStorage();
+  }, [syncFromStorage]);
 
   const add = useCallback((product: MarketplaceProduct, quantity = 1) => {
     /*
@@ -251,8 +299,8 @@ export function useMarketplaceBasket() {
         : line))
       : [...current, { product, quantity: qty }];
     writeBasket(next);
-    setLines(next);
-  }, []);
+    commit(next);
+  }, [commit]);
 
   const setQuantity = useCallback((productId: string, vendorId: string, quantity: number) => {
     /*
@@ -267,19 +315,19 @@ export function useMarketplaceBasket() {
         : line))
       .filter((line) => line.quantity > 0);
     writeBasket(next);
-    setLines(next);
-  }, []);
+    commit(next);
+  }, [commit]);
 
   const remove = useCallback((productId: string, vendorId: string) => {
     const next = readBasket().filter((line) => !sameLine(line, { productId, vendorId }));
     writeBasket(next);
-    setLines(next);
-  }, []);
+    commit(next);
+  }, [commit]);
 
   const clear = useCallback(() => {
     writeBasket([]);
-    setLines([]);
-  }, []);
+    commit([]);
+  }, [commit]);
 
   const itemCount = useMemo(
     () => lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0),
