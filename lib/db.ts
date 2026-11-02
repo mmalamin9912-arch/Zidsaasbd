@@ -27,6 +27,7 @@ export const DB_NAME = 'zidbdsaas';
 function readMongoUri(): string {
   return (
     process.env.MONGODB_URI ||
+    process.env.MONGODB_URI_2 ||
     process.env.MONGODB_URL ||
     process.env.DATABASE_URL ||
     ''
