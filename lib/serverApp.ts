@@ -195,6 +195,7 @@ import {
   reconcileCodDelivery,
   listCodLedger,
   getVendorWallet,
+  creditVendorWallet,
   createPayoutRequest,
   listPayoutRequests,
   updatePayoutRequest,
@@ -15818,6 +15819,10 @@ function toNumeric(value: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function round2(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
 /**
  * Strip keys that MongoDB refuses to accept inside an update operator.
  *
@@ -16060,6 +16065,8 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
 function buildOrderFilterClauses(query: {
   isManual?: unknown;
   status?: unknown;
+  payment_status?: unknown;
+  paymentStatus?: unknown;
   search?: unknown;
 }): Record<string, any> | null {
   const clauses: Record<string, any>[] = [];
@@ -16143,9 +16150,40 @@ function buildOrderFilterClauses(query: {
     });
   }
 
+  // ── payment_status ────────────────────────────────────────────────────────
+  // Admin payment-verification queue: match every spelling a row may carry.
+  const rawPayment = query.payment_status ?? query.paymentStatus;
+  if (rawPayment !== undefined && rawPayment !== null && String(rawPayment).trim() !== '') {
+    const values = paymentStatusFilterValues(rawPayment);
+    if (values.length) {
+      clauses.push({
+        $or: [
+          { payment_status: { $in: values } },
+          { paymentStatus: { $in: values } },
+        ],
+      });
+    }
+  }
+
   if (clauses.length === 0) return null;
   // Multiple clauses must AND together.
   return clauses.length === 1 ? clauses[0] : { $and: clauses };
+}
+
+/**
+ * Every spelling a `payment_status` may have been persisted under, so the admin
+ * payment-verification queue can match 'Pending Verification' regardless of
+ * casing or spacing. `normalizeKey` logic is inlined here (it is not exported
+ * from lib/orderStatus.ts).
+ */
+function paymentStatusFilterValues(raw: unknown): string[] {
+  const text = String(raw ?? '').trim();
+  if (!text) return [];
+  const values = new Set<string>();
+  values.add(text);
+  values.add(text.toLowerCase());
+  values.add(text.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  return Array.from(values).filter(Boolean);
 }
 
 // ── In-Memory & Local Order Cache (eliminates sync lag & database outage blanks) ──
@@ -18536,6 +18574,110 @@ app.delete('/api/orders/:id', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] DELETE /api/orders/:id error:', err);
     return res.status(200).json({ ok: false, deleted: 0, error: err?.message || 'Order delete failed.' });
+  }
+});
+
+// ── Admin payment verification (wallet disbursement) ────────────────────────
+// PATCH /api/admin/orders/:id/payment-verification
+// Body: { action: 'approve' | 'reject', payout_reference?, notes?, processed_by?, store_slug?, merchant_id? }
+// Approving a 'Pending Verification' order marks it Paid / Processing and
+// credits the selling merchant's wallet (available_bdt += net payable) and
+// records a vendor payout in 'processing' state.
+app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, error: 'An order id is required.' });
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const action = String(body.action || '').trim().toLowerCase();
+    if (action !== 'approve' && action !== 'reject') {
+      return res.status(200).json({ ok: false, error: "action must be 'approve' or 'reject'." });
+    }
+    const extra = {
+      store_slug: req.query.store_slug || body.store_slug || body.storeSlug,
+      store_id: req.query.store_id || body.store_id || body.storeId,
+      merchant_id: req.query.merchant_id || body.merchant_id || body.merchantId,
+    };
+
+    const located = await findOrder(id, extra);
+    if (!located.doc) {
+      return res.status(200).json({ ok: false, error: located.error || `Order ${id} was not found.` });
+    }
+    const doc = located.doc as Record<string, any>;
+    const vendorId = String(doc.vendor_id || doc.vendorId || doc.store_id || doc.storeId || doc.merchant_id || doc.merchantId || '').trim();
+    const storeSlug = String(doc.store_slug || doc.storeSlug || doc.storeSlug || '').trim();
+    const vendorName = String(doc.vendor_name || doc.vendorName || doc.store_name || doc.storeName || '').trim();
+    const orderNumber = String(doc.order_number || doc.orderNumber || doc.id || id).replace(/^#/, '');
+    const totalBDT = toNumeric(doc.totalBDT ?? doc.total_price ?? doc.total_bdt ?? doc.total, 0);
+    const commissionBDT = toNumeric(doc.commission_bdt ?? doc.commissionBdt ?? 0, 0);
+    const netPayable = round2(Math.max(0, toNumeric(doc.vendor_net_payable_bdt ?? doc.vendorNetPayableBdt ?? totalBDT - commissionBDT, 0)));
+
+    if (action === 'reject') {
+      const result = await updateOrderFields(id, { paymentStatus: 'Voided' }, extra);
+      return res.status(result.ok ? 200 : 200).json({
+        ok: result.ok,
+        order: result.order ?? null,
+        error: result.error ?? null,
+        action: 'rejected',
+      });
+    }
+
+    // approve
+    const statusResult = await updateOrderFields(id, { status: 'Processing', paymentStatus: 'Paid' }, extra);
+    if (!statusResult.ok) {
+      return res.status(200).json({ ok: false, error: statusResult.error || 'Could not mark the order paid.' });
+    }
+
+    // Credit the selling merchant's wallet with the net payable (prepaid
+    // wallet order — customer already paid; the platform releases the funds).
+    let walletResult: Record<string, any> | null = null;
+    if (vendorId && netPayable > 0) {
+      walletResult = await creditVendorWallet(
+        { vendorId, ...(storeSlug ? { storeSlug } : {}), ...(vendorName ? { vendorName } : {}) },
+        { available: netPayable, gross: totalBDT, commission: commissionBDT, courierFee: 0, orderNumber },
+      ).catch(() => null);
+    }
+
+    // Record / advance the vendor payout ledger to 'processing'.
+    let payoutResult: Record<string, any> | null = null;
+    if (vendorId) {
+      const recorded = await recordVendorPayout({
+        masterOrderId: String(doc.master_order_id || doc.masterOrderId || ''),
+        masterOrderNumber: String(doc.master_order_number || doc.masterOrderNumber || ''),
+        childOrderId: String(doc.child_order_id || doc.childOrderId || doc.id || ''),
+        childOrderNumber: String(doc.child_order_number || doc.childOrderNumber || orderNumber),
+        vendorId,
+        vendorName: vendorName || undefined,
+        storeSlug: storeSlug || undefined,
+        grossAmountBDT: totalBDT,
+        commissionBDT,
+        commissionPercent: toNumeric(doc.commission_rate_percent ?? doc.commissionRatePercent ?? 0, 0),
+        commissionFlatFeeBDT: toNumeric(doc.commission_flat_fee_bdt ?? doc.commissionFlatFeeBdt ?? 0, 0),
+      }).catch(() => ({ ok: false }));
+      if (recorded?.ok && 'payout' in recorded && recorded.payout?._id) {
+        const updated = await updatePayoutStatus(String(recorded.payout._id), {
+          status: 'processing',
+          payout_reference: body.payout_reference ?? body.reference,
+          notes: body.notes,
+          payout_method: body.payout_method ?? body.method,
+        }).catch(() => ({ ok: false }));
+        payoutResult = updated.ok && 'payout' in updated ? updated.payout : null;
+      } else {
+        payoutResult = 'payout' in recorded ? recorded.payout ?? null : null;
+      }
+    }
+
+    const fresh = statusResult.order ?? null;
+    return res.status(200).json({
+      ok: true,
+      action: 'approved',
+      order: fresh,
+      wallet: walletResult ?? null,
+      payout: payoutResult ?? null,
+    });
+  } catch (err: any) {
+    console.error('[Server] PATCH /api/admin/orders/:id/payment-verification error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Payment verification failed.' });
   }
 });
 

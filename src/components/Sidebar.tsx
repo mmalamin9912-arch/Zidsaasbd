@@ -202,6 +202,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'analytics', label: 'Analytics', icon: BarChart3 },
     { id: 'logistics', label: 'Logistics', icon: Truck },
     { id: 'payments', label: 'Payments', icon: CreditCard },
+    { id: 'wallet', label: 'Wallet', icon: Wallet },
     { id: 'financing', label: 'Financing', icon: Landmark, highlight: true },
     { id: 'growth', label: 'Growth', icon: TrendingUp },
     { id: 'channels', label: 'Channels', icon: Share2 },

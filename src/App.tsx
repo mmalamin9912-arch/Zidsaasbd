@@ -89,6 +89,7 @@ import { PaymentsView } from './components/views/PaymentsView';
 import { LogisticsView } from './components/views/LogisticsView';
 import { BillingView } from './components/views/BillingView';
 import { OrdersView } from './components/views/OrdersView';
+import { WalletView } from './components/views/WalletView';
 import { ProductsView } from './components/views/ProductsView';
 import { CustomersView } from './components/views/CustomersView';
 import { supabase } from './lib/supabase';
@@ -3038,6 +3039,10 @@ onPlaceOrder={async (newOrder) => {
                 onUpdateCodConfig={setCodConfig}
                 onUpdateGatewayConfig={setGatewayConfig}
               />
+            )}
+
+            {activeTab === 'wallet' && (
+              <WalletView merchant={merchant} />
             )}
 
             {activeTab === 'financing' && (

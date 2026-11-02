@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
@@ -74,8 +74,9 @@ import {
   Truck,
   Image
 } from 'lucide-react';
-import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, PlanFeatureFlags } from '../types';
+import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, PlanFeatureFlags, Order } from '../types';
 import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingDays, getPlanDisplayName } from '../utils/subscriptionUtils';
+import { toNumber } from '../utils/orderUtils';
 import { supabase, getSupabaseClient, safeUpsertRow } from '../lib/supabase';
 import { savePlan } from '../lib/plansApi';
 import { FEATURE_FLAG_LABELS, featureFlagsOf, monthlyPriceOf, productLimitLabel, sortPlansByTier } from '../lib/planPricing';
@@ -354,8 +355,39 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   onUpdateRolePermissions
 }) => {
   const toast = useToast();
-  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy'>('analytics');
+  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'orders' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics'>('analytics');
   const [openCategory, setOpenCategory] = useState<string | null>(null);
+
+  // Order payment verification queue: orders awaiting the admin's TrxID decision.
+  const [verificationOrders, setVerificationOrders] = useState<Order[]>([]);
+  const [verificationLoading, setVerificationLoading] = useState(false);
+  const verifyingIds = useRef<Set<string>>(new Set());
+
+  /** Approve or reject one pending-verification order via the admin API. */
+  const handleVerificationDecision = async (ord: Order, action: 'approve' | 'reject'): Promise<void> => {
+    verifyingIds.current.add(ord.id);
+    try {
+      const res = await fetch(`/api/admin/orders/${encodeURIComponent(ord.id)}/payment-verification`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ action, processed_by: 'super_admin' }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) throw new Error(data?.error || `Verification ${action} failed.`);
+
+      // Drop the resolved row from the queue so the admin sees progress.
+      setVerificationOrders((prev) => prev.filter((o) => o.id !== ord.id));
+      toast.success(
+        action === 'approve'
+          ? `Payment verified — order ${ord.orderNumber} marked Paid and seller credited.`
+          : `Payment rejected — order ${ord.orderNumber} voided.`
+      );
+    } catch (err: any) {
+      toast.error(`Could not ${action} payment for ${ord.orderNumber}. ${err?.message || 'Please try again.'}`);
+    } finally {
+      verifyingIds.current.delete(ord.id);
+    }
+  };
 
   // New modal state for creating merchant
   const [isCreateMerchantModalOpen, setIsCreateMerchantModalOpen] = useState(false);
@@ -396,6 +428,36 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   useEffect(() => {
     setPlansForm(sortPlansByTier(platformPlans));
   }, [platformPlans]);
+
+  // Order payment verification queue — every order whose payment is awaiting
+  // the admin's TrxID decision, across ALL merchants. No store scope: the
+  // super admin verifies platform wallet payments wherever they originated.
+  const fetchVerificationOrders = useCallback(async () => {
+    setVerificationLoading(true);
+    try {
+      const res = await fetch('/api/orders?payment_status=Pending Verification&limit=500', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      const data = await res.json().catch(() => null);
+      const rows = Array.isArray(data) ? data : Array.isArray(data?.orders) ? data.orders : [];
+      const orders = rows
+        .map((o: any) => o)
+        .filter((o: any) => String(o?.paymentStatus ?? o?.payment_status ?? '') === 'Pending Verification')
+        .sort((a: any, b: any) => new Date(b?.created_at ?? b?.createdAt ?? 0).getTime() - new Date(a?.created_at ?? a?.createdAt ?? 0).getTime());
+      setVerificationOrders(orders);
+    } catch (err: any) {
+      console.warn('[SuperAdmin] verification orders fetch warning:', err?.message || err);
+      setVerificationOrders([]);
+    } finally {
+      setVerificationLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSubTab !== 'orders') return;
+    void fetchVerificationOrders();
+  }, [activeSubTab, fetchVerificationOrders]);
 
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [isTeamModalOpen, setIsTeamModalOpen] = useState(false);
@@ -2323,7 +2385,7 @@ onUpdateMerchant(updatedCurrent);
           // Falls back to the in-memory merchant list before the request resolves.
           const totalMerchantAccounts = merchantCounts.all || allMerchants.length;
 
-          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics';
+          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'orders' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics';
 
           interface NavSubItem {
             id: SubTabKey;
@@ -2377,6 +2439,7 @@ onUpdateMerchant(updatedCurrent);
               icon: Store,
               items: [
                 { id: 'marketplace', label: 'Marketplace Studio', icon: Store },
+                { id: 'orders', label: 'Order Payment Verification', icon: CreditCard },
                 { id: 'taxonomy', label: 'Master Categories', icon: FolderTree },
                 { id: 'logistics', label: 'Logistics / Shipping Settings', icon: Truck },
               ]
@@ -2872,6 +2935,114 @@ onUpdateMerchant(updatedCurrent);
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* 2b. ORDER PAYMENT VERIFICATION — super admin queue */}
+        {activeSubTab === 'orders' && (
+          <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <CreditCard className="w-5 h-5 text-indigo-400" />
+                  <span>Order Payment Verification</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Orders paid by wallet (bKash / Nagad / Bank) whose TrxID the
+                  platform has not yet verified. Approving releases the net
+                  amount to the seller's wallet; rejecting voids the payment.
+                </p>
+              </div>
+              <span
+                className={`text-xs font-bold px-3 py-1 rounded-full border shrink-0 ${
+                  verificationOrders.length > 0
+                    ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                    : 'text-slate-400 bg-slate-500/10 border-slate-500/30'
+                }`}
+              >
+                {verificationOrders.length} Pending Verification
+              </span>
+            </div>
+
+            <div className="overflow-x-auto border border-[#2E3548] rounded-xl bg-[#202533]/40">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-[#202533] text-slate-400 uppercase font-semibold border-b border-[#2E3548]">
+                  <tr>
+                    <th className="p-3.5 font-black text-[10px]">Order #</th>
+                    <th className="p-3.5 font-black text-[10px]">Customer</th>
+                    <th className="p-3.5 font-black text-[10px]">Merchant (Seller)</th>
+                    <th className="p-3.5 font-black text-[10px]">Amount BDT</th>
+                    <th className="p-3.5 font-black text-[10px]">Method</th>
+                    <th className="p-3.5 font-black text-[10px]">TrxID</th>
+                    <th className="p-3.5 font-black text-[10px]">Ordered</th>
+                    <th className="p-3.5 text-right font-black text-[10px]">Admin Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#2E3548]">
+                  {verificationLoading && verificationOrders.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="p-12 text-center text-slate-400">Loading pending payments…</td>
+                    </tr>
+                  ) : verificationOrders.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="p-12 text-center text-slate-500">
+                        <div className="w-12 h-12 bg-[#202533] rounded-full flex items-center justify-center mx-auto mb-3 text-slate-600">
+                          <CreditCard className="w-6 h-6" />
+                        </div>
+                        <p className="font-bold uppercase text-[10px] tracking-widest">No payments awaiting verification</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    verificationOrders.map((ord) => {
+                      const busy = verifyingIds.current.has(ord.id);
+                      return (
+                        <tr key={ord.id} className="hover:bg-[#202533]/50 transition group">
+                          <td className="p-3.5">
+                            <div className="font-mono font-bold text-white text-xs">{ord.orderNumber}</div>
+                          </td>
+                          <td className="p-3.5">
+                            <div className="font-bold text-white">{ord.customerName}</div>
+                            <div className="text-[11px] text-slate-400 font-mono">{ord.customerPhone}</div>
+                          </td>
+                          <td className="p-3.5">
+                            <div className="font-semibold text-slate-200">{ord.vendor_name || ord.store_name || 'Store'}</div>
+                            {ord.store_slug && (
+                              <div className="text-[10px] text-slate-500 truncate max-w-[160px]">{ord.store_slug}</div>
+                            )}
+                          </td>
+                          <td className="p-3.5 font-extrabold text-[#00D68F] text-xs">৳{toNumber(ord.totalBDT)}</td>
+                          <td className="p-3.5 font-semibold text-slate-200 capitalize">{ord.paymentMethod}</td>
+                          <td className="p-3.5">
+                            <span className="font-mono bg-[#181B26] text-pink-400 px-2.5 py-1 rounded border border-[#2E3548] font-bold text-[10px]">
+                              {ord.transactionId || '—'}
+                            </span>
+                          </td>
+                          <td className="p-3.5 text-slate-400 text-[11px] font-mono">
+                            {new Date(ord.createdAt || ord.created_at || 0).toLocaleDateString() || '—'}
+                          </td>
+                          <td className="p-3.5 text-right space-x-2">
+                            <button
+                              onClick={() => void handleVerificationDecision(ord, 'approve')}
+                              disabled={busy}
+                              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition shadow-lg shadow-emerald-600/20"
+                            >
+                              {verifyingIds.current.has(ord.id) ? 'Approving…' : 'Approve Payment'}
+                            </button>
+                            <button
+                              onClick={() => void handleVerificationDecision(ord, 'reject')}
+                              disabled={busy}
+                              className="bg-rose-600 hover:bg-rose-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition shadow-lg shadow-rose-600/20"
+                            >
+                              {verifyingIds.current.has(ord.id) ? 'Rejecting…' : 'Reject Payment'}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         )}

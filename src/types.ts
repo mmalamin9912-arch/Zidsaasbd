@@ -15,6 +15,7 @@ export type NavigationTab =
   | 'analytics'
   | 'logistics'
   | 'payments'
+  | 'wallet'
   | 'financing'
   | 'growth'
   | 'channels'

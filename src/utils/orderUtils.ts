@@ -187,6 +187,7 @@ export function normalizeOrders(raw: unknown): Order[] {
 const STATUS_ALIASES: Record<string, string> = {
   new: 'New',
   pending: 'New',
+  pendingverification: 'New',
   placed: 'New',
   preparing: 'Preparing',
   processing: 'Preparing',

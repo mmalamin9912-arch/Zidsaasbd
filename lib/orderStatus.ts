@@ -55,6 +55,7 @@ export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 const STATUS_ALIASES: Record<string, OrderStatus> = {
   new: 'New',
   pending: 'New',
+  pendingverification: 'New',
   placed: 'New',
   preparing: 'Preparing',
   processing: 'Preparing',
