@@ -406,6 +406,21 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     payment === 'bkash' ? String(adminPay?.bkashNumber || '') :
     payment === 'nagad' ? String(adminPay?.nagadNumber || '') :
     payment === 'rocket' ? String(adminPay?.rocketNumber || '') : '';
+
+  // If the SELECTED gateway is (or becomes) disabled by the Super Admin while
+  // the shopper is on the page, fall back to COD so a stale selection can
+  // never be submitted on a hidden rail.
+  useEffect(() => {
+    if (payment === 'cod') return;
+    const active =
+      payment === 'bkash' ? adminPay?.bkashActive !== false :
+      payment === 'nagad' ? adminPay?.nagadActive !== false :
+      payment === 'rocket' ? adminPay?.rocketActive !== false : true;
+    if (adminPay && !active) {
+      setPayment('cod');
+      setTxId('');
+    }
+  }, [adminPay, payment]);
   const [copiedNumber, setCopiedNumber] = useState(false);
   const copyWalletNumber = async () => {
     if (!adminWalletNumber) return;
@@ -967,6 +982,12 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                   </h2>
                 </div>
                 <div className="space-y-2 p-4">
+                  {/* DYNAMIC PAYMENT VISIBILITY — a method appears only when
+                      the Super Admin has ENABLED it in the gateway panel
+                      (bkashActive / nagadActive / rocketActive). A disabled
+                      gateway is completely HIDDEN, not merely greyed out, so
+                      shoppers can never select a rail the platform does not
+                      accept. COD has no admin toggle: it is always offered. */}
                   {([
                     {
                       id: 'cod' as const,
@@ -980,23 +1001,28 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                       Icon: Wallet,
                       title: 'bKash',
                       desc: t('Send the total, then add your Transaction ID.', 'মোট টাকা পাঠিয়ে ট্রানজেকশন আইডি দিন।'),
-                      enabled: true,
+                      enabled: adminPay ? adminPay.bkashActive !== false : true,
                     },
                     {
                       id: 'nagad' as const,
                       Icon: Wallet,
                       title: 'Nagad',
                       desc: t('Send the total, then add your Transaction ID.', 'মোট টাকা পাঠিয়ে ট্রানজেকশন আইডি দিন।'),
-                      enabled: true,
+                      enabled: adminPay ? adminPay.nagadActive !== false : true,
                     },
                     {
                       id: 'rocket' as const,
                       Icon: Wallet,
                       title: 'Rocket',
                       desc: t('Send the total, then add your Transaction ID.', 'মোট টাকা পাঠিয়ে ট্রানজেকশন আইডি দিন।'),
-                      enabled: true,
+                      enabled: adminPay ? adminPay.rocketActive !== false : true,
                     },
-                  ]).map(({ id, Icon, title, desc, enabled }) => (
+                  ])
+                  // Completely hide disabled gateways rather than greying them
+                  // out — the checkout must never advertise a rail the Super
+                  // Admin switched off.
+                  .filter(({ enabled }) => enabled)
+                  .map(({ id, Icon, title, desc, enabled }) => (
                     <label
                       key={id}
                       className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition ${enabled ? 'hover:bg-[#fafbff]' : 'cursor-not-allowed opacity-55'

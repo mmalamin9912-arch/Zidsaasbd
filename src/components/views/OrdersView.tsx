@@ -720,10 +720,22 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    * fallback warehouse, and when it is missing the modal blocks dispatch and
    * points the merchant to Logistics → Courier API → Setup. */
   const [dispatchConfirmed, setDispatchConfirmed] = useState(false);
+
+  /* PAYMENT VERIFICATION GATE (strict).
+   *
+   * A marketplace wallet order lands as 'Pending Verification' — the customer
+   * claims they sent the money but nobody has reconciled the TrxID yet. Until
+   * the Super Admin flips the status to 'Paid', the vendor MUST NOT dispatch:
+   * the courier collects the parcel and the platform has no proof of payment.
+   * COD and already-Paid orders pass straight through. */
+  const paymentVerificationLock = (ord: Order): boolean =>
+    isMarketplaceOrder(ord) && String(ord.paymentStatus || '') === 'Pending Verification';
+
   const resolvedPickupInfo = useMemo(() => resolvePrintStoreInfo(), [selectedOrderForCourier?.id]);
   const pickupPreviewAddress = String(resolvedPickupInfo.address || '').trim();
   const pickupPreviewPhone = String(resolvedPickupInfo.phone || '').trim();
-  const canDispatch = Boolean(pickupPreviewAddress);
+  const selectedOrderLocked = selectedOrderForCourier ? paymentVerificationLock(selectedOrderForCourier) : false;
+  const canDispatch = Boolean(pickupPreviewAddress) && !selectedOrderLocked;
 
   /** Monotonic counter behind sandbox test tracking IDs (1001, 1002, …). */
   const sandboxSequenceRef = React.useRef(1);
@@ -812,6 +824,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               ? 'The platform has not configured its courier API keys yet — contact the marketplace administrator.'
               : centralData.code === 'missing_vendor_pickup'
               ? 'Add your pickup address and phone in Dashboard → Logistics → Courier API → Setup, then try again.'
+              : centralData.code === 'payment_unverified'
+              ? 'The marketplace administrator has not verified this wallet payment yet. Dispatch unlocks once the payment is marked Paid.'
               : `Central courier booking failed (${centralData.code || centralRes.status}).`);
           toast.error(
             centralData.code === 'missing_vendor_pickup'
@@ -1510,6 +1524,22 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       toast.error('Could not save the payment status for this order.', {
         description: `It has been reverted to "${previous?.paymentStatus || 'Unpaid'}". Please try again.`,
       });
+      return;
+    }
+
+    /* PAYMENT VERIFICATION GATE — verifying (or un-verifying) a marketplace
+     * wallet payment must FLIP the fulfilment lock too. Marking a
+     * 'Pending Verification' order as Paid releases it to the vendor, whose
+     * dispatch button stays greyed out otherwise. Setting anything OTHER than
+     * Paid re-locks the order so a TrxID marked suspect immediately blocks
+     * shipping again. */
+    const order = latestOrdersRef.current.find(o => o.id === orderId);
+    if (order && isMarketplaceOrder(order)) {
+      const unlocked = newPaymentStatus === 'Paid';
+      const stillLocked = paymentVerificationLock(order);
+      if (unlocked !== !stillLocked) {
+        await handleQuickUpdateStatus(orderId, unlocked ? 'Preparing' : 'New');
+      }
     }
   };
 
@@ -4018,6 +4048,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 The vendor must SEE and CONFIRM it before dispatch; if the
                 profile has none, dispatch is blocked until it is added in
                 Dashboard → Logistics. */}
+            {selectedOrderLocked && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs">
+                <div className="flex items-center gap-2 font-black text-amber-400">
+                  <ShieldAlert className="w-4 h-4" /> Payment verification pending
+                </div>
+                <p className="mt-1 leading-relaxed text-amber-300/90">
+                  The customer paid by wallet and the TrxID has NOT been verified by the marketplace administrator yet. Dispatch unlocks automatically once the payment status is marked "Paid".
+                </p>
+              </div>
+            )}
             <div className="bg-[#181B26] p-3.5 rounded-xl border border-[#2E3548] space-y-1.5 text-xs">
               <div className="flex items-center gap-1.5 text-[10px] uppercase font-black text-slate-500">
                 <MapPin className="w-3 h-3" /> Pickup from your store

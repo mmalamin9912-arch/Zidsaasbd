@@ -14731,6 +14731,26 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       });
     }
 
+    // ── STRICT PAYMENT VERIFICATION GATE ──
+    // A marketplace wallet order stays 'Pending Verification' until the Super
+    // Admin confirms the TrxID. Book a parcel for an unverified payment and
+    // the courier ships goods the platform has not been paid for — so the
+    // dispatch is REFUSED at the API level, not just hidden in the UI. A
+    // client that forges the request cannot get around this.
+    const paymentStatus = String(
+      (order as any).payment_status || (order as any).paymentStatus || ''
+    ).trim();
+    if (
+      (order as any).marketplace_order === true &&
+      paymentStatus === 'Pending Verification'
+    ) {
+      return res.status(200).json({
+        ok: false,
+        code: 'payment_unverified',
+        error: 'This order\'s wallet payment has not been verified by the marketplace administrator yet. Dispatch unlocks automatically once the payment status is "Paid".',
+      });
+    }
+
     // ── 2. STRICT VENDOR PICKUP — the merchant's OWN address and phone. ──
     // A marketplace parcel is collected at the merchant's shop. There is NO
     // central fallback warehouse: if this seller has not configured a real
