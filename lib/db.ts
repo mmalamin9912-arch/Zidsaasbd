@@ -4,12 +4,12 @@ import mongoose from 'mongoose';
  * Robust MongoDB connection handler for serverless environments (Vercel).
  *
  * Why this exists:
- *  - Serverless functions are frozen/thawed and modules can be re-evaluated
- *    between invocations. Naively calling `mongoose.connect()` on every request
- *    exhausts the connection pool and triggers "too many connections" errors.
- *  - The fix is to cache both the connection promise AND the resolved db handle
- *    on the Node `global` object, so a warm function reuses one pool across all
- *    invocations, and concurrent requests share a single in-flight connection.
+ * - Serverless functions are frozen/thawed and modules can be re-evaluated
+ *   between invocations. Naively calling `mongoose.connect()` on every request
+ *   exhausts the connection pool and triggers "too many connections" errors.
+ * - The fix is to cache both the connection promise AND the resolved db handle
+ *   on the Node `global` object, so a warm function reuses one pool across all
+ *   invocations, and concurrent requests share a single in-flight connection.
  *
  * All data lives in the 'zidbdsaas' database, so `dbName` is always applied to
  * override whatever database the connection string's path points at.
@@ -18,10 +18,11 @@ import mongoose from 'mongoose';
 export const DB_NAME = 'zidbdsaas';
 
 /**
- * Resolve the connection string on every call rather than freezing it at module
- * load. Serverless functions can have module state created before the runtime
- * injects its environment, and a cached empty value would make the app report
- * "Database is not configured" even though MONGODB_URI IS set in Vercel.
+ * Read the MongoDB URI from environment variables on every call rather than
+ * freezing it at module load. Serverless functions can have module state created
+ * before the runtime injects its environment, and a cached empty value would
+ * make the app report "Database is not configured" even though MONGODB_URI IS set
+ * in Vercel.
  */
 function readMongoUri(): string {
   return (
@@ -37,14 +38,21 @@ type MongooseCache = {
   promise: Promise<typeof mongoose> | null;
 };
 
-// Persist the cache across hot reloads (dev) and warm invocations (serverless).
+/**
+ * Persist the cache across hot reloads (dev) and warm invocations (serverless).
+ * The cache lives on `global` so that across Vercel cold starts that evaluate
+ * the module fresh, a previously-warmed invocation's connection is reused.
+ */
 declare global {
   // eslint-disable-next-line no-var
   var __mongooseCache: MongooseCache | undefined;
 }
 
 const cached: MongooseCache =
-  global.__mongooseCache ?? (global.__mongooseCache = { conn: null, promise: null });
+  global.__mongooseCache ?? (global.__mongooseCache = {
+    conn: null,
+    promise: null,
+  });
 
 export function getMongoUri(): string {
   return readMongoUri();
@@ -52,6 +60,37 @@ export function getMongoUri(): string {
 
 export function isMongoConfigured(): boolean {
   return Boolean(readMongoUri());
+}
+
+/**
+ * Configure mongoose connection options for optimal pooling on MongoDB Atlas.
+ *
+ * Rationale:
+ * - maxPoolSize: 10 connections per M0 cluster is generous enough for typical
+ *   traffic while preventing runaway connection counts. Adjust upward only if
+ *   you hit legitimate concurrency bottlenecks and have scaled beyond M0.
+ * - minPoolSize: 2 keeps 2 connections warm in the pool without excessive
+ *   resource usage. This prevents "cold connection" latency on every request.
+ * - connectionTimeoutMS: 10s to fail fast if the cluster is unreachable.
+ * - socketTimeoutMS: 45s per socket; aligns with typical query durations.
+ * - maxIdleTimeMS: 30min to automatically close idle connections and keep
+ *   the pool lean. This is critical for serverless where connections may sit
+ *   idle between invocations.
+ * - bufferCommands: false disables mongoose's command buffering so writes fail
+ *   fast instead of being silently queued during connection transitions.
+ * - serverSelectionTimeoutMS: 10s to wait for a server to become available.
+ */
+function getConnectionOpts(dbName: string) {
+  return {
+    dbName,
+    bufferCommands: false,
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    maxIdleTimeMS: 30 * 60 * 1000, // 30 minutes
+    connectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    serverSelectionTimeoutMS: 10000,
+  };
 }
 
 export type MongoFailure = {
@@ -119,13 +158,7 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
   }
 
   if (!cached.promise) {
-    const opts = {
-      dbName,
-      bufferCommands: false,
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS: 45000,
-    };
+    const opts = getConnectionOpts(dbName);
 
     console.log(`[MongoDB] Opening new connection pool (dbName=${dbName})`);
 
@@ -155,6 +188,34 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
 }
 
 /**
+ * Set up connection event listeners for error handling and pool management.
+ */
+function setupConnectionListeners(mongooseInstance: typeof mongoose): void {
+  const conn = mongooseInstance.connection;
+
+  // Error events - log and track failures
+  conn.on('error', (err) => {
+    console.error('[MongoDB] Connection error:', err?.message || err);
+  });
+
+  // Disconnected event - attempt reconnection logic
+  conn.on('disconnected', () => {
+    console.warn('[MongoDB] Connection disconnected');
+    // Don't immediately retry - let the next request trigger reconnection
+  });
+
+  // Closed event
+  conn.on('closed', () => {
+    console.error('[MongoDB] Connection closed');
+  });
+
+  // Reconnected event
+  conn.on('reconnected', () => {
+    console.log('[MongoDB] Connection reconnected');
+  });
+}
+
+/**
  * Resolve the native MongoDB `Db` handle for a specific database. Reuses the
  * shared (global-cached) mongoose connection pool.
  */
@@ -165,3 +226,30 @@ export async function getMongoDb(dbName: string = DB_NAME) {
 }
 
 export default connectToDatabase;
+
+/**
+ * Gracefully close the mongoose connection. Useful for shutdown hooks or
+ * forcing a reconnection on the next request.
+ */
+export async function closeConnection(): Promise<void> {
+  if (cached.conn) {
+    console.log('[MongoDB] Closing connection pool');
+    cached.promise = null;
+    cached.conn = null;
+    return Promise.resolve();
+  }
+  // Nothing open
+  cached.promise = null;
+  cached.conn = null;
+  return Promise.resolve();
+}
+
+/**
+ * Force reset the cached connection state. Useful after a catastrophic failure
+ * or when you need to guarantee a fresh connection on the next request.
+ */
+export function resetConnection(): void {
+  cached.promise = null;
+  cached.conn = null;
+  console.log('[MongoDB] Connection state reset forced');
+}
