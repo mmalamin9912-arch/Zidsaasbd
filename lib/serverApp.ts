@@ -16809,14 +16809,22 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
       // STAMP THE VENDOR ON EVERY LINE.
       // The split keeps the vendor on the line when the cart supplied it; this
       // guarantees it even for a legacy payload whose lines carried only the
-      // product, so no child order ever has unattributed line-items.
+      // product, so no child order ever has unattributed line-items. NOTE the
+      // canonical `vendorStoreId` always WINS over the raw cart value — the
+      // checkout may only know a slug, but the vendor dashboard polls with the
+      // canonical UUID, so the canonical id must overwrite, not just fill in.
       items: child.items.map((line: any) => ({
         ...line,
-        vendor_id: line.vendor_id || vendorStoreId,
+        vendor_id: vendorStoreId || line.vendor_id,
+        vendorId: vendorStoreId || line.vendorId,
         vendor_name: line.vendor_name || vendorName,
-        vendor_slug: line.vendor_slug || vendorSlug || undefined,
-        store_id: line.store_id || vendorStoreId,
-        store_slug: line.store_slug || vendorSlug || undefined,
+        vendorName: line.vendorName || vendorName,
+        vendor_slug: vendorSlug || line.vendor_slug || undefined,
+        vendorSlug: vendorSlug || line.vendorSlug || undefined,
+        store_id: vendorStoreId || line.store_id,
+        storeId: vendorStoreId || line.storeId,
+        store_slug: vendorSlug || line.store_slug || undefined,
+        storeSlug: vendorSlug || line.storeSlug || undefined,
       })),
       subtotalBDT: child.subtotal_bdt,
       deliveryCharge: child.delivery_charge,

@@ -2051,6 +2051,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   // Payment & Order Status Options Configuration
   const PAYMENT_STATUS_OPTIONS: { label: Order['paymentStatus']; color: string; bg: string }[] = [
     { label: 'Paid', color: 'text-[#00D68F]', bg: 'bg-[#00D68F]' },
+    { label: 'Pending Verification', color: 'text-indigo-300', bg: 'bg-indigo-500' },
     { label: 'Partially paid', color: 'text-blue-400', bg: 'bg-blue-400' },
     { label: 'Unpaid', color: 'text-amber-400', bg: 'bg-amber-400' },
     { label: 'Voided', color: 'text-rose-400', bg: 'bg-rose-400' },
@@ -2075,6 +2076,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       switch (status) {
         case 'Paid':
           return 'bg-[#00D68F]/20 text-[#00D68F] border-[#00D68F]/40 hover:bg-[#00D68F]/30';
+        case 'Pending Verification':
+          return 'bg-indigo-500/20 text-indigo-300 border-indigo-400/40 hover:bg-indigo-500/30';
         case 'Partially paid':
           return 'bg-blue-500/20 text-blue-400 border-blue-500/40 hover:bg-blue-500/30';
         case 'Unpaid':
