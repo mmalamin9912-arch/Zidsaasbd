@@ -85,6 +85,9 @@ function normalizeLine(raw: any): BasketLine | null {
     title: title || 'Item',
     priceBDT,
     image: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
+    image_url: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
+    imageUrl: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
+    thumbnail: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
     vendor_id: vendorId,
     vendor_name: String(source.vendor_name ?? source.vendorName ?? source.store_name ?? raw.vendorName ?? ''),
     vendor_slug: String(source.vendor_slug ?? source.vendorSlug ?? source.store_slug ?? raw.vendorSlug ?? ''),
@@ -169,6 +172,9 @@ function compactBasketLines(lines: BasketLine[]): any[] {
       vendorName: String(p.vendor_name ?? p.vendorName ?? p.store_name ?? ''),
       vendorSlug: String(p.vendor_slug ?? p.vendorSlug ?? p.store_slug ?? p.storeSlug ?? ''),
       image: safeImage,
+      image_url: safeImage,
+      imageUrl: safeImage,
+      thumbnail: safeImage,
     };
   });
 }

@@ -3532,7 +3532,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                     return (
                       <div key={`${item.product.id}-${p.vendor_id || ''}`} className="flex gap-2.5 rounded-lg border p-2.5" style={{ borderColor: THEME.line }}>
                         <SafeImage
-                          src={p.image || p.image_url || p.imageUrl}
+                          src={p.image || p.image_url || p.imageUrl || p.thumbnail}
                           alt={productTitle(item.product, language)}
                           className="h-16 w-16 shrink-0 rounded-md border object-cover"
                         />
@@ -3637,7 +3637,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                             return (
                               <div key={`${vendor.vendorId}-${line.product.id}`} className="flex gap-2.5 p-2.5">
                                 <SafeImage
-                                  src={p.image || p.image_url || p.imageUrl}
+                                  src={p.image || p.image_url || p.imageUrl || p.thumbnail}
                                   alt={productTitle(line.product, language)}
                                   className="h-14 w-14 shrink-0 rounded-md border object-cover"
                                 />
