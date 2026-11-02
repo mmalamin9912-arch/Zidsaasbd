@@ -652,14 +652,14 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           marketplace_order: true,
         });
         orderResults.push({ ok: supabaseResult.ok, orderId: supabaseResult.orderId, orderNumber: vendorOrderNumber, error: supabaseResult.error });
-        if (supabaseResult.ok) {
-          placedOrders.push({ id: vendorId, orderNumber: vendorOrderNumber, vendorId: vendor.vendorId, vendorName: vendor.vendorName, total: vendorTotal });
-        }
-      }
-      const successes = orderResults.filter((r) => r.ok);
-      if (successes.length === 0) {
-        const firstError = orderResults[0]?.error || 'Your order could not be saved. Please try again.';
-        throw new Error(firstError);
+        placedOrders.push({
+          id: vendorId,
+          orderNumber: vendorOrderNumber,
+          vendorId: vendor.vendorId,
+          vendorSlug: vendor.vendorSlug,
+          vendorName: vendor.vendorName,
+          total: vendorTotal,
+        });
       }
 
       // ── 2. MIRROR TO THE APP SERVER (MongoDB / split child orders) ───────
@@ -668,10 +668,23 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       // failure here must not turn a saved order into a failed checkout, so it
       // is logged and the shipper/merchant dashboards that read the server
       // store are reconciled by the next sync.
+      let mirrorSucceeded = 0;
       for (const order of placedOrders) {
         const mirrorPayload = {
           id: order.id,
           orderNumber: order.orderNumber,
+          // The server uses these fields to route the order to the vendor
+          // dashboard. Without them marketplace orders fall back to the
+          // synthetic "marketplace" store.
+          storeId: order.vendorId,
+          store_id: order.vendorId,
+          storeSlug: order.vendorSlug,
+          store_slug: order.vendorSlug,
+          merchantId: order.vendorId,
+          merchant_id: order.vendorId,
+          merchant_store_slug: order.vendorSlug,
+          vendor_id: order.vendorId,
+          vendor_slug: order.vendorSlug,
           customerName: form.name.trim(),
           customerPhone: form.phone.trim(),
           customerEmail: form.email.trim() || undefined,
@@ -726,12 +739,17 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
             body: JSON.stringify({ orders: [mirrorPayload] }),
           });
           await res.json().catch(() => null);
+          if (res.ok) mirrorSucceeded += 1;
           if (!res.ok) {
             console.warn('[MarketplaceCheckout] /api/orders mirror HTTP', res.status);
           }
         } catch (mirrorErr: any) {
           console.warn('[MarketplaceCheckout] /api/orders mirror failed:', mirrorErr?.message || mirrorErr);
         }
+      }
+      if (orderResults.every((result) => !result.ok) && mirrorSucceeded === 0) {
+        const firstError = orderResults[0]?.error || 'Your order could not be saved. Please try again.';
+        throw new Error(firstError);
       }
 
       // Persist customer session so the customer's orders are immediately visible
@@ -1354,4 +1372,3 @@ const Row: React.FC<{ label: string; value: string }> = ({ label, value }) => (
 );
 
 export default MarketplaceCheckoutView;
-

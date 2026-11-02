@@ -435,7 +435,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const fetchVerificationOrders = useCallback(async () => {
     setVerificationLoading(true);
     try {
-      const res = await fetch('/api/orders?payment_status=Pending Verification&limit=500', {
+      const res = await fetch('/api/admin/orders?payment_status=pending_verification&limit=500', {
         headers: { Accept: 'application/json' },
         cache: 'no-store',
       });
@@ -443,7 +443,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       const rows = Array.isArray(data) ? data : Array.isArray(data?.orders) ? data.orders : [];
       const orders = rows
         .map((o: any) => o)
-        .filter((o: any) => String(o?.paymentStatus ?? o?.payment_status ?? '') === 'Pending Verification')
+        .filter((o: any) => /pending[_\s-]?verification/i.test(String(o?.paymentStatus ?? o?.payment_status ?? '')))
         .sort((a: any, b: any) => new Date(b?.created_at ?? b?.createdAt ?? 0).getTime() - new Date(a?.created_at ?? a?.createdAt ?? 0).getTime());
       setVerificationOrders(orders);
     } catch (err: any) {

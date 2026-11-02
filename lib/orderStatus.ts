@@ -43,7 +43,7 @@ export const ORDERS_COLLECTION = 'orders';
 export const ORDER_STATUSES = ['New', 'Preparing', 'Ready', 'In delivery', 'Completed', 'Cancelled'] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export const PAYMENT_STATUSES = ['Paid', 'Partially paid', 'Unpaid', 'Voided'] as const;
+export const PAYMENT_STATUSES = ['Paid', 'Partially paid', 'Unpaid', 'Voided', 'Pending Verification'] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
 /**
@@ -86,6 +86,8 @@ const PAYMENT_ALIASES: Record<string, PaymentStatus> = {
   partial: 'Partially paid',
   partially: 'Partially paid',
   unpaid: 'Unpaid',
+  pendingverification: 'Pending Verification',
+  awaitingverification: 'Pending Verification',
   pending: 'Unpaid',
   due: 'Unpaid',
   voided: 'Voided',

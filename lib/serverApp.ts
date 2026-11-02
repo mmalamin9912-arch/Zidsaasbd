@@ -16158,12 +16158,17 @@ function buildOrderFilterClauses(query: {
     if (rawPayment !== undefined && rawPayment !== null && String(rawPayment).trim() !== '') {
       const values = paymentStatusFilterValues(rawPayment);
       if (values.length) {
+        const pendingValues = ['pending_verification', 'Pending Verification', 'pending verification'];
         clauses.push({
           $or: [
             { payment_status: { $in: values } },
             { paymentStatus: { $in: values } },
-            { payment_status: { $in: ['pending_verification', 'Pending Verification'] } },
-            { paymentStatus: { $in: ['pending_verification', 'Pending Verification'] } },
+            ...(values.some((value) => /pending[_\s-]?verification/i.test(value))
+              ? [
+                  { payment_status: { $in: pendingValues } },
+                  { paymentStatus: { $in: pendingValues } },
+                ]
+              : []),
           ],
         });
       }
@@ -16187,6 +16192,10 @@ function paymentStatusFilterValues(raw: unknown): string[] {
   values.add(text);
   values.add(text.toLowerCase());
   values.add(text.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  if (/^pending[_\s-]?verification$/i.test(text)) {
+    values.add('pending_verification');
+    values.add('Pending Verification');
+  }
   return Array.from(values).filter(Boolean);
 }
 
@@ -16718,11 +16727,8 @@ function buildOrderRecord(
   const orderNum = String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, '');
   const orderId = String(order.id || order.orderId || orderNum);
   const paymentStatus = order.paymentStatus || order.payment_status || 'unpaid';
-  const normalizedPaymentStatus = paymentStatus === 'Pending Verification' ? 'pending_verification' : 
-                                   paymentStatus === 'Paid' ? 'paid' : 
-                                   paymentStatus === 'Voided' ? 'voided' : 
-                                   paymentStatus === 'Partially paid' ? 'partially_paid' :
-                                   (typeof paymentStatus === 'string' ? paymentStatus.toLowerCase().replace(/\s+/g, '_') : 'unpaid');
+  const displayPaymentStatus = canonicalPaymentStatus(paymentStatus) || 'Unpaid';
+  const normalizedPaymentStatus = displayPaymentStatus.toLowerCase().replace(/\s+/g, '_');
   const record: any = {
     id: orderId,
     store_id: storeId,
@@ -16793,7 +16799,7 @@ function buildOrderRecord(
     payment_method: order.paymentMethod || order.payment_method || 'COD',
     paymentMethod: order.paymentMethod || order.payment_method || 'COD',
     payment_status: normalizedPaymentStatus,
-    paymentStatus: paymentStatus === 'Pending Verification' ? 'pending_verification' : paymentStatus,
+    paymentStatus: displayPaymentStatus,
     fulfillment_status: order.fulfillmentStatus || order.fulfillment_status || 'Unfulfilled',
     fulfillmentStatus: order.fulfillmentStatus || order.fulfillment_status || 'Unfulfilled',
     transaction_id: order.transactionId || order.transaction_id || null,
@@ -17224,6 +17230,7 @@ app.post('/api/orders', async (req, res) => {
         order.storeCode, order.store_code,
         order.merchantId, order.merchant_id,
         order.storeSlug, order.store_slug,
+        order.merchant_store_slug, order.merchant_storeSlug,
       ]
         .map((v) => String(v || '').trim())
         .filter(Boolean);
@@ -17239,7 +17246,13 @@ app.post('/api/orders', async (req, res) => {
         if (identity.storeId && identity.storeSlug) break;
       }
 
-      const explicitSlug = String(order.storeSlug || order.store_slug || '')
+      const explicitSlug = String(
+        order.merchant_store_slug ||
+        order.merchant_storeSlug ||
+        order.storeSlug ||
+        order.store_slug ||
+        ''
+      )
         .split(':')[0]
         .trim()
         .toLowerCase();
@@ -18666,14 +18679,18 @@ app.get('/api/admin/orders', async (req, res) => {
       }
     }
 
-    const payment_status = String(req.query.payment_status || req.query.paymentStatus || 'pending_verification').toLowerCase().replace(/\s+/g, '_');
+    const payment_status = String(req.query.payment_status || req.query.paymentStatus || 'pending_verification').trim();
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 500;
+    const paymentValues = paymentStatusFilterValues(payment_status);
+    if (/^pending[_\s-]?verification$/i.test(payment_status)) {
+      paymentValues.push('pending_verification', 'Pending Verification', 'pending verification');
+    }
 
     const query: any = {
       $or: [
-        { payment_status: { $in: [payment_status, payment_status === 'pending_verification' ? 'Pending Verification' : payment_status] } },
-        { paymentStatus: { $in: [payment_status === 'pending_verification' ? 'pending_verification' : payment_status, payment_status === 'pending_verification' ? 'Pending Verification' : payment_status] } },
+        { payment_status: { $in: Array.from(new Set(paymentValues)) } },
+        { paymentStatus: { $in: Array.from(new Set(paymentValues)) } },
       ]
     };
 
