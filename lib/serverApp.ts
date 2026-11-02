@@ -5343,10 +5343,19 @@ app.get('/api/products', async (req, res) => {
     // 1. MongoDB `products` collection — the AUTHORITATIVE source. Query it
     //    first so a stale local-store.json mirror can never mask real products.
     let prods: any[] = [];
-    try {
-      await connectToMongoDB();
-    } catch (dbErr: any) {
-      console.error('[Server] GET /api/products MongoDB unavailable, falling back to file/memory store:', dbErr?.message || dbErr);
+    // Use direct URI check instead of connectToMongoDB to avoid the local
+    // connectToMongoDB() that silently returns undefined when MONGODB_URI is
+    // not set on Vercel, which causes mongoose.connect() to throw "MissingUri"
+    // and surface as HTTP 500.
+    const mongoUri = readMongoUri();
+    if (mongoUri) {
+      try {
+        await connectToMongoDB();
+      } catch (dbErr: any) {
+        console.error('[Server] GET /api/products MongoDB connection error:', dbErr?.message || dbErr);
+      }
+    } else {
+      console.warn('[Server] GET /api/products MONGODB_URI is not set — falling back to file/memory store.');
     }
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       try {
@@ -16271,6 +16280,8 @@ app.get('/api/orders', async (req, res) => {
         console.warn('[Server] GET /api/orders DB connection warning:', dbErr?.message || dbErr);
         dbConnected = false;
       }
+    } else {
+      console.warn('[Server] GET /api/orders MONGODB_URI is not set — falling back to in-memory cache store.');
     }
 
     res.setHeader('X-Orders-Source', dbConnected ? 'mongodb' : 'cache');

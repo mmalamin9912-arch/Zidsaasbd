@@ -58,9 +58,13 @@ export function getMongoUri(): string {
   return readMongoUri();
 }
 
+export const MONGODB_URI = getMongoUri();
+
 export function isMongoConfigured(): boolean {
   return Boolean(readMongoUri());
 }
+
+export const mongooseConnectionPromise: Promise<typeof mongoose> | null = null;
 
 /**
  * Configure mongoose connection options for optimal pooling on MongoDB Atlas.
@@ -71,14 +75,21 @@ export function isMongoConfigured(): boolean {
  *   you hit legitimate concurrency bottlenecks and have scaled beyond M0.
  * - minPoolSize: 2 keeps 2 connections warm in the pool without excessive
  *   resource usage. This prevents "cold connection" latency on every request.
- * - connectionTimeoutMS: 10s to fail fast if the cluster is unreachable.
+ * - connectTimeoutMS: 5s to fail fast if the cluster is unreachable.
  * - socketTimeoutMS: 45s per socket; aligns with typical query durations.
  * - maxIdleTimeMS: 30min to automatically close idle connections and keep
  *   the pool lean. This is critical for serverless where connections may sit
  *   idle between invocations.
  * - bufferCommands: false disables mongoose's command buffering so writes fail
  *   fast instead of being silently queued during connection transitions.
- * - serverSelectionTimeoutMS: 10s to wait for a server to become available.
+ * - serverSelectionTimeoutMS: 5s to wait for a server to become available.
+ *
+ * NOTE: The MongoDB Node.js driver (v6+) removed the legacy uppercase
+ * connectionTimeoutMS / socketTimeoutMS / maxIdleTimeMS options from the
+ * top-level connect() config. Those keys are no longer honored and cause the
+ * driver to throw "Unknown options: connectiontimeoutms, ..." which surfaces as
+ * HTTP 500 in serverless routes. Only the camelCase driver options below are
+ * standard and supported by Mongoose 9 / MongoDB driver 6.
  */
 function getConnectionOpts(dbName: string) {
   return {
@@ -86,10 +97,9 @@ function getConnectionOpts(dbName: string) {
     bufferCommands: false,
     maxPoolSize: 10,
     minPoolSize: 2,
-    maxIdleTimeMS: 30 * 60 * 1000, // 30 minutes
-    connectTimeoutMS: 10000,
+    connectTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    serverSelectionTimeoutMS: 10000,
+    serverSelectionTimeoutMS: 5000,
   };
 }
 
