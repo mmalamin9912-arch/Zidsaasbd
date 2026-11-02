@@ -2322,7 +2322,7 @@ onUpdateMerchant(updatedCurrent);
           // Falls back to the in-memory merchant list before the request resolves.
           const totalMerchantAccounts = merchantCounts.all || allMerchants.length;
 
-          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy';
+          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics';
 
           interface NavSubItem {
             id: SubTabKey;
@@ -2377,6 +2377,7 @@ onUpdateMerchant(updatedCurrent);
               items: [
                 { id: 'marketplace', label: 'Marketplace Studio', icon: Store },
                 { id: 'taxonomy', label: 'Master Categories', icon: FolderTree },
+                { id: 'logistics', label: 'Logistics / Shipping Settings', icon: Truck },
               ]
             },
             {
@@ -3208,120 +3209,8 @@ onUpdateMerchant(updatedCurrent);
                 </div>
               </div>
 
-              {/* ── CENTRAL COURIER API SETTINGS ── */}
-              <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-black text-white flex items-center gap-2">
-                      <Truck className="w-4 h-4 text-emerald-400" /> Central Courier API
-                    </h3>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Platform courier account used to ship MARKETPLACE orders automatically when a merchant confirms. Each seller's store address is the pickup point.
-                    </p>
-                  </div>
-                  <div
-                    onClick={() => setGatewayForm({
-                      ...gatewayForm,
-                      centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, enabled: gatewayForm.centralCourier?.enabled === false ? true : false },
-                    })}
-                    className={`w-10 h-5 rounded-full transition-all relative cursor-pointer shrink-0 ${gatewayForm.centralCourier?.enabled !== false ? 'bg-emerald-500' : 'bg-slate-700'}`}
-                    title="Enable / disable central courier booking"
-                  >
-                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm ${gatewayForm.centralCourier?.enabled !== false ? 'left-5.5' : 'left-0.5'}`} />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Courier Provider</label>
-                    <select
-                      value={gatewayForm.centralCourier?.provider || 'steadfast'}
-                      onChange={(e) => setGatewayForm({
-                        ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, provider: e.target.value as any },
-                      })}
-                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
-                    >
-                      <option value="steadfast">Steadfast Courier</option>
-                      <option value="pathao">Pathao Courier</option>
-                      <option value="redx">RedX Logistics</option>
-                      <option value="paperfly">Paperfly</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">
-                      {(gatewayForm.centralCourier?.provider || 'steadfast') === 'pathao' ? 'Client ID / API Key' : 'API Key'}
-                    </label>
-                    <input
-                      type="password"
-                      value={gatewayForm.centralCourier?.apiKey || ''}
-                      onChange={(e) => setGatewayForm({
-                        ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiKey: e.target.value },
-                      })}
-                      placeholder="Paste the courier API key"
-                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">
-                      {(gatewayForm.centralCourier?.provider || 'steadfast') === 'pathao' ? 'Client Secret' : 'API Secret'}
-                    </label>
-                    <input
-                      type="password"
-                      value={gatewayForm.centralCourier?.apiSecret || ''}
-                      onChange={(e) => setGatewayForm({
-                        ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiSecret: e.target.value },
-                      })}
-                      placeholder="Paste the courier API secret"
-                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
-                    />
-                  </div>
-                  {(gatewayForm.centralCourier?.provider === 'pathao' || gatewayForm.centralCourier?.provider === 'redx' || gatewayForm.centralCourier?.provider === 'paperfly') && (
-                    <div>
-                      <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Courier Store / Merchant ID</label>
-                      <input
-                        type="text"
-                        value={gatewayForm.centralCourier?.storeId || ''}
-                        onChange={(e) => setGatewayForm({
-                          ...gatewayForm,
-                          centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, storeId: e.target.value },
-                        })}
-                        placeholder="Issued by the courier dashboard"
-                        className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
-                      />
-                    </div>
-                  )}
-                  <div>
-                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Central Pickup Hub (fallback)</label>
-                    <input
-                      type="text"
-                      value={gatewayForm.centralCourier?.pickupAddress || ''}
-                      onChange={(e) => setGatewayForm({
-                        ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, pickupAddress: e.target.value },
-                      })}
-                      placeholder="Used when a seller has no pickup address"
-                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Payment Alert Email</label>
-                    <input
-                      type="email"
-                      value={gatewayForm.centralCourier?.notificationEmail || ''}
-                      onChange={(e) => setGatewayForm({
-                        ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, notificationEmail: e.target.value },
-                      })}
-                      placeholder="admin@example.com"
-                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
-                    />
-                    <p className="text-[10px] text-slate-500 mt-1">Receives an email whenever a customer submits a wallet TrxID for verification.</p>
-                  </div>
-                </div>
-              </div>
+              {/* NOTE: Central Courier API settings have MOVED to the Logistics /
+                  Shipping Settings page, where courier services are managed. */}
 
               <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -3337,7 +3226,7 @@ onUpdateMerchant(updatedCurrent);
                 </div>
                 <div className="flex items-center gap-3">
                   {gatewaySavedMessage && (
-                    <span className="text-[11px] font-bold text-emerald-400">Courier + gateway settings saved.</span>
+                    <span className="text-[11px] font-bold text-emerald-400">Gateway settings saved.</span>
                   )}
                   <button
                     type="submit"
@@ -5163,7 +5052,7 @@ onUpdateMerchant(updatedCurrent);
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-500 leading-relaxed pt-1">
-                      Edit these in <b className="text-slate-400">System & Gateways → Live Payment Gateways</b>. Marketplace orders booked through this account use each seller's store address as the pickup point.
+                      Manage these in <b className="text-slate-400">Logistics / Shipping Settings</b>. Marketplace orders booked through this account use each seller's store address as the pickup point.
                     </p>
                   </div>
                 </div>
@@ -5275,6 +5164,158 @@ onUpdateMerchant(updatedCurrent);
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* 7.5. LOGISTICS / SHIPPING SETTINGS TAB */}
+        {activeSubTab === 'logistics' && (
+          <div className="space-y-6">
+            <div>
+              <h3 className="text-base font-bold text-white">Logistics & Shipping Settings</h3>
+              <p className="text-xs text-slate-400">Manage courier services, shipment automation and delivery zones for the whole platform.</p>
+            </div>
+
+            {/* ── CENTRAL COURIER API (moved out of Payment Gateways) ── */}
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const ok = await onUpdateAdminPaymentConfig(gatewayForm);
+                if (ok) {
+                  toast.success('Central courier settings saved.', {
+                    description: 'Marketplace orders will book parcels with this account automatically.',
+                  });
+                } else {
+                  toast.error('Failed to save central courier settings', {
+                    description: 'Changes were rolled back — please check your connection and try again.',
+                  });
+                }
+              }}
+              className="space-y-6"
+            >
+              <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-black text-white flex items-center gap-2">
+                      <Truck className="w-4 h-4 text-emerald-400" /> Central Courier API
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Platform courier account used to ship MARKETPLACE orders automatically when a merchant confirms. Each seller's store address is the pickup point.
+                    </p>
+                  </div>
+                  <div
+                    onClick={() => setGatewayForm({
+                      ...gatewayForm,
+                      centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, enabled: gatewayForm.centralCourier?.enabled === false ? true : false },
+                    })}
+                    className={`w-10 h-5 rounded-full transition-all relative cursor-pointer shrink-0 ${gatewayForm.centralCourier?.enabled !== false ? 'bg-emerald-500' : 'bg-slate-700'}`}
+                    title="Enable / disable central courier booking"
+                  >
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm ${gatewayForm.centralCourier?.enabled !== false ? 'left-5.5' : 'left-0.5'}`} />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Courier Provider</label>
+                    <select
+                      value={gatewayForm.centralCourier?.provider || 'steadfast'}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, provider: e.target.value as any },
+                      })}
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
+                    >
+                      <option value="steadfast">Steadfast Courier</option>
+                      <option value="pathao">Pathao Courier</option>
+                      <option value="redx">RedX Logistics</option>
+                      <option value="paperfly">Paperfly</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">
+                      {(gatewayForm.centralCourier?.provider || 'steadfast') === 'pathao' ? 'Client ID / API Key' : 'API Key'}
+                    </label>
+                    <input
+                      type="password"
+                      value={gatewayForm.centralCourier?.apiKey || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiKey: e.target.value },
+                      })}
+                      placeholder="Paste the courier API key"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">
+                      {(gatewayForm.centralCourier?.provider || 'steadfast') === 'pathao' ? 'Client Secret' : 'API Secret'}
+                    </label>
+                    <input
+                      type="password"
+                      value={gatewayForm.centralCourier?.apiSecret || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiSecret: e.target.value },
+                      })}
+                      placeholder="Paste the courier API secret"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                    />
+                  </div>
+                  {(gatewayForm.centralCourier?.provider === 'pathao' || gatewayForm.centralCourier?.provider === 'redx' || gatewayForm.centralCourier?.provider === 'paperfly') && (
+                    <div>
+                      <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Courier Store / Merchant ID</label>
+                      <input
+                        type="text"
+                        value={gatewayForm.centralCourier?.storeId || ''}
+                        onChange={(e) => setGatewayForm({
+                          ...gatewayForm,
+                          centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, storeId: e.target.value },
+                        })}
+                        placeholder="Issued by the courier dashboard"
+                        className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Central Pickup Hub (fallback)</label>
+                    <input
+                      type="text"
+                      value={gatewayForm.centralCourier?.pickupAddress || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, pickupAddress: e.target.value },
+                      })}
+                      placeholder="Used when a seller has no pickup address"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Payment Alert Email</label>
+                    <input
+                      type="email"
+                      value={gatewayForm.centralCourier?.notificationEmail || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, notificationEmail: e.target.value },
+                      })}
+                      placeholder="admin@example.com"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">Receives an email whenever a customer submits a wallet TrxID for verification.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end">
+                <button
+                  type="submit"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-8 py-3 rounded-xl text-sm flex items-center gap-2 transition shadow-lg shadow-emerald-600/20 cursor-pointer active:scale-95"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>Save Courier Settings</span>
+                </button>
+              </div>
+            </form>
           </div>
         )}
 
