@@ -1261,6 +1261,8 @@ const newPlan: SubscriptionPlan = {
     apiSecret: '',
     storeId: '',
     notificationEmail: '',
+    telegramBotToken: '',
+    telegramChatId: '',
     enabled: true,
   };
   const [isCustomGatewayModalOpen, setIsCustomGatewayModalOpen] = useState(false);
@@ -5288,6 +5290,34 @@ onUpdateMerchant(updatedCurrent);
                       className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
                     />
                     <p className="text-[10px] text-slate-500 mt-1">Receives an email whenever a customer submits a wallet TrxID for verification.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Telegram Bot Token</label>
+                    <input
+                      type="password"
+                      value={gatewayForm.centralCourier?.telegramBotToken || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, telegramBotToken: e.target.value },
+                      })}
+                      placeholder="123456:ABC-DEF... (from @BotFather)"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">Create a bot with @BotFather, then paste its token here for instant payment alerts.</p>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Telegram Chat ID</label>
+                    <input
+                      type="text"
+                      value={gatewayForm.centralCourier?.telegramChatId || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, telegramChatId: e.target.value },
+                      })}
+                      placeholder="e.g. 6841239511 (your personal chat id)"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">Send any message to your bot, then open api.telegram.org/bot&lt;token&gt;/getUpdates to read your chat id.</p>
                   </div>
                 </div>
               </div>

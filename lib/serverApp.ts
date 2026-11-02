@@ -14618,6 +14618,11 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
     provider: provider || 'steadfast',
     enabled: central.enabled !== false,
     notificationEmail: String(central.notificationEmail || '').trim(),
+    // Telegram payment alerts: dashboard fields first, then env fallbacks
+    // (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) for deployments that never
+    // opened the settings page.
+    telegramBotToken: pick(central.telegramBotToken, process.env.TELEGRAM_BOT_TOKEN || ''),
+    telegramChatId: pick(central.telegramChatId, process.env.TELEGRAM_CHAT_ID || ''),
   };
   for (const key of ['steadfast', 'pathao', 'redx', 'paperfly']) {
     const isChosen = key === out.provider;
@@ -14630,6 +14635,66 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
     };
   }
   return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ADMIN PAYMENT ALERT — TELEGRAM
+ *
+ * An instant push to the Super Admin's personal Telegram so verification does
+ * not require the dashboard to be open. Uses the official Bot API
+ * (`/sendMessage` with HTML parse mode); never throws and never delays the
+ * checkout — a missing token or chat id simply skips the send.
+ * ──────────────────────────────────────────────────────────────────────────── */
+async function sendAdminPaymentAlertTelegram(args: {
+  botToken: string;
+  chatId: string;
+  orderNumber: string;
+  paymentMethod: string;
+  trxId: string;
+  amountBDT: number;
+  customerName: string;
+  customerPhone: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!args.botToken || !args.chatId) {
+    return { ok: false, error: 'Telegram bot token or chat id is not configured.' };
+  }
+  const escapeHtml = (v: unknown) =>
+    String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const message = [
+    '🔔 <b>Payment verification needed</b>',
+    '',
+    `🧾 Order: <code>${escapeHtml(args.orderNumber)}</code>`,
+    `👤 Customer: ${escapeHtml(args.customerName)} — <code>${escapeHtml(args.customerPhone)}</code>`,
+    `💳 Method: <b>${escapeHtml(args.paymentMethod)}</b>`,
+    `🔐 TrxID: <code>${escapeHtml(args.trxId)}</code>`,
+    `💰 Amount: <b>৳${args.amountBDT}</b>`,
+    '',
+    '⚠️ Verify this payment in the admin panel before the vendor dispatches the order.',
+  ].join('\n');
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${args.botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: args.chatId,
+        text: message,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+      // Telegram is a nice-to-have push channel — never hold the response.
+      signal: AbortSignal.timeout(8000),
+    });
+    const data: any = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      const description = String(data?.description || `HTTP ${res.status}`);
+      console.warn('[Telegram] payment alert rejected:', description);
+      return { ok: false, error: description };
+    }
+    return { ok: true };
+  } catch (err: any) {
+    console.warn('[Telegram] payment alert failed:', err?.message || err);
+    return { ok: false, error: err?.message || 'Telegram request failed.' };
+  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -17226,6 +17291,24 @@ app.post('/api/orders', async (req, res) => {
               customerPhone: String(masterRecord.customer_phone || ''),
             }).catch((mailErr: any) => {
               console.warn('[Email] admin payment alert warning:', mailErr?.message || mailErr);
+            });
+          }
+
+          // ── INSTANT TELEGRAM PUSH ── fires alongside the email so the
+          // Super Admin sees the alert on their phone without opening the
+          // dashboard. Skipped silently when no bot token / chat id is set.
+          if (cfg.telegramBotToken && cfg.telegramChatId) {
+            void sendAdminPaymentAlertTelegram({
+              botToken: cfg.telegramBotToken,
+              chatId: cfg.telegramChatId,
+              orderNumber: String(masterRecord.order_number || ''),
+              paymentMethod: String(masterRecord.payment_method || ''),
+              trxId: trxRef,
+              amountBDT: Number(masterRecord.total_price || 0),
+              customerName: String(masterRecord.customer_name || ''),
+              customerPhone: String(masterRecord.customer_phone || ''),
+            }).catch((tgErr: any) => {
+              console.warn('[Telegram] admin payment alert warning:', tgErr?.message || tgErr);
             });
           }
         } catch (mailCfgErr: any) {

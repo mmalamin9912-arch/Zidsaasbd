@@ -1014,6 +1014,10 @@ export interface AdminPaymentGatewayConfig {
     provider?: 'steadfast' | 'pathao' | 'redx' | 'paperfly';
     /** Notification email for automated payment alerts. */
     notificationEmail?: string;
+    /** Telegram bot token (from @BotFather) for instant payment alerts. */
+    telegramBotToken?: string;
+    /** Telegram chat id (the Super Admin's personal chat / group id). */
+    telegramChatId?: string;
     /** Turn central booking on/off without deleting the credentials. */
     enabled?: boolean;
   };
