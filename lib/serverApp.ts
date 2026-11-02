@@ -16154,18 +16154,20 @@ function buildOrderFilterClauses(query: {
 
   // ── payment_status ────────────────────────────────────────────────────────
   // Admin payment-verification queue: match every spelling a row may carry.
-  const rawPayment = query.payment_status ?? query.paymentStatus;
-  if (rawPayment !== undefined && rawPayment !== null && String(rawPayment).trim() !== '') {
-    const values = paymentStatusFilterValues(rawPayment);
-    if (values.length) {
-      clauses.push({
-        $or: [
-          { payment_status: { $in: values } },
-          { paymentStatus: { $in: values } },
-        ],
-      });
+    const rawPayment = query.payment_status ?? query.paymentStatus;
+    if (rawPayment !== undefined && rawPayment !== null && String(rawPayment).trim() !== '') {
+      const values = paymentStatusFilterValues(rawPayment);
+      if (values.length) {
+        clauses.push({
+          $or: [
+            { payment_status: { $in: values } },
+            { paymentStatus: { $in: values } },
+            { payment_status: { $in: ['pending_verification', 'Pending Verification'] } },
+            { paymentStatus: { $in: ['pending_verification', 'Pending Verification'] } },
+          ],
+        });
+      }
     }
-  }
 
   if (clauses.length === 0) return null;
   // Multiple clauses must AND together.
@@ -16715,12 +16717,20 @@ function buildOrderRecord(
   const digits = phoneDigits(rawPhone);
   const orderNum = String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, '');
   const orderId = String(order.id || order.orderId || orderNum);
+  const paymentStatus = order.paymentStatus || order.payment_status || 'unpaid';
+  const normalizedPaymentStatus = paymentStatus === 'Pending Verification' ? 'pending_verification' : 
+                                   paymentStatus === 'Paid' ? 'paid' : 
+                                   paymentStatus === 'Voided' ? 'voided' : 
+                                   paymentStatus === 'Partially paid' ? 'partially_paid' :
+                                   (typeof paymentStatus === 'string' ? paymentStatus.toLowerCase().replace(/\s+/g, '_') : 'unpaid');
   const record: any = {
     id: orderId,
     store_id: storeId,
     storeId,
     store_slug: slug,
     storeSlug: slug,
+    merchant_store_slug: slug,
+    merchant_storeSlug: slug,
     merchant_id: merchantId,
     merchantId,
     ...(storeCode ? { store_code: storeCode, storeCode } : {}),
@@ -16782,8 +16792,8 @@ function buildOrderRecord(
     cod_amount: toNumeric(order.totalBDT ?? order.total_price ?? order.cod_amount, 0),
     payment_method: order.paymentMethod || order.payment_method || 'COD',
     paymentMethod: order.paymentMethod || order.payment_method || 'COD',
-    payment_status: order.paymentStatus || order.payment_status || 'Unpaid',
-    paymentStatus: order.paymentStatus || order.payment_status || 'Unpaid',
+    payment_status: normalizedPaymentStatus,
+    paymentStatus: paymentStatus === 'Pending Verification' ? 'pending_verification' : paymentStatus,
     fulfillment_status: order.fulfillmentStatus || order.fulfillment_status || 'Unfulfilled',
     fulfillmentStatus: order.fulfillmentStatus || order.fulfillment_status || 'Unfulfilled',
     transaction_id: order.transactionId || order.transaction_id || null,
@@ -16793,7 +16803,7 @@ function buildOrderRecord(
     source,
     order_source: source,
     order_source_channel: order.order_source_channel || order.orderSourceChannel || 'marketplace',
-    marketplace_order: Boolean(order.marketplace_order || order.marketplaceOrder),
+    marketplace_order: Boolean(order.marketplace_order || order.marketplaceOrder || (paymentStatus !== 'Unpaid' && paymentStatus !== 'COD')),
     /*
      * VENDOR ATTRIBUTION ON THE MASTER.
      *
@@ -18641,7 +18651,71 @@ app.delete('/api/orders/:id', async (req, res) => {
   }
 });
 
-// ── Admin payment verification (wallet disbursement) ────────────────────────
+// ── Admin orders for payment verification (all merchants) ──────────────────
+app.get('/api/admin/orders', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    let dbConnected = false;
+    if (isMongoConfigured()) {
+      try {
+        await connectToMongoDB();
+        dbConnected = mongoose.connection.readyState === 1;
+      } catch (dbErr: any) {
+        console.warn('[Server] GET /api/admin/orders DB connection warning:', dbErr?.message || dbErr);
+        dbConnected = false;
+      }
+    }
+
+    const payment_status = String(req.query.payment_status || req.query.paymentStatus || 'pending_verification').toLowerCase().replace(/\s+/g, '_');
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 500;
+
+    const query: any = {
+      $or: [
+        { payment_status: { $in: [payment_status, payment_status === 'pending_verification' ? 'Pending Verification' : payment_status] } },
+        { paymentStatus: { $in: [payment_status === 'pending_verification' ? 'pending_verification' : payment_status, payment_status === 'pending_verification' ? 'Pending Verification' : payment_status] } },
+      ]
+    };
+
+    let orders: any[] = [];
+    if (dbConnected) {
+      try {
+        orders = await (Order as any)
+          .find(query)
+          .sort({ created_at: -1, updated_at: -1, _id: -1 })
+          .limit(limit)
+          .lean();
+      } catch (queryErr: any) {
+        console.warn('[Server] GET /api/admin/orders query warning:', queryErr?.message || queryErr);
+        orders = [];
+      }
+    }
+
+    const cachedOrders = Array.from(recentOrdersCache.values()).filter((o: any) => {
+      const ps = String(o?.payment_status || o?.paymentStatus || '').toLowerCase().replace(/\s+/g, '_');
+      return ps === 'pending_verification';
+    });
+    const combinedOrders = [...orders, ...cachedOrders];
+    const dedupedOrders = Array.from(
+      new Map(
+        combinedOrders.map((item: any) => [
+          String(item.id || item.order_number || item.orderNumber || item._id || '').replace(/^#/, '').trim(),
+          item,
+        ])
+      ).values()
+    ).sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime()).slice(0, limit);
+
+    const ordersWithImages = dedupedOrders.map(hydrateOrderItemImages);
+    res.setHeader('X-Orders-Source', dbConnected ? 'mongodb' : 'cache');
+    res.setHeader('X-Orders-Count', String(dedupedOrders.length));
+    return res.status(200).json(ordersWithImages);
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/orders error:', err);
+    res.setHeader('X-Orders-Source', 'error');
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not load admin orders.', orders: [] });
+  }
+});
+
 // PATCH /api/admin/orders/:id/payment-verification
 // Body: { action: 'approve' | 'reject', payout_reference?, notes?, processed_by?, store_slug?, merchant_id? }
 // Approving a 'Pending Verification' order marks it Paid / Processing and
