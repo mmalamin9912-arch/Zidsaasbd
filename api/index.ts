@@ -98,7 +98,7 @@ export default async function handler(req: any, res: any) {
     // client can both see it. Routes that need Mongo add `ok:false` themselves.
     console.error('[api/index] MongoDB unavailable:', mongo.error);
     res.setHeader('x-mongodb-status', 'error');
-    res.setHeader('x-mongodb-error', String(mongo.error || '').slice(0, 300));
+    res.setHeader('x-mongodb-error', encodeURIComponent(String(mongo.error || '')).slice(0, 300));
   } else {
     res.setHeader('x-mongodb-status', 'connected');
   }

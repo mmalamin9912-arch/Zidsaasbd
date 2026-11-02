@@ -87,7 +87,7 @@ function getConnectionOpts(dbName: string) {
     maxPoolSize: 10,
     minPoolSize: 2,
     maxIdleTimeMS: 30 * 60 * 1000, // 30 minutes
-    connectionTimeoutMS: 10000,
+    connectTimeoutMS: 10000,
     socketTimeoutMS: 45000,
     serverSelectionTimeoutMS: 10000,
   };
