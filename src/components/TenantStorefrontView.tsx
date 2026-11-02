@@ -5641,7 +5641,7 @@ The render below must not guess. A merchant may paste
                     {cart.length > 0 ? (
                       cart.map((item, idx) => (
                         <div key={idx} className="flex items-center gap-3 py-2">
-                          <SafeImage src={item.product.image} alt={item.product.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" />
+                          <SafeImage src={item.product.image || (item.product as any).image_url || (item.product as any).thumbnail} alt={item.product.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" />
                           <div className="flex-1 min-w-0">
                             <h4 className="font-semibold text-xs text-slate-100 truncate leading-tight">{item.product.title}</h4>
                             <div className="text-[10px] text-slate-400">Qty: {item.quantity}</div>
@@ -6500,7 +6500,7 @@ The render below must not guess. A merchant may paste
               ) : (
                 cart.map((item, idx) => (
                   <div key={idx} className="flex gap-3.5 p-3.5 border border-slate-800/80 rounded-2xl bg-slate-950/60 relative group">
-                    <SafeImage src={item.product.image} alt={item.product.title} className="w-20 h-20 object-cover rounded-xl border border-slate-800 shrink-0" />
+                    <SafeImage src={item.product.image || (item.product as any).image_url || (item.product as any).thumbnail} alt={item.product.title} className="w-20 h-20 object-cover rounded-xl border border-slate-800 shrink-0" />
                     <div className="flex-1 flex flex-col justify-between min-w-0">
                       <div>
                         <div className="flex justify-between items-start gap-2">

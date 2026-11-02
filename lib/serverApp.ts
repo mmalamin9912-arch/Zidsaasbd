@@ -14546,14 +14546,16 @@ const COURIER_KEY_BY_NAME: Record<string, string> = {
  *
  * The marketplace basket can contain lines from SEVERAL stores, so no single
  * merchant's courier credentials fit every child order. The SUPER ADMIN holds
- * the platform courier accounts, and each STORE already keeps an optional
+ * the platform courier accounts — configured in Super Admin → Logistics →
+ * Courier Settings (persisted with the platform config through
+ * `/api/admin/platform-config`) — and each STORE already keeps an optional
  * pickup address (Logistics → Courier API → Setup → pickupAddress, mirrored
  * onto the store document as `pickup_address` / `store_address`).
  *
  * POST /api/admin/marketplace-courier
  *   Body: {
  *     orderNumber: string,            // the CHILD order number
- *     courier?: 'steadfast'|'pathao'|'redx'|'paperfly',  // default steadfast
+ *     courier?: 'steadfast'|'pathao'|'redx'|'paperfly',  // default from admin
  *     codAmount?: number,
  *     customerName?, customerPhone?, address?, note?,
  *     storeSlug?: string              // merchant store — its address is the PICKUP
@@ -14562,9 +14564,10 @@ const COURIER_KEY_BY_NAME: Record<string, string> = {
  * Flow:
  *   1. Resolve the child order from Mongo (falls back to the body fields) so a
  *      client that only knows the order number still gets a complete parcel.
- *   2. Resolve the PICKUP address from the SELLING store (falls back to
- *      STEADFAST_PICKUP_ADDRESS-style env vars). This is the piece the platform
- *      courier needs that per-store booking never had to think about.
+ *   2. Resolve the PICKUP address from the SELLING store (falls back to the
+ *      admin's central hub address, then STEADFAST_PICKUP_ADDRESS-style env
+ *      vars). This is the piece the platform courier needs that per-store
+ *      booking never had to think about.
  *   3. Build a courier booking request EXACTLY the way handleCourierBooking
  *      does and call the provider directly, then persist with the SAME
  *      recordCourierDispatch helper so the tracking code reaches the child
@@ -14597,17 +14600,104 @@ const ADMIN_COURIER_DEFAULTS = {
   },
 };
 
+/**
+ * Merge the Super Admin's saved courier credentials over the env defaults.
+ *
+ * The platform document lives in the SAME store the admin panel writes to
+ * (readPlatformConfig → adminPaymentConfig.centralCourier), so the operator
+ * can rotate keys from the dashboard without a redeploy. Env vars stay the
+ * fallback so a deployment that never opened the settings page still works.
+ */
+async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
+  const saved = await readPlatformConfig().catch(() => null);
+  const central = (saved?.data as any)?.adminPaymentConfig?.centralCourier || {};
+  const provider = String(central.provider || '').toLowerCase().replace(/[^a-z]/g, '');
+  const pick = (v: any, fb: string) => {
+    const s = String(v ?? '').trim();
+    return s && s !== '••' ? s : fb;
+  };
+  const env = (ADMIN_COURIER_DEFAULTS as Record<string, any>);
+  const out: Record<string, any> = {
+    provider: provider || 'steadfast',
+    enabled: central.enabled !== false,
+    notificationEmail: String(central.notificationEmail || '').trim(),
+    pickup: pick(central.pickupAddress, ''),
+  };
+  for (const key of ['steadfast', 'pathao', 'redx', 'paperfly']) {
+    const isChosen = key === out.provider;
+    out[key] = {
+      apiKey: pick(isChosen ? central.apiKey : '', env[key]?.apiKey || ''),
+      secretKey: pick(isChosen ? central.apiSecret : '', env[key]?.secretKey || env[key]?.clientSecret || ''),
+      clientId: pick(isChosen ? central.apiKey : '', env[key]?.clientId || ''),
+      clientSecret: pick(isChosen ? central.apiSecret : '', env[key]?.clientSecret || ''),
+      storeId: pick(central.storeId, env[key]?.storeId || ''),
+      pickup: pick(central.pickupAddress, env[key]?.pickup || ''),
+    };
+  }
+  return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ADMIN PAYMENT ALERT EMAIL
+ *
+ * Sent through the shared platform transport (Resend first, SMTP/Nodemailer
+ * fallback — see lib/emailService.ts). Fire-and-forget from the order path:
+ * a slow or unconfigured provider must never delay the checkout response.
+ * ──────────────────────────────────────────────────────────────────────────── */
+async function sendAdminPaymentAlertEmail(args: {
+  to: string;
+  orderNumber: string;
+  paymentMethod: string;
+  trxId: string;
+  amountBDT: number;
+  customerName: string;
+  customerPhone: string;
+}) {
+  const subject = `Payment verification needed — ${args.orderNumber} (${args.paymentMethod} ৳${args.amountBDT})`;
+  const text = [
+    `A marketplace customer paid by ${args.paymentMethod} and is waiting for verification.`,
+    '',
+    `Order:      ${args.orderNumber}`,
+    `Amount:     ৳${args.amountBDT}`,`    Customer:   ${args.customerName} (${args.customerPhone})`,
+    `TrxID:      ${args.trxId}`,
+    '',
+    'Open Super Admin → Security & Logs to verify this payment.',
+  ].join('\n');
+  const html = `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px">` +
+    `<h2 style="margin:0 0 12px;font-size:18px">Payment verification needed</h2>` +
+    `<p style="color:#475569;font-size:14px;margin:0 0 16px">A marketplace customer paid by <b>${args.paymentMethod}</b> and is waiting for verification.</p>` +
+    `<table style="width:100%;border-collapse:collapse;font-size:13px">` +
+    `<tr><td style="padding:6px 0;color:#64748b">Order</td><td style="padding:6px 0;font-weight:700">${args.orderNumber}</td></tr>` +
+    `<tr><td style="padding:6px 0;color:#64748b">Amount</td><td style="padding:6px 0;font-weight:700">৳${args.amountBDT}</td></tr>` +
+    `<tr><td style="padding:6px 0;color:#64748b">Customer</td><td style="padding:6px 0">${args.customerName} (${args.customerPhone})</td></tr>` +
+    `<tr><td style="padding:6px 0;color:#64748b">TrxID</td><td style="padding:6px 0;font-family:monospace;font-weight:700">${args.trxId}</td></tr>` +
+    `</table>` +
+    `<p style="color:#94a3b8;font-size:12px;margin-top:20px">Open Super Admin → Security &amp; Logs to verify this payment.</p>` +
+    `</div>`;
+  return sendEmail({ to: args.to, subject, text, html });
+}
+
 app.post('/api/admin/marketplace-courier', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const body = req.body || {};
-    const courierKey = String(body.courier || 'steadfast').toLowerCase().replace(/[^a-z]/g, '');
-    const defaults = (ADMIN_COURIER_DEFAULTS as Record<string, any>)[courierKey];
+    const centralCfg = await resolveCentralCourierConfig();
+    const courierKey = String(
+      body.courier || centralCfg.provider || 'steadfast'
+    ).toLowerCase().replace(/[^a-z]/g, '');
+    const defaults = centralCfg[courierKey];
     if (!defaults) {
       return res.status(200).json({
         ok: false,
         code: 'unknown_courier',
         error: `"${courierKey}" is not a supported central courier. Choose steadfast, pathao, redx or paperfly.`,
+      });
+    }
+    if (centralCfg.enabled === false) {
+      return res.status(200).json({
+        ok: false,
+        code: 'disabled',
+        error: 'Central courier dispatch is switched off in Super Admin → Logistics → Courier Settings.',
       });
     }
 
@@ -14693,7 +14783,7 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         return res.status(200).json({
           ok: false,
           code: 'missing_credentials',
-          error: 'The Super Admin has not configured Steadfast API keys. Add STEADFAST_API_KEY and STEADFAST_SECRET_KEY to the environment.',
+          error: 'The Super Admin has not configured Steadfast API keys in Logistics → Courier Settings.',
         });
       }
       requestUrl = 'https://portal.steadfast.com.bd/api/v1/create_order';
@@ -14711,7 +14801,7 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         return res.status(200).json({
           ok: false,
           code: 'missing_credentials',
-          error: 'The Super Admin has not configured Pathao API keys. Add PATHAO_CLIENT_ID and PATHAO_CLIENT_SECRET to the environment.',
+          error: 'The Super Admin has not configured Pathao API keys in Logistics → Courier Settings.',
         });
       }
       const token = await ensurePathaoToken(defaults.clientId, defaults.clientSecret);
@@ -14736,7 +14826,7 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         return res.status(200).json({
           ok: false,
           code: 'missing_credentials',
-          error: `The Super Admin has not configured ${courierKey === 'redx' ? 'RedX' : 'Paperfly'} API keys in the environment.`,
+          error: `The Super Admin has not configured ${courierKey === 'redx' ? 'RedX' : 'Paperfly'} API keys in Logistics → Courier Settings.`,
         });
       }
       requestUrl = courierKey === 'redx'
@@ -15921,7 +16011,22 @@ function getMatchingCachedOrdersForVendor(refValues: string[]): any[] {
       o.store_code, o.storeCode,
     ].filter(Boolean).map(String).map((s) => s.toLowerCase().trim());
     
-    if (candidates.some((c) => lowerRefs.includes(c))) {
+    /* MARKETPLACE MASTER rows carry ARRAYS (vendor_slugs / vendor_ids / one
+     * vendor_id per seller). Comparing only the scalar candidates above missed
+     * them, so a multi-seller checkout flashed on the shopper's order page but
+     * never on any seller's dashboard until Mongo was re-read. The array forms
+     * are flattened into the candidate set here so the in-memory cache agrees
+     * with the database query in buildOrderQuery. */
+    const arrayCandidates = [
+      ...(Array.isArray(o.vendor_slugs) ? o.vendor_slugs : []),
+      ...(Array.isArray(o.vendorSlugs) ? o.vendorSlugs : []),
+      ...(Array.isArray(o.vendor_ids) ? o.vendor_ids : []),
+      ...(Array.isArray(o.vendorIds) ? o.vendorIds : []),
+      ...(Array.isArray(o.vendor_id) ? o.vendor_id : []),
+      ...(Array.isArray(o.vendorId) ? o.vendorId : []),
+    ].map(String).map((s) => s.toLowerCase().trim()).filter(Boolean);
+
+    if ([...candidates, ...arrayCandidates].some((c) => lowerRefs.includes(c))) {
       matches.push(o);
     }
   }
@@ -17029,6 +17134,30 @@ app.post('/api/orders', async (req, res) => {
         }).catch((logErr: any) => {
           console.warn('[Server] marketplace payment audit log warning:', logErr?.message || logErr);
         });
+
+        // ── EMAIL ALERT TO THE SUPER ADMIN ───────────────────────────────
+        // Fire-and-forget: the email must never slow down or fail the
+        // checkout. The recipient comes from the platform config's central
+        // courier block (`notificationEmail`), falling back to env.
+        try {
+          const cfg = await resolveCentralCourierConfig();
+          const adminEmail = cfg.notificationEmail || process.env.ADMIN_NOTIFICATION_EMAIL || '';
+          if (adminEmail) {
+            void sendAdminPaymentAlertEmail({
+              to: adminEmail,
+              orderNumber: String(masterRecord.order_number || ''),
+              paymentMethod: String(masterRecord.payment_method || ''),
+              trxId: trxRef,
+              amountBDT: Number(masterRecord.total_price || 0),
+              customerName: String(masterRecord.customer_name || ''),
+              customerPhone: String(masterRecord.customer_phone || ''),
+            }).catch((mailErr: any) => {
+              console.warn('[Email] admin payment alert warning:', mailErr?.message || mailErr);
+            });
+          }
+        } catch (mailCfgErr: any) {
+          console.warn('[Email] payment alert config read warning:', mailCfgErr?.message || mailCfgErr);
+        }
       }
 
       // Order confirmation SMS

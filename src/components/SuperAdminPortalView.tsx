@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { BrandLogo } from './BrandLogo';
 import SafeImage from './SafeImage';
@@ -71,6 +71,7 @@ import {
   MessageCircle,
   Store,
   FolderTree,
+  Truck,
   Image
 } from 'lucide-react';
 import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, PlanFeatureFlags } from '../types';
@@ -565,6 +566,24 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
     const matchesSeverity = logSeverityFilter === 'All' || log.severity === logSeverityFilter;
     return matchesSearch && matchesSeverity;
   });
+
+  /**
+   * PAYMENT VERIFICATION QUEUE.
+   *
+   * The server logs one Warning entry per marketplace wallet payment (see
+   * appendAuditLog in POST /api/orders) the moment a customer submits a
+   * bKash/Nagad/Rocket TrxID. Filtering on the 'Payment Bot' author + the
+   * 'verification needed' marker keeps ONLY those out of the general log —
+   * and because auditLogs refreshes on mount (and via Refresh Logs), the
+   * panel stays close to real-time without a second endpoint.
+   */
+  const paymentVerificationLogs = useMemo(
+    () => auditLogs.filter(log =>
+      log.adminUser === 'Payment Bot' &&
+      /verification needed/i.test(String(log.action || ''))
+    ),
+    [auditLogs],
+  );
 
   const handleClearLogs = async () => {
     if (confirm('Are you sure you want to clear all system audit logs? This action cannot be undone.')) {
@@ -1234,6 +1253,17 @@ const newPlan: SubscriptionPlan = {
   // Gateway config form state
   const [gatewayForm, setGatewayForm] = useState<AdminPaymentGatewayConfig>(adminPaymentConfig);
   const [gatewaySavedMessage, setGatewaySavedMessage] = useState(false);
+
+  /** Baseline so optional centralCourier fields always exist on the form. */
+  const defaultCentralCourier: NonNullable<AdminPaymentGatewayConfig['centralCourier']> = {
+    provider: 'steadfast',
+    apiKey: '',
+    apiSecret: '',
+    storeId: '',
+    pickupAddress: '',
+    notificationEmail: '',
+    enabled: true,
+  };
   const [isCustomGatewayModalOpen, setIsCustomGatewayModalOpen] = useState(false);
   const [newCustomGateway, setNewCustomGateway] = useState<Partial<AdminCustomGateway>>({
     name: '',
@@ -3178,6 +3208,121 @@ onUpdateMerchant(updatedCurrent);
                 </div>
               </div>
 
+              {/* ── CENTRAL COURIER API SETTINGS ── */}
+              <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-black text-white flex items-center gap-2">
+                      <Truck className="w-4 h-4 text-emerald-400" /> Central Courier API
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Platform courier account used to ship MARKETPLACE orders automatically when a merchant confirms. Each seller's store address is the pickup point.
+                    </p>
+                  </div>
+                  <div
+                    onClick={() => setGatewayForm({
+                      ...gatewayForm,
+                      centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, enabled: gatewayForm.centralCourier?.enabled === false ? true : false },
+                    })}
+                    className={`w-10 h-5 rounded-full transition-all relative cursor-pointer shrink-0 ${gatewayForm.centralCourier?.enabled !== false ? 'bg-emerald-500' : 'bg-slate-700'}`}
+                    title="Enable / disable central courier booking"
+                  >
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm ${gatewayForm.centralCourier?.enabled !== false ? 'left-5.5' : 'left-0.5'}`} />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Courier Provider</label>
+                    <select
+                      value={gatewayForm.centralCourier?.provider || 'steadfast'}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, provider: e.target.value as any },
+                      })}
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
+                    >
+                      <option value="steadfast">Steadfast Courier</option>
+                      <option value="pathao">Pathao Courier</option>
+                      <option value="redx">RedX Logistics</option>
+                      <option value="paperfly">Paperfly</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">
+                      {(gatewayForm.centralCourier?.provider || 'steadfast') === 'pathao' ? 'Client ID / API Key' : 'API Key'}
+                    </label>
+                    <input
+                      type="password"
+                      value={gatewayForm.centralCourier?.apiKey || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiKey: e.target.value },
+                      })}
+                      placeholder="Paste the courier API key"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">
+                      {(gatewayForm.centralCourier?.provider || 'steadfast') === 'pathao' ? 'Client Secret' : 'API Secret'}
+                    </label>
+                    <input
+                      type="password"
+                      value={gatewayForm.centralCourier?.apiSecret || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiSecret: e.target.value },
+                      })}
+                      placeholder="Paste the courier API secret"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                    />
+                  </div>
+                  {(gatewayForm.centralCourier?.provider === 'pathao' || gatewayForm.centralCourier?.provider === 'redx' || gatewayForm.centralCourier?.provider === 'paperfly') && (
+                    <div>
+                      <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Courier Store / Merchant ID</label>
+                      <input
+                        type="text"
+                        value={gatewayForm.centralCourier?.storeId || ''}
+                        onChange={(e) => setGatewayForm({
+                          ...gatewayForm,
+                          centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, storeId: e.target.value },
+                        })}
+                        placeholder="Issued by the courier dashboard"
+                        className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Central Pickup Hub (fallback)</label>
+                    <input
+                      type="text"
+                      value={gatewayForm.centralCourier?.pickupAddress || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, pickupAddress: e.target.value },
+                      })}
+                      placeholder="Used when a seller has no pickup address"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Payment Alert Email</label>
+                    <input
+                      type="email"
+                      value={gatewayForm.centralCourier?.notificationEmail || ''}
+                      onChange={(e) => setGatewayForm({
+                        ...gatewayForm,
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, notificationEmail: e.target.value },
+                      })}
+                      placeholder="admin@example.com"
+                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">Receives an email whenever a customer submits a wallet TrxID for verification.</p>
+                  </div>
+                </div>
+              </div>
+
               <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className={`w-10 h-6 rounded-full transition-colors relative cursor-pointer ${gatewayForm.enableManualVerification ? 'bg-indigo-600' : 'bg-slate-700'}`}
@@ -3190,13 +3335,18 @@ onUpdateMerchant(updatedCurrent);
                     <div className="text-[10px] text-slate-500 mt-0.5">Recommended to prevent fraudulent approval requests.</div>
                   </div>
                 </div>
-                <button
-                  type="submit"
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-8 py-3 rounded-xl text-sm flex items-center gap-2 transition shadow-lg shadow-indigo-600/20 cursor-pointer active:scale-95"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>Update All Gateways</span>
-                </button>
+                <div className="flex items-center gap-3">
+                  {gatewaySavedMessage && (
+                    <span className="text-[11px] font-bold text-emerald-400">Courier + gateway settings saved.</span>
+                  )}
+                  <button
+                    type="submit"
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-8 py-3 rounded-xl text-sm flex items-center gap-2 transition shadow-lg shadow-indigo-600/20 cursor-pointer active:scale-95"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>Update All Gateways</span>
+                  </button>
+                </div>
               </div>
             </form>
           </div>
@@ -4813,6 +4963,75 @@ onUpdateMerchant(updatedCurrent);
               </div>
             )}
 
+            {/* ── PAYMENT VERIFICATION NOTIFICATION PANEL ── */}
+            <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl overflow-hidden">
+              <div className="p-4 bg-[#202533] border-b border-[#2E3548] flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <Bell className="w-5 h-5 text-amber-400" />
+                    {paymentVerificationLogs.length > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full bg-red-500 text-white text-[9px] font-black flex items-center justify-center px-1">
+                        {paymentVerificationLogs.length > 99 ? '99+' : paymentVerificationLogs.length}
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white">Pending Payment Verifications</h4>
+                    <p className="text-[10px] text-slate-400">
+                      Marketplace bKash/Nagad/Rocket payments waiting for review. Each entry arrived the moment the customer checked out.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleRefreshLogs}
+                  className="bg-[#181B26] hover:bg-[#282E3F] text-slate-300 font-bold px-3 py-1.5 rounded-lg text-[11px] flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <History className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+              </div>
+              {paymentVerificationLogs.length === 0 ? (
+                <div className="py-10 text-center text-xs text-slate-500">
+                  <CheckCircle2 className="w-8 h-8 mx-auto mb-2 text-slate-600" />
+                  No wallet payments waiting — every TrxID has been reviewed.
+                </div>
+              ) : (
+                <div className="divide-y divide-[#2E3548] max-h-[320px] overflow-y-auto custom-scrollbar">
+                  {paymentVerificationLogs.slice(0, 50).map((log) => {
+                    const message = String(log.action || '');
+                    const orderNo = message.match(/([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]+)+)/)?.[1] || log.targetEntity || '';
+                    const trxMatch = message.match(/TrxID ([A-Za-z0-9]+)/);
+                    const amountMatch = message.match(/৳([0-9,.]+)/);
+                    const methodMatch = message.match(/— (.+?) TrxID/);
+                    return (
+                      <div key={log.id} className="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[11.5px] font-bold text-white">{orderNo || 'Marketplace payment'}</span>
+                            {amountMatch && (
+                              <span className="rounded bg-amber-500/15 text-amber-400 px-1.5 py-0.5 text-[10px] font-black">৳{amountMatch[1]}</span>
+                            )}
+                            {methodMatch && (
+                              <span className="rounded bg-indigo-500/15 text-indigo-300 px-1.5 py-0.5 text-[10px] font-black uppercase">
+                                {methodMatch[1]}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-0.5 font-mono truncate">
+                            TrxID: <span className="text-slate-200 font-bold">{trxMatch?.[1] || '—'}</span>
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <div className="text-[10px] text-slate-500">{new Date(log.timestamp).toLocaleString()}</div>
+                          <div className="text-[10px] font-bold text-amber-400">Awaiting verification</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* AUDIT LOG TABLE */}
               <div className="lg:col-span-2 space-y-4">
@@ -4914,6 +5133,41 @@ onUpdateMerchant(updatedCurrent);
 
               {/* SECURITY SETTINGS PANEL */}
               <div className="space-y-6">
+                <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-6">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-emerald-500/20 p-2.5 rounded-xl">
+                      <Truck className="w-5 h-5 text-emerald-400" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-white">Central Courier</h4>
+                      <p className="text-[10px] text-slate-500">Provider & credentials used for marketplace fulfilment.</p>
+                    </div>
+                  </div>
+                  <div className="space-y-2 text-[11px]">
+                    <div className="flex justify-between p-2.5 bg-[#202533] rounded-lg border border-[#2E3548]">
+                      <span className="text-slate-400">Provider</span>
+                      <span className="font-bold text-white capitalize">
+                        {adminPaymentConfig.centralCourier?.provider || 'steadfast'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between p-2.5 bg-[#202533] rounded-lg border border-[#2E3548]">
+                      <span className="text-slate-400">Status</span>
+                      <span className={`font-bold ${adminPaymentConfig.centralCourier?.enabled === false ? 'text-red-400' : 'text-emerald-400'}`}>
+                        {adminPaymentConfig.centralCourier?.enabled === false ? 'Disabled' : 'Active'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between p-2.5 bg-[#202533] rounded-lg border border-[#2E3548]">
+                      <span className="text-slate-400">Credentials</span>
+                      <span className="font-bold text-white">
+                        {(adminPaymentConfig.centralCourier?.apiKey || '').trim() ? 'Saved' : 'From environment'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-relaxed pt-1">
+                      Edit these in <b className="text-slate-400">System & Gateways → Live Payment Gateways</b>. Marketplace orders booked through this account use each seller's store address as the pickup point.
+                    </p>
+                  </div>
+                </div>
+
                 <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-6">
                   <div className="flex items-center gap-3">
                     <div className="bg-amber-500/20 p-2.5 rounded-xl">

@@ -997,6 +997,28 @@ export interface AdminPaymentGatewayConfig {
   customGateways: AdminCustomGateway[];
   instructions: string;
   enableManualVerification?: boolean;
+  /* ── Super Admin CENTRAL COURIER API (marketplace fulfilment) ──────────
+   * These are the PLATFORM's courier credentials, NOT a merchant's. They are
+   * what `/api/admin/marketplace-courier` reads (falling back to env vars)
+   * when it books a marketplace child order after "Confirm Order".*/
+  centralCourier?: {
+    /** API key / client id for the chosen courier. */
+    apiKey?: string;
+    /** API secret (Steadfast / RedX / Paperfly) or client secret (Pathao). */
+    apiSecret?: string;
+    /** Pathao only: numeric store id issued by the courier dashboard. */
+    storeId?: string;
+    /** Name shown to merchants in the fulfilment modal ('Steadfast', …). */
+    courierName?: string;
+    /** One of the supported central providers. */
+    provider?: 'steadfast' | 'pathao' | 'redx' | 'paperfly';
+    /** Central pickup hub used when a seller has no address of their own. */
+    pickupAddress?: string;
+    /** Notification email for automated payment alerts. */
+    notificationEmail?: string;
+    /** Turn central booking on/off without deleting the credentials. */
+    enabled?: boolean;
+  };
 }
 
 export interface PaymentGatewayConfig {

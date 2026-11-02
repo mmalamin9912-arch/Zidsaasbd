@@ -76,13 +76,18 @@ export function normalizeOrderItems(raw: unknown): OrderItem[] {
     const name = String(
       item?.productName ?? item?.product_name ?? item?.name ?? item?.title ?? 'Item'
     );
+    // Product image: accept every spelling the write path produces. Older rows
+    // (and basket-localStorage copies) may carry only `thumbnail`.
+    const image = String(
+      item?.image ?? item?.image_url ?? item?.imageUrl ?? item?.thumbnail ?? ''
+    );
     return {
       id: String(item?.id ?? item?.productId ?? item?.product_id ?? `item-${index}`),
       productName: name,
       variant: String(item?.variant ?? ''),
       quantity,
       unitPriceBDT: unitPrice,
-      image: String(item?.image ?? item?.image_url ?? item?.imageUrl ?? ''),
+      image,
     } as OrderItem;
   });
 }
