@@ -14564,10 +14564,11 @@ const COURIER_KEY_BY_NAME: Record<string, string> = {
  * Flow:
  *   1. Resolve the child order from Mongo (falls back to the body fields) so a
  *      client that only knows the order number still gets a complete parcel.
- *   2. Resolve the PICKUP address from the SELLING store (falls back to the
- *      admin's central hub address, then STEADFAST_PICKUP_ADDRESS-style env
- *      vars). This is the piece the platform courier needs that per-store
- *      booking never had to think about.
+ *   2. STRICT vendor pickup: the parcel is collected at the SELLER'S OWN shop,
+ *      so the request FAILS unless that merchant has configured BOTH a pickup
+ *      address AND a pickup/store phone. There is deliberately NO central
+ *      fallback warehouse — a guessed pickup address would misroute the
+ *      courier's collection.
  *   3. Build a courier booking request EXACTLY the way handleCourierBooking
  *      does and call the provider directly, then persist with the SAME
  *      recordCourierDispatch helper so the tracking code reaches the child
@@ -14580,23 +14581,19 @@ const ADMIN_COURIER_DEFAULTS = {
   steadfast: {
     apiKey: process.env.STEADFAST_API_KEY || '',
     secretKey: process.env.STEADFAST_SECRET_KEY || '',
-    pickup: process.env.STEADFAST_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
   },
   pathao: {
     clientId: process.env.PATHAO_CLIENT_ID || '',
     clientSecret: process.env.PATHAO_CLIENT_SECRET || '',
     storeId: process.env.PATHAO_STORE_ID || '',
-    pickup: process.env.PATHAO_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
   },
   redx: {
     apiKey: process.env.REDX_API_KEY || '',
     secretKey: process.env.REDX_SECRET_KEY || '',
-    pickup: process.env.REDX_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
   },
   paperfly: {
     apiKey: process.env.PAPERFLY_API_KEY || '',
     secretKey: process.env.PAPERFLY_SECRET_KEY || '',
-    pickup: process.env.PAPERFLY_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
   },
 };
 
@@ -14621,7 +14618,6 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
     provider: provider || 'steadfast',
     enabled: central.enabled !== false,
     notificationEmail: String(central.notificationEmail || '').trim(),
-    pickup: pick(central.pickupAddress, ''),
   };
   for (const key of ['steadfast', 'pathao', 'redx', 'paperfly']) {
     const isChosen = key === out.provider;
@@ -14631,7 +14627,6 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
       clientId: pick(isChosen ? central.apiKey : '', env[key]?.clientId || ''),
       clientSecret: pick(isChosen ? central.apiSecret : '', env[key]?.clientSecret || ''),
       storeId: pick(central.storeId, env[key]?.storeId || ''),
-      pickup: pick(central.pickupAddress, env[key]?.pickup || ''),
     };
   }
   return out;
@@ -14736,32 +14731,81 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       });
     }
 
-    // ── 2. The PICKUP address comes from the SELLING STORE, not the courier. ──
-    // A marketplace parcel is collected at the merchant's shop and dropped at
-    // the platform courier hub, so the pickup location is per-SELLER even
-    // though the courier ACCOUNT is central.
+    // ── 2. STRICT VENDOR PICKUP — the merchant's OWN address and phone. ──
+    // A marketplace parcel is collected at the merchant's shop. There is NO
+    // central fallback warehouse: if this seller has not configured a real
+    // pickup address AND phone number, the dispatch is REFUSED and the
+    // merchant is told to complete their profile first. Booking a parcel with
+    // a guessed/admin address would misroute the courier pickup.
     const storeRef = String(body.storeSlug || body.store_slug || order.store_slug || order.vendor_slug || '').trim();
-    let pickupAddress = String(body.pickupAddress || body.pickup_address || '').trim();
-    if (!pickupAddress && storeRef) {
+    const bodyPickup = String(body.pickupAddress || body.pickup_address || '').trim();
+
+    let storeDoc: Record<string, any> | null = null;
+    let storePhone = '';
+    if (storeRef) {
+      const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+      if (db) {
+        storeDoc = await db.collection('stores').findOne({
+          $or: [
+            { store_slug: storeRef },
+            { storeSlug: storeRef },
+            { id: storeRef },
+            { store_id: storeRef },
+          ],
+        }).catch(() => null) || null;
+      }
+      // Per-courier pickup config (Logistics → Courier API → Setup).
       try {
         const storeConfig = await readStoreConfig('courier', storeRef) as Record<string, any> | null;
-        pickupAddress = String(
+        const cfgPickup = String(
           storeConfig?.perCourier?.[courierKey]?.pickupAddress ||
           storeConfig?.pickupAddress || ''
         ).trim();
+        if (cfgPickup) {
+          storeDoc = { ...(storeDoc || {}), courierPickupAddress: cfgPickup };
+        }
       } catch (cfgErr: any) {
         console.warn('[Courier] central pickup address read warning:', cfgErr?.message || cfgErr);
       }
     }
-    if (!pickupAddress) {
-      // Fall back to the central admin pickup hub configured in env.
-      pickupAddress = String(defaults.pickup || '').trim();
-    }
-    if (!pickupAddress) {
+
+    const courierPickup = String((storeDoc as any)?.courierPickupAddress || '').trim();
+    const profileAddress = String(
+      (storeDoc as any)?.pickup_address ||
+      (storeDoc as any)?.pickupAddress ||
+      (storeDoc as any)?.store_address ||
+      (storeDoc as any)?.storeAddress ||
+      (storeDoc as any)?.address ||
+      ''
+    ).trim();
+    storePhone = String(
+      (storeDoc as any)?.pickup_phone ||
+      (storeDoc as any)?.pickupPhone ||
+      (storeDoc as any)?.store_phone ||
+      (storeDoc as any)?.storePhone ||
+      (storeDoc as any)?.phone ||
+      (storeDoc as any)?.supportPhone ||
+      ''
+    ).replace(/[^0-9+]/g, '').trim();
+
+    // An EXPLICIT pickup address sent by the merchant in the dispatch request
+    // (the confirmation modal's verified value) wins; otherwise the store
+    // record's courier pickup, then the store profile address. The phone must
+    // ALWAYS come from the vendor's record — the courier calls this number to
+    // arrange collection, so no default is acceptable.
+    const pickupAddress = bodyPickup || courierPickup || profileAddress;
+    const pickupPhone = storePhone;
+
+    const missing: string[] = [];
+    if (!pickupAddress) missing.push('pickup address');
+    if (!pickupPhone || pickupPhone.replace(/\D/g, '').length < 10) missing.push('pickup phone number');
+    if (missing.length > 0) {
       return res.status(200).json({
         ok: false,
-        code: 'missing_pickup_address',
-        error: 'No pickup address found for this seller. The merchant can add one in Logistics → Courier API → Setup, or the Super Admin can set a central pickup address.',
+        code: 'missing_vendor_pickup',
+        missing,
+        error: `This seller has not configured a valid ${missing.join(' and ')} yet. Add it in Dashboard → Logistics → Courier API → Setup before dispatching marketplace orders.`,
+        storeSlug: storeRef,
       });
     }
 
@@ -14893,6 +14937,7 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       tracking_code: trackingCode,
       persisted,
       pickup_address: pickupAddress,
+      pickup_phone: pickupPhone,
       warning: persisted ? undefined : 'The parcel was booked, but the tracking code could not be saved to this order.',
     });
   } catch (err: any) {

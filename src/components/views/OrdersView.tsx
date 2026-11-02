@@ -21,6 +21,7 @@ import {
   Search,
   Filter,
   Truck,
+  MapPin,
   CheckCircle2,
   Send,
   PhoneCall,
@@ -712,6 +713,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [newTagInput, setNewTagInput] = useState<{ [orderId: string]: string }>({});
   const [isBookingCourier, setIsBookingCourier] = useState<{ [orderId: string]: boolean }>({});
 
+  /* ── DISPATCH CONFIRMATION (vendor-checked pickup) ──
+   * The vendor must SEE the pickup address the courier will collect from and
+   * tick an explicit confirmation before the request is sent. The address is
+   * read from the logged-in merchant's own profile — there is no central
+   * fallback warehouse, and when it is missing the modal blocks dispatch and
+   * points the merchant to Logistics → Courier API → Setup. */
+  const [dispatchConfirmed, setDispatchConfirmed] = useState(false);
+  const resolvedPickupInfo = useMemo(() => resolvePrintStoreInfo(), [selectedOrderForCourier?.id]);
+  const pickupPreviewAddress = String(resolvedPickupInfo.address || '').trim();
+  const pickupPreviewPhone = String(resolvedPickupInfo.phone || '').trim();
+  const canDispatch = Boolean(pickupPreviewAddress);
+
   /** Monotonic counter behind sandbox test tracking IDs (1001, 1002, …). */
   const sandboxSequenceRef = React.useRef(1);
 
@@ -765,9 +778,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
        * the SELLING STORE's address is sent as the pickup location.
        *
        * `/api/admin/marketplace-courier` resolves the full child order from
-       * Mongo (so a partial body is still a complete parcel), reads the
-       * pickup address from the store courier config with a central-env
-       * fallback, books directly with the provider, persists the tracking
+       * Mongo (so a partial body is still a complete parcel), VERIFIES the
+       * vendor's own pickup address AND phone (no central fallback exists),
+       * books directly with the provider, persists the tracking
        * code via recordCourierDispatch and writes an Activity-log entry.
        */
       if (isMarketplaceOrder(ord)) {
@@ -784,6 +797,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             address: ord.address,
             codAmount: ord.paymentMethod === 'COD' ? ord.totalBDT : 0,
             note: (ord as any).customerNote || (ord as any).notes || '',
+            // The VERIFIED pickup address from the confirmation modal — the
+            // vendor has already seen and ticked it before this fires.
+            pickupAddress: pickupPreviewAddress || undefined,
           }),
         });
         const rawCentral = await centralRes.text().catch(() => '');
@@ -794,8 +810,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           const reason = centralData.error
             || (centralData.code === 'missing_credentials'
               ? 'The platform has not configured its courier API keys yet — contact the marketplace administrator.'
+              : centralData.code === 'missing_vendor_pickup'
+              ? 'Add your pickup address and phone in Dashboard → Logistics → Courier API → Setup, then try again.'
               : `Central courier booking failed (${centralData.code || centralRes.status}).`);
-          toast.error('Central courier booking failed', { description: reason });
+          toast.error(
+            centralData.code === 'missing_vendor_pickup'
+              ? 'Pickup details required'
+              : 'Central courier booking failed',
+            { description: reason },
+          );
           return;
         }
 
@@ -3975,7 +3998,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 <span className="text-xs font-mono font-bold text-[#00D68F]">{selectedOrderForCourier.orderNumber}</span>
                 <h3 className="text-base font-bold text-white">{selectedOrderForCourier.customerName}</h3>
               </div>
-              <button onClick={() => setSelectedOrderForCourier(null)} className="p-1 text-slate-400 hover:text-white cursor-pointer">
+              <button onClick={() => { setSelectedOrderForCourier(null); setDispatchConfirmed(false); }} className="p-1 text-slate-400 hover:text-white cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -3989,6 +4012,39 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 <span>Total Collectable BDT:</span>
                 <span className="font-extrabold text-[#00D68F]">৳{safeAmount(selectedOrderForCourier?.totalBDT)} BDT</span>
               </div>
+            </div>
+
+            {/* ── PICKUP PREVIEW ── the address the courier will collect from.
+                The vendor must SEE and CONFIRM it before dispatch; if the
+                profile has none, dispatch is blocked until it is added in
+                Dashboard → Logistics. */}
+            <div className="bg-[#181B26] p-3.5 rounded-xl border border-[#2E3548] space-y-1.5 text-xs">
+              <div className="flex items-center gap-1.5 text-[10px] uppercase font-black text-slate-500">
+                <MapPin className="w-3 h-3" /> Pickup from your store
+              </div>
+              {pickupPreviewAddress ? (
+                <>
+                  <div className="text-white font-semibold leading-snug">{pickupPreviewAddress}</div>
+                  {pickupPreviewPhone && (
+                    <div className="text-slate-400 flex items-center gap-1">
+                      <Smartphone className="w-3 h-3" /> {pickupPreviewPhone}
+                    </div>
+                  )}
+                  {!pickupPreviewPhone && (
+                    <div className="text-amber-400 text-[11px] flex items-start gap-1">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      No pickup phone on your profile — add it in Dashboard → Settings so the courier can call you.
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-amber-400 text-[11.5px] flex items-start gap-1.5">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    No pickup address configured. Add your store's pickup address in <b>Dashboard → Logistics → Courier API → Setup</b> — courier dispatch is blocked until then.
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3 pt-2">
@@ -4005,19 +4061,34 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 <option value="Paperfly">Paperfly GO</option>
               </select>
 
+              {/* Vendor must explicitly confirm the pickup details. */}
+              <label className={`flex items-start gap-2.5 rounded-xl border p-3 text-xs ${canDispatch ? 'cursor-pointer border-[#2E3548] hover:bg-[#181B26]' : 'cursor-not-allowed border-amber-500/30 bg-amber-500/5'}`}>
+                <input
+                  type="checkbox"
+                  checked={dispatchConfirmed}
+                  disabled={!canDispatch}
+                  onChange={(e) => setDispatchConfirmed(e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 accent-[#00D68F]"
+                />
+                <span className="text-slate-300 leading-snug">
+                  I verify the pickup address shown above is correct and a courier agent can collect the parcel from there.
+                </span>
+              </label>
+
               <button
                 onClick={async () => {
                   const targetOrd = selectedOrderForCourier;
                   setSelectedOrderForCourier(null);
+                  setDispatchConfirmed(false);
                   if (targetOrd) {
                     await handleBooking(targetOrd);
                   }
                 }}
-                disabled={Boolean(selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id])}
-                className="w-full bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-extrabold py-3 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#00D68F]/20 disabled:opacity-50"
+                disabled={Boolean(!canDispatch || !dispatchConfirmed || (selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id]))}
+                className="w-full bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-extrabold py-3 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#00D68F]/20 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <Truck className="w-4 h-4" />
-                <span>{selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id] ? 'Booking Courier...' : `1-Click Book via ${dispatchCourier} API`}</span>
+                <span>{selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id] ? 'Booking Courier...' : `Confirm & Dispatch via ${dispatchCourier} API`}</span>
               </button>
             </div>
           </div>

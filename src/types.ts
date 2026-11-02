@@ -1012,8 +1012,6 @@ export interface AdminPaymentGatewayConfig {
     courierName?: string;
     /** One of the supported central providers. */
     provider?: 'steadfast' | 'pathao' | 'redx' | 'paperfly';
-    /** Central pickup hub used when a seller has no address of their own. */
-    pickupAddress?: string;
     /** Notification email for automated payment alerts. */
     notificationEmail?: string;
     /** Turn central booking on/off without deleting the credentials. */

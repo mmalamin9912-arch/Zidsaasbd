@@ -1260,7 +1260,6 @@ const newPlan: SubscriptionPlan = {
     apiKey: '',
     apiSecret: '',
     storeId: '',
-    pickupAddress: '',
     notificationEmail: '',
     enabled: true,
   };
@@ -5276,19 +5275,6 @@ onUpdateMerchant(updatedCurrent);
                       />
                     </div>
                   )}
-                  <div>
-                    <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Central Pickup Hub (fallback)</label>
-                    <input
-                      type="text"
-                      value={gatewayForm.centralCourier?.pickupAddress || ''}
-                      onChange={(e) => setGatewayForm({
-                        ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, pickupAddress: e.target.value },
-                      })}
-                      placeholder="Used when a seller has no pickup address"
-                      className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
-                    />
-                  </div>
                   <div>
                     <label className="block text-[10px] uppercase font-black text-slate-500 mb-1.5">Payment Alert Email</label>
                     <input
