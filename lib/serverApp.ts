@@ -14541,6 +14541,276 @@ const COURIER_KEY_BY_NAME: Record<string, string> = {
   paperfly: 'paperfly',
 };
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * CENTRAL ADMIN COURIER DISPATCH — marketplace orders.
+ *
+ * The marketplace basket can contain lines from SEVERAL stores, so no single
+ * merchant's courier credentials fit every child order. The SUPER ADMIN holds
+ * the platform courier accounts, and each STORE already keeps an optional
+ * pickup address (Logistics → Courier API → Setup → pickupAddress, mirrored
+ * onto the store document as `pickup_address` / `store_address`).
+ *
+ * POST /api/admin/marketplace-courier
+ *   Body: {
+ *     orderNumber: string,            // the CHILD order number
+ *     courier?: 'steadfast'|'pathao'|'redx'|'paperfly',  // default steadfast
+ *     codAmount?: number,
+ *     customerName?, customerPhone?, address?, note?,
+ *     storeSlug?: string              // merchant store — its address is the PICKUP
+ *   }
+ *
+ * Flow:
+ *   1. Resolve the child order from Mongo (falls back to the body fields) so a
+ *      client that only knows the order number still gets a complete parcel.
+ *   2. Resolve the PICKUP address from the SELLING store (falls back to
+ *      STEADFAST_PICKUP_ADDRESS-style env vars). This is the piece the platform
+ *      courier needs that per-store booking never had to think about.
+ *   3. Build a courier booking request EXACTLY the way handleCourierBooking
+ *      does and call the provider directly, then persist with the SAME
+ *      recordCourierDispatch helper so the tracking code reaches the child
+ *      order (and vendor_slips on the master) no matter who booked it.
+ *
+ * Never throws — every failure is a shaped 200 so a dashboard button can show
+ * the reason instead of a network error.
+ * ──────────────────────────────────────────────────────────────────────────── */
+const ADMIN_COURIER_DEFAULTS = {
+  steadfast: {
+    apiKey: process.env.STEADFAST_API_KEY || '',
+    secretKey: process.env.STEADFAST_SECRET_KEY || '',
+    pickup: process.env.STEADFAST_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
+  },
+  pathao: {
+    clientId: process.env.PATHAO_CLIENT_ID || '',
+    clientSecret: process.env.PATHAO_CLIENT_SECRET || '',
+    storeId: process.env.PATHAO_STORE_ID || '',
+    pickup: process.env.PATHAO_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
+  },
+  redx: {
+    apiKey: process.env.REDX_API_KEY || '',
+    secretKey: process.env.REDX_SECRET_KEY || '',
+    pickup: process.env.REDX_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
+  },
+  paperfly: {
+    apiKey: process.env.PAPERFLY_API_KEY || '',
+    secretKey: process.env.PAPERFLY_SECRET_KEY || '',
+    pickup: process.env.PAPERFLY_PICKUP_ADDRESS || process.env.CENTRAL_PICKUP_ADDRESS || '',
+  },
+};
+
+app.post('/api/admin/marketplace-courier', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const courierKey = String(body.courier || 'steadfast').toLowerCase().replace(/[^a-z]/g, '');
+    const defaults = (ADMIN_COURIER_DEFAULTS as Record<string, any>)[courierKey];
+    if (!defaults) {
+      return res.status(200).json({
+        ok: false,
+        code: 'unknown_courier',
+        error: `"${courierKey}" is not a supported central courier. Choose steadfast, pathao, redx or paperfly.`,
+      });
+    }
+
+    // ── 1. Resolve the child order from Mongo so the parcel is complete. ──
+    const orderNumber = String(body.orderNumber || body.order_number || body.invoice_id || '').trim();
+    let order: Record<string, any> = { ...(body.order || {}) };
+    if (orderNumber) {
+      const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+      if (db) {
+        const stored = await db.collection(ORDERS_COLLECTION).findOne({
+          $or: [
+            { order_number: orderNumber },
+            { orderNumber },
+            { id: orderNumber },
+          ],
+        }).catch(() => null);
+        if (stored) {
+          const plain = JSON.parse(JSON.stringify(stored));
+          // Body fields win for anything the caller explicitly passed.
+          order = { ...plain, ...order, invoice_id: order.invoice_id || plain.order_number || orderNumber };
+        }
+      }
+    }
+    if (!order.invoice_id) order.invoice_id = orderNumber || `INV-${Date.now()}`;
+    if (!order.customer_name) order.customer_name = body.customerName || body.customer_name || order.customer_name || 'Customer';
+    if (!order.customer_phone) order.customer_phone = body.customerPhone || body.customer_phone || order.customer_phone || '';
+    if (!order.shipping_address) order.shipping_address = body.address || body.shipping_address || order.shipping_address || '';
+    if (order.cod_amount === undefined) order.cod_amount = body.codAmount ?? body.cod_amount ?? order.cod_amount ?? order.total ?? 0;
+    if (!order.customer_note) order.customer_note = body.note || body.customer_note || order.customer_note || 'Handle with care';
+
+    if (!order.customer_phone || !order.shipping_address) {
+      return res.status(200).json({
+        ok: false,
+        code: 'incomplete_order',
+        error: 'The customer phone and delivery address are required to book this parcel.',
+      });
+    }
+
+    // ── 2. The PICKUP address comes from the SELLING STORE, not the courier. ──
+    // A marketplace parcel is collected at the merchant's shop and dropped at
+    // the platform courier hub, so the pickup location is per-SELLER even
+    // though the courier ACCOUNT is central.
+    const storeRef = String(body.storeSlug || body.store_slug || order.store_slug || order.vendor_slug || '').trim();
+    let pickupAddress = String(body.pickupAddress || body.pickup_address || '').trim();
+    if (!pickupAddress && storeRef) {
+      try {
+        const storeConfig = await readStoreConfig('courier', storeRef) as Record<string, any> | null;
+        pickupAddress = String(
+          storeConfig?.perCourier?.[courierKey]?.pickupAddress ||
+          storeConfig?.pickupAddress || ''
+        ).trim();
+      } catch (cfgErr: any) {
+        console.warn('[Courier] central pickup address read warning:', cfgErr?.message || cfgErr);
+      }
+    }
+    if (!pickupAddress) {
+      // Fall back to the central admin pickup hub configured in env.
+      pickupAddress = String(defaults.pickup || '').trim();
+    }
+    if (!pickupAddress) {
+      return res.status(200).json({
+        ok: false,
+        code: 'missing_pickup_address',
+        error: 'No pickup address found for this seller. The merchant can add one in Logistics → Courier API → Setup, or the Super Admin can set a central pickup address.',
+      });
+    }
+
+    // ── 3. Book directly with the provider (central admin credentials). ──
+    const customerName = String(order.customer_name || 'Customer');
+    const customerPhone = String(order.customer_phone || '');
+    const shippingAddress = String(order.shipping_address || '');
+    const codAmount = Number(order.cod_amount ?? 0) || 0;
+    const note = String(order.customer_note || 'Handle with care');
+    const invoice = String(order.invoice_id || orderNumber);
+
+    let bookingResponse: Response | null = null;
+    let requestBody = '';
+    let requestUrl = '';
+    let requestHeaders: Record<string, string> = {};
+
+    if (courierKey === 'steadfast') {
+      if (!defaults.apiKey || !defaults.secretKey) {
+        return res.status(200).json({
+          ok: false,
+          code: 'missing_credentials',
+          error: 'The Super Admin has not configured Steadfast API keys. Add STEADFAST_API_KEY and STEADFAST_SECRET_KEY to the environment.',
+        });
+      }
+      requestUrl = 'https://portal.steadfast.com.bd/api/v1/create_order';
+      requestHeaders = { 'Content-Type': 'application/json', 'Api-Key': defaults.apiKey, 'Secret-Key': defaults.secretKey };
+      requestBody = JSON.stringify({
+        invoice,
+        recipient_name: customerName,
+        recipient_phone: customerPhone,
+        recipient_address: shippingAddress,
+        cod_amount: codAmount,
+        note,
+      });
+    } else if (courierKey === 'pathao') {
+      if (!defaults.clientId || !defaults.clientSecret) {
+        return res.status(200).json({
+          ok: false,
+          code: 'missing_credentials',
+          error: 'The Super Admin has not configured Pathao API keys. Add PATHAO_CLIENT_ID and PATHAO_CLIENT_SECRET to the environment.',
+        });
+      }
+      const token = await ensurePathaoToken(defaults.clientId, defaults.clientSecret);
+      if (!token.token) {
+        return res.status(200).json({ ok: false, code: 'auth_failed', error: token.error || 'Pathao authentication failed.' });
+      }
+      requestUrl = 'https://api.pathao.com/v1/parcel';
+      requestHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token.token}` };
+      requestBody = JSON.stringify({
+        store_id: defaults.storeId,
+        merchant_pickup_address: pickupAddress,
+        recipient_name: customerName,
+        recipient_phone: customerPhone,
+        recipient_address: shippingAddress,
+        recipient_city: order.customer_city || 'Dhaka',
+        cod_amount: codAmount,
+        note,
+        invoice,
+      });
+    } else if (courierKey === 'redx' || courierKey === 'paperfly') {
+      if (!defaults.apiKey || !defaults.secretKey) {
+        return res.status(200).json({
+          ok: false,
+          code: 'missing_credentials',
+          error: `The Super Admin has not configured ${courierKey === 'redx' ? 'RedX' : 'Paperfly'} API keys in the environment.`,
+        });
+      }
+      requestUrl = courierKey === 'redx'
+        ? 'https://api.redx.com.bd/v1/parcel'
+        : 'https://api.paperfly.com.bd/v1/parcel';
+      requestHeaders = { 'Content-Type': 'application/json', 'Api-Key': defaults.apiKey, 'Secret-Key': defaults.secretKey };
+      requestBody = JSON.stringify({
+        ...(courierKey === 'redx' ? { store_id: defaults.storeId || '' } : { merchant_id: defaults.storeId || '' }),
+        merchant_pickup_address: pickupAddress,
+        recipient_name: customerName,
+        recipient_phone: customerPhone,
+        recipient_address: shippingAddress,
+        recipient_city: order.customer_city || 'Dhaka',
+        cod_amount: codAmount,
+        note,
+        invoice,
+      });
+    }
+
+    bookingResponse = await fetch(requestUrl, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: requestBody,
+    });
+    const providerData: any = await readJson(bookingResponse);
+    const tracking = extractTrackingCode(providerData);
+    const accepted = isBookingAccepted(providerData, tracking);
+    if (!accepted) {
+      const reason = describeProviderFailure(providerData, 'The central courier rejected this booking.');
+      return res.status(200).json({ ok: false, code: 'booking_rejected', error: reason, provider_response: providerData });
+    }
+
+    const trackingCode = tracking ||
+      `${courierKey.slice(0, 3).toUpperCase()}-${String(invoice).replace(/[^a-zA-Z0-9]/g, '').slice(-6)}`;
+
+    // ── 4. Persist onto the CHILD order (and vendor_slips via Mongo). ──
+    let persisted = false;
+    try {
+      const result = await recordCourierDispatch(
+        String(order.id || invoice).trim(),
+        { name: courierKey === 'redx' ? 'RedX Logistics' : courierKey === 'paperfly' ? 'Paperfly' : courierKey === 'pathao' ? 'Pathao Courier' : 'Steadfast Courier', key: courierKey },
+        trackingCode,
+        providerData,
+        storeRef ? { store_slug: storeRef } : {}
+      );
+      persisted = Boolean(result?.ok);
+      if (!persisted) console.warn('[Courier] central dispatch persistence warning:', result?.error);
+    } catch (persistErr: any) {
+      console.warn('[Courier] central dispatch persistence error:', persistErr?.message || persistErr);
+    }
+
+    // Audit trail — the Super Admin can see every central booking in the
+    // dashboard's Activity log without opening the courier portal.
+    void appendAuditLog({
+      adminUser: 'Central Courier Bot',
+      action: `Booked marketplace order ${invoice} with ${courierKey} — tracking ${trackingCode}`,
+      targetEntity: invoice,
+      severity: 'Info',
+    }).catch(() => undefined);
+
+    return res.status(200).json({
+      ok: true,
+      courier: courierKey,
+      tracking_code: trackingCode,
+      persisted,
+      pickup_address: pickupAddress,
+      warning: persisted ? undefined : 'The parcel was booked, but the tracking code could not be saved to this order.',
+    });
+  } catch (err: any) {
+    console.error('[Courier] POST /api/admin/marketplace-courier error:', err);
+    return res.status(200).json({ ok: false, code: 'dispatch_failed', error: err?.message || 'The central courier dispatch failed.' });
+  }
+});
+
 app.post('/api/courier/send', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   const rawName = String(
@@ -16731,6 +17001,35 @@ app.post('/api/orders', async (req, res) => {
       // Guarantees zero-lag read-after-write for customer & vendor dashboards
       rememberRecentOrders(allDocsToPersist);
       inserted.push(...allDocsToPersist);
+
+      // ── SUPER ADMIN PAYMENT NOTIFICATION ────────────────────────────────
+      // A marketplace wallet order arrives with the bKash/Nagad/Rocket TrxID
+      // the customer pasted, marked 'Pending Verification'. Nobody in the
+      // dashboard reads Mongo directly, so the ONLY durable, visible record a
+      // Super Admin already watches is the ACTIVITY LOG (read by
+      // readAuditLogs → SuperAdminPortalView). Log it immediately here so the
+      // payment is flagged for verification in the same second the customer
+      // clicks Confirm Order — not after someone happens to open Orders.
+      const isMarketplaceWalletPayment =
+        masterRecord.marketplace_order === true &&
+        String(masterRecord.payment_status || '') === 'Pending Verification';
+      if (isMarketplaceWalletPayment) {
+        const trxRef = String(
+          (masterRecord as any).transaction_id ||
+          (masterRecord as any).transactionId ||
+          (masterRecord as any).trxId ||
+          (masterRecord as any).trx_id ||
+          'MISSING'
+        );
+        void appendAuditLog({
+          adminUser: 'Payment Bot',
+          action: `Payment verification needed: ${masterRecord.order_number} — ${masterRecord.payment_method} TrxID ${trxRef} — ৳${masterRecord.total_price}`,
+          targetEntity: String(masterRecord.order_number || ''),
+          severity: 'Warning',
+        }).catch((logErr: any) => {
+          console.warn('[Server] marketplace payment audit log warning:', logErr?.message || logErr);
+        });
+      }
 
       // Order confirmation SMS
       if (!isManual && masterRecord.customer_phone) {

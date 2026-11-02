@@ -251,3 +251,22 @@ export function isManualOrder(ord: any): boolean {
   }
   return false;
 }
+
+/**
+ * Does this order come from the cross-vendor MARKETPLACE (not a single store)?
+ *
+ * The write path stamps BOTH `marketplace_order: true` and
+ * `order_source_channel: 'marketplace'` (see buildOrderRecord in serverApp.ts);
+ * every known spelling is accepted here because the dashboard orders can come
+ * from Mongo (snake_case), Supabase rows or the in-memory cache (camelCase).
+ * Marketplace orders route their courier booking through the CENTRAL ADMIN
+ * courier API rather than the merchant's own credentials.
+ */
+export function isMarketplaceOrder(ord: any): boolean {
+  if (!ord) return false;
+  if (ord.marketplace_order === true || ord.marketplaceOrder === true) return true;
+  if (String(ord.marketplace_order ?? ord.marketplaceOrder ?? '') === 'true') return true;
+  if (String(ord.order_source_channel ?? ord.orderSourceChannel ?? '').trim().toLowerCase() === 'marketplace') return true;
+  if (Array.isArray(ord.vendor_slugs ?? ord.vendorSlugs) && (ord.vendor_slugs ?? ord.vendorSlugs).length > 1) return true;
+  return false;
+}

@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, Truck, Wallet, CreditCard, Banknote, ShieldCheck,
-  Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail,
+  Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail, Copy, Check,
   AlertCircle, ArrowRight,
 } from 'lucide-react';
 import SafeImage from './SafeImage';
+import type { AdminPaymentGatewayConfig } from '../types';
 import { useCart } from './CartProvider';
 import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
@@ -121,7 +122,7 @@ const WALLET_PAYMENTS: MarketplacePayment[] = ['bkash', 'nagad', 'rocket'];
 /** Wallet numbers the shopper is told to send to. Placeholder until each seller
  *  publishes its own number at checkout; the transaction id is what is verified. */
 const WALLET_HELP_LINE =
-  'Send the total to the seller’s wallet, then enter the Transaction ID you receive by SMS. Each seller confirms their own payment.';
+  'Send the total to the platform number shown above, then enter the Transaction ID you receive by SMS. The central team verifies every payment before dispatch.';
 const WALLET_HELP_LINE_BN =
   'মোট টাকা সেলারের ওয়ালেটে পাঠিয়ে এসএমএস-এ পাওয়া ট্রানজেকশন আইডি লিখুন। প্রত্যেক সেলার নিজের পেমেন্ট নিশ্চিত করবেন।';
 
@@ -374,6 +375,58 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
   const [txId, setTxId] = useState('');
   const isWalletPayment = payment !== 'cod';
 
+  /**
+   * CENTRAL ADMIN WALLET NUMBERS.
+   *
+   * Marketplace wallet payments go to the PLATFORM's bKash/Nagad/Rocket
+   * accounts (the Super Admin configures them in the admin portal, persisted
+   * through `/api/admin/platform-config`), not to any single seller. The
+   * checkout displays the number for the SELECTED wallet with a one-tap Copy
+   * button so the shopper can send the money and paste the TrxID without
+   * mistyping the account.
+   */
+  const [adminPay, setAdminPay] = useState<AdminPaymentGatewayConfig | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/admin/platform-config', { headers: { Accept: 'application/json' } });
+        const data = await res.json().catch(() => null);
+        const cfg = data?.config?.adminPaymentConfig;
+        if (!cancelled && cfg && typeof cfg === 'object') setAdminPay(cfg as AdminPaymentGatewayConfig);
+      } catch {
+        // Unreachable config service — the payment block simply renders its
+        // fallback guidance instead of a number.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const adminWalletNumber =
+    payment === 'bkash' ? String(adminPay?.bkashNumber || '') :
+    payment === 'nagad' ? String(adminPay?.nagadNumber || '') :
+    payment === 'rocket' ? String(adminPay?.rocketNumber || '') : '';
+  const [copiedNumber, setCopiedNumber] = useState(false);
+  const copyWalletNumber = async () => {
+    if (!adminWalletNumber) return;
+    try {
+      await navigator.clipboard.writeText(adminWalletNumber);
+    } catch {
+      // Clipboard API can be denied (http://, iOS Safari); the execCommand
+      // fallback covers the legacy WebView cases still common in Bangladesh.
+      try {
+        const temp = document.createElement('textarea');
+        temp.value = adminWalletNumber;
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand('copy');
+        document.body.removeChild(temp);
+      } catch { /* give up silently */ }
+    }
+    setCopiedNumber(true);
+    window.setTimeout(() => setCopiedNumber(false), 1800);
+  };
+
   const [placing, setPlacing] = useState(false);
   /**
    * THE SUBMISSION LOCK.
@@ -540,6 +593,8 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         paymentMethod: PAYMENT_LABELS[payment],
         paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
         transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
+        adminPaymentMethod: isWalletPayment ? payment : 'cod',
+        adminPaymentNumber: isWalletPayment ? adminWalletNumber || undefined : undefined,
           lines: vendorItems.map((line) => ({
             productId: line.productId,
             productName: line.productName,
@@ -600,6 +655,8 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           paymentMethod: PAYMENT_LABELS[payment],
           paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
           transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
+          adminPaymentMethod: isWalletPayment ? payment : 'cod',
+          adminPaymentNumber: isWalletPayment ? adminWalletNumber || undefined : undefined,
           fulfillmentStatus: 'Unfulfilled',
           status: 'New',
           source: 'Store',
@@ -983,6 +1040,50 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                       one-click order. */}
                   {isWalletPayment && (
                     <div className="rounded-xl border p-3" style={{ borderColor: THEME.line, backgroundColor: '#fafbff' }}>
+                      {/* CENTRAL ADMIN RECEIVING NUMBER + COPY.
+                          Marketplace wallet payments go to the platform's own
+                          wallet, so the shopper must see — and copy — THAT
+                          number, not a seller's. The Copy button uses the
+                          Clipboard API with an execCommand fallback for the
+                          older WebViews common in Bangladesh. */}
+                      {adminWalletNumber ? (
+                        <div
+                          className="mb-3 flex items-center justify-between gap-2 rounded-lg border px-3 py-2.5"
+                          style={{ borderColor: THEME.line, backgroundColor: '#fff' }}
+                        >
+                          <div className="min-w-0">
+                            <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                              {t('Send money to this number', 'এই নম্বরে টাকা পাঠান')} ({PAYMENT_LABELS[payment]})
+                            </div>
+                            <div
+                              className="truncate font-mono text-[16px] font-black"
+                              style={{ color: THEME.brand }}
+                            >
+                              {adminWalletNumber}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={copyWalletNumber}
+                            aria-label={t('Copy payment number', 'পেমেন্ট নম্বর কপি করুন')}
+                            className="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-black text-white transition active:opacity-80"
+                            style={{ backgroundColor: THEME.brand }}
+                          >
+                            {copiedNumber ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                            {copiedNumber
+                              ? t('Copied!', 'কপি হয়েছে!')
+                              : t('Copy', 'কপি')}
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="mb-3 rounded-lg px-3 py-2 text-[11px] leading-relaxed"
+                           style={{ backgroundColor: '#fff', color: '#64748b' }}>
+                          {t(
+                            `The ${PAYMENT_LABELS[payment]} receiving number is not published yet. Contact support before sending money.`,
+                            `${PAYMENT_LABELS[payment]} এর গ্রহণকারী নম্বর এখনো যুক্ত করা হয়নি। টাকা পাঠানোর আগে সাপোর্টে যোগাযোগ করুন।`,
+                          )}
+                        </p>
+                      )}
                       <label className="block">
                         <span className="mb-1 block text-[11px] font-bold text-slate-600">
                           {t(
@@ -1008,8 +1109,8 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                   <p className="flex items-start gap-1.5 pt-1 text-[10.5px] leading-relaxed text-slate-400">
                     <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" />
                     {t(
-                      'Payment goes directly to each seller — the marketplace never holds your money. Every seller in this order sees the same address and payment details.',
-                      'পেমেন্ট সরাসরি প্রত্যেক সেলারের কাছে যায় — মার্কেটপ্লেস আপনার টাকা ধরে রাখে না। এই অর্ডারের প্রত্যেক সেলার একই ঠিকানা ও পেমেন্ট তথ্য দেখবেন।',
+                      'Payment goes directly to the platform’s central account — each seller is paid their share after verification. Every seller in this order sees the same payment details.',
+                      'পেমেন্ট প্ল্যাটফর্মের সেন্ট্রাল অ্যাকাউন্টে যায় — ভেরিফিকেশনের পর প্রত্যেক সেলার তাদের অংশ পান। এই অর্ডারের প্রত্যেক সেলার একই পেমেন্ট তথ্য দেখবেন।',
                     )}
                   </p>
                 </div>

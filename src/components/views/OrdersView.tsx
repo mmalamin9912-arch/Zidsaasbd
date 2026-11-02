@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { Order, OrderItem } from '../../types';
-import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canonicalStatusOf, isManualOrder } from '../../utils/orderUtils';
+import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canonicalStatusOf, isManualOrder, isMarketplaceOrder } from '../../utils/orderUtils';
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
 import { loadCourierConfig } from '../../lib/logisticsApi';
@@ -748,6 +748,80 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         'RedX Logistics': '/api/courier/redx',
         'Paperfly': '/api/courier/paperfly',
       };
+      const courierKeyMap: Record<string, string> = {
+        'Steadfast Courier': 'steadfast',
+        'Pathao Courier': 'pathao',
+        'RedX Logistics': 'redx',
+        'Paperfly': 'paperfly',
+      };
+
+      /* ── MARKETPLACE ORDERS BOOK THROUGH THE CENTRAL ADMIN COURIER API ──
+       *
+       * A marketplace child order belongs to the platform's cross-vendor
+       * basket, not to this merchant's own storefront shipment flow. The
+       * merchant clicking “Confirm Order” (the courier modal's book button
+       * below calls THIS handler) must NOT spend their own Steadfast/
+       * Pathao quota on it — the Super Admin's account books the parcel and
+       * the SELLING STORE's address is sent as the pickup location.
+       *
+       * `/api/admin/marketplace-courier` resolves the full child order from
+       * Mongo (so a partial body is still a complete parcel), reads the
+       * pickup address from the store courier config with a central-env
+       * fallback, books directly with the provider, persists the tracking
+       * code via recordCourierDispatch and writes an Activity-log entry.
+       */
+      if (isMarketplaceOrder(ord)) {
+        const centralCourierKey = courierKeyMap[dispatchCourier] || 'steadfast';
+        const centralRes = await fetch('/api/admin/marketplace-courier', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            orderNumber: ord.orderNumber || ord.id,
+            courier: centralCourierKey,
+            storeSlug: storeSlug || (ord as any).store_slug || '',
+            customerName: ord.customerName,
+            customerPhone: ord.customerPhone,
+            address: ord.address,
+            codAmount: ord.paymentMethod === 'COD' ? ord.totalBDT : 0,
+            note: (ord as any).customerNote || (ord as any).notes || '',
+          }),
+        });
+        const rawCentral = await centralRes.text().catch(() => '');
+        let centralData: any = {};
+        try { centralData = rawCentral ? JSON.parse(rawCentral) : {}; } catch { centralData = {}; }
+
+        if (!centralData.ok) {
+          const reason = centralData.error
+            || (centralData.code === 'missing_credentials'
+              ? 'The platform has not configured its courier API keys yet — contact the marketplace administrator.'
+              : `Central courier booking failed (${centralData.code || centralRes.status}).`);
+          toast.error('Central courier booking failed', { description: reason });
+          return;
+        }
+
+        const centralTracking = String(centralData.tracking_code || '');
+        if (centralData.order) {
+          const serverOrder = normalizeOrder(centralData.order);
+          onUpdateOrders(orders.map(o => (o.id === ord.id ? { ...o, ...serverOrder, id: o.id } : o)));
+        } else {
+          onUpdateOrders(orders.map(o => (o.id === ord.id
+            ? {
+                ...o,
+                status: 'In delivery' as const,
+                fulfillmentStatus: 'In Transit' as const,
+                courierName: dispatchCourier,
+                trackingCode: centralTracking,
+              }
+            : o)));
+        }
+        toast.success(`Booked via central ${dispatchCourier}`, {
+          description: centralData.warning
+            ? `Tracking ID: ${centralTracking}. ${centralData.warning}`
+            : `Tracking ID: ${centralTracking}. Pickup from ${centralData.pickup_address || 'store address'}.`,
+        });
+        return;
+      }
+
       const courierEndpoint = courierMap[dispatchCourier] || '/api/courier/steadfast';
       const courierName = dispatchCourier || 'Steadfast Courier';
 
