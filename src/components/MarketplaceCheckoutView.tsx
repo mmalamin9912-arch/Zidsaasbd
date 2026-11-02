@@ -52,6 +52,25 @@ const THEME = {
 
 const bdt = (v: number) => `৳${Math.round(Number(v) || 0).toLocaleString('en-US')}`;
 
+/**
+ * Resolve the best available product image URL from every spelling the basket,
+ * product cards and Supabase rows may carry, plus the first `images[]` entry.
+ * Returns '' when none exists so SafeImage renders its local placeholder
+ * instead of a broken/missing icon.
+ */
+function productImageOf(p: any): string {
+  return String(
+    p?.image ??
+    p?.image_url ??
+    p?.imageUrl ??
+    p?.thumbnail ??
+    p?.productImage ??
+    p?.product_image ??
+    (Array.isArray(p?.images) && p.images.length > 0 ? p.images[0] : undefined) ??
+    ''
+  ).trim();
+}
+
 /** All 64 districts — a courier needs the real one, not a header shortcut. */
 const DISTRICTS = [
   'Dhaka', 'Gazipur', 'Narayanganj', 'Manikganj', 'Munshiganj', 'Narsingdi', 'Tangail', 'Kishoreganj', 'Faridpur', 'Gopalganj', 'Madaripur', 'Rajbari', 'Shariatpur',
@@ -1167,11 +1186,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                         const p = line.product as any;
                         return (
                           <div key={`${vendor.vendorId}-${p.id}`} className="mb-2 flex gap-2.5 last:mb-0">
-                            <SafeImage
-                              src={p.image || p.image_url || p.imageUrl || p.thumbnail}
-                              alt={p.title || p.name || 'Item'}
-                              className="h-11 w-11 shrink-0 rounded-lg border object-cover"
-                            />
+                          <SafeImage
+                            src={productImageOf(p) || undefined}
+                            alt={p.title || p.name || 'Item'}
+                            className="w-20 h-20 shrink-0 rounded-lg border object-cover"
+                          />
                             <div className="min-w-0 flex-1">
                               {/* `name` is the legacy fallback — a basket stored
                                   by an older build carries it instead of `title`,
