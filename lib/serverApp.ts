@@ -202,6 +202,7 @@ import {
   PAYOUT_RULES,
 } from './codLedger.js';
 import { sanitizeImagePayload, formatBytes, approximateSize, MAX_PAYLOAD_BYTES } from './imagePayload.js';
+import { PLACEHOLDER_IMAGE } from '../src/utils/imageFallback.js';
 // Central email transport (Resend first, SMTP/Nodemailer fallback). Every
 // broadcast and automation-trigger email goes through `sendEmail` so delivery
 // attempts and failures produce one consistent, greppable log line.
@@ -16263,13 +16264,7 @@ function getMatchingCachedOrdersForVendor(refValues: string[]): any[] {
       o.merchant_id, o.merchantId,
       o.store_code, o.storeCode,
     ].filter(Boolean).map(String).map((s) => s.toLowerCase().trim());
-    
-    /* MARKETPLACE MASTER rows carry ARRAYS (vendor_slugs / vendor_ids / one
-     * vendor_id per seller). Comparing only the scalar candidates above missed
-     * them, so a multi-seller checkout flashed on the shopper's order page but
-     * never on any seller's dashboard until Mongo was re-read. The array forms
-     * are flattened into the candidate set here so the in-memory cache agrees
-     * with the database query in buildOrderQuery. */
+
     const arrayCandidates = [
       ...(Array.isArray(o.vendor_slugs) ? o.vendor_slugs : []),
       ...(Array.isArray(o.vendorSlugs) ? o.vendorSlugs : []),
@@ -16284,6 +16279,50 @@ function getMatchingCachedOrdersForVendor(refValues: string[]): any[] {
     }
   }
   return matches;
+}
+
+/**
+ * Ensure every order item carries a usable product image URL so checkout,
+ * order tracking and the merchant dashboard never render a broken <img>.
+ *
+ * Order rows store `items` as a JSON string. This parses it, fills each item's
+ * `image` from every known spelling (image / image_url / imageUrl / thumbnail)
+ * and substitutes the local placeholder when nothing is usable, then writes the
+ * (possibly updated) items back as a JSON string on the same object.
+ */
+function hydrateOrderItemImages(order: any): any {
+  if (!order || typeof order !== 'object') return order;
+  let items: any[] = [];
+  const raw = order.items;
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      items = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      items = [];
+    }
+  }
+  if (items.length === 0) return order;
+
+  const hydrated = items.map((item: any) => {
+    if (!item || typeof item !== 'object') return item;
+    const image =
+      item.image ??
+      item.image_url ??
+      item.imageUrl ??
+      item.thumbnail ??
+      item.productImage ??
+      item.product_image ??
+      '';
+    if (typeof image === 'string' && image.trim() !== '' && image.trim() !== '#') {
+      return item;
+    }
+    return { ...item, image: PLACEHOLDER_IMAGE };
+  });
+
+  return { ...order, items: JSON.stringify(hydrated) };
 }
 
 // GET /api/orders — list orders with FLEXIBLE matching. Accepts the store
@@ -16395,7 +16434,10 @@ app.get('/api/orders', async (req, res) => {
       res.setHeader('X-Orders-Degraded', 'true');
       res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
     }
-    return res.status(200).json(dedupedOrders);
+    // Embed a usable product image on every order line item so checkout,
+    // tracking and dashboard order rows never render a broken thumbnail.
+    const ordersWithImages = dedupedOrders.map(hydrateOrderItemImages);
+    return res.status(200).json(ordersWithImages);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
     // 500, never a silent empty list: the client keeps its previous data on a
@@ -16494,7 +16536,8 @@ app.get('/api/orders/:storeRef', async (req, res) => {
       res.setHeader('X-Orders-Degraded', 'true');
       res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
     }
-    return res.status(200).json(dedupedOrders);
+    const ordersWithImages = dedupedOrders.map(hydrateOrderItemImages);
+    return res.status(200).json(ordersWithImages);
   } catch (err: any) {
     console.error('[Server] GET /api/orders/:storeRef error:', err);
     res.setHeader('X-Orders-Source', 'error');
@@ -16609,7 +16652,8 @@ app.get('/api/customer/orders', async (req, res) => {
 
     res.setHeader('X-Orders-Count', String(finalOrders.length));
     res.setHeader('X-Orders-Source', dbConnected ? 'mongodb' : 'cache');
-    return res.status(200).json({ ok: true, orders: finalOrders });
+    const customerOrdersWithImages = finalOrders.map(hydrateOrderItemImages);
+    return res.status(200).json({ ok: true, orders: customerOrdersWithImages });
   } catch (err: any) {
     console.error('[Server] GET /api/customer/orders error:', err);
     return res.status(200).json({ ok: true, orders: [], warning: 'Customer orders fallback' });
@@ -16710,7 +16754,24 @@ function buildOrderRecord(
     customerNote: order.customerNote || order.customer_note || undefined,
     delivery_zone: order.deliveryZone || order.delivery_zone || 'Inside Dhaka',
     deliveryZone: order.deliveryZone || order.delivery_zone || 'Inside Dhaka',
-    items: typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []),
+    items: (() => {
+      const rawItems = typeof order.items === 'string' ? order.items : JSON.stringify(order.items || []);
+      let parsed: any[] = [];
+      try {
+        parsed = Array.isArray(JSON.parse(rawItems)) ? JSON.parse(rawItems) : [];
+      } catch {
+        parsed = [];
+      }
+      return JSON.stringify(
+        parsed.map((it: any) => {
+          if (!it || typeof it !== 'object') return it;
+          const image =
+            it.image ?? it.image_url ?? it.imageUrl ?? it.thumbnail ?? it.productImage ?? it.product_image ?? '';
+          if (typeof image === 'string' && image.trim() !== '' && image.trim() !== '#') return it;
+          return { ...it, image: PLACEHOLDER_IMAGE };
+        }),
+      );
+    })(),
     total_price: toNumeric(order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total, 0),
     totalBDT: toNumeric(order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total, 0),
     subtotal_bdt: toNumeric(order.subtotalBDT ?? order.subtotal_bdt, 0),
