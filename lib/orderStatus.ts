@@ -88,7 +88,6 @@ const PAYMENT_ALIASES: Record<string, PaymentStatus> = {
   unpaid: 'Unpaid',
   pending: 'Unpaid',
   due: 'Unpaid',
-  pendingverification: 'Unpaid',
   voided: 'Voided',
   void: 'Voided',
   refunded: 'Voided',

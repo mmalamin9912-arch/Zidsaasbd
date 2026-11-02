@@ -16329,6 +16329,7 @@ app.get('/api/orders', async (req, res) => {
     const filterClauses = buildOrderFilterClauses({
       isManual: req.query.isManual ?? req.query.is_manual ?? req.query.manual,
       status: req.query.status ?? req.query.order_status,
+      payment_status: req.query.payment_status ?? req.query.paymentStatus,
       search: req.query.search ?? req.query.q,
     });
 
@@ -16442,6 +16443,7 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     const filterClauses = buildOrderFilterClauses({
       isManual: req.query.isManual ?? req.query.is_manual ?? req.query.manual,
       status: req.query.status ?? req.query.order_status,
+      payment_status: req.query.payment_status ?? req.query.paymentStatus,
       search: req.query.search ?? req.query.q,
     });
     let query: any = storeQuery;
