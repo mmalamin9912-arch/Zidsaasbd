@@ -186,6 +186,12 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const [nidNumber, setNidNumber] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  /**
+   * VENDOR TERMS & POLICIES consent — mandatory before registration.
+   * Checked state turns the agreement card green; the submit handler refuses
+   * to POST /api/auth/merchant/register until it is true.
+   */
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
 
   // WhatsApp OTP Phone Verification States
   const [whatsappOtpInput, setWhatsappOtpInput] = useState('');
@@ -1565,6 +1571,16 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
       return;
     }
 
+    // TERMS & POLICIES GATE — registration is refused until the vendor has
+    // explicitly agreed to the return policy, the subscription-after-trial
+    // rule and the fraud policy. The `required` attribute already blocks the
+    // native submit; this guard also covers programmatic submissions.
+    if (!agreedToTerms) {
+      setErrorMsg('auth_err_terms_required');
+      toast.error(t('auth_err_terms_required'));
+      return;
+    }
+
     const fullName = `${firstName.trim()} ${lastName.trim()}`;
     const formattedPhone = formatFullPhoneNumber(phone);
     const fullBusinessAddress = `${streetAddress.trim()}, ${cityUpazila.trim()}, ${district} - ${postCode.trim()}`;
@@ -2447,6 +2463,47 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                       placeholder="••••••••"
                       className="w-full bg-[#161923] border border-[#3A435E] focus:border-[#D4AF37] rounded-xl px-3 py-2 text-white outline-none"
                     />
+                  </div>
+                </div>
+
+                {/* ── MANDATORY VENDOR TERMS & POLICIES AGREEMENT ──
+                    A vendor cannot complete registration without explicitly
+                    agreeing to the marketplace's return policy, the
+                    subscription-after-trial rule, and the fraud policy. The
+                    checkbox is required by BOTH the HTML form validation and
+                    the submit handler below. */}
+                <div
+                  className={`rounded-xl border p-3.5 space-y-2 ${
+                    agreedToTerms
+                      ? 'border-[#00D68F]/40 bg-[#00D68F]/5'
+                      : 'border-[#3A435E] bg-[#161923]'
+                  }`}
+                >
+                  <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={agreedToTerms}
+                      onChange={(e) => {
+                        setAgreedToTerms(e.target.checked);
+                        if (e.target.checked && errorMsg === 'auth_err_terms_required') setErrorMsg(null);
+                      }}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-[#D4AF37] cursor-pointer"
+                    />
+                    <span className="font-bold text-slate-200 leading-snug">
+                      I have read and agree to the Vendor Terms &amp; Policies *
+                    </span>
+                  </label>
+                  <div className="text-[11px] leading-relaxed text-slate-400 pl-[26px] space-y-1">
+                    <p>
+                      • I will comply with the platform's <b className="text-slate-300">Return Policy</b> for all customer orders.
+                    </p>
+                    <p>
+                      • I understand that after the <b className="text-slate-300">1-month free trial</b> ends, a paid subscription plan must be purchased to keep my store active — otherwise the account may be suspended.
+                    </p>
+                    <p>
+                      • I acknowledge that <b className="text-slate-300">strict action, including account suspension</b>, will be taken if valid customer complaints arise regarding unreturned or fraudulent product returns.
+                    </p>
                   </div>
                 </div>
 
