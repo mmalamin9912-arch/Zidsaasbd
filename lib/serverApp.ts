@@ -3589,6 +3589,8 @@ app.post('/api/store/subscription-requests', async (req, res) => {
     if (!planId) return res.status(400).json({ ok: false, error: 'planId is required.' });
 
     const storeRef = cleanStoreRef(body.store_slug || body.storeSlug || body.storeId);
+    const requestTrxId = String(body.transactionId || body.transaction_id || '').trim();
+    const requestAmount = Number(body.amountBDT ?? body.amount_bdt ?? body.amount ?? 0) || 0;
     const result = await writeSubscriptionRequest({
       id: body.id,
       storeName: body.storeName || body.store_name,
@@ -3597,11 +3599,51 @@ app.post('/api/store/subscription-requests', async (req, res) => {
       email: body.email || body.merchant_email,
       planId,
       planName: body.planName || body.plan_name,
-      amountBDT: body.amountBDT ?? body.amount_bdt ?? body.amount,
+      amountBDT: requestAmount,
       paymentMethod: body.paymentMethod || body.payment_method,
-      transactionId: body.transactionId || body.transaction_id,
+      transactionId: requestTrxId,
       status: 'pending_approval',
     });
+
+    /* ── INSTANT TELEGRAM ALERT — vendor plan purchase / renewal ──
+     * The Super Admin gets a push the moment a vendor submits a plan request
+     * (wallet TrxID OR manual payment), so approvals do not wait for the
+     * dashboard to be opened. Reuses the SAME bot token / chat id as the
+     * marketplace payment alerts. Fire-and-forget: never delays the merchant's
+     * request, and skipped silently when Telegram is not configured. */
+    if (result.ok) {
+      void (async () => {
+        try {
+          const cfg = await resolveCentralCourierConfig();
+          if (!cfg.telegramBotToken || !cfg.telegramChatId) return;
+
+          // Resolve the vendor's phone from the store record when the request
+          // body did not carry one — the alert must show who to call back.
+          let vendorPhone = String(body.phone || body.vendorPhone || body.store_phone || '').trim();
+          if (!vendorPhone && storeRef) {
+            const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+            const store = db ? await db.collection('stores').findOne({
+              $or: [{ store_slug: storeRef }, { storeSlug: storeRef }, { id: storeRef }, { store_id: storeRef }],
+            }).catch(() => null) : null;
+            vendorPhone = String(store?.phone || store?.store_phone || store?.supportPhone || '').trim();
+          }
+
+          const isRenewal = /^(renew|extend|upgrade)/i.test(String(body.action || body.requestType || ''));
+          await sendAdminPaymentAlertTelegram({
+            botToken: cfg.telegramBotToken,
+            chatId: cfg.telegramChatId,
+            orderNumber: `PLAN-${planId.toUpperCase()}${isRenewal ? ' (renewal)' : ''}`,
+            paymentMethod: String(body.paymentMethod || body.payment_method || 'Manual'),
+            trxId: requestTrxId || 'Not provided',
+            amountBDT: requestAmount,
+            customerName: String(body.storeName || body.store_name || storeRef || 'Vendor store'),
+            customerPhone: vendorPhone || 'Not on file',
+          });
+        } catch (tgPlanErr: any) {
+          console.warn('[Telegram] vendor plan alert warning:', tgPlanErr?.message || tgPlanErr);
+        }
+      })();
+    }
 
     return res.status(200).json({
       ok: result.ok,
@@ -7595,6 +7637,40 @@ app.post('/api/subscription/update', async (req, res) => {
       console.warn('[Server] subscription request write failed:', err?.message || err);
       return { ok: false, collections: [], error: err?.message };
     });
+
+    /* ── INSTANT TELEGRAM ALERT — vendor plan purchase / renewal ──
+     * Fires on every merchant submission of this route as well (the
+     * `/api/store/subscription-requests` path has its own copy below the
+     * approval gate), so whichever endpoint the client posts to the Super
+     * Admin gets the same push. Admin APPROVALS deliberately do NOT alert. */
+    if (!isAdminApproval && (requestWrite as any)?.ok) {
+      void (async () => {
+        try {
+          const cfg = await resolveCentralCourierConfig();
+          if (!cfg.telegramBotToken || !cfg.telegramChatId) return;
+          let vendorPhone = String(req.body?.phone || req.body?.vendorPhone || '').trim();
+          if (!vendorPhone && storeSlug) {
+            const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+            const store = db ? await db.collection('stores').findOne({
+              $or: [{ store_slug: storeSlug }, { storeSlug }, { id: storeSlug }],
+            }).catch(() => null) : null;
+            vendorPhone = String(store?.phone || store?.store_phone || store?.supportPhone || '').trim();
+          }
+          await sendAdminPaymentAlertTelegram({
+            botToken: cfg.telegramBotToken,
+            chatId: cfg.telegramChatId,
+            orderNumber: `PLAN-${String(planId || '').toUpperCase()}`,
+            paymentMethod: String(paymentMethod || 'Manual'),
+            trxId: String(transactionId || '') || 'Not provided',
+            amountBDT: Number(rawAmount) || 0,
+            customerName: String(storeName || storeSlug || 'Vendor store'),
+            customerPhone: vendorPhone || 'Not on file',
+          });
+        } catch (tgPlanErr: any) {
+          console.warn('[Telegram] vendor plan alert warning:', tgPlanErr?.message || tgPlanErr);
+        }
+      })();
+    }
 
     // 2. A pending request must NOT change the active plan/expiry. Persisting
     //    the new timestamps here is what made a merely-submitted plan render as
