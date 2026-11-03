@@ -401,8 +401,19 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     const fetchLiveOrders = async () => {
       try {
         const params = new URLSearchParams();
-        if (merchantId) params.set('merchant_id', merchantId);
-        if (storeSlug) params.set('store_slug', storeSlug);
+        /*
+         * Both identities, as repeated params — the server treats them as an
+         * `$or`, so sending both can only broaden the match. This poll and the
+         * initial load in App.tsx must ask the SAME question, or the table
+         * renders rows and then the poll replaces them with an empty list.
+         */
+        for (const value of [merchantId, storeSlug]) {
+          const ref = String(value ?? '').trim();
+          if (!ref) continue;
+          params.append('merchant_id', ref);
+          params.append('store_slug', ref);
+          params.append('storeRef', ref);
+        }
         // NOTE: deliberately NOT sending subMenu/statusTab/search here. This
         // poll owns the authoritative list held in app state; narrowing it to
         // the active tab would delete the other rows from the list and break

@@ -16185,6 +16185,23 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
     supplied.add(raw);
     supplied.add(raw.toLowerCase());
     const identity = await resolveStoreIdentity(raw);
+
+    /*
+     * THE SLUG THE CALLER SENT IS ALWAYS A CANDIDATE SLUG.
+     *
+     * The previous code only registered `raw` as a slug when the store lookup
+     * returned NOTHING. But `resolveStoreIdentity` answers with `storeSlug` for
+     * ANY unrecognised ref (it lowercases it into a slug by default), so
+     * `identity.storeSlug` was almost always truthy — and when it differed from
+     * what the orders actually carry (store renamed, or the row was written with
+     * the slug the customer's checkout knew), the caller's own slug was never
+     * matched. Orders for the merchant then evaluated to an empty list.
+     */
+    if (!isUuidLike(raw) && !STORE_CODE_RE.test(raw)) {
+      slugs.add(raw.toLowerCase());
+      canonical.add(raw.toLowerCase());
+    }
+
     if (identity.storeId) {
       canonical.add(identity.storeId);
       vendorIds.add(identity.storeId);
@@ -16275,6 +16292,36 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
   // keyed on a capitalised vendor slug is still owned by this merchant.
   if (caseInsensitive.length) {
     or.push({ vendor_id: { $in: caseInsensitive } }, { vendorId: { $in: caseInsensitive } });
+  }
+
+  /*
+   * VENDOR ATTRIBUTION IS INDEPENDENT OF HOW THE SLUG WAS SPELLED.
+   *
+   * A CHILD order records its owner in `vendor_id`, and `persistVendorChildren`
+   * writes the canonical UUID there only after a successful store lookup. When
+   * that lookup fails it stores whatever the cart grouped by — a slug, or a
+   * store CODE — while leaving `store_slug` empty. Such an order matched the
+   * `store_*` clauses NOT AT ALL and `vendor_id` only when the value happened to
+   * equal a value the caller sent verbatim, so a real, paid, verified child
+   * order was invisible on its own merchant's dashboard.
+   *
+   * `vendor_id` is therefore compared against the FULL identity set (ids, slugs
+   * and codes, every casing) — not just the UUIDs and slugs.
+   */
+  const vendorRefSet = Array.from(new Set([
+    ...all,
+    ...all.map((v) => v.toLowerCase()),
+    ...all.map((v) => v.toUpperCase()),
+  ])).filter(Boolean);
+  if (vendorRefSet.length) {
+    or.push(
+      { vendor_id: { $in: vendorRefSet } },
+      // Case-INSENSITIVE as well: a child order may carry `MyStore` while the
+      // dashboard polls `mystore`, and the `$in` above is exact.
+      { vendor_id: { $in: caseInsensitive } },
+      { vendorId: { $in: vendorRefSet } },
+      { vendorId: { $in: caseInsensitive } },
+    );
   }
 
   // Store codes: match every case spelling the resolver or the writer may have
@@ -16619,20 +16666,29 @@ function hydrateOrderItemImages(order: any): any {
 app.get('/api/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
-    const refValues = [
-      req.query.store_slug,
-      req.query.storeSlug,
-      req.query.store_id,
-      req.query.storeId,
-      req.query.merchant_id,
-      req.query.merchantId,
-      req.query.storeRef,
-      req.query.slug,
-    ]
-      .filter(Boolean)
-      .map(String)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    /*
+     * REPEATED params are honoured.
+     *
+     * The dashboard sends both `merchant_id` and `store_slug` for the same
+     * merchant, and Express turns a repeated key into an ARRAY. Calling
+     * `String(array)` produced `"uuid,slug"` — a value that matches nothing, so
+     * adding a second identity used to make the query strictly WORSE. Each
+     * occurrence is flattened individually instead.
+     */
+    const flattenRef = (value: unknown): string[] =>
+      (Array.isArray(value) ? value : [value])
+        .map((v) => String(v ?? '').trim())
+        .filter(Boolean);
+    const refValues = Array.from(new Set([
+      ...flattenRef(req.query.store_slug),
+      ...flattenRef(req.query.storeSlug),
+      ...flattenRef(req.query.store_id),
+      ...flattenRef(req.query.storeId),
+      ...flattenRef(req.query.merchant_id),
+      ...flattenRef(req.query.merchantId),
+      ...flattenRef(req.query.storeRef),
+      ...flattenRef(req.query.slug),
+    ]));
 
     let dbConnected = false;
     if (isMongoConfigured()) {
@@ -17004,7 +17060,28 @@ function buildOrderRecord(
   const orderId = String(order.id || order.orderId || orderNum);
   const paymentStatus = order.paymentStatus || order.payment_status || 'unpaid';
   const displayPaymentStatus = canonicalPaymentStatus(paymentStatus) || 'Unpaid';
-  const normalizedPaymentStatus = displayPaymentStatus.toLowerCase().replace(/\s+/g, '_');
+  /*
+   * CANONICAL `payment_status` = `pending_verification`.
+   *
+   * The Super Admin queue and the merchant's badge both key off the snake_case
+   * column. `displayPaymentStatus.toLowerCase().replace(/\s+/g,'_')` produced
+   * `pending_verification` for that one label only; every near-synonym a caller
+   * might send — `pending`, `pending payment`, `awaiting_verification`,
+   * `pending-verification` — was persisted VERBATIM and then matched by no
+   * queue query, so the order existed but was invisible to the admin.
+   */
+  const normalizedPaymentStatus = (() => {
+    const raw = String(displayPaymentStatus || 'Unpaid').trim();
+    const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (
+      key === 'pendingverification' || key === 'pending' ||
+      key === 'pendingpayment' || key === 'awaitingverification' ||
+      key === 'verificationpending'
+    ) {
+      return 'pending_verification';
+    }
+    return key || 'unpaid';
+  })();
   const requestedStatus = order.status ?? order.order_status;
   const normalizedStatus = !isManual && (!requestedStatus || canonicalOrderStatus(requestedStatus) === 'New')
     ? 'pending'
@@ -17539,12 +17616,60 @@ app.post('/api/orders', async (req, res) => {
         .split(':')[0]
         .trim()
         .toLowerCase();
+      /*
+       * THE `id` FIELD IS NOT A SLUG.
+       *
+       * `refs` is built from every store reference the caller sent — which for
+       * the desktop dashboard's order sync includes `id: ord-…`. When that ref
+       * does not resolve, the fallback below picked the FIRST non-UUID ref —
+       * i.e. the order's own id — and wrote it into `store_slug` and
+       * `merchant_store_slug` (and, via `merchantId`, into `merchant_id`). The
+       * order then belonged to a "store" named `ord-1756900000000` and no real
+       * merchant query could ever match it.
+       *
+       * Only a value that could plausibly BE a slug is eligible here: not a
+       * UUID, not a store code, not the order's own id, and shaped like a slug.
+       */
+      const orderOwnIds = new Set(
+        [order.id, order.orderId, order.order_id, order.orderNumber, order.order_number]
+          .map((v) => String(v ?? '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+      /*
+       * Only a GENERATED container id is excluded, not every id.
+       *
+       * The original failure was `id: ord-1756900000000` leaking into the slug
+       * column. On the multi-vendor mirror the order's `id` and its
+       * `vendor_id` are legitimately the SAME value (`<vendorId>` is generated as
+       * `MP-…` and used as the order id), so excluding every known id would strip
+       * the only slug a child order has and push it back to `marketplace`.
+       *
+       * `ord-` / `MP-` ids that carry no store segment are pure bookkeeping and
+       * are never valid slugs; a vendor ref equal to any OTHER id is allowed.
+       */
+      const isGeneratedContainerId = (value: string) =>
+        /^(ord|order|tmp|tmpord[_-]?)\d/i.test(value) || /^ord-/i.test(value);
+      const slugCandidate = refs.find((r) =>
+        !isUuidLike(r) &&
+        !STORE_CODE_RE.test(r) &&
+        !isGeneratedContainerId(r.toLowerCase()) &&
+        !(orderOwnIds.has(r.toLowerCase()) && !/^[a-z0-9._-]{2,}$/.test(r)) &&
+        /^[a-z0-9][a-z0-9._-]{1,80}$/i.test(r)
+      );
       const slug = String(
         explicitSlug ||
           identity.storeSlug ||
-          refs.find((r) => !isUuidLike(r) && !STORE_CODE_RE.test(r)) ||
+          slugCandidate ||
           'marketplace'
       ).split(':')[0].trim().toLowerCase() || 'marketplace';
+
+      /*
+       * `merchant_id` must be an OWNER identity (UUID / store code), never the
+       * order's own id and never a borrowed value from an unrelated ref.
+       */
+      const merchantRefs = [order.merchantId, order.merchant_id]
+        .map((v) => String(v || '').trim())
+        .filter((v) => v && !isGeneratedContainerId(v.toLowerCase()));
 
       /*
        * The master order's store: the canonical UUID when one is known, otherwise
@@ -17554,10 +17679,10 @@ app.post('/api/orders', async (req, res) => {
        */
       const storeId = identity.storeId || refs.find((r) => isUuidLike(r)) || identity.storeCode || slug;
       const merchantId = String(
-        order.merchantId ||
-          order.merchant_id ||
+        merchantRefs[0] ||
           identity.storeId ||
           refs.find((r) => isUuidLike(r)) ||
+          merchantRefs[1] ||
           slug
       ).trim();
 
@@ -19117,15 +19242,25 @@ app.get('/api/admin/orders', async (req, res) => {
 
     /*
      * Payment status is written under both spellings (`payment_status` and
-     * `paymentStatus`), and a row may be stored with NEITHER (an older document,
-     * or one whose writer omitted it) — but such a row is not awaiting
-     * verification, so it stays out. `$in` is case-sensitive, hence the exact
-     * list above carries every casing a writer may have used.
+     * `paymentStatus`).
+     *
+     * `$in` compares exactly and case-sensitively, so an enumerated list can
+     * only ever cover the spellings someone remembered. For the PENDING queue
+     * the intent is categorical — "every order awaiting an admin decision" — so
+     * a bounded regex is added that matches any casing/separator of the pending
+     * family (`Pending`, `PENDING`, `pending-payment`, `pending verification`,
+     * `Pending_Verification`). This is what makes rows written by older builds
+     * (or by a writer that used its own spelling) appear immediately instead of
+     * needing a data migration.
      */
+    const pendingFamily = /^(pending([\s_-]?payment)?|pending[\s_-]?verification|awaiting[\s_-]?verification)$/i;
     const query: any = {
       $or: [
         { payment_status: { $in: Array.from(new Set(paymentValues)) } },
         { paymentStatus: { $in: Array.from(new Set(paymentValues)) } },
+        ...(isPendingQueue
+          ? [{ payment_status: pendingFamily }, { paymentStatus: pendingFamily }]
+          : []),
       ],
     };
 
@@ -19146,10 +19281,10 @@ app.get('/api/admin/orders', async (req, res) => {
     }
 
     const cachedOrders = Array.from(recentOrdersCache.values()).filter((o: any) => {
-      const ps = canonicalPaymentStatus(o?.payment_status || o?.paymentStatus);
-      // Same rule as the database query: the long form, or a bare `pending`
-      // (a legacy row still waiting on the admin).
-      return ps === 'Pending Verification' || /^pending$/i.test(String(ps || ''));
+      // Same rule as the database query. `canonicalPaymentStatus` already folds
+      // `pending` / `pending_payment` / `awaiting_verification` into
+      // 'Pending Verification', so this single comparison is the whole family.
+      return canonicalPaymentStatus(o?.payment_status || o?.paymentStatus) === 'Pending Verification';
     });
     const combinedOrders = [...orders, ...cachedOrders];
     const dedupedOrders = Array.from(

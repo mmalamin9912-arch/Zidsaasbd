@@ -805,9 +805,22 @@ export default function App() {
     // match on store_id OR store_slug OR merchant_id. Passing BOTH the merchant
     // id and the slug means a checkout that only knew the slug is still found.
     const ordersQuery = new URLSearchParams();
-    if (merchant?.id) ordersQuery.set('merchant_id', String(merchant.id));
-    if (merchant?.storeSlug) ordersQuery.set('store_slug', String(merchant.storeSlug));
-    if (!merchant?.id && !merchant?.storeSlug && merchantId) ordersQuery.set('storeRef', String(merchantId));
+    // Emit EVERY identity the profile carries. The server treats them as an
+    // `$or`, so this can only broaden the match. The initial load previously
+    // sent only `merchant_id` + `store_slug` while `OrdersView`'s poll (below)
+    // sent a different pair — a profile whose orders were written against the
+    // store CODE resolved on one path and not the other, so the table rendered
+    // rows and then the poll replaced them with `[]` ("orders disappear").
+    const identityRefs = new Set(
+      [merchant?.id, merchant?.storeCode, merchant?.store_code, merchant?.storeSlug, merchantId]
+        .map((v) => String(v ?? '').trim())
+        .filter(Boolean)
+    );
+    for (const value of identityRefs) {
+      ordersQuery.append('storeRef', value);
+      ordersQuery.append('store_slug', value);
+      ordersQuery.append('merchant_id', value);
+    }
     fetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`, { cache: 'no-store' })
       .then(async res => {
         if (!isMounted || !res.ok) return;
@@ -856,7 +869,7 @@ export default function App() {
     // repopulated, which read as "orders randomly disappearing". The identity
     // fields below are exactly what the orders query depends on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [merchant?.id, merchant?.storeCode, merchant?.storeSlug]);
+  }, [merchant?.id, merchant?.storeCode, merchant?.store_code, merchant?.storeSlug]);
 
   // Auto-sync merchant settings and categories to Supabase on change.
   // Skip the very first run (initial hydration) and only sync when a field we

@@ -88,7 +88,20 @@ const PAYMENT_ALIASES: Record<string, PaymentStatus> = {
   unpaid: 'Unpaid',
   pendingverification: 'Pending Verification',
   awaitingverification: 'Pending Verification',
-  pending: 'Unpaid',
+  /*
+   * `pending` is NOT `Unpaid`.
+   *
+   * "Unpaid" is a COD order nobody has to approve; a bare `pending` comes from
+   * a wallet order that IS waiting for the Super Admin to verify the TrxID.
+   * Mapping it to Unpaid meant such a row was normalised away from the
+   * verification queue at every read — it could never be approved, and the
+   * admin panel insisted there was nothing to verify while the order sat in the
+   * database awaiting a decision.
+   */
+  pending: 'Pending Verification',
+  pendingpayment: 'Pending Verification',
+  pendingverifications: 'Pending Verification',
+  verificationpending: 'Pending Verification',
   due: 'Unpaid',
   voided: 'Voided',
   void: 'Voided',
