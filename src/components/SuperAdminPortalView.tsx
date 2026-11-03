@@ -370,7 +370,13 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       const res = await fetch(`/api/admin/orders/${encodeURIComponent(ord.id)}/payment-verification`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ action, processed_by: 'super_admin' }),
+        body: JSON.stringify({
+          action,
+          processed_by: 'super_admin',
+          orderId: ord.id,
+          orderNumber: ord.orderNumber,
+          order_number: ord.orderNumber,
+        }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.ok) throw new Error(data?.error || `Verification ${action} failed.`);

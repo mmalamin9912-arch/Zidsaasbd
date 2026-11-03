@@ -18835,11 +18835,23 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
       merchant_id: req.query.merchant_id || body.merchant_id || body.merchantId,
     };
 
-    const located = await findOrder(id, extra);
+    const lookupKeys = Array.from(new Set([
+      id,
+      body.orderId,
+      body.order_id,
+      body.orderNumber,
+      body.order_number,
+    ].map((value) => String(value || '').trim()).filter(Boolean)));
+    let located: Awaited<ReturnType<typeof findOrder>> = { doc: null };
+    for (const lookupKey of lookupKeys) {
+      located = await findOrder(lookupKey, extra);
+      if (located.doc) break;
+    }
     if (!located.doc) {
       return res.status(200).json({ ok: false, error: located.error || `Order ${id} was not found.` });
     }
     const doc = located.doc as Record<string, any>;
+    const canonicalOrderId = doc._id ? String(doc._id) : id;
     const vendorId = String(doc.vendor_id || doc.vendorId || doc.store_id || doc.storeId || doc.merchant_id || doc.merchantId || '').trim();
     const storeSlug = String(doc.store_slug || doc.storeSlug || doc.storeSlug || '').trim();
     const vendorName = String(doc.vendor_name || doc.vendorName || doc.store_name || doc.storeName || '').trim();
@@ -18849,7 +18861,7 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
     const netPayable = round2(Math.max(0, toNumeric(doc.vendor_net_payable_bdt ?? doc.vendorNetPayableBdt ?? totalBDT - commissionBDT, 0)));
 
     if (action === 'reject') {
-      const result = await updateOrderFields(id, { paymentStatus: 'Voided' }, extra);
+      const result = await updateOrderFields(canonicalOrderId, { paymentStatus: 'Voided' }, extra);
       return res.status(result.ok ? 200 : 200).json({
         ok: result.ok,
         order: result.order ?? null,
@@ -18859,7 +18871,7 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
     }
 
     // approve
-    const statusResult = await updateOrderFields(id, { status: 'Processing', paymentStatus: 'Paid' }, extra);
+    const statusResult = await updateOrderFields(canonicalOrderId, { status: 'Processing', paymentStatus: 'Paid' }, extra);
     if (!statusResult.ok) {
       return res.status(200).json({ ok: false, error: statusResult.error || 'Could not mark the order paid.' });
     }
