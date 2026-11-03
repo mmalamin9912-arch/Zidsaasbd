@@ -15998,6 +15998,8 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
     { storeId: { $in: all } },
     { store_slug: { $in: all } },
     { storeSlug: { $in: all } },
+    { merchant_store_slug: { $in: all } },
+    { merchant_storeSlug: { $in: all } },
     { merchant_id: { $in: all } },
     { merchantId: { $in: all } },
   ];
@@ -16729,6 +16731,10 @@ function buildOrderRecord(
   const paymentStatus = order.paymentStatus || order.payment_status || 'unpaid';
   const displayPaymentStatus = canonicalPaymentStatus(paymentStatus) || 'Unpaid';
   const normalizedPaymentStatus = displayPaymentStatus.toLowerCase().replace(/\s+/g, '_');
+  const requestedStatus = order.status ?? order.order_status;
+  const normalizedStatus = !isManual && (!requestedStatus || canonicalOrderStatus(requestedStatus) === 'New')
+    ? 'pending'
+    : requestedStatus || 'New';
   const record: any = {
     id: orderId,
     store_id: storeId,
@@ -16791,6 +16797,8 @@ function buildOrderRecord(
     })(),
     total_price: toNumeric(order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total, 0),
     totalBDT: toNumeric(order.totalBDT ?? order.total_price ?? order.total_amount ?? order.total, 0),
+    total_amount: toNumeric(order.totalAmount ?? order.total_amount ?? order.totalBDT ?? order.total_price ?? order.total, 0),
+    totalAmount: toNumeric(order.totalAmount ?? order.total_amount ?? order.totalBDT ?? order.total_price ?? order.total, 0),
     subtotal_bdt: toNumeric(order.subtotalBDT ?? order.subtotal_bdt, 0),
     subtotalBDT: toNumeric(order.subtotalBDT ?? order.subtotal_bdt, 0),
     delivery_charge: toNumeric(order.deliveryCharge ?? order.delivery_charge, 0),
@@ -16805,7 +16813,8 @@ function buildOrderRecord(
     transaction_id: order.transactionId || order.transaction_id || null,
     advance_delivery_paid: toNumeric(order.advanceDeliveryPaidBDT ?? order.advance_delivery_paid, 0),
     cod_balance: toNumeric(order.codBalanceBDT ?? order.cod_balance, 0),
-    status: order.status || 'New',
+    status: normalizedStatus,
+    order_status: normalizedStatus,
     source,
     order_source: source,
     order_source_channel: order.order_source_channel || order.orderSourceChannel || 'marketplace',
@@ -18709,8 +18718,8 @@ app.get('/api/admin/orders', async (req, res) => {
     }
 
     const cachedOrders = Array.from(recentOrdersCache.values()).filter((o: any) => {
-      const ps = String(o?.payment_status || o?.paymentStatus || '').toLowerCase().replace(/\s+/g, '_');
-      return ps === 'pending_verification';
+      const ps = canonicalPaymentStatus(o?.payment_status || o?.paymentStatus);
+      return ps === 'Pending Verification';
     });
     const combinedOrders = [...orders, ...cachedOrders];
     const dedupedOrders = Array.from(
