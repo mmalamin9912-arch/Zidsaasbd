@@ -38,6 +38,76 @@ import path from 'path';
 import fs from 'fs/promises';
 import dns from 'node:dns/promises';
 import crypto from 'node:crypto';
+
+/*
+ * CUSTOMER SESSION TOKENS (inlined — a sibling `./customerSession` import is
+ * not reliably shipped to the Vercel function bundle; see the header note).
+ *
+ * A verified phone is bound to a signed, expiring HMAC token. The shopper's
+ * order history validates that token and only then queries by the phone inside
+ * it — so the client can never ask for somebody else's number, and the `orders`
+ * table can stay closed to anon now that RLS is on.
+ */
+const CUSTOMER_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+
+function customerSessionSecret(): string {
+  return (
+    String(process.env.CUSTOMER_SESSION_SECRET || '').trim() ||
+    String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim() ||
+    String(process.env.TELEGRAM_WEBHOOK_SECRET || '').trim()
+  );
+}
+
+/** National 10-digit form, so "+8801700…" and "01700…" agree. */
+function normalizeSessionPhone(phone: unknown): string {
+  const digits = String(phone ?? '').replace(/\D/g, '');
+  if (digits.length < 10) return '';
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function base64url(input: string | Buffer): string {
+  return Buffer.from(input).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function signCustomerPayload(payload: string, secret: string): string {
+  return base64url(crypto.createHmac('sha256', secret).update(payload).digest());
+}
+
+/** Mint a session token for a verified phone. '' when no secret is configured. */
+function issueCustomerSession(phone: unknown): string {
+  const secret = customerSessionSecret();
+  const normalized = normalizeSessionPhone(phone);
+  if (!secret || !normalized) return '';
+  const payload = base64url(JSON.stringify({ p: normalized, exp: Date.now() + CUSTOMER_SESSION_TTL_MS }));
+  return `${payload}.${signCustomerPayload(payload, secret)}`;
+}
+
+/** Verify a session token; returns the bound phone or null. */
+function readCustomerSession(token: unknown): { phone: string } | null {
+  const secret = customerSessionSecret();
+  const raw = String(token ?? '').trim();
+  if (!secret || !raw.includes('.')) return null;
+  const [payload, signature] = raw.split('.');
+  if (!payload || !signature) return null;
+
+  const expected = signCustomerPayload(payload, secret);
+  const a = Buffer.from(signature);
+  const b = Buffer.from(expected);
+  // Constant-time compare: a wrong signature must not leak timing information.
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+
+  try {
+    const json = JSON.parse(
+      Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
+    );
+    if (!json?.p || typeof json.exp !== 'number' || json.exp < Date.now()) return null;
+    const phone = normalizeSessionPhone(json.p);
+    return phone ? { phone } : null;
+  } catch {
+    return null;
+  }
+}
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 // Platform-wide aggregation for the Super Admin Portal. Lives in lib/ and is
@@ -2622,13 +2692,46 @@ app.post('/api/admin/verify-pin', async (req, res) => {
 //   GET  /api/admin/platform-config — read the saved config (merged).
 //   POST /api/admin/platform-config — upsert the config to Supabase + Mongo.
 // Always answers 200 with a shaped envelope (never a 404/500).
+/*
+ * REDACT SECRETS FROM THE PLATFORM CONFIG.
+ *
+ * `adminPaymentConfig.centralCourier` carries the Telegram bot token, which IS
+ * the bot's password — anyone holding it can act as the bot. The platform
+ * config is also exposed for public read (the storefront needs the gateway
+ * numbers through the anon key + RLS), so the token must never leave this
+ * server. The dashboard is told only WHETHER a value is stored, which is all
+ * its "configured" indicator needs.
+ */
+function redactPlatformConfigSecrets(data: Record<string, any> | null): Record<string, any> | null {
+  if (!data || typeof data !== 'object') return data;
+  const adminPaymentConfig = (data as any).adminPaymentConfig;
+  if (!adminPaymentConfig || typeof adminPaymentConfig !== 'object') return data;
+  const centralCourier = adminPaymentConfig.centralCourier;
+  if (!centralCourier || typeof centralCourier !== 'object') return data;
+
+  const mask = (value: unknown) => (String(value || '').trim() ? '••configured••' : '');
+  return {
+    ...data,
+    adminPaymentConfig: {
+      ...adminPaymentConfig,
+      centralCourier: {
+        ...centralCourier,
+        telegramBotToken: mask(centralCourier.telegramBotToken),
+        telegramChatId: mask(centralCourier.telegramChatId),
+        apiKey: centralCourier.apiKey ? '••configured••' : '',
+        apiSecret: centralCourier.apiSecret ? '••configured••' : '',
+      },
+    },
+  };
+}
+
 app.get('/api/admin/platform-config', async (_req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const result = await readPlatformConfig();
     return res.status(200).json({
       ok: result.ok,
-      config: result.data,
+      config: redactPlatformConfigSecrets(result.data),
       sources: result.sources,
       diagnostics: result.diagnostics,
       error: result.error,
@@ -2645,11 +2748,34 @@ app.post('/api/admin/platform-config', async (req, res) => {
     const body = req.body || {};
     // Accept either a wrapped { config: {...} } payload or the raw object.
     const payload = body.config && typeof body.config === 'object' ? body.config : body;
+
+    /*
+     * The dashboard reads a MASKED config and saves it back. Writing the mask
+     * verbatim would overwrite the real Telegram token with '••configured••' on
+     * any unrelated settings save — the alert would then silently stop. Keep the
+     * stored secret whenever the incoming value is a mask.
+     */
+    const isMask = (v: unknown) => /^•+configured•+$/i.test(String(v ?? '').trim()) || String(v ?? '').trim() === '••';
+    try {
+      const existing = await readPlatformConfig();
+      const existingCourier = (existing?.data as any)?.adminPaymentConfig?.centralCourier || {};
+      const incomingCourier = (payload as any)?.adminPaymentConfig?.centralCourier;
+      if (incomingCourier && typeof incomingCourier === 'object') {
+        for (const field of ['telegramBotToken', 'telegramChatId', 'apiKey', 'apiSecret']) {
+          if (isMask(incomingCourier[field]) && existingCourier[field] !== undefined) {
+            incomingCourier[field] = existingCourier[field];
+          }
+        }
+      }
+    } catch (maskErr: any) {
+      console.warn('[Server] platform-config mask restore warning:', maskErr?.message || maskErr);
+    }
+
     const result = await writePlatformConfig(payload);
     return res.status(200).json({
       ok: result.ok,
       sources: result.sources,
-      config: result.data,
+      config: redactPlatformConfigSecrets(result.data),
       message: result.ok ? 'Platform configuration saved.' : (result.error || 'Could not save platform config.'),
     });
   } catch (err: any) {
@@ -9087,6 +9213,12 @@ app.post('/api/auth/whatsapp-otp/verify', async (req, res) => {
       }
     }
 
+    /*
+     * The returned token is a SIGNED session bound to the verified number, not a
+     * timestamp. The old `wp_verified_<Date.now()>` value proved nothing and was
+     * accepted by nothing; it could not authorise the order-history read, which
+     * is why that read had to be public before RLS.
+     */
     if (session && session.code === cleanCode && session.expiresAt > Date.now()) {
       session.status = 'verified';
       whatsappOtpSessions.set(cleanPhone, session);
@@ -9094,7 +9226,8 @@ app.post('/api/auth/whatsapp-otp/verify', async (req, res) => {
         ok: true,
         verified: true,
         message: 'Phone number verified successfully via WhatsApp!',
-        token: `wp_verified_${Date.now()}`
+        token: issueCustomerSession(cleanPhone),
+        phone: normalizeSessionPhone(cleanPhone),
       });
     }
 
@@ -9103,7 +9236,8 @@ app.post('/api/auth/whatsapp-otp/verify', async (req, res) => {
         ok: true,
         verified: true,
         message: 'Phone number verified successfully via Supabase!',
-        token: `sb_verified_${Date.now()}`
+        token: issueCustomerSession(cleanPhone),
+        phone: normalizeSessionPhone(cleanPhone),
       });
     }
 
@@ -16982,6 +17116,109 @@ app.get('/api/orders/:storeRef', async (req, res) => {
 /*
  * GET /api/customer/orders — the signed-in shopper's own order history.
  */
+/*
+ * GET /api/customer/supabase-orders
+ *
+ * The shopper's order history needs the SUPABASE `orders` rows (the order of
+ * record for the unified checkout), but that table is no longer public. The read
+ * therefore happens HERE, with the service-role key, authorised by a signed
+ * customer session rather than by the phone number in the request.
+ *
+ * The phone is taken FROM THE TOKEN, never from the query string — a caller
+ * cannot request another customer's history by guessing a number.
+ *
+ * Result: `{ ok, orders: [] }` always (200), so a Supabase outage degrades to an
+ * empty merge instead of breaking the history page.
+ */
+app.get('/api/customer/supabase-orders', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    const session = readCustomerSession(bearer) || readCustomerSession(req.query.token);
+    if (!session) {
+      return res.status(401).json({ ok: false, orders: [], error: 'A verified customer session is required.' });
+    }
+
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    if (!isConfigured) return res.status(200).json({ ok: true, orders: [] });
+
+    const last10 = session.phone;
+    const candidates = Array.from(new Set([last10, `0${last10}`, `+88${last10}`]));
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const phoneFilter = candidates.map((p) => encodeURIComponent(p)).join(',');
+
+    const sbRes = await fetch(
+      `${supabaseUrl}/rest/v1/orders?select=id,store_id,order_number,customer_name,customer_phone,district,city_area,shipping_address,items,total_amount,payment_method,payment_status,order_status,created_at` +
+      `&customer_phone=in.(${phoneFilter})&order=created_at.desc&limit=${limit}`,
+      {
+        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+
+    if (!sbRes.ok) {
+      console.warn('[Server] supabase-orders read warning:', sbRes.status);
+      return res.status(200).json({ ok: true, orders: [] });
+    }
+    const rows = await sbRes.json().catch(() => []);
+    return res.status(200).json({ ok: true, orders: Array.isArray(rows) ? rows : [] });
+  } catch (err: any) {
+    console.warn('[Server] GET /api/customer/supabase-orders warning:', err?.message || err);
+    return res.status(200).json({ ok: true, orders: [] });
+  }
+});
+
+// POST /api/customer/session — exchange a verified OTP for a signed session.
+app.post('/api/customer/session', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const phone = normalizeSessionPhone(body.phone);
+    if (!phone) return res.status(400).json({ ok: false, error: 'A phone number is required.' });
+
+    /*
+     * A verified OTP is required. The code is checked against the same
+     * `whatsapp_otps` store the verify endpoint uses — a bare phone number must
+     * never mint a session, or this would be a free "read any customer's orders"
+     * endpoint.
+     */
+    const code = String(body.code || '').trim();
+    if (!code) return res.status(400).json({ ok: false, error: 'An OTP code is required.' });
+
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    let verified = false;
+    if (isConfigured) {
+      try {
+        const q = `${supabaseUrl}/rest/v1/whatsapp_otps?phone=in.(${encodeURIComponent(phone)},${encodeURIComponent('+88' + phone)})&code=eq.${encodeURIComponent(code)}&status=in.(pending,verified)&select=phone,code,expires_at&order=created_at.desc&limit=1`;
+        const sbRes = await fetch(q, {
+          headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (sbRes.ok) {
+          const rows = await sbRes.json().catch(() => []);
+          const row = Array.isArray(rows) ? rows[0] : null;
+          verified = Boolean(row) && new Date(row.expires_at).getTime() > Date.now();
+        }
+      } catch (err: any) {
+        console.warn('[Server] customer session OTP check warning:', err?.message || err);
+      }
+    }
+
+    if (!verified) return res.status(401).json({ ok: false, error: 'Invalid or expired OTP.' });
+
+    const token = issueCustomerSession(phone);
+    if (!token) {
+      // No signing secret configured — say so instead of issuing a token that
+      // cannot be verified.
+      return res.status(503).json({ ok: false, error: 'Customer sessions are not configured.' });
+    }
+    return res.status(200).json({ ok: true, token, phone });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not create a session.' });
+  }
+});
+
 app.get('/api/customer/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {

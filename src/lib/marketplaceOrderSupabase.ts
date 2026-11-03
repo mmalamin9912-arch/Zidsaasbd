@@ -403,17 +403,30 @@ alter table public.orders enable row level security;
 drop policy if exists "orders_insert_anon" on public.orders;
 create policy "orders_insert_anon"
   on public.orders for insert to anon, authenticated with check (true);
+-- REMOVED: public SELECT on orders/order_items.
+--
+-- These two policies were "for select to anon, authenticated using (true)".
+-- "using (true)" is not "the shopper's own orders" — it makes EVERY order row
+-- readable by anyone holding the public anon key, including other customers'
+-- names, phone numbers and addresses. That is precisely the exposure Supabase
+-- reported.
+--
+-- The shopper's history no longer needs a database policy: it is served by
+-- /api/customer/supabase-orders, which uses the service-role key and a signed
+-- customer session. See supabase/migrations/0016_enable_rls_all_tables.sql.
+--
+-- If an older deployment still has those policies applied, they are dropped here.
 drop policy if exists "orders_select_anon" on public.orders;
-create policy "orders_select_anon"
-  on public.orders for select to anon, authenticated using (true);
+drop policy if exists "order_items_select_anon" on public.order_items;
 
 alter table public.order_items enable row level security;
 drop policy if exists "order_items_insert_anon" on public.order_items;
+-- INSERT stays open, but ONLY for an order that exists. The checkout writes
+-- line items as an anonymous shopper, so some insert path must exist; a bare
+-- "true" allowed rows to be attached to arbitrary or nonexistent orders.
 create policy "order_items_insert_anon"
-  on public.order_items for insert to anon, authenticated with check (true);
-drop policy if exists "order_items_select_anon" on public.order_items;
-create policy "order_items_select_anon"
-  on public.order_items for select to anon, authenticated using (true);
+  on public.order_items for insert to anon, authenticated
+  with check (exists (select 1 from public.orders o where o.id = order_items.order_id));
 `;
 
 /**
@@ -425,9 +438,17 @@ create policy "order_items_select_anon"
  * to the shopper who placed it. This returns the Supabase rows for that phone
  * so the page can merge them with the server list.
  *
- * Scoped by phone number and capped: it is used to fill a gap, not to page
- * through history. Never throws — a Supabase outage degrades to the server
- * list alone.
+ * SECURITY: this used to query `orders` DIRECTLY from the browser with the anon
+ * key, which required a public `select using (true)` policy on the orders table
+ * — i.e. every customer's order history was readable by anyone holding the
+ * (public) anon key. Row Level Security now blocks that, so the read goes
+ * through `/api/customer/supabase-orders`, which uses the service-role key and
+ * authorises the request with a signed customer session.
+ *
+ * The phone supplied by the caller is only used to decide WHETHER to ask; the
+ * server resolves the number from the session token, so a caller cannot read
+ * another customer's rows. Never throws — a Supabase outage degrades to the
+ * server list alone.
  */
 export async function fetchSupabaseOrdersForPhone(
   phone: string,
@@ -435,29 +456,47 @@ export async function fetchSupabaseOrdersForPhone(
 ): Promise<Record<string, any>[]> {
   const clean = String(phone || '').replace(/\D/g, '');
   if (clean.length < 10) return [];
-  if (!isSupabaseConfigured) return [];
-  const client = getSupabaseClient();
-  if (!client) return [];
-
-  // Compare on digits so "+8801700…" and "01700…" resolve to the same rows.
-  const last10 = clean.slice(-10);
-  const candidates = Array.from(new Set([clean, last10, `0${last10}`]));
 
   try {
-    const { data, error } = await client
-      .from('orders')
-      .select('id, store_id, order_number, customer_name, customer_phone, district, city_area, shipping_address, items, total_amount, payment_method, payment_status, order_status, created_at')
-      .in('customer_phone', candidates)
-      .order('created_at', { ascending: false })
-      .limit(limit);
-
-    if (error) {
-      console.warn('[marketplaceOrder] Supabase customer orders read failed:', error.message);
+    const token = readStoredCustomerToken();
+    const res = await fetch(
+      `/api/customer/supabase-orders?limit=${encodeURIComponent(String(limit))}`,
+      {
+        headers: token
+          ? { Accept: 'application/json', Authorization: `Bearer ${token}` }
+          : { Accept: 'application/json' },
+        cache: 'no-store',
+      },
+    );
+    if (res.status === 401) {
+      // The shopper has not completed phone verification for this session.
+      // History still renders from the server (Mongo) list.
       return [];
     }
-    return Array.isArray(data) ? data : [];
+    const data = await res.json().catch(() => null);
+    const rows = Array.isArray(data?.orders) ? data.orders : [];
+    return rows;
   } catch (err: any) {
     console.warn('[marketplaceOrder] Supabase customer orders read threw:', err?.message || err);
     return [];
+  }
+}
+
+/** The signed session token issued after WhatsApp OTP verification. */
+export function readStoredCustomerToken(): string {
+  try {
+    return String(window.localStorage.getItem('zid_customer_token') || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/** Persist the token returned by the OTP verification endpoint. */
+export function storeCustomerToken(token: string): void {
+  try {
+    if (token) window.localStorage.setItem('zid_customer_token', token);
+    else window.localStorage.removeItem('zid_customer_token');
+  } catch {
+    // Private-mode storage can throw; the session simply does not persist.
   }
 }

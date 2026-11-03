@@ -38,15 +38,26 @@ const rawSupabaseUrl =
   procEnv.SUPABASE_URL ||
   '';
 
+/*
+ * NEVER FALL BACK TO THE SERVICE-ROLE KEY HERE.
+ *
+ * This module is bundled into the BROWSER. Vite inlines `VITE_*` values at
+ * build time, so listing `SUPABASE_SERVICE_ROLE_KEY` as a fallback shipped the
+ * key that BYPASSES Row Level Security to every visitor — anyone could read the
+ * whole database (orders, customers, OTPs) with `curl`. It also silently defeated
+ * any RLS we enable: the browser would keep bypassing it.
+ *
+ * Only the public anon key belongs in a client bundle. Server-side code that
+ * genuinely needs elevated access must use the server Supabase client (it runs
+ * in Node and can read the service key at request time).
+ */
 const rawSupabaseAnonKey =
   metaEnv.VITE_SUPABASE_ANON_KEY ||
-  procEnv.VITE_SUPABASE_ANON_KEY ||
   metaEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  procEnv.VITE_SUPABASE_ANON_KEY ||
   procEnv.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
   metaEnv.SUPABASE_ANON_KEY ||
   procEnv.SUPABASE_ANON_KEY ||
-  metaEnv.SUPABASE_SERVICE_ROLE_KEY ||
-  procEnv.SUPABASE_SERVICE_ROLE_KEY ||
   metaEnv.VITE_SUPABASE_KEY ||
   metaEnv.SUPABASE_KEY ||
   procEnv.VITE_SUPABASE_KEY ||
@@ -55,6 +66,28 @@ const rawSupabaseAnonKey =
 
 export const supabaseUrl = cleanEnvUrl(rawSupabaseUrl);
 export const supabaseAnonKey = cleanEnvKey(rawSupabaseAnonKey);
+
+/*
+ * Fail loudly (in dev) if a privileged key reached the browser bundle. A
+ * service-role JWT carries `"role":"service_role"` in its payload, so it is
+ * detectable without verifying the signature.
+ */
+(function assertNoPrivilegedKeyInBrowser() {
+  if (typeof window === 'undefined' || !supabaseAnonKey) return;
+  try {
+    const payload = supabaseAnonKey.split('.')[1];
+    if (!payload) return;
+    const json = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    if (json?.role && json.role !== 'anon') {
+      console.error(
+        '[supabase] SECURITY: a privileged key (role=' + json.role + ') was exposed to the browser ' +
+        'bundle. Remove SUPABASE_SERVICE_ROLE_KEY from any NEXT_PUBLIC_/VITE_ variable and rebuild.'
+      );
+    }
+  } catch {
+    // Not a JWT (newer publishable keys) — nothing to inspect.
+  }
+})();
 
 export const isSupabaseConfigured = Boolean(
   supabaseUrl &&
