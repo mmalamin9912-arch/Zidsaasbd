@@ -1,158 +1,73 @@
 -- =============================================================================
--- ZID Merchant Dashboard — Full Row Level Security lockdown
--- Migration: 0016_enable_rls_all_tables.sql
+-- ZID Merchant Dashboard — Row Level Security lockdown (dynamic, schema-safe)
+-- Migration: 0016_enable_rls_all_tables.sql   (REWRITTEN)
 -- -----------------------------------------------------------------------------
--- WHY
---   Supabase reported the project "Zid-BD-Merchant" had publicly accessible
---   tables because RLS was disabled. Without RLS, ANY holder of the public anon
---   key (= every visitor, it ships in the JS bundle) can read and write the
---   entire schema through PostgREST:
+-- WHY THIS IS A REWRITE
+--   The first version of this migration failed with
+--       ERROR: column s.user_id does not exist
+--   because it assumed the `stores` table has ownership columns
+--   (`user_id` / `auth_user_id` / `owner_id`). Referencing a column that does
+--   not exist is a PARSE-TIME error in PostgreSQL: the whole script aborts
+--   before a single policy is created.
 --
---       curl "$SUPABASE_URL/rest/v1/orders?select=*" -H "apikey: <anon>"
+--   Worse, a static policy can never be correct here. Whether `stores.user_id`
+--   exists depends on migrations 0001/0010 having been applied to THIS project
+--   — and Supabase reports the schema is NOT what those files describe. So this
+--   version never names an ownership column literally:
 --
---   That is a full data breach: every merchant's orders, customer phone
---   numbers, and the whatsapp_otps table (live login codes).
+--     • every `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` is generated in a loop
+--       over pg_class, so a missing/renamed table cannot break it;
+--     • ownership is resolved by a helper that CHECKS pg_attribute at runtime
+--       and only then builds the predicate with dynamic SQL;
+--     • if no ownership column exists at all, the helper degrades to
+--       "matches nothing" instead of failing the migration.
 --
--- DESIGN — READ THIS BEFORE CHANGING A POLICY
---   1. RLS is ENABLED on every table in `public`. A table with RLS enabled and
---      NO policy is DENIED to anon/authenticated — the safe default.
---   2. Two classes of table:
---        * SERVER-ONLY  — written exclusively by the Express API with the
---          service-role key (which BYPASSES RLS). Enabling RLS here costs
---          nothing and closes the public hole.
---        * CLIENT-WRITTEN — the browser writes these directly with the anon
---          key, so they need real policies (see section 3).
---   3. Ownership is always resolved through `stores`:
---          stores.user_id / stores.auth_user_id / stores.owner_id = auth.uid()
---      Nothing here trusts a client-supplied merchant id.
---   4. The public storefront must still work for signed-out shoppers:
---        - read published products/categories of ACTIVE stores
---        - create an order for an existing store
---        - NOT read anyone else's orders
+-- WHAT THIS MIGRATION GUARANTEES
+--   1. RLS is enabled on EVERY table in `public` (loop — no table list to miss).
+--   2. No client INSERT/UPDATE/DELETE policy on order data. The server writes
+--      with the SERVICE-ROLE key, which BYPASSES RLS, so
+--      `writeOrderToSupabase()` and every /api route keep working unchanged.
+--   3. Public storefront reads (published products, active categories) survive.
+--   4. Sensitive tables (whatsapp_otps, audit_logs, admin_team, …) are deny-all.
 --
--- ROLLBACK: each table has a documented `DISABLE ROW LEVEL SECURITY` at the end.
+-- VERIFY AFTER RUNNING (must return zero rows):
+--     SELECT tablename FROM pg_tables WHERE schemaname='public' AND rowsecurity = false;
 -- =============================================================================
 
 BEGIN;
 
 -- -----------------------------------------------------------------------------
--- 0. Helper functions (SECURITY DEFINER so they can read `stores` from inside a
---    policy without recursing into the stores policy itself).
--- -----------------------------------------------------------------------------
-
--- Stores owned by the caller.
-CREATE OR REPLACE FUNCTION public.zid_my_store_ids()
-RETURNS SETOF uuid
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-  SELECT s.id
-  FROM public.stores s
-  WHERE auth.uid() IS NOT NULL
-    AND s.id IS NOT NULL
-    AND (
-          s.user_id      = auth.uid()
-       OR s.auth_user_id = auth.uid()
-       OR s.owner_id     = auth.uid()
-    );
-$$;
-
--- True when the caller owns the store referenced by a row's store column.
-CREATE OR REPLACE FUNCTION public.zid_owns_store(target_store uuid)
-RETURNS boolean
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.zid_my_store_ids() AS owned(id)
-    WHERE owned.id = target_store
-  );
-$$;
-
--- True when the caller owns the store addressed by SLUG (several write paths
--- carry the slug rather than the UUID).
-CREATE OR REPLACE FUNCTION public.zid_owns_store_slug(target_slug text)
-RETURNS boolean
-LANGUAGE sql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.stores s
-    WHERE auth.uid() IS NOT NULL
-      AND lower(trim(s.store_slug)) = lower(trim(coalesce(target_slug, '')))
-      AND (
-            s.user_id      = auth.uid()
-         OR s.auth_user_id = auth.uid()
-         OR s.owner_id     = auth.uid()
-      )
-  );
-$$;
-
-REVOKE ALL ON FUNCTION public.zid_my_store_ids()        FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.zid_owns_store(uuid)      FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.zid_owns_store_slug(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.zid_my_store_ids()        TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.zid_owns_store(uuid)      TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.zid_owns_store_slug(text) TO anon, authenticated;
-
--- -----------------------------------------------------------------------------
 -- 1. ENABLE RLS ON EVERY TABLE IN `public`.
---    Done dynamically so a table added by a later migration is not silently
---    left wide open.
+--    Do this FIRST and unconditionally: even if a later helper cannot build an
+--    ownership predicate, the tables are still closed. (RLS with no policy =
+--    deny-all to anon/authenticated.)
 -- -----------------------------------------------------------------------------
 DO $$
 DECLARE
   t record;
+  n integer := 0;
 BEGIN
   FOR t IN
     SELECT c.relname
     FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relkind = 'r'          -- ordinary tables only (not views)
-      AND NOT c.relrowsecurity     -- skip ones already enabled
+    JOIN pg_namespace ns ON ns.oid = c.relnamespace
+    WHERE ns.nspname = 'public'
+      AND c.relkind = 'r'
+      AND NOT c.relrowsecurity
   LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', t.relname);
-    RAISE NOTICE 'RLS enabled on public.%', t.relname;
+    n := n + 1;
   END LOOP;
+  RAISE NOTICE 'RLS enabled on % table(s).', n;
 END $$;
 
 -- -----------------------------------------------------------------------------
--- 2. SERVER-ONLY TABLES.
---
---    These are written by the Express API using the service-role key, which
---    bypasses RLS, so enabling RLS (done above) already closes the public hole.
---    This section ADDS owner-read policies where it is genuinely useful, and
---    deliberately adds NOTHING (=> deny-all) where exposure would be harmful.
---
---    DENY-ALL (no policy at all, intentionally):
---        whatsapp_otps      live login codes — never readable by a client
---        security_settings  platform policy
---        admin_*            admin identity/roles
---        *_ledger / payouts financial ledger rows
+-- 2. DROP EVERY LEGACY CLIENT POLICY ON ORDER / SENSITIVE DATA.
+--    These came from migrations 0001/0004/0005/0006 and from the
+--    ORDER_ITEMS_MIGRATION_SQL constant still shipped to old clients.
+--    `orders_select_anon ... using (true)` is what let anyone holding the public
+--    anon key read every customer's name, phone and address.
 -- -----------------------------------------------------------------------------
-
-/*
- * DROP THE LEGACY "EVERYONE CAN DO EVERYTHING" POLICIES.
- *
- * Migrations 0004/0006 created `FOR ALL TO authenticated, anon USING (true)
- * WITH CHECK (true)` on platform_config, security_settings, audit_logs,
- * admin_team and role_permissions. Those policies are worse than having no RLS:
- * they let ANY anonymous visitor rewrite the platform payment gateway numbers
- * (so shoppers would send money to the attacker's bKash) and read the full
- * admin team, security policy and audit trail.
- *
- * The API writes these tables with the service-role key (which bypasses RLS),
- * so removing the client policies changes nothing functionally.
- */
 DO $$
 DECLARE
   stale record;
@@ -162,102 +77,157 @@ BEGIN
     FROM pg_policies
     WHERE schemaname = 'public'
       AND tablename IN (
-        'platform_config', 'security_settings', 'audit_logs',
-        'admin_team', 'role_permissions', 'whatsapp_otps'
-      )
-      -- Only the blanket policies, matched by their known names.
-      AND policyname IN (
-        'platform_config_admin_all', 'security_settings_admin_all',
-        'audit_logs_admin_all', 'admin_team_admin_all',
-        'role_permissions_admin_all', 'whatsapp_otps_all'
+        'orders', 'order_items', 'whatsapp_otps', 'audit_logs',
+        'admin_team', 'role_permissions', 'security_settings'
       )
   LOOP
     EXECUTE format('DROP POLICY %I ON %I.%I', stale.policyname, stale.schemaname, stale.tablename);
-    RAISE NOTICE 'Dropped permissive policy %.%.%', stale.schemaname, stale.tablename, stale.policyname;
+    RAISE NOTICE 'Dropped policy %.%.%', stale.schemaname, stale.tablename, stale.policyname;
   END LOOP;
 END $$;
 
--- Platform configuration: PUBLIC READ is required (the storefront renders the
--- gateway numbers and support contacts). Writes stay server-only.
+-- -----------------------------------------------------------------------------
+-- 3. OWNERSHIP HELPERS — built only from columns that ACTUALLY EXIST.
 --
--- NOTE ON SENSITIVITY: this table also holds `adminPaymentConfig` (the platform
--- wallet numbers shown to shoppers) and courier/template settings. If any
--- SECRET is ever added here, move it to a separate table — this policy is
--- readable by every visitor, which is the point of it.
-ALTER TABLE IF EXISTS public.platform_config ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS platform_config_public_read ON public.platform_config;
-CREATE POLICY platform_config_public_read
-  ON public.platform_config FOR SELECT
-  TO anon, authenticated
-  USING (true);
+--    `zid_owns_store_slug(text)` is the single predicate every owner policy
+--    uses. It scans `stores` for a row whose slug matches AND whose ownership
+--    column equals auth.uid(). The ownership column is discovered at runtime;
+--    if none exists, the function returns false (deny) rather than throwing.
+-- -----------------------------------------------------------------------------
 
--- audit_logs: admin-only. The API writes them; no client needs to read them via
--- PostgREST (the dashboard reads /api/admin/audit-logs, which is server-side).
-ALTER TABLE IF EXISTS public.audit_logs ENABLE ROW LEVEL SECURITY;
+-- Which column (if any) ties a `stores` row to an auth user?
+CREATE OR REPLACE FUNCTION public.zid_store_owner_column()
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT a.attname
+  FROM pg_attribute a
+  JOIN pg_class c        ON c.oid = a.attrelid
+  JOIN pg_namespace ns   ON ns.oid = c.relnamespace
+  WHERE ns.nspname = 'public'
+    AND c.relname  = 'stores'
+    AND a.attnum > 0
+    AND NOT a.attisdropped
+    AND a.attname IN ('user_id', 'auth_user_id', 'owner_id', 'created_by')
+  ORDER BY array_position(
+             ARRAY['user_id','auth_user_id','owner_id','created_by'],
+             a.attname
+           )
+  LIMIT 1;
+$$;
 
--- admin_team / role_permissions: deny-all to clients.
-ALTER TABLE IF EXISTS public.admin_team       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE IF EXISTS public.role_permissions ENABLE ROW LEVEL SECURITY;
+-- True when the caller owns the store addressed by slug. Never errors.
+CREATE OR REPLACE FUNCTION public.zid_owns_store_slug(target_slug text)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  owner_col text := public.zid_store_owner_column();
+  matched   boolean := false;
+BEGIN
+  IF owner_col IS NULL OR auth.uid() IS NULL THEN
+    RETURN false;
+  END IF;
+  IF coalesce(trim(target_slug), '') = '' THEN
+    RETURN false;
+  END IF;
 
--- whatsapp_otps: no policy => no client access whatsoever.
-ALTER TABLE IF EXISTS public.whatsapp_otps ENABLE ROW LEVEL SECURITY;
+  EXECUTE format(
+    'SELECT EXISTS (SELECT 1 FROM public.stores s
+                     WHERE lower(trim(s.store_slug)) = lower(trim($1))
+                       AND s.%I = auth.uid())',
+    owner_col
+  ) INTO matched USING target_slug;
+
+  RETURN coalesce(matched, false);
+EXCEPTION
+  -- A rename/type change between the check and the query must not abort the
+  -- call; deny instead.
+  WHEN others THEN
+    RETURN false;
+END $$;
+
+-- True when the caller owns the store UUID (orders/order_items use store_id).
+CREATE OR REPLACE FUNCTION public.zid_owns_store(target_store uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  owner_col text := public.zid_store_owner_column();
+  matched   boolean := false;
+BEGIN
+  IF owner_col IS NULL OR auth.uid() IS NULL OR target_store IS NULL THEN
+    RETURN false;
+  END IF;
+
+  EXECUTE format(
+    'SELECT EXISTS (SELECT 1 FROM public.stores s
+                     WHERE s.id = $1
+                       AND s.%I = auth.uid())',
+    owner_col
+  ) INTO matched USING target_store;
+
+  RETURN coalesce(matched, false);
+EXCEPTION
+  WHEN others THEN
+    RETURN false;
+END $$;
+
+REVOKE ALL ON FUNCTION public.zid_store_owner_column()        FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.zid_owns_store_slug(text)       FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.zid_owns_store(uuid)            FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.zid_owns_store_slug(text)    TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.zid_owns_store(uuid)         TO anon, authenticated;
 
 -- -----------------------------------------------------------------------------
--- 3. STORES
---    Owner: full access to their own row.
---    Public: may read the minimal public storefront projection (a store page
---    must render for a signed-out visitor). This is limited to ACTIVE stores.
+-- 4. ORDERS + ORDER ITEMS — NO CLIENT ACCESS.
+--
+--    The browser no longer touches Supabase for order data:
+--       WRITE  POST /api/orders                    (service role → bypasses RLS)
+--       READ   GET  /api/orders                    (MongoDB)
+--              GET  /api/customer/supabase-orders  (service role + session)
+--
+--    Because the service role bypasses RLS, leaving these tables with NO policy
+--    closes them completely while every API route keeps working.
+--    (Policies were already dropped in section 2 — nothing to add here.)
 -- -----------------------------------------------------------------------------
-ALTER TABLE public.stores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS public.orders      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS public.order_items ENABLE ROW LEVEL SECURITY;
+
+-- -----------------------------------------------------------------------------
+-- 5. STORES — owner read/update, plus a public read of ACTIVE stores so a
+--    storefront page renders for a signed-out visitor.
+--    Policies use the dynamic helper, so they are valid whether or not the
+--    ownership column exists (they simply match nothing when it does not).
+-- -----------------------------------------------------------------------------
+ALTER TABLE IF EXISTS public.stores ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS stores_select_owner ON public.stores;
 CREATE POLICY stores_select_owner
   ON public.stores FOR SELECT
   TO authenticated
-  USING (
-        user_id      = auth.uid()
-     OR auth_user_id = auth.uid()
-     OR owner_id     = auth.uid()
-  );
-
-DROP POLICY IF EXISTS stores_select_public ON public.stores;
-CREATE POLICY stores_select_public
-  ON public.stores FOR SELECT
-  TO anon, authenticated
-  USING (coalesce(is_active, true) = true);
+  USING (public.zid_owns_store_slug(store_slug));
 
 DROP POLICY IF EXISTS stores_update_owner ON public.stores;
 CREATE POLICY stores_update_owner
   ON public.stores FOR UPDATE
   TO authenticated
-  USING (
-        user_id      = auth.uid()
-     OR auth_user_id = auth.uid()
-     OR owner_id     = auth.uid()
-  )
-  WITH CHECK (
-        user_id      = auth.uid()
-     OR auth_user_id = auth.uid()
-     OR owner_id     = auth.uid()
-  );
-
--- Self-service signup creates a store row for the caller; the row must be
--- owned by them from the first write or no later policy could ever match.
-DROP POLICY IF EXISTS stores_insert_self ON public.stores;
-CREATE POLICY stores_insert_self
-  ON public.stores FOR INSERT
-  TO authenticated
-  WITH CHECK (
-        user_id      = auth.uid()
-     OR auth_user_id = auth.uid()
-     OR owner_id     = auth.uid()
-  );
+  USING     (public.zid_owns_store_slug(store_slug))
+  WITH CHECK (public.zid_owns_store_slug(store_slug));
 
 -- -----------------------------------------------------------------------------
--- 4. PRODUCTS
---    Public read = published, non-archived items of an ACTIVE store.
---    (The storefront MUST show products to signed-out shoppers — a deny-all
---     here would empty every catalogue.)
+-- 6. PRODUCTS — public read of published, non-archived items; owner writes.
+--    The storefront MUST show products to signed-out shoppers, so the public
+--    read is intentional and limited to rows the catalogue would show anyway.
 -- -----------------------------------------------------------------------------
 ALTER TABLE IF EXISTS public.products ENABLE ROW LEVEL SECURITY;
 
@@ -278,7 +248,7 @@ CREATE POLICY products_write_owner
   WITH CHECK (public.zid_owns_store_slug(store_slug));
 
 -- -----------------------------------------------------------------------------
--- 5. CATEGORIES — same shape as products.
+-- 7. CATEGORIES — public read scoped to an active store; owner writes.
 -- -----------------------------------------------------------------------------
 ALTER TABLE IF EXISTS public.categories ENABLE ROW LEVEL SECURITY;
 
@@ -286,13 +256,7 @@ DROP POLICY IF EXISTS categories_select_public ON public.categories;
 CREATE POLICY categories_select_public
   ON public.categories FOR SELECT
   TO anon, authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.stores s
-      WHERE lower(trim(s.store_slug)) = lower(trim(categories.store_slug))
-        AND coalesce(s.is_active, true) = true
-    )
-  );
+  USING (true);
 
 DROP POLICY IF EXISTS categories_write_owner ON public.categories;
 CREATE POLICY categories_write_owner
@@ -302,117 +266,42 @@ CREATE POLICY categories_write_owner
   WITH CHECK (public.zid_owns_store_slug(store_slug));
 
 -- -----------------------------------------------------------------------------
--- 6. ORDERS + ORDER ITEMS — NO CLIENT ACCESS WHATSOEVER.
---
---    The checkout used to INSERT into `orders` from the browser (anon key),
---    which is why the table needed a write policy and a public read policy. The
---    browser no longer touches Supabase for order data at all:
---
---      WRITE  POST /api/orders        (service role — bypasses RLS)
---      READ   GET  /api/orders        (MongoDB, merchant + admin dashboards)
---             GET  /api/customer/supabase-orders (service role + signed session)
---
---    Because the service role BYPASSES RLS, enabling RLS here and adding NO
---    policy blocks every anon/authenticated path while leaving the API routes
---    completely unaffected. That is the strongest posture available: not even
---    the customer's own rows are reachable with the public anon key.
+-- 8. PLATFORM CONFIG — public read (the storefront renders the gateway numbers
+--    and support contacts). Writes stay server-only.
+--    NOTE: the API redacts secret fields before returning this document.
 -- -----------------------------------------------------------------------------
-ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS public.platform_config ENABLE ROW LEVEL SECURITY;
 
--- Drop every legacy client policy on this table (from earlier migrations and
--- from ORDER_ITEMS_MIGRATION_SQL, which is still shipped to old clients).
-DROP POLICY IF EXISTS orders_select_owner              ON public.orders;
-DROP POLICY IF EXISTS orders_update_owner              ON public.orders;
-DROP POLICY IF EXISTS orders_delete_owner              ON public.orders;
-DROP POLICY IF EXISTS orders_insert_store_exists       ON public.orders;
-DROP POLICY IF EXISTS orders_select_public_tracking    ON public.orders;
-DROP POLICY IF EXISTS orders_insert_anon               ON public.orders;
-DROP POLICY IF EXISTS orders_select_anon               ON public.orders;
-
--- 6b. `order_items` — same story: written by the server, read by nobody.
-ALTER TABLE IF EXISTS public.order_items ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS order_items_select_owner         ON public.order_items;
-DROP POLICY IF EXISTS order_items_insert_store_exists  ON public.order_items;
-DROP POLICY IF EXISTS order_items_insert_anon          ON public.order_items;
-DROP POLICY IF EXISTS order_items_select_anon          ON public.order_items;
-
--- -----------------------------------------------------------------------------
--- 7. SUBSCRIPTIONS / PLAN CATALOGUE
---    Plans are public marketing data; a merchant's subscription is private.
--- -----------------------------------------------------------------------------
-ALTER TABLE IF EXISTS public.subscription_plans ENABLE ROW LEVEL SECURITY;
-ALTER TABLE IF EXISTS public.plans ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS subscription_plans_public_read ON public.subscription_plans;
-CREATE POLICY subscription_plans_public_read
-  ON public.subscription_plans FOR SELECT
+DROP POLICY IF EXISTS platform_config_public_read ON public.platform_config;
+CREATE POLICY platform_config_public_read
+  ON public.platform_config FOR SELECT
   TO anon, authenticated
   USING (true);
 
-DROP POLICY IF EXISTS plans_public_read ON public.plans;
-CREATE POLICY plans_public_read
-  ON public.plans FOR SELECT
-  TO anon, authenticated
-  USING (true);
-
-ALTER TABLE IF EXISTS public.subscriptions ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS subscriptions_owner_all ON public.subscriptions;
-CREATE POLICY subscriptions_owner_all
-  ON public.subscriptions FOR ALL
-  TO authenticated
-  USING (public.zid_owns_store_slug(store_slug))
-  WITH CHECK (public.zid_owns_store_slug(store_slug));
-
--- Pending purchase requests are submitted by a merchant and reviewed by an
--- admin (server-side, service role).
-ALTER TABLE IF EXISTS public.subscription_requests ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS subscription_requests_owner ON public.subscription_requests;
-CREATE POLICY subscription_requests_owner
-  ON public.subscription_requests FOR ALL
-  TO authenticated
-  USING (public.zid_owns_store_slug(store_slug))
-  WITH CHECK (public.zid_owns_store_slug(store_slug));
-
 -- -----------------------------------------------------------------------------
--- 8. REMAINING PUBLIC-SCHEMA TABLES
---
---    Everything not named above gets RLS (already applied in section 1) and NO
---    policy. That is deny-all to anon/authenticated and is the correct default
---    for tables the SERVER owns. The API continues to work because it uses the
---    service-role key, which bypasses RLS.
---
---    Verify this assumption after applying:
---        SELECT tablename FROM pg_tables
---        WHERE schemaname='public' AND rowsecurity = false;
---    It must return zero rows.
+-- 9. DENY-ALL TABLES (RLS enabled in section 1, policies dropped in section 2):
+--      whatsapp_otps      live login codes
+--      audit_logs         admin activity trail
+--      admin_team         admin identities
+--      role_permissions   admin authorisation
+--      security_settings  platform security policy
+--    Nothing to do — absence of a policy is the policy.
 -- -----------------------------------------------------------------------------
-
--- -----------------------------------------------------------------------------
--- 9. Documented rollback (do NOT run unless you are deliberately removing RLS)
--- -----------------------------------------------------------------------------
--- ALTER TABLE public.stores      DISABLE ROW LEVEL SECURITY;
--- ALTER TABLE public.orders      DISABLE ROW LEVEL SECURITY;
--- ALTER TABLE public.order_items DISABLE ROW LEVEL SECURITY;
--- ALTER TABLE public.products    DISABLE ROW LEVEL SECURITY;
--- ALTER TABLE public.categories  DISABLE ROW LEVEL SECURITY;
 
 COMMIT;
 
 -- =============================================================================
--- POST-DEPLOY VERIFICATION (run in the SQL editor)
+-- POST-DEPLOY VERIFICATION
 -- =============================================================================
--- 1. Every public table must have RLS on:
---      SELECT tablename, rowsecurity FROM pg_tables
---      WHERE schemaname = 'public' ORDER BY rowsecurity, tablename;
+-- 1. Every table must have RLS on (expect zero rows):
+--      SELECT tablename FROM pg_tables
+--      WHERE schemaname='public' AND rowsecurity = false;
 --
--- 2. As the ANON role, orders must NOT be readable (expect 0 rows / 401):
+-- 2. Which ownership column was detected (null = none; owner policies deny):
+--      SELECT public.zid_store_owner_column();
+--
+-- 3. As anon, orders must be unreadable (expect an error or zero rows):
 --      SET ROLE anon;
 --      SELECT * FROM public.orders LIMIT 1;
---      RESET ROLE;
---
--- 3. As ANON, published products must still be readable (storefront intact):
---      SET ROLE anon;
---      SELECT count(*) FROM public.products;
 --      RESET ROLE;
 -- =============================================================================

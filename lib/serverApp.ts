@@ -883,11 +883,24 @@ function getServerSupabaseConfig() {
     process.env.SUPABASE_URL ||
     process.env.DATABASE_URL ||
     '';
+  /*
+   * THE SERVICE-ROLE KEY MUST WIN ON THE SERVER.
+   *
+   * This is server-only code, so the elevated key is the correct default. The
+   * old order put the ANON key first, which meant that whenever both variables
+   * were set (the normal deployment) every “server” Supabase call — including
+   * `writeOrderToSupabase` — actually ran as `anon`. Once RLS is enabled with no
+   * policy on `orders`, those writes would be silently rejected with a 42501
+   * permission error and checkout would stop persisting.
+   *
+   * The anon key remains the fallback so a deployment that has not set a
+   * service key still works for the public reads (`/rest/v1/products`).
+   */
   const rawSupabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
     process.env.VITE_SUPABASE_ANON_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     process.env.SUPABASE_ANON_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
     process.env.SUPABASE_KEY ||
     '';
   const supabaseUrl = cleanEnvUrl(rawSupabaseUrl);
