@@ -16,6 +16,11 @@ import mongoose from 'mongoose';
  */
 
 export const DB_NAME = 'zidbdsaas';
+export const MongoConnectionRole = {
+  primary: 'primary',
+  secondary: 'secondary',
+} as const;
+export type MongoConnectionRole = (typeof MongoConnectionRole)[keyof typeof MongoConnectionRole];
 
 /**
  * Read the MongoDB URI from environment variables on every call rather than
@@ -24,10 +29,12 @@ export const DB_NAME = 'zidbdsaas';
  * make the app report "Database is not configured" even though MONGODB_URI IS set
  * in Vercel.
  */
-function readMongoUri(): string {
+function readMongoUri(role: MongoConnectionRole = 'primary'): string {
+  if (role === 'secondary') {
+    return (process.env.MONGODB_URI_2 || '').trim();
+  }
   return (
     process.env.MONGODB_URI ||
-    process.env.MONGODB_URI_2 ||
     process.env.MONGODB_URL ||
     process.env.DATABASE_URL ||
     ''
@@ -39,6 +46,11 @@ type MongooseCache = {
   promise: Promise<typeof mongoose> | null;
 };
 
+type SecondaryCache = {
+  conn: mongoose.Connection | null;
+  promise: Promise<mongoose.Connection> | null;
+};
+
 /**
  * Persist the cache across hot reloads (dev) and warm invocations (serverless).
  * The cache lives on `global` so that across Vercel cold starts that evaluate
@@ -47,6 +59,7 @@ type MongooseCache = {
 declare global {
   // eslint-disable-next-line no-var
   var __mongooseCache: MongooseCache | undefined;
+  var __mongooseSecondaryCache: SecondaryCache | undefined;
 }
 
 const cached: MongooseCache =
@@ -55,14 +68,21 @@ const cached: MongooseCache =
     promise: null,
   });
 
-export function getMongoUri(): string {
-  return readMongoUri();
+const secondaryCached: SecondaryCache =
+  global.__mongooseSecondaryCache ?? (global.__mongooseSecondaryCache = {
+    conn: null,
+    promise: null,
+  });
+
+export function getMongoUri(role: MongoConnectionRole = 'primary'): string {
+  return readMongoUri(role);
 }
 
-export const MONGODB_URI = getMongoUri();
+export const MONGODB_URI = getMongoUri('primary');
+export const MONGODB_URI_2 = getMongoUri('secondary');
 
-export function isMongoConfigured(): boolean {
-  return Boolean(readMongoUri());
+export function isMongoConfigured(role: MongoConnectionRole = 'primary'): boolean {
+  return Boolean(readMongoUri(role));
 }
 
 export const mongooseConnectionPromise: Promise<typeof mongoose> | null = null;
@@ -146,7 +166,7 @@ export function describeMongoError(err: unknown): MongoFailure {
  * callers can surface real details instead of an opaque 500.
  */
 export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeof mongoose> {
-  const uri = readMongoUri();
+  const uri = readMongoUri('primary');
   if (!uri) {
     throw new Error('[MongoDB] MONGODB_URI is not set. Set it in your environment variables.');
   }
@@ -199,6 +219,38 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
 }
 
 /**
+ * Open the secondary Atlas pool independently from Mongoose's primary pool.
+ * This is intentionally a separate `Connection`: switching URI 2 must never
+ * replace the models and transactions used by core order/auth routes.
+ */
+export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
+  const uri = readMongoUri('secondary');
+  if (!uri) {
+    throw new Error('[MongoDB] MONGODB_URI_2 is not set for the secondary database.');
+  }
+  if (secondaryCached.conn?.readyState === 1) return secondaryCached.conn;
+  if (!secondaryCached.promise) {
+    const opts = getConnectionOpts(dbName);
+    console.log(`[MongoDB] Opening secondary connection pool (dbName=${dbName})`);
+    secondaryCached.promise = mongoose
+      .createConnection(uri, opts)
+      .asPromise()
+      .then((connection) => {
+        secondaryCached.conn = connection;
+        console.log('[MongoDB] Secondary connection established');
+        return connection;
+      })
+      .catch((err) => {
+        secondaryCached.promise = null;
+        secondaryCached.conn = null;
+        console.error('[MongoDB] Secondary connection failed:', err?.message || err);
+        throw new Error(`[MongoDB] Secondary connection failed: ${err?.message || err}`);
+      });
+  }
+  return secondaryCached.promise;
+}
+
+/**
  * Set up connection event listeners for error handling and pool management.
  */
 function setupConnectionListeners(mongooseInstance: typeof mongoose): void {
@@ -230,10 +282,21 @@ function setupConnectionListeners(mongooseInstance: typeof mongoose): void {
  * Resolve the native MongoDB `Db` handle for a specific database. Reuses the
  * shared (global-cached) mongoose connection pool.
  */
-export async function getMongoDb(dbName: string = DB_NAME) {
-  if (!readMongoUri()) return null;
+export async function getMongoDb(
+  dbName: string = DB_NAME,
+  role: MongoConnectionRole = 'primary',
+) {
+  if (!readMongoUri(role)) return null;
+  if (role === 'secondary') {
+    const connection = await connectToSecondaryDatabase(dbName);
+    return connection.db ?? null;
+  }
   await connectToDatabase(dbName);
   return mongoose.connection.db ?? null;
+}
+
+export async function getSecondaryMongoDb(dbName: string = DB_NAME) {
+  return getMongoDb(dbName, 'secondary');
 }
 
 export default connectToDatabase;
@@ -247,6 +310,11 @@ export async function closeConnection(): Promise<void> {
     console.log('[MongoDB] Closing connection pool');
     cached.promise = null;
     cached.conn = null;
+    if (secondaryCached.conn) {
+      await secondaryCached.conn.close().catch(() => undefined);
+    }
+    secondaryCached.promise = null;
+    secondaryCached.conn = null;
     return Promise.resolve();
   }
   // Nothing open
@@ -262,5 +330,7 @@ export async function closeConnection(): Promise<void> {
 export function resetConnection(): void {
   cached.promise = null;
   cached.conn = null;
+  secondaryCached.promise = null;
+  secondaryCached.conn = null;
   console.log('[MongoDB] Connection state reset forced');
 }

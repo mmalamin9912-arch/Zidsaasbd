@@ -379,11 +379,12 @@ async function resolveMerchantEmail(ref: string): Promise<string | null> {
 // invocations and concurrent requests share a single in-flight handshake.
 
 export const DB_NAME = 'zidbdsaas';
+export const SECONDARY_DB_ROLE = 'secondary' as const;
 
-export function readMongoUri(): string {
+export function readMongoUri(role: 'primary' | 'secondary' = 'primary'): string {
+  if (role === SECONDARY_DB_ROLE) return (process.env.MONGODB_URI_2 || '').trim();
   return (
     process.env.MONGODB_URI ||
-    process.env.MONGODB_URI_2 ||
     process.env.MONGODB_URL ||
     process.env.DATABASE_URL ||
     ''
@@ -397,16 +398,24 @@ type MongooseCache = {
   promise: Promise<typeof mongoose> | null;
 };
 
+type SecondaryCache = {
+  conn: mongoose.Connection | null;
+  promise: Promise<mongoose.Connection> | null;
+};
+
 declare global {
   // eslint-disable-next-line no-var
   var __mongooseCache: MongooseCache | undefined;
+  var __mongooseSecondaryCache: SecondaryCache | undefined;
 }
 
 const cached: MongooseCache =
   global.__mongooseCache ?? (global.__mongooseCache = { conn: null, promise: null });
+const secondaryCached: SecondaryCache =
+  global.__mongooseSecondaryCache ?? (global.__mongooseSecondaryCache = { conn: null, promise: null });
 
-export function getMongoUri(): string {
-  return readMongoUri();
+export function getMongoUri(role: 'primary' | 'secondary' = 'primary'): string {
+  return readMongoUri(role);
 }
 
 export function isMongoConfigured(): boolean {
@@ -419,7 +428,7 @@ export function isMongoConfigured(): boolean {
  * details instead of an opaque 500.
  */
 export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeof mongoose> {
-  const uri = readMongoUri();
+  const uri = readMongoUri('primary');
   if (!uri) {
     throw new Error('[MongoDB] MONGODB_URI is not set. Set it in your environment variables.');
   }
@@ -471,13 +480,46 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
   }
 }
 
+export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
+  const uri = readMongoUri(SECONDARY_DB_ROLE);
+  if (!uri) throw new Error('[MongoDB] MONGODB_URI_2 is not set for the secondary database.');
+  if (secondaryCached.conn?.readyState === 1) return secondaryCached.conn;
+  if (!secondaryCached.promise) {
+    secondaryCached.promise = mongoose
+      .createConnection(uri, {
+        dbName,
+        bufferCommands: false,
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 45000,
+        connectTimeoutMS: 5000,
+      })
+      .asPromise()
+      .then((connection) => {
+        secondaryCached.conn = connection;
+        return connection;
+      })
+      .catch((err) => {
+        secondaryCached.promise = null;
+        secondaryCached.conn = null;
+        throw new Error(`[MongoDB] Secondary connection failed: ${err?.message || err}`);
+      });
+  }
+  return secondaryCached.promise;
+}
+
 /**
  * Resolve the native MongoDB `Db` handle for a specific database. Reuses the
  * shared (global-cached) mongoose connection pool.
  */
-export async function getMongoDb(dbName: string = DB_NAME) {
-  const uri = readMongoUri();
+export async function getMongoDb(dbName: string = DB_NAME, role: 'primary' | 'secondary' = 'primary') {
+  const uri = readMongoUri(role);
   if (!uri) return null;
+  if (role === SECONDARY_DB_ROLE) {
+    const connection = await connectToSecondaryDatabase(dbName);
+    return connection.db ?? null;
+  }
   try {
     await connectToDatabase(dbName);
   } catch {
@@ -5351,16 +5393,21 @@ app.get('/api/products', async (req, res) => {
     // not set on Vercel, which causes mongoose.connect() to throw "MissingUri"
     // and surface as HTTP 500.
     const mongoUri = readMongoUri();
-    if (mongoUri) {
+    let productDb: any = null;
+    if (mongoUri || readMongoUri(SECONDARY_DB_ROLE)) {
       try {
-        await connectToMongoDB();
+        // Catalog reads use the secondary pool when configured. If the
+        // secondary cluster is unavailable or has no matching rows, fall back
+        // to the primary pool so a partial deployment never hides products.
+        productDb = await getMongoDb(DB_NAME, SECONDARY_DB_ROLE).catch(() => null);
+        if (!productDb) productDb = await getMongoDb(DB_NAME, 'primary');
       } catch (dbErr: any) {
         console.error('[Server] GET /api/products MongoDB connection error:', dbErr?.message || dbErr);
       }
     } else {
-      console.warn('[Server] GET /api/products MONGODB_URI is not set — falling back to file/memory store.');
+      console.warn('[Server] GET /api/products MongoDB URIs are not set — falling back to file/memory store.');
     }
-    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+    if (productDb) {
       try {
         const mongoOr: any[] = [
           { store_slug: storeSlug },
@@ -5376,7 +5423,7 @@ app.get('/api/products', async (req, res) => {
         if (lowerOrig.includes('.')) {
           mongoOr.push({ store_domain: lowerOrig }, { domain: lowerOrig }, { customDomain: lowerOrig }, { custom_domain: lowerOrig });
         }
-        const mongoProds = await (mongoose.connection.db.collection('products') as any)
+        const mongoProds = await (productDb.collection('products') as any)
           .find({ $or: mongoOr })
           .toArray();
         if (Array.isArray(mongoProds) && mongoProds.length > 0) {
@@ -5384,6 +5431,22 @@ app.get('/api/products', async (req, res) => {
         }
       } catch (mongoErr) {
         console.warn('[Server] GET /api/products MongoDB query warning:', mongoErr);
+      }
+    }
+
+    // If the secondary catalog is empty while the primary still has legacy
+    // rows, read the primary catalog before using the file/memory mirror.
+    if (prods.length === 0 && productDb && productDb !== mongoose.connection.db) {
+      try {
+        const primaryDb = await getMongoDb(DB_NAME, 'primary');
+        if (primaryDb) {
+          const mongoProds = await (primaryDb.collection('products') as any)
+            .find({ store_slug: storeSlug })
+            .toArray();
+          prods = Array.isArray(mongoProds) ? mongoProds.map(normalizeMongoProduct) : [];
+        }
+      } catch (mongoErr) {
+        console.warn('[Server] GET /api/products primary fallback warning:', mongoErr);
       }
     }
 
