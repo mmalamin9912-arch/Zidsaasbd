@@ -7,7 +7,7 @@ import {
 import SafeImage from './SafeImage';
 import type { AdminPaymentGatewayConfig } from '../types';
 import { useCart } from './CartProvider';
-import { resolveImageUrl } from '../utils/imageFallback';
+import { PLACEHOLDER_IMAGE, resolveProductImage } from '../utils/imageFallback';
 import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
 import {
@@ -53,52 +53,29 @@ const THEME = {
 
 const bdt = (v: number) => `৳${Math.round(Number(v) || 0).toLocaleString('en-US')}`;
 
-/**
- * Resolve the best available product image URL from every spelling the basket,
- * product cards and Supabase rows may carry, plus the first `images[]` entry.
- * Returns '' when none exists so SafeImage renders its local placeholder
- * instead of a broken/missing icon.
- */
+/** One dev-time log per item, so the console is not flooded on every render. */
 const loggedImageItems = new Set<string>();
 
-function imageUrlFromValue(value: any): string {
-  if (typeof value === 'string') return value.trim();
-  if (!value || typeof value !== 'object') return '';
-  return String(
-    value.url ??
-    value.src ??
-    value.image ??
-    value.image_url ??
-    value.imageUrl ??
-    value.thumbnail ??
-    value.path ??
-    '',
-  ).trim();
-}
-
 function productImageOf(p: any, line?: any): string {
-  const nestedProduct = p?.product && typeof p.product === 'object' ? p.product : null;
-  const candidates = [
-    p?.image, p?.imageUrl, p?.image_url, p?.thumbnail, p?.thumbnailUrl,
-    p?.productImage, p?.product_image, p?.photo, p?.photoUrl,
-    ...(Array.isArray(p?.images) ? p.images : []),
-    nestedProduct?.image, nestedProduct?.imageUrl, nestedProduct?.image_url,
-    ...(Array.isArray(nestedProduct?.images) ? nestedProduct.images : []),
-    line?.image, line?.imageUrl, line?.image_url, line?.thumbnail,
-    ...(Array.isArray(line?.images) ? line.images : []),
-  ];
-  const image = candidates.map(imageUrlFromValue).find((value) => value !== '' && value !== '#') || '';
+  /*
+   * ONE resolver for the whole app.
+   *
+   * The rules (flat keys → `images[]` → nested `product.images[0]`) live in
+   * `resolveProductImage`, which `normalizeOrderItems` also uses. Keeping two
+   * copies is what let the checkout show thumbnails while order history showed
+   * none for the very same line.
+   *
+   * The PRODUCT is authoritative; the basket line is only the fallback, because
+   * a line persisted in localStorage can carry a stale/blank image while the
+   * live product still has one.
+   */
+  const image = resolveProductImage(p) || resolveProductImage(line) || '';
   const itemKey = String(p?.id || p?.productId || p?.product_id || line?.productId || '');
   if (import.meta.env.DEV && itemKey && !loggedImageItems.has(itemKey)) {
     loggedImageItems.add(itemKey);
-    console.debug('[MarketplaceCheckout] resolved cart item image', {
-      itemKey,
-      image,
-      product: p,
-      line,
-    });
+    console.debug('[MarketplaceCheckout] resolved cart item image', { itemKey, image });
   }
-  return resolveImageUrl(image, '/placeholder.svg');
+  return image || PLACEHOLDER_IMAGE;
 }
 
 /** All 64 districts — a courier needs the real one, not a header shortcut. */

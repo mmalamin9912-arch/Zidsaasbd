@@ -19,6 +19,7 @@
  */
 
 import type { Order, OrderItem } from '../types';
+import { resolveProductImage } from './imageFallback';
 
 /** Coerce anything to a finite number, defaulting to 0. */
 export function toNumber(value: unknown, fallback = 0): number {
@@ -76,11 +77,10 @@ export function normalizeOrderItems(raw: unknown): OrderItem[] {
     const name = String(
       item?.productName ?? item?.product_name ?? item?.name ?? item?.title ?? 'Item'
     );
-    // Product image: accept every spelling the write path produces. Older rows
-    // (and basket-localStorage copies) may carry only `thumbnail`.
-    const image = String(
-      item?.image ?? item?.image_url ?? item?.imageUrl ?? item?.thumbnail ?? ''
-    );
+    // Product image: the shared resolver also covers `images[0]` and a nested
+    // `product.images[0]`, which is how Supabase order lines are shaped. Reading
+    // only the flat keys left those rows with a blank thumbnail.
+    const image = resolveProductImage(item);
     return {
       id: String(item?.id ?? item?.productId ?? item?.product_id ?? `item-${index}`),
       productName: name,

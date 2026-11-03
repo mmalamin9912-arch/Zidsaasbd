@@ -14873,6 +14873,72 @@ function normalizeTelegramToken(raw: unknown): string {
   return token.trim();
 }
 
+/** Escape the three characters Telegram's HTML parse mode treats as markup. */
+function escapeHtmlForTelegram(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Toast on the tapped button (Telegram shows it for ~5s).
+ *
+ * `callback_query` updates MUST be answered or the button keeps its spinner
+ * until it times out on the client. Failures are logged, never thrown.
+ */
+async function answerCallbackQuery(botToken: string, callbackQueryId: string, text: string): Promise<void> {
+  if (!botToken || !callbackQueryId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text, show_alert: false }),
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (err: any) {
+    console.warn('[Telegram] answerCallbackQuery warning:', err?.message || err);
+  }
+}
+
+/**
+ * Rewrite an alert message in place (used to stamp "Approved ✅").
+ *
+ * The order identity lives in the BUTTONS, so an edited message that drops the
+ * `reply_markup` must also drop those buttons — that is what makes the decision
+ * one-shot in the chat history.
+ */
+async function editTelegramMessage(
+  botToken: string,
+  chatId: string,
+  messageId: unknown,
+  patch: { text: string; reply_markup?: Record<string, any> },
+): Promise<void> {
+  if (!botToken || !messageId) return;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        text: patch.text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        ...(patch.reply_markup ? { reply_markup: patch.reply_markup } : {}),
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      const data: any = await res.json().catch(() => null);
+      // 400 "message is not modified" is harmless (double tap).
+      console.warn('[Telegram] editMessageText rejected:', data?.description || res.status);
+    }
+  } catch (err: any) {
+    console.warn('[Telegram] editMessageText warning:', err?.message || err);
+  }
+}
+
 /** Reduce a pasted chat id to its bare value (`-100…` / `@channelname`). */
 function normalizeTelegramChatId(raw: unknown): string {
   const value = String(raw ?? '').trim();
@@ -14933,6 +14999,8 @@ async function resolveTelegramAlertConfig(): Promise<{
 async function sendAdminPaymentAlertTelegram(args: {
   botToken: string;
   chatId: string;
+  /** The ORDER id/order_number the inline buttons act on (callback data). */
+  orderId?: string;
   orderNumber: string;
   paymentMethod: string;
   trxId: string;
@@ -14961,14 +15029,35 @@ async function sendAdminPaymentAlertTelegram(args: {
     `🔐 TrxID: <code>${escapeHtml(args.trxId)}</code>`,
     `💰 Amount: <b>৳${args.amountBDT}</b>`,
     '',
-    '⚠️ Verify this payment in the admin panel before the vendor dispatches the order.',
+    '⬇️ Verify this payment right here, or ignore to handle it in the admin panel.',
   ].join('\n');
+
+  /*
+   * INLINE DECISION BUTTONS.
+   *
+   * The callback data stays short (`tvp:approve:<id>`) because Telegram caps it
+   * at 64 bytes; the webhook then re-resolves the order from the database, so a
+   * tampered payload cannot point at a different store's order than the one the
+   * button was rendered for. When no id is available the message is still sent —
+   * an alert without buttons is far better than no alert.
+   */
+  const actionId = String(args.orderId || args.orderNumber || '').trim();
+  const replyMarkup = actionId
+    ? {
+        inline_keyboard: [[
+          { text: '✅ Approve Payment', callback_data: `tvp:approve:${actionId}`.slice(0, 64) },
+          { text: '❌ Reject Payment', callback_data: `tvp:reject:${actionId}`.slice(0, 64) },
+        ]],
+      }
+    : undefined;
+
   try {
     console.log('[Telegram] sending admin payment alert:', {
       order: args.orderNumber,
       chatId,
       tokenPrefix: `${botToken.slice(0, 6)}…`,
       amountBDT: args.amountBDT,
+      inlineButtons: Boolean(replyMarkup),
     });
     const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
@@ -14978,6 +15067,7 @@ async function sendAdminPaymentAlertTelegram(args: {
         text: message,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       }),
       // Telegram is a nice-to-have push channel — never hold the response.
       signal: AbortSignal.timeout(8000),
@@ -17804,6 +17894,7 @@ app.post('/api/orders', async (req, res) => {
 
       // ── ROBUST ATOMIC DATABASE TRANSACTION ─────────────────────────────
       let persisted = false;
+      let persistError: string | null = null;
       if (db) {
         let transactionCommitted = false;
         let session: any = null;
@@ -17853,17 +17944,68 @@ app.post('/api/orders', async (req, res) => {
             );
             persisted = true;
           } catch (bulkErr: any) {
-            console.warn('[Server] bulkWrite insert warning:', bulkErr?.message || bulkErr);
+            /*
+             * A FAILED WRITE IS NOT A SAVED ORDER.
+             *
+             * This used to be a `console.warn` followed by business as usual: the
+             * order was still pushed to `inserted`, the route answered 200
+             * "Order placed successfully", the Telegram alert fired — and the row
+             * existed nowhere but the in-process cache, so it vanished on the
+             * next cold start / other lambda. That is exactly "orders disappear
+             * after being placed".
+             *
+             * The error is recorded here and the batch is reported as rejected
+             * below, so the checkout can show a real failure instead of a silent
+             * loss.
+             */
+            console.error('[Server] bulkWrite insert FAILED — order NOT persisted:', bulkErr?.message || bulkErr);
+            persistError = bulkErr?.message || 'The order could not be written to the database.';
           }
         } else {
           persisted = true;
         }
+
+        /*
+         * Read-back verification. An acknowledged bulkWrite is not proof the
+         * document is findable by the exact filter the dashboards use (a silent
+         * duplicate-key race, a wrong collection, an index conflict). One cheap
+         * count on the master's identity turns that into a definite answer.
+         */
+        if (persisted) {
+          const found = await db.collection(ORDERS_COLLECTION)
+            .countDocuments({ $or: [{ id: masterRecord.id }, { order_number: masterRecord.order_number }] })
+            .catch(() => -1);
+          if (found === 0) {
+            persisted = false;
+            persistError = 'The order was acknowledged by the database but could not be read back.';
+            console.error('[Server] post-write verification failed:', {
+              id: masterRecord.id,
+              order_number: masterRecord.order_number,
+            });
+          }
+        }
+      } else {
+        // No database handle at all (Mongo unreachable/unconfigured).
+        persistError = 'The database is unavailable.';
       }
 
       // ── Runtime memory and local storage synchronization ─────────────
       // Guarantees zero-lag read-after-write for customer & vendor dashboards
       rememberRecentOrders(allDocsToPersist);
-      inserted.push(...allDocsToPersist);
+      if (persisted) {
+        inserted.push(...allDocsToPersist);
+      } else {
+        // Surface the failure to the caller; do NOT let it look like a success.
+        rejected.push({
+          index,
+          error: persistError || 'The order could not be saved.',
+        });
+        console.error('[Server] POST /api/orders not persisted:', {
+          order_number: masterRecord.order_number,
+          store: slug,
+          error: persistError,
+        });
+      }
 
       // ── SUPER ADMIN PAYMENT NOTIFICATION ────────────────────────────────
       // A marketplace wallet order arrives with the bKash/Nagad/Rocket TrxID
@@ -17908,7 +18050,10 @@ app.post('/api/orders', async (req, res) => {
         willAlert: isWalletPaymentAwaitingVerification,
       });
 
-      if (isWalletPaymentAwaitingVerification) {
+      // Only alert for an order that is actually IN the database. Alerting on a
+      // row that failed to persist is how an admin taps "Approve" on a payment
+      // whose order does not exist.
+      if (isWalletPaymentAwaitingVerification && persisted) {
         const trxRef = masterTrxRef || 'MISSING';
         void appendAuditLog({
           adminUser: 'Payment Bot',
@@ -17967,6 +18112,9 @@ app.post('/api/orders', async (req, res) => {
             const result = await sendAdminPaymentAlertTelegram({
               botToken: tg.botToken,
               chatId: tg.chatId,
+              // The webhook resolves the order by this id; `order_number` is the
+              // stable column every writer populates.
+              orderId: String(masterRecord.order_number || masterRecord.id || ''),
               orderNumber: String(masterRecord.order_number || ''),
               paymentMethod: String(masterRecord.payment_method || ''),
               trxId: trxRef,
@@ -19317,42 +19465,41 @@ app.get('/api/admin/orders', async (req, res) => {
   }
 });
 
-// PATCH /api/admin/orders/:id/payment-verification
-// Body: { action: 'approve' | 'reject', payout_reference?, notes?, processed_by?, store_slug?, merchant_id? }
-// Approving a 'Pending Verification' order marks it Paid / Processing and
-// credits the selling merchant's wallet (available_bdt += net payable) and
-// records a vendor payout in 'processing' state.
-app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  try {
-    const id = String(req.params.id || '').trim();
-    if (!id) return res.status(200).json({ ok: false, error: 'An order id is required.' });
-    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
-    const action = String(body.action || '').trim().toLowerCase();
-    if (action !== 'approve' && action !== 'reject') {
-      return res.status(200).json({ ok: false, error: "action must be 'approve' or 'reject'." });
-    }
+/*
+ * APPLY A PAYMENT-VERIFICATION DECISION.
+ *
+ * ONE implementation, used by BOTH the dashboard PATCH route and the Telegram
+ * webhook. Approving marks the order Paid / Processing, credits the selling
+ * merchant's wallet by the net payable and advances the payout ledger to
+ * 'processing'; rejecting voids it.
+ *
+ * Extracted rather than duplicated because the two entry points must never be
+ * able to disagree — a Telegram approval that skipped the wallet credit would
+ * leave the money in limbo, and that divergence is invisible until a vendor
+ * asks where their payout is.
+ *
+ * `locate` supplies everything known about the order (the queue/payload ids);
+ * the record itself is always re-read from MongoDB so the button cannot act on
+ * a stale client-side snapshot.
+ */
+async function applyPaymentVerification(args: {
+  id: string;
+  action: 'approve' | 'reject';
+  extra?: Record<string, any>;
+  body?: Record<string, any>;
+}): Promise<Record<string, any>> {
+  const { id, action } = args;
+  const body = args.body || {};
+  const extra = args.extra || {};
+  {
     /*
-     * The row identity as the admin panel sees it.
+     * The row identity as the caller knows it.
      *
-     * `:id` is the queue row's `id`, which for a marketplace checkout is a
-     * CLIENT-side string (`MP-<ts>-<rand>`) while the stored columns are
-     * `order_number` (`ZID-727907022-mystore-1`) and `id`. Both, plus the
-     * transaction id, are carried into `extra` so `findOrder` probes every
-     * column the row may have been written under. Nothing here is a hard
-     * store filter — see findOrder.
+     * `id` may be the queue row's `id` (for a marketplace checkout a
+     * CLIENT-side `MP-<ts>-<rand>` string) while the stored columns are
+     * `order_number` (`ZID-727907022-mystore-1`) and `id`. All of them, plus the
+     * transaction id, are probed by `findOrder`.
      */
-    const extra = {
-      store_slug: req.query.store_slug || body.store_slug || body.storeSlug,
-      store_id: req.query.store_id || body.store_id || body.storeId,
-      merchant_id: req.query.merchant_id || body.merchant_id || body.merchantId,
-      order_number: body.order_number || body.orderNumber,
-      orderNumber: body.orderNumber || body.order_number,
-      orderId: body.orderId || body.order_id,
-      order_id: body.order_id || body.orderId,
-      transaction_id: body.transaction_id || body.transactionId || body.trxId || body.trx_id,
-    };
-
     const lookupKeys = Array.from(new Set([
       id,
       body.orderId,
@@ -19397,17 +19544,17 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
       }
     }
     if (!located.doc) {
-      return res.status(200).json({
+      return {
         ok: false,
         error: located.error || `Order ${lookupKeys[0] || id} was not found.`,
         attempted: lookupKeys,
-      });
+      };
     }
     const doc = located.doc as Record<string, any>;
     /*
      * The id the WRITE is keyed on.
      *
-     * A cached row carries no Mongo `_id`, and the queue's `:id` may be a
+     * A cached row carries no Mongo `_id`, and the queue's `id` may be a
      * client-side `MP-…` string — neither resolves in `updateOrderFields`.
      * The stored `order_number` / `id` column is, and `extra.order_number`
      * lets the update re-locate the document from it.
@@ -19417,7 +19564,7 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
       ? String(doc._id)
       : (docOrderNumber || String(doc.id || id).trim());
     const vendorId = String(doc.vendor_id || doc.vendorId || doc.store_id || doc.storeId || doc.merchant_id || doc.merchantId || '').trim();
-    const storeSlug = String(doc.store_slug || doc.storeSlug || doc.storeSlug || '').trim();
+    const storeSlug = String(doc.store_slug || doc.storeSlug || '').trim();
     const vendorName = String(doc.vendor_name || doc.vendorName || doc.store_name || doc.storeName || '').trim();
     const orderNumber = docOrderNumber || id;
     const totalBDT = toNumeric(doc.totalBDT ?? doc.total_price ?? doc.total_bdt ?? doc.total, 0);
@@ -19429,12 +19576,13 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
         paymentStatus: 'Voided',
         payment_status: 'voided',
       }, { ...extra, order_number: orderNumber });
-      return res.status(result.ok ? 200 : 200).json({
+      return {
         ok: result.ok,
+        action: 'rejected',
         order: result.order ?? null,
         error: result.error ?? null,
-        action: 'rejected',
-      });
+        orderNumber,
+      };
     }
 
     // approve — both spellings are written, because the queue and the
@@ -19453,7 +19601,7 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
         : {}),
     }, { ...extra, order_number: orderNumber });
     if (!statusResult.ok) {
-      return res.status(200).json({ ok: false, error: statusResult.error || 'Could not mark the order paid.' });
+      return { ok: false, action: 'approved', error: statusResult.error || 'Could not mark the order paid.', orderNumber };
     }
 
     // Credit the selling merchant's wallet with the net payable (prepaid
@@ -19495,17 +19643,262 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
       }
     }
 
-    const fresh = statusResult.order ?? null;
-    return res.status(200).json({
+    return {
       ok: true,
       action: 'approved',
-      order: fresh,
+      order: statusResult.order ?? null,
       wallet: walletResult ?? null,
       payout: payoutResult ?? null,
+      orderNumber,
+      vendorId,
+      netPayable,
+    };
+  }
+}
+
+// PATCH /api/admin/orders/:id/payment-verification
+// Body: { action: 'approve' | 'reject', payout_reference?, notes?, processed_by?, store_slug?, merchant_id? }
+// Approving a 'Pending Verification' order marks it Paid / Processing and
+// credits the selling merchant's wallet (available_bdt += net payable) and
+// records a vendor payout in 'processing' state.
+app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(200).json({ ok: false, error: 'An order id is required.' });
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const action = String(body.action || '').trim().toLowerCase();
+    if (action !== 'approve' && action !== 'reject') {
+      return res.status(200).json({ ok: false, error: "action must be 'approve' or 'reject'." });
+    }
+    /*
+     * The row identity as the admin panel sees it. `:id` may be the queue row's
+     * `id` (a client-side `MP-…` string) while the stored columns are
+     * `order_number` and `id`; all of them are probed by `findOrder`.
+     */
+    const extra = {
+      store_slug: req.query.store_slug || body.store_slug || body.storeSlug,
+      store_id: req.query.store_id || body.store_id || body.storeId,
+      merchant_id: req.query.merchant_id || body.merchant_id || body.merchantId,
+      order_number: body.order_number || body.orderNumber,
+      orderNumber: body.orderNumber || body.order_number,
+      orderId: body.orderId || body.order_id,
+      order_id: body.order_id || body.orderId,
+      transaction_id: body.transaction_id || body.transactionId || body.trxId || body.trx_id,
+    };
+
+    // Shared with the Telegram webhook — see applyPaymentVerification.
+    const result = await applyPaymentVerification({
+      id,
+      action,
+      extra,
+      body,
     });
+    return res.status(200).json(result);
   } catch (err: any) {
     console.error('[Server] PATCH /api/admin/orders/:id/payment-verification error:', err);
     return res.status(200).json({ ok: false, error: err?.message || 'Payment verification failed.' });
+  }
+});
+
+/*
+ * GET|POST /api/admin/telegram-webhook/setup?url=https://<host>
+ *
+ * Registers this deployment's webhook with Telegram (setWebhook). Exists so
+ * enabling inline approval needs no shell and no hand-written curl: pass the
+ * public origin and the route computes `/api/admin/telegram-webhook`, attaches
+ * the configured secret token and reports Telegram's reply.
+ *
+ * Refuses to run without TELEGRAM_WEBHOOK_SECRET — registering a webhook WITHOUT
+ * the secret header would leave the approval endpoint open.
+ */
+app.all('/api/admin/telegram-webhook/setup', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const secret = telegramEnv('TELEGRAM_WEBHOOK_SECRET');
+    const tg = await resolveTelegramAlertConfig();
+    if (!tg.botToken) {
+      return res.status(200).json({ ok: false, error: 'Telegram bot token is not configured.' });
+    }
+    if (!secret) {
+      return res.status(200).json({
+        ok: false,
+        error: 'TELEGRAM_WEBHOOK_SECRET is not set. Add it in Vercel, redeploy, then retry.',
+      });
+    }
+
+    const origin = String(req.query.url || req.query.origin || '').trim().replace(/\/+$/, '');
+    if (!/^https:\/\/[a-z0-9.-]+/i.test(origin)) {
+      return res.status(200).json({ ok: false, error: 'Pass ?url=https://<your-domain>' });
+    }
+    const webhookUrl = `${origin}/api/admin/telegram-webhook`;
+
+    const setRes = await fetch(`https://api.telegram.org/bot${tg.botToken}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: webhookUrl,
+        secret_token: secret,
+        allowed_updates: ['callback_query', 'message'],
+        drop_pending_updates: false,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data: any = await setRes.json().catch(() => null);
+    console.log('[Telegram] setWebhook:', { webhookUrl, ok: data?.ok, description: data?.description });
+    return res.status(200).json({
+      ok: Boolean(data?.ok),
+      webhookUrl,
+      description: data?.description || `HTTP ${setRes.status}`,
+    });
+  } catch (err: any) {
+    console.error('[Server] telegram-webhook/setup error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not register the webhook.' });
+  }
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * TELEGRAM WEBHOOK — inline payment approval/rejection
+ *
+ * POST /api/admin/telegram-webhook
+ *   Body: a Telegram Update (callback_query from the inline buttons).
+ *
+ * SECURITY
+ * --------
+ * This endpoint can move money, so it is not open:
+ *   1. Telegram is asked to send `X-Telegram-Bot-Api-Secret-Token`, which must
+ *      equal TELEGRAM_WEBHOOK_SECRET (set once via `setWebhook`). Any request
+ *      without it is rejected before a body is even parsed.
+ *   2. The update is dropped unless it comes from the configured admin chat — a
+ *      bot added to some other group cannot approve an order.
+ *   3. The callback only carries an ORDER IDENTIFIER. The order is re-read from
+ *      MongoDB, so a forged/edited payload cannot redirect the decision to a
+ *      different store's order than the one the message described.
+ *
+ * Both Telegram and the Super Admin may act on the same order; the second
+ * decision simply re-applies the terminal state, which is idempotent.
+ * ──────────────────────────────────────────────────────────────────────────── */
+app.post('/api/admin/telegram-webhook', async (req, res) => {
+  // Always 200: a non-2xx makes Telegram retry the same update repeatedly.
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const expectedSecret = telegramEnv('TELEGRAM_WEBHOOK_SECRET');
+    const providedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '').trim();
+
+    if (!expectedSecret) {
+      console.warn('[TelegramWebhook] TELEGRAM_WEBHOOK_SECRET is not set — refusing all updates.');
+      return res.status(200).json({ ok: false, error: 'Webhook secret is not configured.' });
+    }
+    if (providedSecret !== expectedSecret) {
+      console.warn('[TelegramWebhook] rejected: bad secret token', {
+        hadHeader: Boolean(providedSecret),
+      });
+      return res.status(200).json({ ok: false, error: 'Invalid secret token.' });
+    }
+
+    const update = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const callback = update.callback_query;
+    if (!callback) {
+      // A plain message/edited_message is acknowledged and ignored.
+      return res.status(200).json({ ok: true, ignored: 'not a callback_query' });
+    }
+
+    const tg = await resolveTelegramAlertConfig();
+    if (tg.source === 'none') {
+      return res.status(200).json({ ok: false, error: 'Telegram is not configured.' });
+    }
+
+    // Only the configured admin chat may decide a payment.
+    const fromChatId = String(callback?.message?.chat?.id ?? '').trim();
+    if (fromChatId && tg.chatId && fromChatId !== tg.chatId) {
+      console.warn('[TelegramWebhook] rejected: chat mismatch', { fromChatId, expected: tg.chatId });
+      return res.status(200).json({ ok: false, error: 'This chat is not authorised.' });
+    }
+
+    const data = String(callback?.data || '');
+    // Format: tvp:<approve|reject>:<order identifier>
+    const match = /^tvp:(approve|reject):(.+)$/.exec(data);
+    if (!match) {
+      await answerCallbackQuery(tg.botToken, callback.id, 'Unrecognised action.');
+      return res.status(200).json({ ok: true, ignored: 'unknown callback data' });
+    }
+    const action = match[1] as 'approve' | 'reject';
+    const orderRef = match[2].trim();
+
+    const who = String(
+      [callback?.from?.first_name, callback?.from?.last_name].filter(Boolean).join(' ') ||
+      callback?.from?.username || 'Telegram admin'
+    ).trim();
+
+    console.log('[TelegramWebhook] decision received:', {
+      action,
+      orderRef,
+      by: who,
+      chatId: fromChatId,
+    });
+
+    const result = await applyPaymentVerification({
+      id: orderRef,
+      action,
+      extra: { order_number: orderRef, orderNumber: orderRef, orderId: orderRef },
+      body: { processed_by: `telegram:${who}` },
+    });
+
+    const orderNumber = String(result.orderNumber || orderRef);
+
+    if (!result.ok) {
+      const error = String(result.error || 'The order could not be updated.');
+      console.warn('[TelegramWebhook] decision failed:', { orderRef, action, error });
+      await answerCallbackQuery(tg.botToken, callback.id, `❌ ${error}`.slice(0, 190));
+      await editTelegramMessage(tg.botToken, tg.chatId, callback?.message?.message_id, {
+        text: `${String(callback?.message?.text || '').split('\n').slice(0, 1).join('\n')}\n\n⚠️ <b>Update failed</b>\n${escapeHtmlForTelegram(error)}`,
+      }).catch(() => undefined);
+      return res.status(200).json({ ok: false, error });
+    }
+
+    // Replace the message with the final state and REMOVE the buttons, so the
+    // same approval cannot be tapped twice from the chat history.
+    const approved = result.action === 'approved';
+    const header = approved ? '✅ <b>Payment APPROVED</b>' : '🚫 <b>Payment REJECTED</b>';
+    const lines = [
+      header,
+      '',
+      `🧾 Order: <code>${escapeHtmlForTelegram(orderNumber)}</code>`,
+      `👤 Customer: ${escapeHtmlForTelegram(String(callback?.message?.text || '').match(/Customer: (.+)/)?.[1] || '—')}`,
+      `📅 ${new Date().toISOString().replace('T', ' ').slice(0, 16)} UTC`,
+      `🖐 By: ${escapeHtmlForTelegram(who)} (Telegram)`,
+    ];
+    if (approved) {
+      lines.push('', '💰 Merchant wallet credited and the seller can dispatch the order.');
+    } else {
+      lines.push('', '↩️ The order is voided and will not be dispatched.');
+    }
+
+    await editTelegramMessage(tg.botToken, tg.chatId, callback?.message?.message_id, {
+      text: lines.join('\n'),
+      reply_markup: { inline_keyboard: [] },
+    }).catch((err: any) => console.warn('[TelegramWebhook] editMessageText warning:', err?.message || err));
+
+    await answerCallbackQuery(
+      tg.botToken,
+      callback.id,
+      approved ? '✅ Payment approved — merchant credited.' : '🚫 Payment rejected — order voided.'
+    );
+
+    // Keep the dashboard audit trail complete even when the decision was made
+    // from a phone.
+    void appendAuditLog({
+      adminUser: `Telegram: ${who}`,
+      action: `${approved ? 'Approved' : 'Rejected'} payment for ${orderNumber} via Telegram`,
+      targetEntity: orderNumber,
+      severity: 'Info',
+    }).catch(() => undefined);
+
+    return res.status(200).json({ ok: true, action: result.action, orderNumber });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/telegram-webhook error:', err);
+    // Still 200 — see the note above about Telegram retries.
+    return res.status(200).json({ ok: false, error: err?.message || 'Webhook failed.' });
   }
 });
 

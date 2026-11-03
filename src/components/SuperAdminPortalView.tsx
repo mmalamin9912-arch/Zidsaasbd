@@ -358,58 +358,16 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'orders' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics'>('analytics');
   const [openCategory, setOpenCategory] = useState<string | null>(null);
 
-  // Order payment verification queue: orders awaiting the admin's TrxID decision.
+  /*
+   * Order payment verification queue — READ-ONLY status view.
+   *
+   * Approve/reject now happens from the inline buttons on the Telegram alert
+   * (POST /api/admin/telegram-webhook), so the manual action handlers and the
+   * per-row "verifying" bookkeeping were removed. This list still polls so an
+   * admin sees what is outstanding and watches decided rows drop off.
+   */
   const [verificationOrders, setVerificationOrders] = useState<Order[]>([]);
   const [verificationLoading, setVerificationLoading] = useState(false);
-  const verifyingIds = useRef<Set<string>>(new Set());
-
-  /** Approve or reject one pending-verification order via the admin API. */
-  const handleVerificationDecision = async (ord: Order, action: 'approve' | 'reject'): Promise<void> => {
-    verifyingIds.current.add(ord.id);
-    try {
-      const res = await fetch(`/api/admin/orders/${encodeURIComponent(ord.id)}/payment-verification`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        // Send EVERY identifier the row carries. The stored document is keyed
-        // on `order_number` (and sometimes only on its `id` column), neither of
-        // which is necessarily the queue row's `id`, so the server must be
-        // able to match on all of them.
-        body: JSON.stringify({
-          action,
-          processed_by: 'super_admin',
-          orderId: ord.id,
-          order_id: ord.id,
-          _id: (ord as any)._id,
-          orderNumber: ord.orderNumber,
-          order_number: ord.orderNumber,
-          transaction_id: ord.transactionId,
-          store_slug: (ord as any).store_slug || (ord as any).storeSlug,
-          store_id: (ord as any).store_id || (ord as any).storeId,
-          merchant_id: (ord as any).merchant_id || (ord as any).merchantId,
-          vendor_id: (ord as any).vendor_id || (ord as any).vendorId,
-        }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.ok) throw new Error(data?.error || `Verification ${action} failed.`);
-
-      // Drop the resolved row from the queue so the admin sees progress.
-      setVerificationOrders((prev) => prev.filter((o) => o.id !== ord.id));
-      const verifiedNumber =
-        (data?.order && ((data.order as any).order_number || (data.order as any).orderNumber)) || ord.orderNumber;
-      toast.success(
-        action === 'approve'
-          ? `Payment verified — order ${verifiedNumber} marked Paid and seller credited.`
-          : `Payment rejected — order ${verifiedNumber} voided.`
-      );
-    } catch (err: any) {
-      toast.error(`Could not ${action} payment for ${ord.orderNumber}. ${err?.message || 'Please try again.'}`);
-      // The row stayed in the queue; re-read it so a stale number is refreshed
-      // instead of the admin clicking the same broken row again.
-      void fetchVerificationOrders();
-    } finally {
-      verifyingIds.current.delete(ord.id);
-    }
-  };
 
   // New modal state for creating merchant
   const [isCreateMerchantModalOpen, setIsCreateMerchantModalOpen] = useState(false);
@@ -2990,8 +2948,9 @@ onUpdateMerchant(updatedCurrent);
                 </h3>
                 <p className="text-xs text-slate-400 mt-1">
                   Orders paid by wallet (bKash / Nagad / Bank) whose TrxID the
-                  platform has not yet verified. Approving releases the net
-                  amount to the seller's wallet; rejecting voids the payment.
+                  platform has not yet verified. Payments are now approved or
+                  rejected directly from the Telegram alert — this list is the
+                  live status view and needs no manual action.
                 </p>
               </div>
               <span
@@ -3035,7 +2994,6 @@ onUpdateMerchant(updatedCurrent);
                     </tr>
                   ) : (
                     verificationOrders.map((ord) => {
-                      const busy = verifyingIds.current.has(ord.id);
                       return (
                         <tr key={ord.id} className="hover:bg-[#202533]/50 transition group">
                           <td className="p-3.5">
@@ -3061,21 +3019,17 @@ onUpdateMerchant(updatedCurrent);
                           <td className="p-3.5 text-slate-400 text-[11px] font-mono">
                             {new Date(ord.createdAt || ord.created_at || 0).toLocaleDateString() || '—'}
                           </td>
-                          <td className="p-3.5 text-right space-x-2">
-                            <button
-                              onClick={() => void handleVerificationDecision(ord, 'approve')}
-                              disabled={busy}
-                              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition shadow-lg shadow-emerald-600/20"
-                            >
-                              {verifyingIds.current.has(ord.id) ? 'Approving…' : 'Approve Payment'}
-                            </button>
-                            <button
-                              onClick={() => void handleVerificationDecision(ord, 'reject')}
-                              disabled={busy}
-                              className="bg-rose-600 hover:bg-rose-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold px-3 py-1.5 rounded-lg text-[10px] uppercase transition shadow-lg shadow-rose-600/20"
-                            >
-                              {verifyingIds.current.has(ord.id) ? 'Rejecting…' : 'Reject Payment'}
-                            </button>
+                          <td className="p-3.5 text-right">
+                            {/*
+                             * Decisions are made from the Telegram alert's
+                             * inline buttons. This dash simply reflects the
+                             * state — a row that has been decided disappears
+                             * from the queue on the next poll.
+                             */}
+                            <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                              Awaiting Telegram
+                            </span>
                           </td>
                         </tr>
                       );
