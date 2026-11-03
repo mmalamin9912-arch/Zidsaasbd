@@ -59,24 +59,46 @@ const bdt = (v: number) => `৳${Math.round(Number(v) || 0).toLocaleString('en-U
  * Returns '' when none exists so SafeImage renders its local placeholder
  * instead of a broken/missing icon.
  */
+const loggedImageItems = new Set<string>();
+
+function imageUrlFromValue(value: any): string {
+  if (typeof value === 'string') return value.trim();
+  if (!value || typeof value !== 'object') return '';
+  return String(
+    value.url ??
+    value.src ??
+    value.image ??
+    value.image_url ??
+    value.imageUrl ??
+    value.thumbnail ??
+    value.path ??
+    '',
+  ).trim();
+}
+
 function productImageOf(p: any, line?: any): string {
-  const image = [
-    p?.image,
-    p?.thumbnail,
-    p?.image_url,
-    p?.imageUrl,
-    p?.thumbnailUrl,
-    p?.productImage,
-    p?.product_image,
+  const nestedProduct = p?.product && typeof p.product === 'object' ? p.product : null;
+  const candidates = [
+    p?.image, p?.imageUrl, p?.image_url, p?.thumbnail, p?.thumbnailUrl,
+    p?.productImage, p?.product_image, p?.photo, p?.photoUrl,
     ...(Array.isArray(p?.images) ? p.images : []),
-    line?.image,
-    line?.thumbnail,
-    line?.image_url,
-    line?.imageUrl,
-  ]
-    .map((value) => String(value ?? '').trim())
-    .find((value) => value !== '' && value !== '#') || '';
-  return resolveImageUrl(image);
+    nestedProduct?.image, nestedProduct?.imageUrl, nestedProduct?.image_url,
+    ...(Array.isArray(nestedProduct?.images) ? nestedProduct.images : []),
+    line?.image, line?.imageUrl, line?.image_url, line?.thumbnail,
+    ...(Array.isArray(line?.images) ? line.images : []),
+  ];
+  const image = candidates.map(imageUrlFromValue).find((value) => value !== '' && value !== '#') || '';
+  const itemKey = String(p?.id || p?.productId || p?.product_id || line?.productId || '');
+  if (import.meta.env.DEV && itemKey && !loggedImageItems.has(itemKey)) {
+    loggedImageItems.add(itemKey);
+    console.debug('[MarketplaceCheckout] resolved cart item image', {
+      itemKey,
+      image,
+      product: p,
+      line,
+    });
+  }
+  return resolveImageUrl(image, '/placeholder.svg');
 }
 
 /** All 64 districts — a courier needs the real one, not a header shortcut. */
@@ -1214,8 +1236,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                           <div key={`${vendor.vendorId}-${p.id}`} className="mb-2 flex gap-2.5 last:mb-0">
                           <SafeImage
                             src={productImageOf(p, line)}
+                            fallbackSrc="/placeholder.svg"
                             alt={p.title || p.name || 'Item'}
-                            className="w-20 h-20 shrink-0 rounded-lg border object-cover"
+                            width={80}
+                            height={80}
+                            className="h-20 w-20 shrink-0 rounded-lg border object-cover"
                           />
                             <div className="min-w-0 flex-1">
                               {/* `name` is the legacy fallback — a basket stored
