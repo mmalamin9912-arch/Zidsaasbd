@@ -1,0 +1,21 @@
+{
+  "name": "Zid SaaS BD",
+  "short_name": "Zid BD",
+  "description": "Bangladesh's multi-vendor marketplace and e-commerce SaaS platform.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#12151F",
+  "theme_color": "#12151F",
+  "icons": [
+    {
+      "src": "/favicon-48.png",
+      "sizes": "48x48",
+      "type": "image/png"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
