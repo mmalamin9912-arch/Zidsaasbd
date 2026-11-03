@@ -813,20 +813,21 @@ export default function App() {
         if (!isMounted || !res.ok) return;
         const data = await res.json().catch(() => null);
         if (!isMounted || !Array.isArray(data)) return;
-        // ── Authority guard ───────────────────────────────────────────────
-        // GET /api/orders answers 200 + [] BOTH for "this store has no rows"
-        // AND for a DEGRADED database (a Mongo connect failure returns []
-        // WITHOUT the X-Orders-* headers). This effect re-runs on every tab
-        // switch (pendingIdentity includes activeTab), so applying that empty
-        // list blanked the sidebar badge and flashed "No orders found" across
-        // the whole table. Keep the previous data unless the answer is
-        // confirmed authoritative: non-empty, or the DB headers prove the
-        // database was actually read.
-        const authoritative =
-          data.length > 0 ||
-          (res.headers.get('X-Orders-Degraded') !== 'true' &&
-            res.headers.get('X-Orders-Source') === 'mongodb');
-        if (!authoritative) return;
+        /*
+         * ── DEGRADED RESPONSES ARE REJECTED; GENUINE EMPTIES ARE ACCEPTED ──
+         *
+         * The old guard ALSO rejected a legitimate empty list whenever the
+         * headers were absent (older deploy, proxy stripping them, a 200 from
+         * the cache tier), so a store that really had zero matching orders
+         * kept rendering the previous list forever. The signal that actually
+         * matters is the server's explicit degraded flag — a Mongo read failure
+         * sets `X-Orders-Degraded: true`. Without that flag the array IS the
+         * store's current truth, empty or not.
+         */
+        if (res.headers.get('X-Orders-Degraded') === 'true') {
+          console.warn('[App] orders response was degraded — keeping the current list');
+          return;
+        }
         // API rows are raw Mongo documents (total_price / created_at / items as
         // a JSON string). Normalize them into the UI `Order` shape so the
         // dashboard never renders `.toLocaleString()` on an undefined field.
@@ -849,8 +850,13 @@ export default function App() {
     return () => {
       isMounted = false;
     };
+    // NOTE: keyed on the ORDER-RELEVANT identity only, not `pendingIdentity`.
+    // `pendingIdentity` embeds `activeTab`, so every tab switch tore down this
+    // effect and re-fetched into a fresh closure — the list visibly reset, then
+    // repopulated, which read as "orders randomly disappearing". The identity
+    // fields below are exactly what the orders query depends on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingIdentity]);
+  }, [merchant?.id, merchant?.storeCode, merchant?.storeSlug]);
 
   // Auto-sync merchant settings and categories to Supabase on change.
   // Skip the very first run (initial hydration) and only sync when a field we
@@ -2744,8 +2750,21 @@ onPlaceOrder={async (newOrder) => {
                 // (see OrdersViewProps.onSyncOrders for the loop this breaks).
                 onSyncOrders={setOrders}
                 setOrders={setOrders}
-                merchantId={merchant?.id}
-                storeSlug={merchant?.storeSlug}
+                /*
+                 * IDENTITY MUST NEVER BE BLANK.
+                 *
+                 * `OrdersView`'s poll bails out with `if (!merchantId &&
+                 * !storeSlug) return;` — so a merchant whose profile has no
+                 * UUID `id` (created before ids were minted, or logged in via
+                 * slug) never polled at all, and the table stayed empty while
+                 * the orders were sitting in the database. The initial load
+                 * above already falls back to the store code and slug, so the
+                 * poll must use exactly the same identity. `GET /api/orders`
+                 * treats these as an `$or` (never an AND), so sending more
+                 * identifiers can only broaden the match, not narrow it.
+                 */
+                merchantId={merchant?.id || merchant?.storeCode || merchant?.storeSlug}
+                storeSlug={merchant?.storeSlug || merchant?.id || merchant?.storeCode}
                 // Page ID powers "Share to Messenger": the chat opens directly
                 // when set; the invoice text is copied either way.
                 facebookPageId={merchant?.integrationsConfig?.facebookPageId}

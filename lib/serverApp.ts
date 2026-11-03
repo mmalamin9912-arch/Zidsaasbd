@@ -16217,16 +16217,53 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
   const slugValues = Array.from(slugs);
   const vendorValues = Array.from(vendorIds);
 
-  const or: Record<string, { $in: string[] }>[] = [
+  /*
+   * CASE-INSENSITIVE slow-but-exact fallbacks.
+   *
+   * `store_slug` is written by several callers (checkout, dashboard sync, the
+   * marketplace split) and not all of them lowercase it (`MyStore` vs
+   * `mystore`). A `$in` compare is exact AND case-sensitive, so an order written
+   * under a capitalised slug was invisible to the merchant whose dashboard polls
+   * with the canonical lower-case one — a placed, paid, verified order that
+   * simply never appeared in "Orders". The regex alternatives below run as a
+   * second `$or` branch and depend on no index ordering, so they are safe to add
+   * alongside the exact matches rather than replacing them.
+   */
+  const escapeRegex = (value: string) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const caseInsensitiveValues = Array.from(new Set([
+    ...slugValues,
+    ...all.filter((v) => !isUuidLike(v) && !STORE_CODE_RE.test(v)).map((v) => v.toLowerCase()),
+  ])).filter((v) => v && v.length <= 120);
+  const caseInsensitive = caseInsensitiveValues.map(
+    (v) => new RegExp(`^${escapeRegex(v)}$`, 'i')
+  );
+
+  const or: Record<string, any>[] = [
     { store_id: { $in: all } },
     { storeId: { $in: all } },
     { store_slug: { $in: all } },
     { storeSlug: { $in: all } },
     { merchant_store_slug: { $in: all } },
     { merchant_storeSlug: { $in: all } },
+    { merchant_slug: { $in: all } },
     { merchant_id: { $in: all } },
     { merchantId: { $in: all } },
   ];
+
+  if (caseInsensitive.length) {
+    or.push(
+      { store_slug: { $in: caseInsensitive } },
+      { storeSlug: { $in: caseInsensitive } },
+      { merchant_store_slug: { $in: caseInsensitive } },
+      { merchant_storeSlug: { $in: caseInsensitive } },
+      { merchant_slug: { $in: caseInsensitive } },
+      { vendor_slug: { $in: caseInsensitive } },
+      { vendorSlug: { $in: caseInsensitive } },
+      { vendor_slugs: { $in: caseInsensitive } },
+      { vendorSlugs: { $in: caseInsensitive } },
+      { store_code: { $in: all.filter((v) => STORE_CODE_RE.test(v)).flatMap((v) => [v, v.toUpperCase(), v.toLowerCase()]) } },
+    );
+  }
 
   // `vendor_id` is a CHILD-order attribution column. Only compare it against the
   // merchant's own canonical ids/slugs — the dashboard sends both
@@ -16234,11 +16271,22 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
   // not be compared against a sibling store's random slug value.
   if (vendorValues.length) or.push({ vendor_id: { $in: vendorValues } }, { vendorId: { $in: vendorValues } });
   if (slugValues.length) or.push({ vendor_id: { $in: slugValues } }, { vendorId: { $in: slugValues } });
+  // A slug in `vendor_id` is compared case-insensitively too, so a child order
+  // keyed on a capitalised vendor slug is still owned by this merchant.
+  if (caseInsensitive.length) {
+    or.push({ vendor_id: { $in: caseInsensitive } }, { vendorId: { $in: caseInsensitive } });
+  }
 
-  // Store codes: match the canonical upper-case form (the resolver normalises it).
-  const codeValues = all.filter((v) => STORE_CODE_RE.test(v));
+  // Store codes: match every case spelling the resolver or the writer may have
+  // used (`ZID-BD-5150` vs `zid-bd-5150`).
+  const codeValues = all
+    .filter((v) => STORE_CODE_RE.test(v))
+    .flatMap((v) => [v, v.toUpperCase(), v.toLowerCase()]);
   if (codeValues.length) {
-    or.push({ store_code: { $in: codeValues } }, { storeCode: { $in: codeValues } });
+    or.push(
+      { store_code: { $in: Array.from(new Set(codeValues)) } },
+      { storeCode: { $in: Array.from(new Set(codeValues)) } },
+    );
   }
 
   /*
@@ -18950,6 +18998,86 @@ app.delete('/api/orders/:id', async (req, res) => {
   }
 });
 
+/*
+ * GET /api/admin/orders/diagnostics?store_slug=<slug>&merchant_id=<id>
+ *
+ * Answers "the order exists, so WHY is the dashboard not seeing it?" without
+ * reading function logs or opening a Mongo shell. It reports:
+ *   • which database / collection the order routes actually read,
+ *   • a census of the store-related columns across the newest rows,
+ *   • the exact query the merchant dashboard would run, and how many rows it
+ *     matches — plus how many it would match WITHOUT the store filter.
+ * Read-only; it never writes.
+ */
+app.get('/api/admin/orders/diagnostics', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = String(
+      req.query.store_slug || req.query.storeSlug || req.query.merchant_id ||
+      req.query.merchantId || req.query.store_id || req.query.storeId || ''
+    ).trim();
+
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) {
+      return res.status(200).json({ ok: false, error: 'MongoDB is unavailable.', dbName: ORDERS_DB_NAME });
+    }
+
+    const total = await db.collection(ORDERS_COLLECTION).countDocuments({});
+    const newest = await db
+      .collection(ORDERS_COLLECTION)
+      .find({}, {
+        projection: {
+          id: 1, order_number: 1, order_type: 1, parent_order_id: 1,
+          store_id: 1, store_slug: 1, storeSlug: 1, store_code: 1,
+          merchant_id: 1, merchantId: 1, vendor_id: 1, vendor_slug: 1,
+          vendor_slugs: 1, payment_status: 1, paymentStatus: 1, created_at: 1,
+        },
+      })
+      .sort({ created_at: -1, _id: -1 })
+      .limit(20)
+      .toArray()
+      .catch(() => []);
+
+    let storeQuery: any = null;
+    let matched = 0;
+    if (storeRef) {
+      storeQuery = await buildOrderQuery(storeRef);
+      if (storeQuery) {
+        matched = await db.collection(ORDERS_COLLECTION).countDocuments(storeQuery).catch(() => 0);
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      dbName: ORDERS_DB_NAME,
+      collection: ORDERS_COLLECTION,
+      totalOrders: total,
+      storeRef: storeRef || null,
+      storeQuery,
+      matchedForStore: storeRef ? matched : null,
+      // `$or` with regexes cannot be serialised back to a query string, so the
+      // rows that thread the needle are shown instead.
+      newestSample: newest.map((r: any) => ({
+        order_number: r.order_number || r.id || null,
+        order_type: r.order_type || null,
+        parent_order_id: r.parent_order_id || null,
+        store_id: r.store_id || null,
+        store_slug: r.store_slug || r.storeSlug || null,
+        store_code: r.store_code || null,
+        merchant_id: r.merchant_id || r.merchantId || null,
+        vendor_id: r.vendor_id || null,
+        vendor_slug: r.vendor_slug || null,
+        vendor_slugs: r.vendor_slugs || null,
+        payment_status: r.payment_status || r.paymentStatus || null,
+        created_at: r.created_at || null,
+      })),
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/orders/diagnostics error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Diagnostics failed.' });
+  }
+});
+
 // ── Admin orders for payment verification (all merchants) ──────────────────
 app.get('/api/admin/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
@@ -18969,15 +19097,36 @@ app.get('/api/admin/orders', async (req, res) => {
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 500;
     const paymentValues = paymentStatusFilterValues(payment_status);
-    if (/^pending[_\s-]?verification$/i.test(payment_status)) {
-      paymentValues.push('pending_verification', 'Pending Verification', 'pending verification');
+    const isPendingQueue = /^(pending|pendingverification|pendingpayment|unpaidreview)/i.test(
+      payment_status.replace(/[_\s-]/g, '')
+    );
+    if (isPendingQueue) {
+      // THE VERIFICATION QUEUE IS "EVERYTHING AWAITING A DECISION".
+      //
+      // Orders reach Mongo from several writers with different spellings of the
+      // same state: `pending_verification` (checkout), `Pending Verification`
+      // (dashboard sync) and a bare `pending` / `pending_payment` (legacy rows,
+      // manual orders). Matching only the long form left real, unpaid orders out
+      // of the Super Admin queue while the merchant could see them.
+      paymentValues.push(
+        'pending_verification', 'Pending Verification', 'pending verification',
+        'pending', 'Pending', 'pending_payment', 'pending payment',
+        'pendingpayment', 'PENDING_VERIFICATION',
+      );
     }
 
+    /*
+     * Payment status is written under both spellings (`payment_status` and
+     * `paymentStatus`), and a row may be stored with NEITHER (an older document,
+     * or one whose writer omitted it) — but such a row is not awaiting
+     * verification, so it stays out. `$in` is case-sensitive, hence the exact
+     * list above carries every casing a writer may have used.
+     */
     const query: any = {
       $or: [
         { payment_status: { $in: Array.from(new Set(paymentValues)) } },
         { paymentStatus: { $in: Array.from(new Set(paymentValues)) } },
-      ]
+      ],
     };
 
     let orders: any[] = [];
@@ -18998,7 +19147,9 @@ app.get('/api/admin/orders', async (req, res) => {
 
     const cachedOrders = Array.from(recentOrdersCache.values()).filter((o: any) => {
       const ps = canonicalPaymentStatus(o?.payment_status || o?.paymentStatus);
-      return ps === 'Pending Verification';
+      // Same rule as the database query: the long form, or a bare `pending`
+      // (a legacy row still waiting on the admin).
+      return ps === 'Pending Verification' || /^pending$/i.test(String(ps || ''));
     });
     const combinedOrders = [...orders, ...cachedOrders];
     const dedupedOrders = Array.from(
@@ -19010,7 +19161,12 @@ app.get('/api/admin/orders', async (req, res) => {
       ).values()
     ).sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime()).slice(0, limit);
 
-    const ordersWithImages = dedupedOrders.map(hydrateOrderItemImages);
+    // The queue renders `.toLocaleString()` on amounts and reads camelCase, so
+    // every row leaves here in the dashboard's shape — a raw Mongo row put an
+    // `undefined` amount on screen and looked like a broken/empty queue.
+    const ordersWithImages = dedupedOrders
+      .map((row) => hydrateOrderItemImages(normalizeOrderRow(row) || row))
+      .filter(Boolean);
     const degraded = !dbConnected || queryFailed;
     res.setHeader('X-Orders-Source', degraded ? 'cache' : 'mongodb');
     res.setHeader('X-Orders-Count', String(dedupedOrders.length));

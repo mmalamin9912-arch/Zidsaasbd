@@ -468,9 +468,22 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
         console.warn('[SuperAdmin] keeping previous verification queue after degraded response');
         return;
       }
+      /*
+       * The SERVER decides what belongs in the verification queue.
+       *
+       * The old client-side filter only accepted `/pending[_-]?verification/`,
+       * so a row the API correctly returned under a bare `pending` (legacy /
+       * manual orders) was silently thrown away AFTER the fetch — the panel said
+       * "No payments awaiting verification" while the database held unpaid
+       * orders. Only rows already resolved (paid/voided/refunded) are excluded
+       * here, which is the one thing the queue must never show.
+       */
       const orders = rows
         .map((o: any) => o)
-        .filter((o: any) => /pending[_\s-]?verification/i.test(String(o?.paymentStatus ?? o?.payment_status ?? '')))
+        .filter((o: any) => {
+          const status = String(o?.paymentStatus ?? o?.payment_status ?? '').trim().toLowerCase();
+          return !/^(paid|voided|refunded|cancelled|canceled|failed|completed)$/.test(status);
+        })
         .sort((a: any, b: any) => new Date(b?.created_at ?? b?.createdAt ?? 0).getTime() - new Date(a?.created_at ?? a?.createdAt ?? 0).getTime());
       setVerificationOrders(orders);
     } catch (err: any) {

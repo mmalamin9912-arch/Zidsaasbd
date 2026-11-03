@@ -430,29 +430,29 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           return;
         }
 
-        // ── Authority guard ─────────────────────────────────────────────────
-        // GET /api/orders answers 200 + [] BOTH for "this store truly has no
-        // rows" AND for a DEGRADED database (a Mongo connect failure returns
-        // [] WITHOUT the X-Orders-* headers). Applying that empty list is what
-        // made the table flicker to "No orders found" and back every time the
-        // API hiccuped. Keep the previous data — the equivalent of SWR's
-        // keepPreviousData — unless the answer is confirmed authoritative:
-        // non-empty, or the DB headers prove the database was actually read.
+        /*
+         * ── Keep-previous-ONLY-when-degraded ────────────────────────────────
+         *
+         * The previous guard treated "empty array + no X-Orders-* headers" as a
+         * degraded answer and kept the old rows. But a legitimate empty list
+         * (the store truly has no orders, or every row was filtered out by a
+         * server-side limit) also arrives that way whenever a proxy or an older
+         * deploy drops the headers — and then the table showed STALE orders
+         * forever, while the "pending verification" badge and the tab counts
+         * (computed from fresher probes) disagreed with it. That mismatch is
+         * the "orders keep disappearing / reappearing" flapping.
+         *
+         * The server sets `X-Orders-Degraded: true` explicitly when a Mongo read
+         * failed. That flag — and only that flag — means "do not trust this
+         * list". An empty list without it IS the truth for this store.
+         */
         const degraded = res.headers.get('X-Orders-Degraded') === 'true';
-        const authoritative =
-          rows.length > 0 ||
-          (res.headers.get('X-Orders-Degraded') !== 'true' &&
-            res.headers.get('X-Orders-Source') === 'mongodb');
-        if (!authoritative) {
-          console.warn('Orders poll returned a non-authoritative empty list — keeping the current orders.');
+        if (degraded) {
+          console.warn('Orders poll was degraded — keeping the current orders.');
           setLiveSync({ state: 'degraded', at: Date.now(), message: 'Database unavailable' });
           return;
         }
-        setLiveSync({
-          state: degraded ? 'degraded' : 'live',
-          at: Date.now(),
-          message: degraded ? (res.headers.get('X-Orders-Warning') || 'Serving cached orders') : undefined,
-        });
+        setLiveSync({ state: 'live', at: Date.now() });
 
         const signature = JSON.stringify(rows);
         // Reconcile on every tick while a write is in flight or a previous
