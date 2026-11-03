@@ -824,8 +824,8 @@ export default function App() {
         // database was actually read.
         const authoritative =
           data.length > 0 ||
-          res.headers.get('X-Orders-Source') === 'mongodb' ||
-          res.headers.get('X-Orders-Count') !== null;
+          (res.headers.get('X-Orders-Degraded') !== 'true' &&
+            res.headers.get('X-Orders-Source') === 'mongodb');
         if (!authoritative) return;
         // API rows are raw Mongo documents (total_price / created_at / items as
         // a JSON string). Normalize them into the UI `Order` shape so the

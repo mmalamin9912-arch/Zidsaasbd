@@ -441,8 +441,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         const degraded = res.headers.get('X-Orders-Degraded') === 'true';
         const authoritative =
           rows.length > 0 ||
-          res.headers.get('X-Orders-Source') === 'mongodb' ||
-          res.headers.get('X-Orders-Count') !== null;
+          (res.headers.get('X-Orders-Degraded') !== 'true' &&
+            res.headers.get('X-Orders-Source') === 'mongodb');
         if (!authoritative) {
           console.warn('Orders poll returned a non-authoritative empty list — keeping the current orders.');
           setLiveSync({ state: 'degraded', at: Date.now(), message: 'Database unavailable' });

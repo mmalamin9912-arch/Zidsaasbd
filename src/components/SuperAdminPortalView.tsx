@@ -441,6 +441,11 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       });
       const data = await res.json().catch(() => null);
       const rows = Array.isArray(data) ? data : Array.isArray(data?.orders) ? data.orders : [];
+      const degraded = res.headers.get('X-Orders-Degraded') === 'true';
+      if (!res.ok || (degraded && rows.length === 0)) {
+        console.warn('[SuperAdmin] keeping previous verification queue after degraded response');
+        return;
+      }
       const orders = rows
         .map((o: any) => o)
         .filter((o: any) => /pending[_\s-]?verification/i.test(String(o?.paymentStatus ?? o?.payment_status ?? '')))
@@ -448,7 +453,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       setVerificationOrders(orders);
     } catch (err: any) {
       console.warn('[SuperAdmin] verification orders fetch warning:', err?.message || err);
-      setVerificationOrders([]);
+      // Keep the last successful queue visible during transient API failures.
     } finally {
       setVerificationLoading(false);
     }

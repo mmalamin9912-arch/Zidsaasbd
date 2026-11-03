@@ -16429,7 +16429,9 @@ app.get('/api/orders', async (req, res) => {
       .sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime())
       .slice(0, limit);
 
-    res.setHeader('X-Orders-Count', String(dedupedOrders.length));
+    if (dbConnected && !queryFailed) {
+      res.setHeader('X-Orders-Count', String(dedupedOrders.length));
+    }
     res.setHeader('X-Orders-Filtered', filterClauses ? 'true' : 'false');
     /*
      * A DEGRADED ANSWER MUST SAY SO.
@@ -18704,6 +18706,7 @@ app.get('/api/admin/orders', async (req, res) => {
     };
 
     let orders: any[] = [];
+    let queryFailed = false;
     if (dbConnected) {
       try {
         orders = await (Order as any)
@@ -18714,6 +18717,7 @@ app.get('/api/admin/orders', async (req, res) => {
       } catch (queryErr: any) {
         console.warn('[Server] GET /api/admin/orders query warning:', queryErr?.message || queryErr);
         orders = [];
+        queryFailed = true;
       }
     }
 
@@ -18732,8 +18736,13 @@ app.get('/api/admin/orders', async (req, res) => {
     ).sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime()).slice(0, limit);
 
     const ordersWithImages = dedupedOrders.map(hydrateOrderItemImages);
-    res.setHeader('X-Orders-Source', dbConnected ? 'mongodb' : 'cache');
+    const degraded = !dbConnected || queryFailed;
+    res.setHeader('X-Orders-Source', degraded ? 'cache' : 'mongodb');
     res.setHeader('X-Orders-Count', String(dedupedOrders.length));
+    if (degraded) {
+      res.setHeader('X-Orders-Degraded', 'true');
+      res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
+    }
     return res.status(200).json(ordersWithImages);
   } catch (err: any) {
     console.error('[Server] GET /api/admin/orders error:', err);
