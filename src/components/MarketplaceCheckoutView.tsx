@@ -7,6 +7,7 @@ import {
 import SafeImage from './SafeImage';
 import type { AdminPaymentGatewayConfig } from '../types';
 import { useCart } from './CartProvider';
+import { resolveImageUrl } from '../utils/imageFallback';
 import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
 import {
@@ -58,17 +59,24 @@ const bdt = (v: number) => `৳${Math.round(Number(v) || 0).toLocaleString('en-U
  * Returns '' when none exists so SafeImage renders its local placeholder
  * instead of a broken/missing icon.
  */
-function productImageOf(p: any): string {
-  return String(
-    p?.image ??
-    p?.image_url ??
-    p?.imageUrl ??
-    p?.thumbnail ??
-    p?.productImage ??
-    p?.product_image ??
-    (Array.isArray(p?.images) && p.images.length > 0 ? p.images[0] : undefined) ??
-    ''
-  ).trim();
+function productImageOf(p: any, line?: any): string {
+  const image = [
+    p?.image,
+    p?.thumbnail,
+    p?.image_url,
+    p?.imageUrl,
+    p?.thumbnailUrl,
+    p?.productImage,
+    p?.product_image,
+    ...(Array.isArray(p?.images) ? p.images : []),
+    line?.image,
+    line?.thumbnail,
+    line?.image_url,
+    line?.imageUrl,
+  ]
+    .map((value) => String(value ?? '').trim())
+    .find((value) => value !== '' && value !== '#') || '';
+  return resolveImageUrl(image);
 }
 
 /** All 64 districts — a courier needs the real one, not a header shortcut. */
@@ -1205,7 +1213,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                         return (
                           <div key={`${vendor.vendorId}-${p.id}`} className="mb-2 flex gap-2.5 last:mb-0">
                           <SafeImage
-                            src={productImageOf(p) || undefined}
+                            src={productImageOf(p, line)}
                             alt={p.title || p.name || 'Item'}
                             className="w-20 h-20 shrink-0 rounded-lg border object-cover"
                           />
