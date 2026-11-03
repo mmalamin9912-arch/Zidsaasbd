@@ -13,7 +13,7 @@ import { MerchantProfile } from '../types';
 export interface AuthSession {
   email: string;
   loggedInAt: string;
-  userProfile: MerchantProfile;
+  userProfile?: Partial<MerchantProfile>;
   token?: string;
 }
 
@@ -71,12 +71,29 @@ function isValidSessionObject(obj: any): obj is AuthSession {
   return Boolean(hasEmail || hasProfile);
 }
 
+function compactSession(session: AuthSession): AuthSession {
+  const profile = session.userProfile;
+  return {
+    email: String(session.email || profile?.email || '').trim(),
+    loggedInAt: session.loggedInAt,
+    ...(session.token ? { token: session.token } : {}),
+    userProfile: profile
+      ? {
+          id: profile.id,
+          email: profile.email,
+          storeSlug: profile.storeSlug,
+          storeCode: profile.storeCode,
+          storeName: profile.storeName,
+        }
+      : undefined,
+  };
+}
+
 /**
  * Read the current auth session from any persistent storage layer:
  * 1. LocalStorage (`zid_auth_session`)
  * 2. SessionStorage (`zid_auth_session`)
  * 3. Client Cookie (`zid_auth_session`)
- * 4. Fallback Store Data (`ZID_MERCHANT_STORE_DATA`)
  */
 export function getStoredSession(): AuthSession | null {
   if (typeof window === 'undefined') return null;
@@ -98,8 +115,6 @@ export function getStoredSession(): AuthSession | null {
     if (rawSession) {
       const parsed = JSON.parse(rawSession);
       if (isValidSessionObject(parsed)) {
-        // Heal LocalStorage from SessionStorage
-        safeSetItem(SESSION_STORAGE_KEY, parsed);
         return parsed;
       }
     }
@@ -111,29 +126,7 @@ export function getStoredSession(): AuthSession | null {
     if (rawCookie) {
       const parsed = JSON.parse(rawCookie);
       if (isValidSessionObject(parsed)) {
-        // Heal LocalStorage and SessionStorage from Cookie
-        safeSetItem(SESSION_STORAGE_KEY, parsed);
-        try { sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(parsed)); } catch {}
         return parsed;
-      }
-    }
-  } catch {}
-
-  // 4. Try legacy / fallback store cache
-  try {
-    const storeData = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-    if (storeData) {
-      const parsed = JSON.parse(storeData);
-      const merchant = parsed?.merchant;
-      if (merchant && typeof merchant.email === 'string' && merchant.email.includes('@')) {
-        const reconstructed: AuthSession = {
-          email: merchant.email,
-          loggedInAt: new Date().toISOString(),
-          userProfile: merchant,
-        };
-        // Heal storage layers
-        setStoredSession(reconstructed);
-        return reconstructed;
       }
     }
   } catch {}
@@ -147,10 +140,12 @@ export function getStoredSession(): AuthSession | null {
 export function setStoredSession(session: AuthSession): void {
   if (typeof window === 'undefined' || !session) return;
 
-  const serialized = JSON.stringify(session);
+  const compact = compactSession(session);
+  const serialized = JSON.stringify(compact);
 
-  // 1. LocalStorage
-  safeSetItem(SESSION_STORAGE_KEY, session);
+  // Persist only identity and token metadata. The authoritative profile is
+  // loaded from MongoDB through /api/auth/session after every reload.
+  safeSetItem(SESSION_STORAGE_KEY, compact);
 
   // 2. SessionStorage
   try {
@@ -224,8 +219,10 @@ export async function validateSessionWithServer(): Promise<{
     if (data?.ok && data?.authenticated && data?.merchant) {
       // Re-sync local storage with authoritative merchant profile
       if (local) {
-        local.userProfile = { ...local.userProfile, ...data.merchant };
-        setStoredSession(local);
+        setStoredSession({
+          ...local,
+          userProfile: data.merchant,
+        });
       }
       return { ok: true, authenticated: true, merchant: data.merchant };
     }

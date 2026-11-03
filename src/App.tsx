@@ -42,7 +42,7 @@ import { SuperAdminPortalView } from './components/SuperAdminPortalView';
 import { MegaMarketplaceView } from './components/MegaMarketplaceView';
 import { MarketplaceOrdersView } from './components/MarketplaceOrdersView';
 import { MarketplaceCheckoutView } from './components/MarketplaceCheckoutView';
-import { safeSetItem, safeGetItem, safeRemoveItem } from './utils/safeStorage';
+import { safeSetItem, safeGetItem, safeRemoveItem, purgeApiOnlyStorage } from './utils/safeStorage';
 import { getStoredSession, setStoredSession, clearStoredSession, validateSessionWithServer } from './lib/authSession';
 import { normalizeOrders } from './utils/orderUtils';
 import { mergeStoredWallets } from './utils/paymentMethods';
@@ -201,6 +201,9 @@ function storeSlugFromHost(hostname: string): string {
 }
 
 export default function App() {
+  React.useEffect(() => {
+    purgeApiOnlyStorage();
+  }, []);
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
   // Bumped by the notification bell when a "New Return Request…" row is clicked:
@@ -514,11 +517,6 @@ export default function App() {
     try {
       const savedSession = getStoredSession();
       if (savedSession?.userProfile) return resolveMerchantSubscription(savedSession.userProfile);
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) {
-        const storeMerchant = JSON.parse(saved).merchant;
-        if (storeMerchant) return resolveMerchantSubscription(storeMerchant);
-      }
     } catch (e) {
       console.error(e);
     }
@@ -886,114 +884,22 @@ export default function App() {
     // Realtime Supabase channels removed — use simple fetch-on-load instead.
   }, [merchant?.email, merchant?.storeSlug, merchant?.id]);
 
-  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>(() => {
-    try {
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        const accounts: BankAccount[] = parsed.bankAccounts || [];
-        return accounts.filter(acc => acc.accountNumber !== '210.120.9876543' && acc.accountNumber !== '101235008912');
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    return initialBankAccounts;
-  });
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>(initialBankAccounts);
 
-  const [mobileBanking, setMobileBanking] = useState<MobileBankingConfig[]>(() => {
-    try {
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        const stored = parsed.mobileBanking ?? parsed.mobile_banking;
-        if (Array.isArray(stored) && stored.length > 0) {
-          // Keep every saved wallet (including disabled ones) and make sure the
-          // bKash / Nagad / Rocket cards always exist. Disabled placeholders are
-          // created EMPTY — never pre-filled with a demo number, which would
-          // otherwise be the one the customer is told to pay.
-          return mergeStoredWallets(
-            stored,
-            initialMobileBanking.map((method) => ({ ...method, number: '' })),
-          );
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    return initialMobileBanking;
-  });
+  const [mobileBanking, setMobileBanking] = useState<MobileBankingConfig[]>(initialMobileBanking);
 
-  const [codConfig, setCodConfig] = useState<CodConfig>(() => {
-    try {
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.codConfig) {
-          if (parsed.codConfig.insideDhakaFee === 60 && parsed.codConfig.outsideDhakaFee === 120) {
-            return initialCodConfig;
-          }
-          return parsed.codConfig;
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    return initialCodConfig;
-  });
+  const [codConfig, setCodConfig] = useState<CodConfig>(initialCodConfig);
 
-  const [gatewayConfig, setGatewayConfig] = useState<PaymentGatewayConfig>(() => {
-    try {
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.gatewayConfig) return parsed.gatewayConfig;
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    return initialPaymentGateway;
-  });
+  const [gatewayConfig, setGatewayConfig] = useState<PaymentGatewayConfig>(initialPaymentGateway);
 
   const [couriers, setCouriers] = useState<CourierService[]>(initialCouriers);
   const [products, setProducts] = useState<Product[]>([]);
 
-  const [customers, setCustomers] = useState<Customer[]>(() => {
-    try {
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) return JSON.parse(saved).customers || [];
-    } catch (e) {
-      console.error(e);
-    }
-    return [];
-  });
+  const [customers, setCustomers] = useState<Customer[]>([]);
 
-  // Reads this merchant's cached orders from localStorage — the same cache the
-  // auto-save effect below writes on every orders change. Returns null when
-  // nothing is cached yet so callers can tell "no cache" from "cached: empty".
-  const readCachedOrders = (): Order[] | null => {
-    try {
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) {
-        const parsed = JSON.parse(saved).orders;
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    try {
-      const saved2 = localStorage.getItem(`ZID_MERCHANT_STORE_DATA_${(merchant as any)?.storeSlug || 'bd'}`);
-      if (saved2) {
-        const parsed = JSON.parse(saved2).orders;
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    return null;
-  };
-
-
-  const [orders, setOrders] = useState<Order[]>(() => readCachedOrders() ?? []);
+  // Orders are MongoDB-authoritative. Keep them in memory only; the API load
+  // below hydrates this state after authentication and on store changes.
+  const [orders, setOrders] = useState<Order[]>([]);
 
   // Orders hydration gate for the sidebar badge and every order-count widget.
   //
@@ -1002,61 +908,17 @@ export default function App() {
   // login starts on the loading placeholder instead of a misleading `0` until
   // the first authoritative /api/orders response resolves.
   const [ordersHydrated, setOrdersHydrated] = useState<boolean>(
-    () => (readCachedOrders()?.length ?? 0) > 0
+    () => false
   );
 
-  const [themes, setThemes] = useState<ThemeConfig[]>(() => {
-    try {
-      const saved = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-      if (saved) return JSON.parse(saved).themes || initialThemes;
-    } catch (e) {
-      console.error(e);
-    }
-    return initialThemes;
-  });
+  const [themes, setThemes] = useState<ThemeConfig[]>(initialThemes);
 
   React.useEffect(() => {
     try {
       const oldSlug = prevSlugRef.current;
       const newSlug = merchant?.storeSlug || '';
 
-      if (oldSlug && newSlug && oldSlug !== newSlug) {
-        // If slug has changed, migrate database data and delete the old entry
-        const oldKey = `ZID_MERCHANT_STORE_DATA_${oldSlug}`;
-        const newKey = `ZID_MERCHANT_STORE_DATA_${newSlug}`;
-        const oldData = safeGetItem(oldKey);
-        if (oldData) {
-          try {
-            const parsed = typeof oldData === 'object' ? oldData : JSON.parse(oldData);
-            parsed.merchant = merchant;
-            safeSetItem(newKey, parsed);
-          } catch (err) {
-            safeSetItem(newKey, oldData);
-          }
-          safeRemoveItem(oldKey);
-        }
-
-        // Update the ref to the new slug
-        prevSlugRef.current = newSlug;
-      }
-
-      const storeData = {
-        merchant,
-        themes,
-        bankAccounts,
-        mobileBanking,
-        codConfig,
-        // Courier credentials belong in the cache too — they used to be dropped
-        // here AND left out of this effect's dependencies, so a key saved in
-        // Logistics vanished on the next reload. The durable copy lives in
-        // MongoDB via /api/store/courier-integrations.
-        couriers,
-        gatewayConfig
-      };
-      safeSetItem('ZID_MERCHANT_STORE_DATA', storeData);
-      if (merchant?.storeSlug) {
-        safeSetItem(`ZID_MERCHANT_STORE_DATA_${merchant.storeSlug}`, storeData);
-      }
+      if (oldSlug !== newSlug) prevSlugRef.current = newSlug;
 
       // Update the main merchants index (allMerchants) by email to prevent old profile/slug from persisting
       setAllMerchants(prev => {
@@ -1074,16 +936,14 @@ export default function App() {
         return updated;
       });
 
-      // Synchronize zid_auth_session with updated profile
-      const savedSession = safeGetItem('zid_auth_session');
-      if (savedSession) {
-        try {
-          const parsed = typeof savedSession === 'object' ? savedSession : JSON.parse(savedSession);
-          parsed.userProfile = merchant;
-          safeSetItem('zid_auth_session', parsed);
-        } catch (err) {
-          console.error(err);
-        }
+      // Keep only the lightweight identity/token session. The full profile is
+      // refreshed from MongoDB by validateSessionWithServer.
+      if (merchant?.email) {
+        setStoredSession({
+          email: merchant.email,
+          loggedInAt: new Date().toISOString(),
+          userProfile: merchant,
+        });
       }
 
       // Automatically update the storeName in any pending or historical subscription requests for this merchant
@@ -1990,41 +1850,10 @@ export default function App() {
       setIsSubscriptionModalOpen(true);
     }
 
-    try {
-      // Restore this logged-in merchant's specific data from database
-      const stored = localStorage.getItem(`ZID_MERCHANT_STORE_DATA_${userProfile.storeSlug}`);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed.products) setProducts(parsed.products);
-        if (parsed.bankAccounts) setBankAccounts(parsed.bankAccounts);
-        if (parsed.mobileBanking) setMobileBanking(parsed.mobileBanking);
-        if (parsed.codConfig) setCodConfig(parsed.codConfig);
-        // Courier connection state + credentials (secrets re-hydrate from Mongo).
-        if (Array.isArray(parsed.couriers) && parsed.couriers.length > 0) setCouriers(parsed.couriers);
-        if (Array.isArray(parsed.orders)) {
-          const restoredOrders = normalizeOrders(parsed.orders);
-          setOrders(restoredOrders);
-          // Cached rows are real data — render them right away. An empty cache
-          // keeps the loading placeholder until Mongo answers (count may truly be 0).
-          setOrdersHydrated(restoredOrders.length > 0);
-        }
-        if (parsed.themes) setThemes(parsed.themes);
-      } else {
-        // Fallback or fresh merchant setup
-        setProducts([]);
-        setBankAccounts([]);
-        setMobileBanking(initialMobileBanking);
-        setCodConfig(initialCodConfig);
-        setCouriers(initialCouriers);
-        setOrders([]);
-        // Fresh workspace: nothing cached — show the loading placeholder until
-        // the first /api/orders response resolves instead of flashing `0`.
-        setOrdersHydrated(false);
-        setThemes([]);
-      }
-    } catch (e) {
-      console.error('Error restoring merchant workspace:', e);
-    }
+    // Product, order, customer, payment and theme state is hydrated by the
+    // MongoDB-backed API effect keyed by the authenticated store identity.
+    setOrders([]);
+    setOrdersHydrated(false);
 
     // ── Payment accounts: the DATABASE is authoritative ──────────────────
     // localStorage above is only a cache. A merchant who activated bKash on
@@ -2265,14 +2094,6 @@ export default function App() {
     const pageSlug = isTrackOrder ? 'track-order' : (storePagesMatch[3] || rawTail || '');
 
     let pageMerchant: Record<string, any> | null = null;
-    try {
-      const customStoreDataStr = localStorage.getItem(`ZID_MERCHANT_STORE_DATA_${pageStoreSlug}`);
-      if (customStoreDataStr) {
-        pageMerchant = JSON.parse(customStoreDataStr)?.merchant || null;
-      }
-    } catch {
-      pageMerchant = null;
-    }
     if (!pageMerchant && merchant?.storeSlug === pageStoreSlug) pageMerchant = merchant;
 
     return (
@@ -2300,25 +2121,9 @@ export default function App() {
     let targetMobileBanking = mobileBanking;
     let targetThemes = themes;
 
-    try {
-      // Fetch precise custom configuration using unique store slug
-      const customStoreDataStr = localStorage.getItem(`ZID_MERCHANT_STORE_DATA_${storeSlug}`);
-      if (customStoreDataStr) {
-        const parsed = JSON.parse(customStoreDataStr);
-        if (parsed.merchant) targetMerchant = parsed.merchant;
-        if (parsed.products) targetProducts = parsed.products;
-        if (parsed.bankAccounts) targetBankAccounts = parsed.bankAccounts;
-        if (parsed.mobileBanking) targetMobileBanking = parsed.mobileBanking;
-        if (parsed.themes) targetThemes = parsed.themes;
-      } else {
-        // Fallback search in general merchant profiles index
-        const matchedProfile = allMerchants.find(m => m.storeSlug === storeSlug);
-        if (matchedProfile) {
-          targetMerchant = matchedProfile;
-        }
-      }
-    } catch (e) {
-      console.error('Error fetching custom theme from database:', e);
+    const matchedProfile = allMerchants.find(m => m.storeSlug === storeSlug);
+    if (matchedProfile) {
+      targetMerchant = matchedProfile;
     }
 
     // Resolve which LAYOUT this store's active theme maps to. TenantStorefrontView
@@ -2355,22 +2160,7 @@ export default function App() {
         themes={targetThemes}
         layout={activeLayout}
 onPlaceOrder={async (newOrder) => {
-            try {
-              // Persist order details back to that store's custom record
-              const key = `ZID_MERCHANT_STORE_DATA_${storeSlug}`;
-              const customStoreDataStr = localStorage.getItem(key);
-              if (customStoreDataStr) {
-                const parsed = JSON.parse(customStoreDataStr);
-                parsed.orders = [newOrder, ...(parsed.orders || [])];
-                safeSetItem(key, parsed);
-              }
-              // Append to current logged-in orders view if active
-              if (merchant?.storeSlug === storeSlug) {
-                setOrders(prev => [newOrder, ...prev]);
-              }
-            } catch (e) {
-              console.error('Error recording order to database:', e);
-            }
+            if (merchant?.storeSlug === storeSlug) setOrders(prev => [newOrder, ...prev]);
           }}
       />
     );

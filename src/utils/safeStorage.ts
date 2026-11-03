@@ -25,6 +25,8 @@ const RECLAIMABLE_KEYS = [
   'zid_store_categories_v2',
 ];
 
+const API_ONLY_KEY_PREFIXES = ['ZID_MERCHANT_STORE_DATA'];
+
 // Helper to sanitize and strip large Base64 data URLs from objects before caching
 export function sanitizeDataForStorage(data: any, maxDepth = 4): any {
   if (data === null || data === undefined) return data;
@@ -59,6 +61,9 @@ export function sanitizeDataForStorage(data: any, maxDepth = 4): any {
 }
 
 export function safeSetItem(key: string, value: any): boolean {
+  if (API_ONLY_KEY_PREFIXES.some(prefix => key === prefix || key.startsWith(`${prefix}_`))) {
+    return false;
+  }
   try {
     const sanitized = sanitizeDataForStorage(value);
     const serialized = typeof sanitized === 'string' ? sanitized : JSON.stringify(sanitized);
@@ -94,10 +99,24 @@ export function safeSetItem(key: string, value: any): boolean {
           return true;
         }
       }
+
     } catch (secondErr) {
       console.warn(`[safeStorage] Could not write key "${key}" even after cleanup:`, secondErr);
     }
     return false;
+  }
+}
+
+export function purgeApiOnlyStorage(): void {
+  try {
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key && API_ONLY_KEY_PREFIXES.some(prefix => key === prefix || key.startsWith(`${prefix}_`))) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch (error) {
+    console.warn('[safeStorage] Could not purge API-only workspace cache:', error);
   }
 }
 

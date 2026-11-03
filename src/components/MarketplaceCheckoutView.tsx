@@ -159,9 +159,9 @@ type Session = { name: string; email: string; phone: string } | null;
 
 function readSession(): Session {
   try {
-    const raw = localStorage.getItem('zid_customer_session');
+    const raw = document.cookie.match(/(?:^|; )zid_customer_session=([^;]*)/)?.[1];
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(decodeURIComponent(raw));
     return {
       name: String(parsed?.name || '').trim(),
       email: String(parsed?.email || '').trim(),
@@ -768,7 +768,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           phone: form.phone.trim(),
           email: form.email.trim() || undefined,
         };
-        localStorage.setItem('zid_customer_session', JSON.stringify(sessionPayload));
+        document.cookie = `zid_customer_session=${encodeURIComponent(JSON.stringify(sessionPayload))}; Max-Age=2592000; Path=/; SameSite=Lax`;
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('zid:customer-session', { detail: sessionPayload }));
         }

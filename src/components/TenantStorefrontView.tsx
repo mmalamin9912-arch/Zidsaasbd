@@ -1513,35 +1513,6 @@ The render below must not guess. A merchant may paste
         clearTimeout(timeoutId);
       }
 
-        // Check localStorage fallbacks — only THIS store's keys, never the mock
-        // 'bd'/'default'/'verandabd' demo keys that inject dummy products.
-        try {
-        const localCatKeys = [
-          `zid_store_categories_v2:${storeSlug}`
-        ];
-        for (const k of localCatKeys) {
-          const val = localStorage.getItem(k);
-          if (val) {
-            const parsed = JSON.parse(val);
-            if (Array.isArray(parsed)) catData.push(...parsed);
-          }
-        }
-
-        const localStoreKeys = [
-          `ZID_MERCHANT_STORE_DATA_${storeSlug}`
-        ];
-        for (const k of localStoreKeys) {
-          const val = localStorage.getItem(k);
-          if (val) {
-            const parsed = JSON.parse(val);
-            if (Array.isArray(parsed?.categories)) catData.push(...parsed.categories);
-            if (Array.isArray(parsed?.products)) prodData.push(...parsed.products);
-          }
-        }
-      } catch (e) {
-        console.warn('LocalStorage fallback warning:', e);
-      }
-
       if (active) {
         const uniqueCatMap = new Map<string, any>();
         for (const c of catData) {

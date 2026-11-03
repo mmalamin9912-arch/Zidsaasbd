@@ -49,9 +49,9 @@ type Session = { name: string; email: string; phone: string } | null;
 
 function readSession(): Session {
   try {
-    const raw = localStorage.getItem('zid_customer_session');
+    const raw = document.cookie.match(/(?:^|; )zid_customer_session=([^;]*)/)?.[1];
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(decodeURIComponent(raw));
     const name = String(parsed?.name || '').trim();
     const email = String(parsed?.email || '').trim();
     const phone = String(parsed?.phone || '').trim();
@@ -159,7 +159,7 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
       phone: digits,
     };
     try {
-      localStorage.setItem('zid_customer_session', JSON.stringify(newSession));
+      document.cookie = `zid_customer_session=${encodeURIComponent(JSON.stringify(newSession))}; Max-Age=2592000; Path=/; SameSite=Lax`;
       window.dispatchEvent(new CustomEvent('zid:customer-session', { detail: newSession }));
     } catch {
       // ignore storage error
@@ -169,7 +169,7 @@ export const MarketplaceOrdersView: React.FC<Props> = ({ onBack, onVisitStore, o
 
   const handleSignOut = () => {
     try {
-      localStorage.removeItem('zid_customer_session');
+      document.cookie = 'zid_customer_session=; Max-Age=0; Path=/; SameSite=Lax';
       window.dispatchEvent(new CustomEvent('zid:customer-session', { detail: null }));
     } catch {
       // ignore storage error
