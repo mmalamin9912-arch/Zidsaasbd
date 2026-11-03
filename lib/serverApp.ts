@@ -2658,6 +2658,56 @@ app.post('/api/admin/platform-config', async (req, res) => {
   }
 });
 
+// ── Telegram alert diagnostics ───────────────────────────────────────────────
+// GET /api/admin/telegram-status        — is the bot configured, and where from?
+// GET /api/admin/telegram-status?send=1  — also deliver a real test message.
+//
+// Exists so an operator can tell "the env var is missing" apart from "Telegram
+// rejected the chat id" without placing a test order and reading function logs.
+// The token is never returned — only its length and a short prefix.
+app.all('/api/admin/telegram-status', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const tg = await resolveTelegramAlertConfig();
+    const configured = tg.source !== 'none';
+    let test: Record<string, any> | null = null;
+
+    if (String(req.query.send || '') === '1' && configured) {
+      test = await sendAdminPaymentAlertTelegram({
+        botToken: tg.botToken,
+        chatId: tg.chatId,
+        orderNumber: 'TELEGRAM-TEST',
+        paymentMethod: 'Test',
+        trxId: `TEST-${Date.now()}`,
+        amountBDT: 0,
+        customerName: 'Zid Admin Alert test',
+        customerPhone: '—',
+      });
+    }
+
+    return res.status(200).json({
+      ok: configured && (!test || test.ok),
+      configured,
+      source: tg.source,
+      chatId: tg.chatId || null,
+      token: tg.botToken
+        ? { length: tg.botToken.length, prefix: `${tg.botToken.slice(0, 6)}…`, hasColon: tg.botToken.includes(':') }
+        : null,
+      env: {
+        TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN ? 'set' : 'missing',
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ? 'set' : 'missing',
+      },
+      test,
+      hint: configured
+        ? 'Configured. A test message was sent only if ?send=1 was passed.'
+        : 'No bot token / chat id found in the dashboard config or process.env.',
+    });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/telegram-status error:', err);
+    return res.status(200).json({ ok: false, configured: false, error: err?.message || 'Could not read Telegram status.' });
+  }
+});
+
 // ── Admin Security Settings (Supabase-first, MongoDB fallback) ───────────────
 // Force 2FA, admin session timeout, max login attempts, etc.
 //   GET  /api/admin/security-settings — read the saved policy.
@@ -14772,8 +14822,8 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
     // Telegram payment alerts: dashboard fields first, then env fallbacks
     // (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) for deployments that never
     // opened the settings page.
-    telegramBotToken: pick(central.telegramBotToken, process.env.TELEGRAM_BOT_TOKEN || ''),
-    telegramChatId: pick(central.telegramChatId, process.env.TELEGRAM_CHAT_ID || ''),
+    telegramBotToken: pick(central.telegramBotToken, telegramEnv('TELEGRAM_BOT_TOKEN')),
+    telegramChatId: pick(central.telegramChatId, telegramEnv('TELEGRAM_CHAT_ID')),
   };
   for (const key of ['steadfast', 'pathao', 'redx', 'paperfly']) {
     const isChosen = key === out.provider;
@@ -14795,7 +14845,91 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
  * not require the dashboard to be open. Uses the official Bot API
  * (`/sendMessage` with HTML parse mode); never throws and never delays the
  * checkout — a missing token or chat id simply skips the send.
+ *
+ * A token pasted into the dashboard often arrives wrapped in whitespace, a
+ * trailing newline, or the full `https://api.telegram.org/bot<id>:<secret>/`
+ * URL. Sent verbatim that produced `/bot ... /sendMessage`, Telegram answered
+ * 404, and the alert vanished with only a console line. The credentials are
+ * normalised here so every caller benefits.
  * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Read a Telegram env var, tolerating a BOM / wrapping quotes / stray spaces. */
+function telegramEnv(name: string): string {
+  return String(process.env[name] ?? '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .replace(/^["'](.*)["']$/s, '$1')
+    .trim();
+}
+
+/** Reduce a pasted token to `123456:ABC…` (drops any URL wrapper or prefix). */
+function normalizeTelegramToken(raw: unknown): string {
+  let token = String(raw ?? '').trim();
+  token = token.replace(/^bot/i, '');
+  // Full Bot API URL → keep only the token segment.
+  const afterBot = token.match(/api\.telegram\.org\/bot([^/?#\s]+)/i);
+  if (afterBot) token = afterBot[1];
+  token = token.replace(/\/sendMessage$/i, '').replace(/\/+$/, '');
+  return token.trim();
+}
+
+/** Reduce a pasted chat id to its bare value (`-100…` / `@channelname`). */
+function normalizeTelegramChatId(raw: unknown): string {
+  const value = String(raw ?? '').trim();
+  // t.me/<name> or @name are both valid chat references.
+  const linked = value.match(/t\.me\/([A-Za-z0-9_]+)/i);
+  if (linked) return `@${linked[1]}`;
+  return value.replace(/^https?:\/\//i, '').trim();
+}
+
+/**
+ * Resolve the Telegram credentials the alert should use.
+ *
+ * Dashboard values win; `process.env` is the fallback so a deployment that
+ * never opened the settings page (or whose saved document was wiped by a
+ * settings save) still alerts. A partially configured dashboard pair cannot
+ * disable an env-alerting deployment — token and chat id are chosen as a PAIR.
+ */
+async function resolveTelegramAlertConfig(): Promise<{
+  botToken: string;
+  chatId: string;
+  source: 'dashboard' | 'env' | 'none';
+}> {
+  const envToken = normalizeTelegramToken(telegramEnv('TELEGRAM_BOT_TOKEN'));
+  // Accept the common misspelling of the chat id var as well.
+  const envChat = normalizeTelegramChatId(telegramEnv('TELEGRAM_CHAT_ID') || telegramEnv('TELEGRAM_CHATID'));
+
+  let savedToken = '';
+  let savedChat = '';
+  try {
+    const saved = await readPlatformConfig();
+    const central = (saved?.data as any)?.adminPaymentConfig?.centralCourier || {};
+    savedToken = normalizeTelegramToken(central.telegramBotToken);
+    savedChat = normalizeTelegramChatId(central.telegramChatId);
+  } catch (err: any) {
+    console.warn('[Telegram] platform config read warning:', err?.message || err);
+  }
+
+  const botToken = savedToken || envToken;
+  const chatId = savedToken ? (savedChat || envChat) : envChat;
+  const source: 'dashboard' | 'env' | 'none' = botToken && chatId
+    ? (savedToken ? 'dashboard' : 'env')
+    : 'none';
+
+  console.log('[Telegram] alert config resolved:', {
+    source,
+    botToken: botToken ? `${botToken.slice(0, 6)}…(${botToken.length} chars, has colon: ${botToken.includes(':')})` : 'MISSING',
+    chatId: chatId || 'MISSING',
+    env: {
+      TELEGRAM_BOT_TOKEN: envToken ? `set (${envToken.length} chars)` : 'MISSING',
+      TELEGRAM_CHAT_ID: envChat ? 'set' : 'MISSING',
+    },
+    dashboard: { token: savedToken ? 'set' : 'empty', chatId: savedChat ? 'set' : 'empty' },
+  });
+
+  return { botToken, chatId, source };
+}
+
 async function sendAdminPaymentAlertTelegram(args: {
   botToken: string;
   chatId: string;
@@ -14806,9 +14940,16 @@ async function sendAdminPaymentAlertTelegram(args: {
   customerName: string;
   customerPhone: string;
 }): Promise<{ ok: boolean; error?: string }> {
-  if (!args.botToken || !args.chatId) {
+  const botToken = normalizeTelegramToken(args.botToken);
+  const chatId = normalizeTelegramChatId(args.chatId);
+  if (!botToken || !chatId) {
+    console.warn('[Telegram] alert skipped — bot token or chat id is not configured.', {
+      botToken: botToken ? 'set' : 'MISSING',
+      chatId: chatId ? 'set' : 'MISSING',
+    });
     return { ok: false, error: 'Telegram bot token or chat id is not configured.' };
   }
+  args = { ...args, botToken, chatId };
   const escapeHtml = (v: unknown) =>
     String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const message = [
@@ -14823,11 +14964,17 @@ async function sendAdminPaymentAlertTelegram(args: {
     '⚠️ Verify this payment in the admin panel before the vendor dispatches the order.',
   ].join('\n');
   try {
-    const res = await fetch(`https://api.telegram.org/bot${args.botToken}/sendMessage`, {
+    console.log('[Telegram] sending admin payment alert:', {
+      order: args.orderNumber,
+      chatId,
+      tokenPrefix: `${botToken.slice(0, 6)}…`,
+      amountBDT: args.amountBDT,
+    });
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: args.chatId,
+        chat_id: chatId,
         text: message,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
@@ -14838,12 +14985,26 @@ async function sendAdminPaymentAlertTelegram(args: {
     const data: any = await res.json().catch(() => null);
     if (!res.ok || !data?.ok) {
       const description = String(data?.description || `HTTP ${res.status}`);
-      console.warn('[Telegram] payment alert rejected:', description);
+      // 401 = bad token, 400 'chat not found' = bot never started / wrong id.
+      console.warn('[Telegram] payment alert rejected:', {
+        status: res.status,
+        description,
+        chatId,
+        order: args.orderNumber,
+      });
       return { ok: false, error: description };
     }
+    console.log('[Telegram] payment alert sent:', {
+      order: args.orderNumber,
+      messageId: data?.result?.message_id,
+    });
     return { ok: true };
   } catch (err: any) {
-    console.warn('[Telegram] payment alert failed:', err?.message || err);
+    console.warn('[Telegram] payment alert failed:', {
+      order: args.orderNumber,
+      message: err?.message || String(err),
+      name: err?.name,
+    });
     return { ok: false, error: err?.message || 'Telegram request failed.' };
   }
 }
@@ -17539,17 +17700,43 @@ app.post('/api/orders', async (req, res) => {
       // readAuditLogs → SuperAdminPortalView). Log it immediately here so the
       // payment is flagged for verification in the same second the customer
       // clicks Confirm Order — not after someone happens to open Orders.
-      const isMarketplaceWalletPayment =
-        masterRecord.marketplace_order === true &&
-        String(masterRecord.payment_status || '') === 'Pending Verification';
-      if (isMarketplaceWalletPayment) {
-        const trxRef = String(
-          (masterRecord as any).transaction_id ||
-          (masterRecord as any).transactionId ||
-          (masterRecord as any).trxId ||
-          (masterRecord as any).trx_id ||
-          'MISSING'
-        );
+      /*
+       * The alert fires for ANY wallet order awaiting verification, not only a
+       * `marketplace_order: true` one.
+       *
+       * `marketplace_order` is derived in `buildOrderRecord` from the payment
+       * status at write time, so an order whose flag is missing/stale — a
+       * dashboard-created order, a payload that omitted the flag, a row written
+       * by the fallback bulkWrite — was silently excluded. The payment status
+       * and the presence of a TrxID are what actually mean "the admin must
+       * verify this", so those are the conditions now. Keeping them in ONE
+       * predicate means the audit log, the email and the Telegram push can
+       * never disagree about which orders are alerted.
+       */
+      const masterPaymentStatus = canonicalPaymentStatus(
+        masterRecord.payment_status || (masterRecord as any).paymentStatus
+      );
+      const masterTrxRef = String(
+        (masterRecord as any).transaction_id ||
+        (masterRecord as any).transactionId ||
+        (masterRecord as any).trxId ||
+        (masterRecord as any).trx_id ||
+        ''
+      ).trim();
+      const isWalletPaymentAwaitingVerification =
+        masterPaymentStatus === 'Pending Verification' ||
+        Boolean(masterRecord.marketplace_order === true && masterTrxRef);
+
+      console.log('[OrderAlert] payment notification check:', {
+        order: masterRecord.order_number,
+        payment_status: masterRecord.payment_status,
+        marketplace_order: masterRecord.marketplace_order,
+        hasTrxId: Boolean(masterTrxRef),
+        willAlert: isWalletPaymentAwaitingVerification,
+      });
+
+      if (isWalletPaymentAwaitingVerification) {
+        const trxRef = masterTrxRef || 'MISSING';
         void appendAuditLog({
           adminUser: 'Payment Bot',
           action: `Payment verification needed: ${masterRecord.order_number} — ${masterRecord.payment_method} TrxID ${trxRef} — ৳${masterRecord.total_price}`,
@@ -17563,6 +17750,10 @@ app.post('/api/orders', async (req, res) => {
         // Fire-and-forget: the email must never slow down or fail the
         // checkout. The recipient comes from the platform config's central
         // courier block (`notificationEmail`), falling back to env.
+        //
+        // It has its own try/catch so a failure reading the platform config
+        // cannot swallow the Telegram push below — that coupling is exactly
+        // how one bad config read silenced BOTH channels.
         try {
           const cfg = await resolveCentralCourierConfig();
           const adminEmail = cfg.notificationEmail || process.env.ADMIN_NOTIFICATION_EMAIL || '';
@@ -17579,26 +17770,47 @@ app.post('/api/orders', async (req, res) => {
               console.warn('[Email] admin payment alert warning:', mailErr?.message || mailErr);
             });
           }
+        } catch (mailCfgErr: any) {
+          console.warn('[Email] payment alert config read warning:', mailCfgErr?.message || mailCfgErr);
+        }
 
-          // ── INSTANT TELEGRAM PUSH ── fires alongside the email so the
-          // Super Admin sees the alert on their phone without opening the
-          // dashboard. Skipped silently when no bot token / chat id is set.
-          if (cfg.telegramBotToken && cfg.telegramChatId) {
-            void sendAdminPaymentAlertTelegram({
-              botToken: cfg.telegramBotToken,
-              chatId: cfg.telegramChatId,
+        /*
+         * ── INSTANT TELEGRAM PUSH ────────────────────────────────────────
+         *
+         * Runs directly after the order was saved, in its own try/catch, so a
+         * Telegram problem (missing token, bad chat id, network, HTML parse
+         * error) can never fail or crash the checkout — the order is already
+         * persisted by this point and the response is unaffected.
+         *
+         * Credentials come from `resolveTelegramAlertConfig`, which prefers the
+         * dashboard values and falls back to `process.env.TELEGRAM_BOT_TOKEN` /
+         * `TELEGRAM_CHAT_ID`, and normalises both before use.
+         */
+        try {
+          const tg = await resolveTelegramAlertConfig();
+          if (tg.source === 'none') {
+            console.warn('[Telegram] admin payment alert skipped — no bot token / chat id in the dashboard or env.');
+          } else {
+            const result = await sendAdminPaymentAlertTelegram({
+              botToken: tg.botToken,
+              chatId: tg.chatId,
               orderNumber: String(masterRecord.order_number || ''),
               paymentMethod: String(masterRecord.payment_method || ''),
               trxId: trxRef,
               amountBDT: Number(masterRecord.total_price || 0),
               customerName: String(masterRecord.customer_name || ''),
               customerPhone: String(masterRecord.customer_phone || ''),
-            }).catch((tgErr: any) => {
-              console.warn('[Telegram] admin payment alert warning:', tgErr?.message || tgErr);
+            });
+            console.log('[Telegram] admin payment alert result:', {
+              order: masterRecord.order_number,
+              source: tg.source,
+              ok: result.ok,
+              error: result.error,
             });
           }
-        } catch (mailCfgErr: any) {
-          console.warn('[Email] payment alert config read warning:', mailCfgErr?.message || mailCfgErr);
+        } catch (tgErr: any) {
+          // Never rethrow — the order is already saved.
+          console.warn('[Telegram] admin payment alert threw (order already saved):', tgErr?.message || tgErr);
         }
       }
 
