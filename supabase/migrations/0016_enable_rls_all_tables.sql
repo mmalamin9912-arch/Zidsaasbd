@@ -302,83 +302,40 @@ CREATE POLICY categories_write_owner
   WITH CHECK (public.zid_owns_store_slug(store_slug));
 
 -- -----------------------------------------------------------------------------
--- 6. ORDERS + ORDER ITEMS
+-- 6. ORDERS + ORDER ITEMS — NO CLIENT ACCESS WHATSOEVER.
 --
---    The subtle requirement: the storefront creates orders as a SIGNED-OUT
---    shopper (anon) and the shopper must then see their own orders on
---    /marketplace/orders. There is no auth.uid() for them, so the order is
---    bound to the browser by `customer_phone` (the shopper enters it at
---    checkout) — see `orders_select_public_tracking` below.
+--    The checkout used to INSERT into `orders` from the browser (anon key),
+--    which is why the table needed a write policy and a public read policy. The
+--    browser no longer touches Supabase for order data at all:
 --
---    INSERT is allowed for any store that EXISTS; this is what keeps RLS from
---    breaking checkout. Rows cannot be forged for a non-existent store.
+--      WRITE  POST /api/orders        (service role — bypasses RLS)
+--      READ   GET  /api/orders        (MongoDB, merchant + admin dashboards)
+--             GET  /api/customer/supabase-orders (service role + signed session)
+--
+--    Because the service role BYPASSES RLS, enabling RLS here and adding NO
+--    policy blocks every anon/authenticated path while leaving the API routes
+--    completely unaffected. That is the strongest posture available: not even
+--    the customer's own rows are reachable with the public anon key.
 -- -----------------------------------------------------------------------------
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 
--- 6a. Owner read/write (merchant dashboard).
-DROP POLICY IF EXISTS orders_select_owner ON public.orders;
-CREATE POLICY orders_select_owner
-  ON public.orders FOR SELECT
-  TO authenticated
-  USING (public.zid_owns_store(store_id));
+-- Drop every legacy client policy on this table (from earlier migrations and
+-- from ORDER_ITEMS_MIGRATION_SQL, which is still shipped to old clients).
+DROP POLICY IF EXISTS orders_select_owner              ON public.orders;
+DROP POLICY IF EXISTS orders_update_owner              ON public.orders;
+DROP POLICY IF EXISTS orders_delete_owner              ON public.orders;
+DROP POLICY IF EXISTS orders_insert_store_exists       ON public.orders;
+DROP POLICY IF EXISTS orders_select_public_tracking    ON public.orders;
+DROP POLICY IF EXISTS orders_insert_anon               ON public.orders;
+DROP POLICY IF EXISTS orders_select_anon               ON public.orders;
 
-DROP POLICY IF EXISTS orders_update_owner ON public.orders;
-CREATE POLICY orders_update_owner
-  ON public.orders FOR UPDATE
-  TO authenticated
-  USING     (public.zid_owns_store(store_id))
-  WITH CHECK (public.zid_owns_store(store_id));
-
-DROP POLICY IF EXISTS orders_delete_owner ON public.orders;
-CREATE POLICY orders_delete_owner
-  ON public.orders FOR DELETE
-  TO authenticated
-  USING (public.zid_owns_store(store_id));
-
--- 6b. Public checkout — any shopper may place an order for a real store.
-DROP POLICY IF EXISTS orders_insert_store_exists ON public.orders;
-CREATE POLICY orders_insert_store_exists
-  ON public.orders FOR INSERT
-  TO anon, authenticated
-  WITH CHECK (
-    store_id IS NOT NULL
-    AND EXISTS (SELECT 1 FROM public.stores s WHERE s.id = orders.store_id)
-  );
-
--- 6c. Shopper order history.
---     Scoped to the order id (a UUID the shopper only learns by placing it).
---     A phone-based policy would be unverifiable — any visitor could enumerate
---     another customer's history by guessing a phone number — so history is
---     fetched through the server route (/api/customer/orders), which is
---     authenticated by the phone + OTP flow; see section 8.
-DROP POLICY IF EXISTS orders_select_public_tracking ON public.orders;
-CREATE POLICY orders_select_public_tracking
-  ON public.orders FOR SELECT
-  TO anon, authenticated
-  USING (false);   -- replaced by the server route; keep explicit for clarity
-
--- 6d. Order line items follow their order's visibility.
+-- 6b. `order_items` — same story: written by the server, read by nobody.
 ALTER TABLE IF EXISTS public.order_items ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS order_items_select_owner ON public.order_items;
-CREATE POLICY order_items_select_owner
-  ON public.order_items FOR SELECT
-  TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.orders o
-      WHERE o.id = order_items.order_id
-        AND public.zid_owns_store(o.store_id)
-    )
-  );
-
-DROP POLICY IF EXISTS order_items_insert_store_exists ON public.order_items;
-CREATE POLICY order_items_insert_store_exists
-  ON public.order_items FOR INSERT
-  TO anon, authenticated
-  WITH CHECK (
-    EXISTS (SELECT 1 FROM public.orders o WHERE o.id = order_items.order_id)
-  );
+DROP POLICY IF EXISTS order_items_select_owner         ON public.order_items;
+DROP POLICY IF EXISTS order_items_insert_store_exists  ON public.order_items;
+DROP POLICY IF EXISTS order_items_insert_anon          ON public.order_items;
+DROP POLICY IF EXISTS order_items_select_anon          ON public.order_items;
 
 -- -----------------------------------------------------------------------------
 -- 7. SUBSCRIPTIONS / PLAN CATALOGUE

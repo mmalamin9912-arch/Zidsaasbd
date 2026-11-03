@@ -104,24 +104,15 @@ export async function createSupabaseNativeOrder(input: any): Promise<{ ok: boole
   return { ok: true, order: { id: result.orderId, order_number: result.orderNumber } };
 }
 
-export async function fetchSupabaseNativeAllOrders(): Promise<{ ok: boolean; orders: any[]; error?: string }> {
-  if (!isSupabaseConfigured) return { ok: false, orders: [], error: 'Supabase is not configured.' };
-  const client = getSupabaseClient();
-  if (!client) return { ok: false, orders: [], error: 'Supabase client unavailable.' };
-  const { data, error } = await client.from('orders').select('*').eq('marketplace_order', true).order('created_at', { ascending: false });
-  if (error) { console.warn('[supabaseNative] fetchSupabaseNativeAllOrders error:', supabaseErrorMessage(error)); return { ok: false, orders: [], error: error.message || 'Orders could not be fetched.' }; }
-  return { ok: true, orders: Array.isArray(data) ? data : [] };
-}
+/*
+ * REMOVED: fetchSupabaseNativeAllOrders / fetchSupabaseNativeVendorOrders.
+ *
+ * Both queried `orders` straight from the browser with the anon key. They had no
+ * callers, and under RLS they would silently return `[]` (the table has no
+ * client SELECT policy by design). Merchant and admin order lists are served by
+ * GET /api/orders from MongoDB; the Supabase copy is written server-side by
+ * POST /api/orders. Nothing in the browser reads `orders` any more.
+ */
 
-export async function fetchSupabaseNativeVendorOrders(vendorId: string): Promise<{ ok: boolean; orders: any[]; error?: string }> {
-  if (!vendorId) return { ok: false, orders: [], error: 'Vendor ID required.' };
-  if (!isSupabaseConfigured) return { ok: false, orders: [], error: 'Supabase is not configured.' };
-  const client = getSupabaseClient();
-  if (!client) return { ok: false, orders: [], error: 'Supabase client unavailable.' };
-  const { data, error } = await client.from('orders').select('*').or(`vendor_id.eq.${vendorId},store_id.eq.${vendorId},store_slug.eq.${vendorId}`).eq('marketplace_order', true).order('created_at', { ascending: false });
-  if (error) { console.warn('[supabaseNative] fetchSupabaseNativeVendorOrders error:', supabaseErrorMessage(error)); return { ok: false, orders: [], error: error.message || 'Vendor orders unavailable.' }; }
-  return { ok: true, orders: Array.isArray(data) ? data : [] };
-}
-
-const supabaseNativeModule = { fetchSupabaseNativeProducts, fetchSupabaseNativeCategories, createSupabaseNativeOrder, fetchSupabaseNativeAllOrders, fetchSupabaseNativeVendorOrders };
+const supabaseNativeModule = { fetchSupabaseNativeProducts, fetchSupabaseNativeCategories, createSupabaseNativeOrder };
 export default supabaseNativeModule;

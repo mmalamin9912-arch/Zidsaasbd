@@ -17855,6 +17855,122 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
   return prepared;
 }
 
+/*
+ * ────────────────────────────────────────────────────────────────────────────
+ * SUPABASE ORDER WRITE — SERVER-SIDE ONLY
+ *
+ * The browser used to write `orders` directly with the anon key. That forced a
+ * `select using (true)` policy on the table (so any visitor could read every
+ * customer's name/phone/address), and it is why a schema mismatch surfaced as a
+ * client-side PGRST204 instead of a clear server log.
+ *
+ * Both problems disappear once the write moves here: this runs on the server
+ * with the service-role key, which BYPASSES Row Level Security entirely — so
+ * RLS can stay enabled with NO policies on `orders`, and no API route is ever
+ * blocked by it. `postgrestWrite` additionally drops columns the deployed table
+ * does not have and retries, which is what makes a schema drift stop breaking
+ * checkout.
+ *
+ * Best-effort by design: MongoDB remains the merchant/admin read path, so a
+ * Supabase outage must not fail the shopper's order. The result is reported in
+ * the response for diagnostics.
+ * ────────────────────────────────────────────────────────────────────────────
+ */
+async function writeOrderToSupabase(order: Record<string, any>): Promise<{ ok: boolean; error?: string; droppedColumns?: string[] }> {
+  try {
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
+
+    const orderNumber = String(order.orderNumber || order.order_number || order.id || '').replace(/^#/, '').trim();
+    if (!orderNumber) return { ok: false, error: 'The order has no order number.' };
+
+    /*
+     * `orders.store_id` is a UUID column. Sending a slug fails with 22P02 and
+     * loses the row, so unresolved stores are created on the fly — the row must
+     * exist for the foreign key, and a stable uuid derived from the slug keeps
+     * repeated orders against the same store together.
+     */
+    let storeId = String(order.store_id || order.storeId || '').trim();
+    if (!isUuidLike(storeId)) {
+      const slug = String(order.store_slug || order.storeSlug || storeId || 'marketplace').trim().toLowerCase();
+      const lookup = await fetch(
+        `${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`,
+        { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+      ).catch(() => null);
+      const rows: any[] = lookup?.ok ? await lookup.json().catch(() => []) : [];
+      storeId = isUuidLike(rows?.[0]?.id) ? String(rows[0].id) : '';
+      if (!storeId) {
+        // No store row yet: create the minimal one this order needs.
+        const created = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates' },
+          body: { store_slug: slug, store_name: String(order.store_name || order.storeName || slug) },
+          conflictPatchPath: `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`,
+        });
+        if (!created.ok) {
+          return { ok: false, error: `The store "${slug}" could not be resolved in Supabase.`, droppedColumns: created.droppedColumns };
+        }
+        const again = await fetch(
+          `${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`,
+          { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, Accept: 'application/json' } }
+        ).catch(() => null);
+        const againRows: any[] = again?.ok ? await again.json().catch(() => []) : [];
+        storeId = isUuidLike(againRows?.[0]?.id) ? String(againRows[0].id) : '';
+        if (!storeId) return { ok: false, error: `The store "${slug}" has no usable id in Supabase.` };
+      }
+    }
+
+    /*
+     * ONLY THE COLUMNS THE DEPLOYED TABLE ACTUALLY HAS.
+     *
+     * This is the PGRST204 fix: `orders` here has no `store_slug`,
+     * `vendor_id`, `subtotal_bdt`, `transaction_id`, `fulfillment_status` or
+     * `status`. Vendor attribution is kept inside `items` (each line carries its
+     * vendor), and `items` is TEXT, so it is stored as a JSON STRING.
+     */
+    const items = Array.isArray(order.items)
+      ? order.items
+      : (() => { try { return JSON.parse(String(order.items || '[]')); } catch { return []; } })();
+
+    const payload: Record<string, any> = {
+      store_id: storeId,
+      order_number: orderNumber,
+      customer_name: String(order.customer_name || order.customerName || 'Customer'),
+      customer_phone: String(order.customer_phone || order.customerPhone || ''),
+      district: String(order.district || order.customer_district || ''),
+      city_area: String(order.city_area || order.customer_area || ''),
+      shipping_address: String(order.shipping_address || order.address || ''),
+      items: JSON.stringify(Array.isArray(items) ? items : []),
+      total_amount: toNumeric(order.total_price ?? order.totalBDT ?? order.total_amount, 0),
+      payment_method: String(order.payment_method || order.paymentMethod || 'COD'),
+      payment_status: String(order.paymentStatus || order.payment_status || 'Unpaid'),
+      order_status: String(order.order_status || order.status || 'New'),
+    };
+
+    const result = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/orders', {
+      method: 'POST',
+      // `order_number` is the natural key: a retried checkout updates the same
+      // row instead of creating a second order.
+      headers: { Prefer: 'resolution=merge-duplicates' },
+      body: payload,
+      conflictPatchPath: `/rest/v1/orders?order_number=eq.${encodeURIComponent(orderNumber)}`,
+    });
+
+    if (!result.ok) {
+      console.warn('[Server] Supabase order write failed:', {
+        order_number: orderNumber,
+        status: result.status,
+        detail: result.detail?.slice(0, 300),
+        droppedColumns: result.droppedColumns,
+      });
+    }
+    return { ok: result.ok, error: result.ok ? undefined : result.detail, droppedColumns: result.droppedColumns };
+  } catch (err: any) {
+    console.warn('[Server] Supabase order write threw:', err?.message || err);
+    return { ok: false, error: err?.message || 'Supabase write failed.' };
+  }
+}
+
 app.post('/api/orders', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -17900,6 +18016,8 @@ app.post('/api/orders', async (req, res) => {
 
     const inserted: any[] = [];
     const rejected: { index: number; error: string }[] = [];
+    // Per-order outcome of the server-side Supabase mirror (diagnostics only).
+    const supabaseMirrors: any[] = [];
     const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
 
     for (let index = 0; index < arr.length; index += 1) {
@@ -18231,6 +18349,29 @@ app.post('/api/orders', async (req, res) => {
       rememberRecentOrders(allDocsToPersist);
       if (persisted) {
         inserted.push(...allDocsToPersist);
+
+        /*
+         * MIRROR TO SUPABASE — from the server, with the service-role key.
+         *
+         * This replaces the browser-side write, so the anon key never touches
+         * `orders` and RLS needs no client policy for checkout. Awaited (not
+         * fire-and-forget) so the response can report `supabase` for debugging;
+         * a failure is logged but does NOT fail the order — MongoDB is
+         * authoritative for both dashboards.
+         */
+        const supabaseWrite = await writeOrderToSupabase({
+          ...masterRecord,
+          // The master's own store, not the marketplace bucket, so the row lands
+          // on the seller whose dashboard shows it.
+          store_slug: masterRecord.store_slug || slug,
+          store_name: String(order.storeName || order.store_name || ''),
+        });
+        supabaseMirrors.push({
+          order_number: masterRecord.order_number,
+          ok: supabaseWrite.ok,
+          dropped_columns: supabaseWrite.droppedColumns ?? [],
+          ...(supabaseWrite.ok ? {} : { error: supabaseWrite.error }),
+        });
       } else {
         // Surface the failure to the caller; do NOT let it look like a success.
         rejected.push({
@@ -18417,13 +18558,26 @@ app.post('/api/orders', async (req, res) => {
       });
     }
 
+    const supabaseFailed = supabaseMirrors.filter((m) => !m.ok);
+    if (supabaseFailed.length > 0) {
+      // Visible to the client AND the function log, so a schema mismatch is
+      // diagnosable without a database shell. The order IS in MongoDB, so this
+      // is a warning, not a failure.
+      console.warn('[Server] Supabase order mirror incomplete:', supabaseFailed);
+    }
+
     return res.status(200).json({
       ok: true,
       success: true,
       synced: inserted.length,
       rejected,
+      // `ok: false` here means "not mirrored to Supabase", not "order failed".
+      supabase: supabaseMirrors,
       ...(rejected.length > 0
         ? { warning: `${rejected.length} payload(s) were rejected and not saved.` }
+        : {}),
+      ...(supabaseFailed.length > 0
+        ? { supabase_warning: 'The order was saved, but the Supabase mirror did not complete.' }
         : {}),
       message: 'Order placed successfully',
     });

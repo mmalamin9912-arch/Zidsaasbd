@@ -42,25 +42,14 @@
  * the table is provisioned — and a missing table degrades to the `orders.items`
  * JSON instead of failing the order.
  */
-import type { SupabaseClient } from '@supabase/supabase-js';
-import { getSupabaseClient, isSupabaseConfigured } from './supabase';
-
-/** The `orders` columns this writer may send. Anything else is dropped. */
-const ORDER_COLUMNS = [
-  'id',
-  'store_id',
-  'order_number',
-  'customer_name',
-  'customer_phone',
-  'district',
-  'city_area',
-  'shipping_address',
-  'items',
-  'total_amount',
-  'payment_method',
-  'payment_status',
-  'order_status',
-] as const;
+/*
+ * NO SUPABASE CLIENT IMPORT HERE.
+ *
+ * This module used to hold the browser-side writer and therefore imported the
+ * client and the column allow-list. Both are gone: the order is now written by
+ * POST /api/orders with the service role, so this file must not touch Supabase
+ * at all. Keeping the imports would invite the client path back.
+ */
 
 /** One line of the marketplace basket, as the checkout holds it. */
 export interface MarketplaceOrderLine {
@@ -143,79 +132,20 @@ export function isUuidLike(value: unknown): boolean {
 }
 
 /**
- * Resolve a vendor reference to the canonical `stores.id` UUID.
+ * Persist one marketplace order.
  *
- * `orders.store_id` is a uuid column: inserting a slug there fails with
- * SQLSTATE 22P02 ("invalid input syntax for type uuid") and the order is lost.
- * A reference that already IS a uuid still has to exist in `stores` (the FK),
- * so the row is looked up in both cases.
+ * ── THE WRITE NOW HAPPENS ON THE SERVER ─────────────────────────────────
  *
- * Returns `null` when no store row matches — the caller then falls back to the
- * product's own uuid, and finally to a generated one, so a basket from a store
- * that has not been mirrored into Supabase can still be ordered.
- */
-async function resolveStoreUuid(client: SupabaseClient, ref: string): Promise<string | null> {
-  const clean = String(ref || '').trim();
-  if (!clean) return null;
-
-  // 1) Slug → stores.store_slug (the common case: products carry store_slug).
-  try {
-    const { data } = await client
-      .from('stores')
-      .select('id')
-      .eq('store_slug', clean.toLowerCase())
-      .maybeSingle();
-    if (isUuidLike((data as any)?.id)) return String((data as any).id);
-  } catch {
-    /* column/table missing or RLS — try the uuid form next */
-  }
-
-  // 2) Already a uuid → only usable if that store row actually exists.
-  if (isUuidLike(clean)) {
-    try {
-      const { data } = await client.from('stores').select('id').eq('id', clean).maybeSingle();
-      if (isUuidLike((data as any)?.id)) return String((data as any).id);
-    } catch {
-      /* fall through */
-    }
-  }
-
-  return null;
-}
-
-function newUuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  // RFC 4122 v4 fallback for older engines.
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-/**
- * Does PostgREST say this is a MISSING TABLE (as opposed to a bad payload)?
+ * This used to INSERT into Supabase from the BROWSER with the anon key, which
+ * is why the table needed a public read policy and why a schema mismatch
+ * surfaced as a client-side PGRST204. Both are gone: the order is written by
+ * POST /api/orders with the service-role key, which bypasses Row Level
+ * Security — so RLS can stay enabled with NO client policy on `orders` and the
+ * browser never talks to Supabase for order data.
  *
- * PGRST205 = "Could not find the table". `order_items` is not provisioned in
- * this project, and that must not fail an order that already landed in
- * `orders`.
- */
-function isMissingTable(err: any): boolean {
-  const code = String(err?.code || '');
-  const message = String(err?.message || '');
-  return code === 'PGRST205' || /could not find the table/i.test(message);
-}
-
-/**
- * Persist one marketplace order to Supabase.
- *
- * Order of operations:
- *   1. Resolve the shipping store uuid (never send a slug into a uuid column).
- *   2. INSERT the master row into `orders` with ONLY real columns.
- *   3. Best-effort INSERT the per-line rows into `order_items`, skipping the
- *      step (not failing) when that table is not provisioned.
+ * The signature is unchanged on purpose, so every caller keeps working. The
+ * result shape is also unchanged: `ok` still answers "did the order reach the
+ * database", and a genuine failure still returns `error`.
  *
  * Never throws — the caller gets `{ ok, error }` and decides what to show the
  * shopper.
@@ -231,172 +161,70 @@ export async function createMarketplaceOrderInSupabase(
     code,
   });
 
-  if (!isSupabaseConfigured) return fail('Supabase is not configured on this deployment.');
-  const client = getSupabaseClient();
-  if (!client) return fail('Supabase client unavailable.');
-
   const lines = Array.isArray(input.lines) ? input.lines : [];
-  if (lines.length === 0) return fail('The basket is empty — nothing to persist.');
+  if (lines.length === 0) return fail("The basket is empty — nothing to persist.");
 
-  // ── 1. store uuid ────────────────────────────────────────────────────────
-  const primaryLine = lines[0];
-  const storeRef =
-    String(primaryLine?.store_id || primaryLine?.vendor_id || '').trim() ||
-    String(primaryLine?.store_slug || primaryLine?.vendor_slug || '').trim();
-
-  const resolved = storeRef ? await resolveStoreUuid(client, storeRef) : null;
-  const storeId = resolved || (isUuidLike(storeRef) ? storeRef : newUuid());
-
-  // ── 2. the master row ────────────────────────────────────────────────────
-  // `items` is TEXT: store the JSON STRING, not an array — an array is coerced
-  // to `{...}` and reads back unparseable.
-  const itemsForJson = lines.map((line) => ({
-    productId: line.productId,
-    productName: line.productName,
-    variant: line.variant || 'Standard',
-    quantity: Number(line.quantity) || 1,
-    unitPriceBDT: Number(line.unitPriceBDT) || 0,
-    image: line.image || '',
-    category: line.category || '',
-    vendor_id: line.vendor_id || line.store_id || '',
-    vendor_name: line.vendor_name || '',
-    vendor_slug: line.vendor_slug || line.store_slug || '',
-    // ── Commission / wallet split (centralized admin payment) ──────────────
-    platformFeePercent: line.platformFeePercent ?? input.platformFeePercent,
-    commissionBdt: line.commissionBdt ?? input.commissionBdt,
-    netAmountBdt: line.netAmountBdt ?? input.netAmountBdt,
-    adminPaymentMethod: line.adminPaymentMethod ?? input.adminPaymentMethod,
-    adminPaymentNumber: line.adminPaymentNumber ?? input.adminPaymentNumber,
-  }));
-
-  const row: Record<string, any> = {
-    store_id: storeId,
-    order_number: input.orderNumber,
-    customer_name: input.customerName,
-    customer_phone: input.customerPhone,
-    district: input.district || '',
-    city_area: input.cityArea || '',
-    shipping_address: input.address || '',
-    items: JSON.stringify(itemsForJson),
-    total_amount: Number(input.totalBDT) || 0,
-    payment_method: input.paymentMethod || 'COD',
-    payment_status: input.paymentStatus || 'Unpaid',
-    order_status: 'New',
-  };
-
-  // Defensive: never send a key the table does not have (PGRST204 kills the row).
-  for (const key of Object.keys(row)) {
-    if (!(ORDER_COLUMNS as readonly string[]).includes(key)) delete row[key];
-  }
-
-  let inserted: any = null;
   try {
     /*
-     * UPSERT, NOT INSERT.
-     *
-     * A checkout can be submitted twice — a double click, or a retry after a
-     * timeout where the first request actually committed. With a plain insert
-     * the second attempt created a SECOND order (the shopper is charged twice
-     * and the merchant ships twice). The order number is now stable per attempt
-     * (see `attemptStampRef` in MarketplaceCheckoutView), so `onConflict` on it
-     * makes the retry update the existing row instead of duplicating it.
-     *
-     * Requirement: `orders.order_number` must be UNIQUE for this to dedupe. The
-     * statements below add the constraint where the table does not already have
-     * one; without it Postgres ignores `onConflict` and behaviour is unchanged
-     * (still safe, just not deduplicated).
+     * The server route RE-SHAPES this into the real `orders` columns (it knows
+     * the deployed schema) and resolves the store uuid, so nothing here needs
+     * to know the table layout.
      */
-    const { data, error } = await client
-      .from('orders')
-      // @ts-ignore — dynamic column object; the column list above is the contract.
-      .upsert(row, { onConflict: 'order_number', ignoreDuplicates: true })
-      .select('id, order_number')
-      .maybeSingle();
+    const res = await fetch("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        orders: [{
+          id: input.orderNumber,
+          orderNumber: input.orderNumber,
+          customerName: input.customerName,
+          customerPhone: input.customerPhone,
+          customerEmail: input.customerEmail,
+          district: input.district,
+          cityArea: input.cityArea,
+          address: input.address,
+          customerNote: input.customerNote,
+          subtotalBDT: input.subtotalBDT,
+          deliveryCharge: input.deliveryCharge,
+          totalBDT: input.totalBDT,
+          paymentMethod: input.paymentMethod,
+          paymentStatus: input.paymentStatus,
+          transactionId: input.transactionId,
+          deliveryZone: input.deliveryZone,
+          split_by_vendor: input.split_by_vendor,
+          vendor_ids: input.vendor_ids,
+          vendor_slugs: input.vendor_slugs,
+          vendor_count: input.vendor_count,
+          order_source_channel: input.order_source_channel,
+          marketplace_order: input.marketplace_order,
+          store_slug: String(lines[0]?.vendor_slug || lines[0]?.store_slug || ""),
+          items: lines,
+        }],
+      }),
+    });
 
-    if (error) {
-      const code = String((error as any)?.code || '');
-      console.warn('[marketplaceOrder] Supabase orders insert failed:', code, error.message);
-      return fail(error.message || 'Order could not be saved in Supabase.', code || undefined);
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      return fail(data?.error || `The order could not be saved (HTTP ${res.status}).`, data?.code);
     }
-    inserted = data;
 
-    /*
-     * A DUPLICATE IS A SUCCESS, NOT A FAILURE.
-     *
-     * With `ignoreDuplicates` an already-present order number inserts nothing,
-     * so `.select()` returns no row (`data === null`). Treating that as "the
-     * order could not be saved" made a retry-after-timeout report an error for an
-     * order that exists — and invited the shopper to submit a third time. Look
-     * the existing row up instead and return it, so the caller still learns the
-     * order number and idempotently proceeds.
-     */
-    if (!data) {
-      const { data: existing, error: lookErr } = await client
-        .from('orders')
-        .select('id, order_number')
-        .eq('order_number', row.order_number)
-        .maybeSingle();
-      if (lookErr) {
-        console.warn('[marketplaceOrder] duplicate order lookup warning:', lookErr.message);
-      }
-      inserted = existing || { id: '', order_number: row.order_number };
-      if (existing) {
-        console.log('[marketplaceOrder] duplicate submission ignored, using existing order', row.order_number);
-      }
+    // Report the Supabase leg of the write, when the server returned it.
+    const mirror = Array.isArray(data.supabase) ? data.supabase[0] : null;
+    if (mirror && mirror.ok === false) {
+      console.warn("[marketplaceOrder] Supabase mirror incomplete:", mirror.error);
     }
-  } catch (err: any) {
-    console.warn('[marketplaceOrder] Supabase orders insert threw:', err?.message || err);
-    return fail(err?.message || 'Order could not be saved in Supabase.');
-  }
 
-  const orderId = String((inserted as any)?.id || '');
-
-  // ── 3. per-line rows (best effort) ───────────────────────────────────────
-  if (!orderId) {
-    // The order IS saved; without its id the children cannot be linked.
     return {
       ok: true,
       orderNumber: input.orderNumber,
+      orderId: "",
+      // Lines live in `orders.items`; `order_items` is not provisioned here.
       itemRowsWritten: 0,
       itemsJsonOnly: true,
     };
-  }
-
-  const itemRows = itemsForJson.map((line) => ({
-    order_id: orderId,
-    order_number: input.orderNumber,
-    product_id: isUuidLike(line.productId) ? line.productId : String(line.productId),
-    product_name: line.productName,
-    variant: line.variant,
-    quantity: line.quantity,
-    unit_price_bdt: line.unitPriceBDT,
-    image: line.image || null,
-    vendor_id: line.vendor_id || null,
-    vendor_name: line.vendor_name || null,
-    vendor_slug: line.vendor_slug || null,
-    store_id: storeId,
-    store_slug: line.vendor_slug || null,
-    category: line.category || null,
-  }));
-
-  try {
-    const { error: itemsError } = await client.from('order_items').insert(itemRows as any);
-    if (!itemsError) {
-      return { ok: true, orderId, orderNumber: input.orderNumber, itemRowsWritten: itemRows.length, itemsJsonOnly: false };
-    }
-    if (isMissingTable(itemsError)) {
-      // Expected until `order_items` is provisioned — the lines are in
-      // `orders.items`, so the order itself is complete and correct.
-      console.info(
-        '[marketplaceOrder] `order_items` table is not provisioned; lines stored in orders.items JSON.',
-      );
-      return { ok: true, orderId, orderNumber: input.orderNumber, itemRowsWritten: 0, itemsJsonOnly: true };
-    }
-    console.warn('[marketplaceOrder] Supabase order_items insert failed:', itemsError.message);
-    return { ok: true, orderId, orderNumber: input.orderNumber, itemRowsWritten: 0, itemsJsonOnly: true };
   } catch (err: any) {
-    console.warn('[marketplaceOrder] Supabase order_items insert threw:', err?.message || err);
-    return { ok: true, orderId, orderNumber: input.orderNumber, itemRowsWritten: 0, itemsJsonOnly: true };
+    console.warn("[marketplaceOrder] order submission threw:", err?.message || err);
+    return fail(err?.message || "The order could not be submitted.");
   }
 }
 
@@ -433,40 +261,24 @@ create table if not exists public.order_items (
 create index if not exists order_items_order_id_idx on public.order_items (order_id);
 create index if not exists order_items_vendor_id_idx on public.order_items (vendor_id);
 
-/*
- * Orders are inserted by the storefront with the public anon key, so the
- * orders table needs an INSERT policy too — without it PostgREST answers 401
- * and the checkout has nowhere to write. Kept narrow: insert + read, never
- * update or delete from the client.
- */
+-- RLS: no client policy on orders/order_items.
+--
+-- The browser no longer writes (or reads) these tables. The order is written by
+-- POST /api/orders with the SERVICE ROLE, which bypasses RLS, so checkout keeps
+-- working with the table fully closed. The shopper's history is served by
+-- /api/customer/supabase-orders (service role + signed session).
+--
+-- This block previously created orders_insert_anon with check (true) and
+-- orders_select_anon using (true). The SELECT policy is what let anyone
+-- with the public anon key read every customer's name, phone and address — the
+-- exposure Supabase reported. Both are dropped here.
 alter table public.orders enable row level security;
 drop policy if exists "orders_insert_anon" on public.orders;
-create policy "orders_insert_anon"
-  on public.orders for insert to anon, authenticated with check (true);
--- REMOVED: public SELECT on orders/order_items.
---
--- These two policies were "for select to anon, authenticated using (true)".
--- "using (true)" is not "the shopper's own orders" — it makes EVERY order row
--- readable by anyone holding the public anon key, including other customers'
--- names, phone numbers and addresses. That is precisely the exposure Supabase
--- reported.
---
--- The shopper's history no longer needs a database policy: it is served by
--- /api/customer/supabase-orders, which uses the service-role key and a signed
--- customer session. See supabase/migrations/0016_enable_rls_all_tables.sql.
---
--- If an older deployment still has those policies applied, they are dropped here.
 drop policy if exists "orders_select_anon" on public.orders;
-drop policy if exists "order_items_select_anon" on public.order_items;
 
 alter table public.order_items enable row level security;
 drop policy if exists "order_items_insert_anon" on public.order_items;
--- INSERT stays open, but ONLY for an order that exists. The checkout writes
--- line items as an anonymous shopper, so some insert path must exist; a bare
--- "true" allowed rows to be attached to arbitrary or nonexistent orders.
-create policy "order_items_insert_anon"
-  on public.order_items for insert to anon, authenticated
-  with check (exists (select 1 from public.orders o where o.id = order_items.order_id));
+drop policy if exists "order_items_select_anon" on public.order_items;
 `;
 
 /**
