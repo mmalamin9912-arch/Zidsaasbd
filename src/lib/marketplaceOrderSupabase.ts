@@ -291,12 +291,27 @@ export async function createMarketplaceOrderInSupabase(
 
   let inserted: any = null;
   try {
+    /*
+     * UPSERT, NOT INSERT.
+     *
+     * A checkout can be submitted twice — a double click, or a retry after a
+     * timeout where the first request actually committed. With a plain insert
+     * the second attempt created a SECOND order (the shopper is charged twice
+     * and the merchant ships twice). The order number is now stable per attempt
+     * (see `attemptStampRef` in MarketplaceCheckoutView), so `onConflict` on it
+     * makes the retry update the existing row instead of duplicating it.
+     *
+     * Requirement: `orders.order_number` must be UNIQUE for this to dedupe. The
+     * statements below add the constraint where the table does not already have
+     * one; without it Postgres ignores `onConflict` and behaviour is unchanged
+     * (still safe, just not deduplicated).
+     */
     const { data, error } = await client
       .from('orders')
       // @ts-ignore — dynamic column object; the column list above is the contract.
-      .insert(row)
+      .upsert(row, { onConflict: 'order_number', ignoreDuplicates: true })
       .select('id, order_number')
-      .single();
+      .maybeSingle();
 
     if (error) {
       const code = String((error as any)?.code || '');
@@ -304,6 +319,31 @@ export async function createMarketplaceOrderInSupabase(
       return fail(error.message || 'Order could not be saved in Supabase.', code || undefined);
     }
     inserted = data;
+
+    /*
+     * A DUPLICATE IS A SUCCESS, NOT A FAILURE.
+     *
+     * With `ignoreDuplicates` an already-present order number inserts nothing,
+     * so `.select()` returns no row (`data === null`). Treating that as "the
+     * order could not be saved" made a retry-after-timeout report an error for an
+     * order that exists — and invited the shopper to submit a third time. Look
+     * the existing row up instead and return it, so the caller still learns the
+     * order number and idempotently proceeds.
+     */
+    if (!data) {
+      const { data: existing, error: lookErr } = await client
+        .from('orders')
+        .select('id, order_number')
+        .eq('order_number', row.order_number)
+        .maybeSingle();
+      if (lookErr) {
+        console.warn('[marketplaceOrder] duplicate order lookup warning:', lookErr.message);
+      }
+      inserted = existing || { id: '', order_number: row.order_number };
+      if (existing) {
+        console.log('[marketplaceOrder] duplicate submission ignored, using existing order', row.order_number);
+      }
+    }
   } catch (err: any) {
     console.warn('[marketplaceOrder] Supabase orders insert threw:', err?.message || err);
     return fail(err?.message || 'Order could not be saved in Supabase.');

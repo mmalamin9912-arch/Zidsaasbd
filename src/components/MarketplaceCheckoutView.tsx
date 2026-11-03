@@ -481,6 +481,21 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
    * It also survives a re-render, unlike a state value captured in a closure.
    */
   const submittingRef = useRef(false);
+
+  /*
+   * A STABLE IDEMPOTENCY KEY PER CHECKOUT ATTEMPT.
+   *
+   * `ZID-<Date.now()>-<slug>` was generated fresh on every submit, so if a
+   * request timed out after the row was already committed and the shopper
+   * pressed the button again, the retry produced a DIFFERENT order number and
+   * the server could not tell it was the same basket — the shopper ended up with
+   * two orders.
+   *
+   * This stamp is created once when the checkout view mounts and only rotated
+   * after a CONFIRMED success. Every retry of the same attempt therefore reuses
+   * the same order numbers, which the insert upserts on.
+   */
+  const attemptStampRef = useRef(`ZID-${Date.now().toString().slice(-9)}`);
   const [error, setError] = useState<string | null>(null);
   const [placed, setPlaced] = useState<{ id: string; number: string; vendors: number } | null>(null);
 
@@ -594,8 +609,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       const orderResults = [];
       const placedOrders = [];
       for (const vendor of vendors) {
+        // Derived from the per-attempt stamp (see `attemptStampRef`) plus the
+        // vendor, so the SAME basket always maps to the SAME order numbers.
+        const slugPart = String(vendor.vendorSlug || vendor.vendorId || 'store').trim().toLowerCase();
         const vendorId = `MP-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        const vendorOrderNumber = `ZID-${Date.now().toString().slice(-9)}-${vendor.vendorSlug || vendor.vendorId}`;
+        const vendorOrderNumber = `${attemptStampRef.current}-${slugPart}`;
         const vendorItems = vendor.lines.map((line, index) => {
           const p = line.product as any;
           return {
@@ -794,8 +812,16 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         });
       }
 
+      /*
+       * Only a CONFIRMED success rotates the attempt stamp. A failed attempt
+       * keeps its numbers, so pressing the button again retries the SAME order
+       * (which the upsert de-duplicates) instead of creating a new one.
+       */
+      attemptStampRef.current = `ZID-${Date.now().toString().slice(-9)}`;
       setPlaced({ id, number: orderNumber, vendors: vendors.length });
     } catch (e: any) {
+      // No retry loop, no automatic resubmission: the shopper stays on the form
+      // with the entered data intact and decides whether to try again.
       setError(
         t(
           `Could not place the order. ${e?.message || 'Please try again.'}`,

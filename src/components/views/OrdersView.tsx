@@ -155,19 +155,14 @@ const RETURN_BADGE: Record<ReturnRequest['status'], string> = {
  * deletes) and the tab-count probe still refresh immediately.
  */
 /*
- * How often the merchant's order list re-reads the server.
+ * There is deliberately NO polling interval constant here.
  *
- * 30s was too slow for the actual complaint: a marketplace order is written by
- * a different customer in a different tab, so nothing in THIS dashboard fires an
- * event to announce it. A seller watching the list waited up to half a minute
- * before the new order appeared. 10s matches the customer-side cadence.
- *
- * The cost is bounded, not multiplied: the poll skips hidden tabs (see below)
- * and the response is diffed against `lastSyncedSignature`, so an unchanged
- * payload causes no setState and no re-render at all.
+ * The order list and the returns list are each fetched ONCE when the view
+ * mounts. Background timers were removing the merchant's ability to read the
+ * page (each tick replaced `orders`, re-running every dependent effect) and
+ * hammering the API. Freshness is on demand: the Refresh button, the
+ * `subscribeOrdersChanged` event fired by an in-app write, or a remount.
  */
-const ORDERS_POLL_MS = 10000;
-const RETURNS_POLL_MS = 30000;
 
 export type StatusTab =
   | 'All'
@@ -491,41 +486,30 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         setLiveSync({ state: 'error', at: Date.now(), message: err instanceof Error ? err.message : 'Network error' });
       }
     };
+    /*
+     * FETCH ONCE ON LOAD — NO BACKGROUND POLLING.
+     *
+     * This effect used to install a 10s `setInterval`, a `visibilitychange`
+     * listener AND a BroadcastChannel subscription, all three calling the same
+     * fetch. On a busy dashboard that is a request every few seconds forever, and
+     * because each response replaced `orders` state it re-ran every `[orders]`
+     * effect (counts, filter memos, the tab probe) — the "it keeps reloading" /
+     * "orders flicker" behaviour. Nothing here needs to be live: a merchant who
+     * wants fresh rows presses Refresh, and an order placed in ANOTHER tab is
+     * picked up on the next mount.
+     *
+     * The manual Refresh button still works through `fetchLiveOrdersRef`.
+     */
     void fetchLiveOrders();
 
-    // Skip the tick entirely while the tab is in the background: the merchant
-    // cannot see the list, and browsers throttle background timers anyway. On
-    // return we fire immediately (`visibilitychange`) so the table is current
-    // the moment it is looked at, rather than up to one interval later.
-    const timer = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      void fetchLiveOrders();
-    }, ORDERS_POLL_MS);
-
-    const onVisible = () => {
-      if (typeof document !== 'undefined' && !document.hidden) void fetchLiveOrders();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-
-    // EVENT-DRIVEN REFETCH (the invalidation half of the poll).
-    //
-    // A checkout in another tab — or an order that just landed while the
-    // merchant is looking at this page — posts a signal; we refetch NOW instead
-    // of waiting out the interval. The poll still runs as the safety net for a
-    // signal that was never delivered (a tab that was asleep, a dropped
-    // BroadcastChannel message).
+    // An explicit merchant action that changes the list (a status change, a
+    // delete, a new order created inside this tab) still refreshes immediately —
+    // these are user-initiated, not a timer.
     const unsubscribe = subscribeOrdersChanged(() => {
-      if (typeof document !== 'undefined' && document.hidden) {
-        // If the tab is hidden the poll will fire on `visibilitychange`
-        // anyway; a hidden refetch would just duplicate it.
-        return;
-      }
       void fetchLiveOrders();
     }, storeSlug || merchantId);
 
     return () => {
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
       unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -573,10 +557,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         console.warn('Error fetching return requests:', err);
       }
     };
+    // Loaded once per mount; refreshed by the returns-actions below.
     void fetchReturns();
-    // 30s cadence — same band as the orders tick above.
-    const timer = setInterval(fetchReturns, RETURNS_POLL_MS);
-    return () => { cancelled = true; clearInterval(timer); };
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [merchantId, storeSlug]);
 
@@ -2303,9 +2286,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     </div>
                   </div>
 
-                  {ret.image && (
-                    <img src={ret.image} alt="" className="w-16 h-16 rounded-lg object-cover border border-[#2E3548] shrink-0" />
-                  )}
+                  {/*
+                   * SafeImage, not a raw <img>: a return can point at a
+                   * deleted product photo or a host that stopped serving it,
+                   * and a bare <img> then paints the browser's broken-image
+                   * icon. The loader swaps to the local placeholder on error.
+                   */}
+                  <SafeImage
+                    src={ret.image}
+                    alt={ret.productName || ''}
+                    className="w-16 h-16 rounded-lg object-cover border border-[#2E3548] shrink-0"
+                  />
                 </div>
 
                 {/* Actions — only meaningful while the request is still pending.
