@@ -247,6 +247,11 @@ export function isObjectIdLike(value: string): boolean {
  * `ObjectId` therefore missed almost every real order. This probes, in order:
  *   `_id` (when ObjectId-shaped), `order_number`, `id`, `invoice_id`,
  *   `transaction_id`, and finally the tracking code.
+ *
+ * `extra` may carry the same order's other identifiers (`order_number`,
+ * `orderId`, `transaction_id`, …); every one of them is probed too, because a
+ * caller that holds a stale/mangled string for the order still holds at least
+ * one column value that matches.
  */
 export async function findOrder(
   id: string,
@@ -260,20 +265,41 @@ export async function findOrder(
     const db = await getMongoDb(ORDERS_DB_NAME);
     if (!db) return { doc: null, error: 'MongoDB is unavailable.' };
 
-    const cleaned = key.replace(/^#/, '');
+    const cleaned = key.replace(/^#/, '').trim();
+    /*
+     * Every identifier the admin panel may send for the SAME order.
+     *
+     * The Super Admin queue renders `orderNumber` (e.g. `ZID-727907022-mystore-1`)
+     * but the row's `id` is a client-generated `MP-<ts>-<rand>` string that was
+     * never written to the collection — only `order_number` / `id` were. A lookup
+     * that only probes the strings it was given therefore missed the row the
+     * admin was looking at, and approval failed with "Order … was not found."
+     *
+     * Variants covered: leading `#`, the `order_number` vs `id`/`orderId`
+     * columns (both are written), and a `-<slug>-<n>` / `-<slug>` suffix that a
+     * vendor-split child adds. The exact key is always tried first.
+     */
+    const keys = new Set<string>([cleaned, key].filter(Boolean));
+    const addKey = (value: any) => {
+      const text = String(value ?? '').trim().replace(/^#/, '');
+      if (text) keys.add(text);
+    };
+    // Identity columns the queue carries alongside the number.
+    addKey(extra.order_number);
+    addKey(extra.orderNumber);
+    addKey(extra.order_id);
+    addKey(extra.orderId);
+    addKey(extra.id);
+    addKey(extra.transaction_id);
+    // A child order number is `<base>-<vendorSlug>-<n>`; the master/base is the
+    // part before the first extra segment. Derived only when it still looks
+    // like an order id, so a genuine `ZID-123` is untouched.
+    const baseMatch = /^(.*?-[A-Za-z][A-Za-z0-9_]*)(?:-\d+)?$/.exec(cleaned);
+    if (baseMatch && baseMatch[1] && baseMatch[1] !== cleaned) addKey(baseMatch[1]);
+    const withoutTrailingSegment = cleaned.replace(/-\d+$/, '');
+    if (withoutTrailingSegment && withoutTrailingSegment !== cleaned) addKey(withoutTrailingSegment);
+
     const or: Record<string, any>[] = [
-      { order_number: cleaned },
-      { order_number: key },
-      { orderNumber: cleaned },
-      { orderNumber: key },
-      { id: key },
-      { id: cleaned },
-      { order_id: key },
-      { order_id: cleaned },
-      { orderId: key },
-      { orderId: cleaned },
-      { invoice_id: key },
-      { invoice_id: cleaned },
       { transaction_id: key },
       { tracking_code: key },
       { trackingCode: key },
@@ -284,6 +310,13 @@ export async function findOrder(
       { consignment_id: cleaned },
       { consignmentId: cleaned },
     ];
+    // Every identifier the caller holds gets the same probes, so a row found
+    // under `order_number` is also found under `id` / `orderId`.
+    for (const value of keys) {
+      or.push({ order_number: value }, { orderNumber: value }, { id: value });
+      or.push({ order_id: value }, { orderId: value }, { invoice_id: value });
+    }
+
     // Only treat it as an ObjectId when it looks like one — casting an
     // arbitrary string would throw and fail the whole lookup.
     if (isObjectIdLike(key)) {
@@ -295,22 +328,40 @@ export async function findOrder(
       }
     }
 
-    // Scope to the store when the caller supplied one, so an id collision in
-    // another store cannot update the wrong order.
-    const filter: Record<string, any> = { $or: or };
+    /*
+     * A store scope is only a TIE-BREAKER, never a hard filter.
+     *
+     * The admin queue spans every merchant, so the caller often has no store
+     * ref at all — but when it does (a stale slug on the row, a store renamed
+     * since checkout) ANDing it onto an exact order-number match hid an order
+     * that existed and reported "was not found". An identifier that unique
+     * identifies the order therefore wins on its own; the scoped query is
+     * only used when the unscoped one finds nothing.
+     */
+    const collection = db.collection(ORDERS_COLLECTION);
+    const doc = await collection.findOne({ $or: or });
+    if (doc) return { doc };
+
     const storeScope = String(extra.store_slug || extra.storeSlug || extra.store_id || extra.merchant_id || '').trim();
     if (storeScope) {
-      filter.$and = [{
-        $or: [
-          { store_slug: storeScope }, { storeSlug: storeScope },
-          { store_id: storeScope }, { merchant_id: storeScope },
-          { store_code: storeScope },
+      const scoped = await collection.findOne({
+        $and: [
+          { $or: or },
+          {
+            $or: [
+              { store_slug: storeScope }, { storeSlug: storeScope },
+              { store_id: storeScope }, { store_id: extra.store_id }, { storeId: storeScope },
+              { merchant_id: storeScope }, { merchantId: storeScope },
+              { store_code: storeScope },
+              { vendor_id: storeScope }, { vendorId: storeScope },
+            ],
+          },
         ],
-      }];
+      });
+      if (scoped) return { doc: scoped };
     }
 
-    const doc = await db.collection(ORDERS_COLLECTION).findOne(filter);
-    return { doc: doc || null };
+    return { doc: null };
   } catch (err: any) {
     return { doc: null, error: err?.message || 'Order lookup failed.' };
   }

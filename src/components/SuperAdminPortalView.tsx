@@ -370,12 +370,23 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
       const res = await fetch(`/api/admin/orders/${encodeURIComponent(ord.id)}/payment-verification`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        // Send EVERY identifier the row carries. The stored document is keyed
+        // on `order_number` (and sometimes only on its `id` column), neither of
+        // which is necessarily the queue row's `id`, so the server must be
+        // able to match on all of them.
         body: JSON.stringify({
           action,
           processed_by: 'super_admin',
           orderId: ord.id,
+          order_id: ord.id,
+          _id: (ord as any)._id,
           orderNumber: ord.orderNumber,
           order_number: ord.orderNumber,
+          transaction_id: ord.transactionId,
+          store_slug: (ord as any).store_slug || (ord as any).storeSlug,
+          store_id: (ord as any).store_id || (ord as any).storeId,
+          merchant_id: (ord as any).merchant_id || (ord as any).merchantId,
+          vendor_id: (ord as any).vendor_id || (ord as any).vendorId,
         }),
       });
       const data = await res.json().catch(() => null);
@@ -383,13 +394,18 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
 
       // Drop the resolved row from the queue so the admin sees progress.
       setVerificationOrders((prev) => prev.filter((o) => o.id !== ord.id));
+      const verifiedNumber =
+        (data?.order && ((data.order as any).order_number || (data.order as any).orderNumber)) || ord.orderNumber;
       toast.success(
         action === 'approve'
-          ? `Payment verified — order ${ord.orderNumber} marked Paid and seller credited.`
-          : `Payment rejected — order ${ord.orderNumber} voided.`
+          ? `Payment verified — order ${verifiedNumber} marked Paid and seller credited.`
+          : `Payment rejected — order ${verifiedNumber} voided.`
       );
     } catch (err: any) {
       toast.error(`Could not ${action} payment for ${ord.orderNumber}. ${err?.message || 'Please try again.'}`);
+      // The row stayed in the queue; re-read it so a stale number is refreshed
+      // instead of the admin clicking the same broken row again.
+      void fetchVerificationOrders();
     } finally {
       verifyingIds.current.delete(ord.id);
     }

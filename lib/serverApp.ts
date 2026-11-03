@@ -18829,10 +18829,25 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
     if (action !== 'approve' && action !== 'reject') {
       return res.status(200).json({ ok: false, error: "action must be 'approve' or 'reject'." });
     }
+    /*
+     * The row identity as the admin panel sees it.
+     *
+     * `:id` is the queue row's `id`, which for a marketplace checkout is a
+     * CLIENT-side string (`MP-<ts>-<rand>`) while the stored columns are
+     * `order_number` (`ZID-727907022-mystore-1`) and `id`. Both, plus the
+     * transaction id, are carried into `extra` so `findOrder` probes every
+     * column the row may have been written under. Nothing here is a hard
+     * store filter — see findOrder.
+     */
     const extra = {
       store_slug: req.query.store_slug || body.store_slug || body.storeSlug,
       store_id: req.query.store_id || body.store_id || body.storeId,
       merchant_id: req.query.merchant_id || body.merchant_id || body.merchantId,
+      order_number: body.order_number || body.orderNumber,
+      orderNumber: body.orderNumber || body.order_number,
+      orderId: body.orderId || body.order_id,
+      order_id: body.order_id || body.orderId,
+      transaction_id: body.transaction_id || body.transactionId || body.trxId || body.trx_id,
     };
 
     const lookupKeys = Array.from(new Set([
@@ -18841,6 +18856,10 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
       body.order_id,
       body.orderNumber,
       body.order_number,
+      body.transaction_id,
+      body.transactionId,
+      body.trxId,
+      body.trx_id,
     ].map((value) => String(value || '').trim()).filter(Boolean)));
     let located: Awaited<ReturnType<typeof findOrder>> = { doc: null };
     for (const lookupKey of lookupKeys) {
@@ -18848,20 +18867,65 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
       if (located.doc) break;
     }
     if (!located.doc) {
-      return res.status(200).json({ ok: false, error: located.error || `Order ${id} was not found.` });
+      /*
+       * LAST-RESORT FALLBACK — the same queue the admin panel is displaying.
+       *
+       * GET /api/admin/orders merges `recentOrdersCache` into its result, so a
+       * row that is on screen can legitimately have no Mongo match yet (Mongo
+       * write degraded, or the row arrived from the in-memory sync path).
+       * Searching that cache with the same identifiers means the button acts
+       * on the row the admin clicked instead of failing outright. The write
+       * below still targets Mongo by the cached document's identifiers.
+       */
+      const wanted = new Set(lookupKeys);
+      for (const cached of recentOrdersCache.values()) {
+        const candidates = [
+          cached?.id, cached?._id, cached?.order_number, cached?.orderNumber,
+          cached?.order_id, cached?.orderId, cached?.transaction_id,
+        ].map((value) => String(value || '').replace(/^#/, '').trim());
+        if (candidates.some((value) => value && wanted.has(value.replace(/^#/, '')))) {
+          const cachedId = String(cached?.id || cached?.order_number || '').trim();
+          if (cachedId) {
+            located = { doc: { ...cached } };
+            lookupKeys.push(cachedId);
+            break;
+          }
+        }
+      }
+    }
+    if (!located.doc) {
+      return res.status(200).json({
+        ok: false,
+        error: located.error || `Order ${lookupKeys[0] || id} was not found.`,
+        attempted: lookupKeys,
+      });
     }
     const doc = located.doc as Record<string, any>;
-    const canonicalOrderId = doc._id ? String(doc._id) : id;
+    /*
+     * The id the WRITE is keyed on.
+     *
+     * A cached row carries no Mongo `_id`, and the queue's `:id` may be a
+     * client-side `MP-…` string — neither resolves in `updateOrderFields`.
+     * The stored `order_number` / `id` column is, and `extra.order_number`
+     * lets the update re-locate the document from it.
+     */
+    const docOrderNumber = String(doc.order_number || doc.orderNumber || doc.id || '').replace(/^#/, '').trim();
+    const canonicalOrderId = doc._id
+      ? String(doc._id)
+      : (docOrderNumber || String(doc.id || id).trim());
     const vendorId = String(doc.vendor_id || doc.vendorId || doc.store_id || doc.storeId || doc.merchant_id || doc.merchantId || '').trim();
     const storeSlug = String(doc.store_slug || doc.storeSlug || doc.storeSlug || '').trim();
     const vendorName = String(doc.vendor_name || doc.vendorName || doc.store_name || doc.storeName || '').trim();
-    const orderNumber = String(doc.order_number || doc.orderNumber || doc.id || id).replace(/^#/, '');
+    const orderNumber = docOrderNumber || id;
     const totalBDT = toNumeric(doc.totalBDT ?? doc.total_price ?? doc.total_bdt ?? doc.total, 0);
     const commissionBDT = toNumeric(doc.commission_bdt ?? doc.commissionBdt ?? 0, 0);
     const netPayable = round2(Math.max(0, toNumeric(doc.vendor_net_payable_bdt ?? doc.vendorNetPayableBdt ?? totalBDT - commissionBDT, 0)));
 
     if (action === 'reject') {
-      const result = await updateOrderFields(canonicalOrderId, { paymentStatus: 'Voided' }, extra);
+      const result = await updateOrderFields(canonicalOrderId, {
+        paymentStatus: 'Voided',
+        payment_status: 'voided',
+      }, { ...extra, order_number: orderNumber });
       return res.status(result.ok ? 200 : 200).json({
         ok: result.ok,
         order: result.order ?? null,
@@ -18870,8 +18934,21 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
       });
     }
 
-    // approve
-    const statusResult = await updateOrderFields(canonicalOrderId, { status: 'Processing', paymentStatus: 'Paid' }, extra);
+    // approve — both spellings are written, because the queue and the
+    // storefront read different ones and a partial write left the row still
+    // listed as 'Pending Verification' after a successful approval.
+    const statusResult = await updateOrderFields(canonicalOrderId, {
+      status: 'Processing',
+      order_status: 'Processing',
+      fulfillment_status: 'Unfulfilled',
+      paymentStatus: 'Paid',
+      payment_status: 'paid',
+      payment_verified_at: new Date(),
+      payment_verified_by: String(body.processed_by || 'super_admin'),
+      ...(body.transaction_id || body.transactionId
+        ? { transaction_id: String(body.transaction_id || body.transactionId) }
+        : {}),
+    }, { ...extra, order_number: orderNumber });
     if (!statusResult.ok) {
       return res.status(200).json({ ok: false, error: statusResult.error || 'Could not mark the order paid.' });
     }
