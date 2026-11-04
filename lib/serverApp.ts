@@ -16311,6 +16311,19 @@ function sanitizeMongoPatch(patch: Record<string, any>): Record<string, any> {
   for (const [key, value] of Object.entries(patch)) {
     // `_id` is immutable; operator keys are not data.
     if (key === '_id' || key.startsWith('$')) continue;
+    /*
+     * Timestamps are OWNED BY THE DATABASE, never by the caller.
+     *
+     * `created_at` must never be part of `$set`: a client that echoes an order
+     * back (the dashboard posts the whole list again, with its own
+     * `createdAt`) would otherwise overwrite the row's original creation time,
+     * and Mongo aborts the write with a "created_at conflict" when the same
+     * path is assigned twice in one update. It is written once on insert via
+     * `$setOnInsert`, and reads fall back to `Date.now()` (schema default).
+     * `updated_at` is stamped by the caller on every write, so drop it here and
+     * let that single assignment stand.
+     */
+    if (key === 'created_at' || key === 'createdAt' || key === 'updated_at') continue;
     // `undefined` would be dropped by the driver anyway; skip it so it cannot
     // mask a genuine field with a null-ish value.
     if (value === undefined) continue;
@@ -17534,8 +17547,16 @@ function buildOrderRecord(
       : {}),
     is_manual: isManual,
     isManual,
-    created_at: toValidDate(order.createdAt ?? order.created_at ?? order.date),
-    createdAt: toValidDate(order.createdAt ?? order.created_at ?? order.date),
+    /*
+     * NO `created_at` / `createdAt` HERE — the database stamps it on insert.
+     *
+     * Checkout used to send a browser-formatted `createdAt`, and the write path
+     * then assigned `created_at` BOTH in the patch and in `$setOnInsert` for the
+     * same upsert. Mongo rejects the same path being updated twice in one
+     * operation (`created_at conflict`), and a retried or echoed order
+     * overwrote the original creation time. The timestamp now has exactly one
+     * source of truth: `$setOnInsert` (schema default `Date.now`).
+     */
   };
   return record;
 }
@@ -17959,6 +17980,19 @@ async function writeOrderToSupabase(order: Record<string, any>): Promise<{ ok: b
       payment_status: String(order.paymentStatus || order.payment_status || 'Unpaid'),
       order_status: String(order.order_status || order.status || 'New'),
     };
+    /*
+     * NO `created_at` IN THE POSTGREST PAYLOAD.
+     *
+     * The semantic type of every other row here is now:
+     *   INSERT  -> omitted, so Postgres fills it from DEFAULT NOW()
+     *   UPSERT  -> PATCH fallback below, which also omits it, so a retried
+     *              checkout never rewrites, nor conflicts on, the timestamp.
+     * What remains (`tables`/`values`/`is_duplicate` metadata from an echoed
+     * client order) is not a column of `orders` and would only be another
+     * source of schema drift, so it is dropped too.
+     */
+    delete payload.created_at;
+    delete payload.createdAt;
 
     const result = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/orders', {
       method: 'POST',
@@ -18276,8 +18310,14 @@ app.post('/api/orders', async (req, res) => {
                   await db.collection(ORDERS_COLLECTION).updateOne(
                     { $or: [{ id: doc.id }, { order_number: doc.order_number }] },
                     {
+                      /*
+                       * `created_at` is assigned EXACTLY ONCE per operation, and
+                       * only on insert. `sanitizeMongoPatch` strips every
+                       * timestamp, so `$set` can never overlap `$setOnInsert`
+                       * (which Mongo rejects as a "created_at conflict").
+                       */
                       $set: { ...sanitizeMongoPatch(doc), updated_at: new Date() },
-                      $setOnInsert: { created_at: doc.created_at || new Date() },
+                      $setOnInsert: { created_at: new Date() },
                     },
                     { upsert: true, session }
                   );
@@ -18302,8 +18342,9 @@ app.post('/api/orders', async (req, res) => {
                 updateOne: {
                   filter: { $or: [{ id: doc.id }, { order_number: doc.order_number }] },
                   update: {
+                    // Same single-source timestamp rule as the transaction above.
                     $set: { ...sanitizeMongoPatch(doc), updated_at: new Date() },
-                    $setOnInsert: { created_at: doc.created_at || new Date() },
+                    $setOnInsert: { created_at: new Date() },
                   },
                   upsert: true,
                 },

@@ -3132,7 +3132,10 @@ The render below must not guess. A merchant may paste
       status: 'New',
       courierName: 'Steadfast Courier',
       trackingCode: 'SF-PENDING-' + Math.floor(1000 + Math.random() * 9000),
-      createdAt: new Date().toLocaleString(),
+      // `createdAt` is intentionally NOT sent: the order timestamp is generated
+      // once by the database (`created_at DEFAULT NOW()` / schema default). A
+      // browser-side stamp made the server write `created_at` twice in one
+      // upsert and fail the first click with a `created_at conflict`.
       storeSlug: effectiveStoreSlug,
       merchantId: (merchant as any)?.id || '',
       // The stored address line already ends with the district/area the

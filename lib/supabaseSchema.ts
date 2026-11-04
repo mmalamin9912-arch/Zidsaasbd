@@ -328,7 +328,15 @@ function extractUnknownColumnFrom(detail: string): string | null {
     const m = re.exec(detail);
     if (m && m[1]) return m[1];
   }
-  return null;
+  /*
+   * Schema-cache drift: the column EXISTS in Postgres but not in PostgREST's
+   * cached schema (
+   *   PGRST204: Could not find the 'x' column of 'orders' in the schema cache
+   * ). Retrying the same body can never succeed and the whole row is lost, so
+   * this is treated exactly like an unknown column.
+   */
+  const cacheMiss = /'([^']+)' column of '[^']+' in the schema cache/i.exec(detail);
+  return cacheMiss?.[1] ?? null;
 }
 
 function tableFromPath(path: string): string {
@@ -446,6 +454,21 @@ export async function postgrestWrite(
         if (!droppedColumns.includes(unknownCol)) droppedColumns.push(unknownCol);
         rememberWriteDroppedColumn(table, unknownCol);
         console.warn(`[postgrestWrite] Dropped unknown column "${unknownCol}" from ${table} payload.`);
+        continue;
+      }
+
+      /*
+       * 3b) "Column specified more than once" — an upsert body listed the same
+       * column twice (e.g. legacy `created_at` + camelCase `createdAt` aliases
+       * in one PATCH). The duplicated column is owned by the database, so it is
+       * removed from the payload and the write retried instead of failing.
+       */
+      const duplicateCol = /column "([^"]+)" specified more than once/i.exec(lastDetail)?.[1]
+        || /multiple assignments to same column "([^"]+)"/i.exec(lastDetail)?.[1];
+      if (duplicateCol && body && Object.prototype.hasOwnProperty.call(body, duplicateCol)) {
+        delete body[duplicateCol];
+        if (!droppedColumns.includes(duplicateCol)) droppedColumns.push(duplicateCol);
+        console.warn(`[postgrestWrite] Dropped duplicated column "${duplicateCol}" from ${table} payload.`);
         continue;
       }
 
