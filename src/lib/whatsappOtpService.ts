@@ -374,11 +374,36 @@ export async function verifyWhatsAppOtp(
       const isExpired = localSession.expiresAt < Date.now();
       if (localSession.code === cleanCode && !isExpired) {
         localSession.status = 'verified';
+        /*
+         * STILL ASK THE SERVER FOR A REAL SESSION.
+         *
+         * The local hit only proves the code was issued in THIS browser. The
+         * order-history read (`/api/customer/supabase-orders`) needs a signed
+         * token the server can verify, so the same code is exchanged for one
+         * here. `dev_verified_<ts>` used to be returned instead — a value no
+         * endpoint accepts, which is why that read answered 401.
+         */
+        const signed = await fetch('/api/auth/whatsapp-otp/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ phone: normalized, code: cleanCode }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+        if (signed?.ok && signed?.token) {
+          return {
+            success: true,
+            verified: true,
+            message: 'Phone number verified successfully via WhatsApp OTP ✓',
+            token: String(signed.token),
+          };
+        }
+        // Server unreachable/expired there: keep working, but the caller can
+        // see that no session token was issued (`token` is omitted).
         return {
           success: true,
           verified: true,
           message: 'Phone number verified successfully via WhatsApp OTP ✓',
-          token: `dev_verified_${Date.now()}`
         };
       }
     }
@@ -438,11 +463,18 @@ export async function verifyWhatsAppOtp(
               .update({ status: 'verified', verified_at: new Date().toISOString() })
               .eq('phone', normalized);
 
+            /*
+             * NO `sb_verified_…` TOKEN.
+             *
+             * That value was a timestamp dressed up as a session: the server
+             * cannot verify it, so every read that required a session answered
+             * 401. The caller then exchanges the code with
+             * `/api/auth/whatsapp-otp/verify`, which mints the signed token.
+             */
             return {
               success: true,
               verified: true,
-              message: 'Phone number successfully verified via Supabase!',
-              token: `sb_verified_${Date.now()}`
+              message: 'Phone number successfully verified via Supabase!'
             };
           }
         }
@@ -467,7 +499,8 @@ export async function verifyWhatsAppOtp(
         success: true,
         verified: true,
         message: 'Phone number successfully verified via WhatsApp!',
-        token: data?.token || `wp_verified_${Date.now()}`
+        // Only the token the server actually signed — never a fabricated one.
+        ...(data?.token ? { token: String(data.token) } : {})
       };
     }
 
@@ -484,8 +517,7 @@ export async function verifyWhatsAppOtp(
       return {
         success: true,
         verified: true,
-        message: 'Phone number verified successfully (offline fallback) ✓',
-        token: `offline_verified_${Date.now()}`
+        message: 'Phone number verified successfully (offline fallback) ✓'
       };
     }
     return {

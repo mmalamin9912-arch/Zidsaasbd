@@ -320,12 +320,14 @@ export async function fetchSupabaseOrdersForPhone(
         cache: 'no-store',
       },
     );
-    if (res.status === 401) {
-      // The shopper has not completed phone verification for this session.
-      // History still renders from the server (Mongo) list.
-      return [];
-    }
+    /*
+     * No session (401) or an intentionally empty answer: the server now replies
+     * 200 with `auth: 'none'` instead of a 401, but an older deployment may
+     * still 401 — both mean "render from the server list only", never an error.
+     */
+    if (res.status === 401) return [];
     const data = await res.json().catch(() => null);
+    if (data?.auth === 'none') return [];
     const rows = Array.isArray(data?.orders) ? data.orders : [];
     return rows;
   } catch (err: any) {

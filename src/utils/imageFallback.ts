@@ -117,6 +117,10 @@ export function resolveProductImage(source: unknown): string {
     ...(Array.isArray(item.images) ? item.images : []),
     product?.image, product?.imageUrl, product?.image_url, product?.thumbnail,
     ...(Array.isArray(product?.images) ? product.images : []),
+    // A POPULATED reference: `product_id` may be an id string or a joined row
+    // (`{ image, image_url, … }`) depending on which API produced the order.
+    (typeof item.product_id === 'object' && item.product_id ? (item.product_id as any).image : ''),
+    (typeof item.product_id === 'object' && item.product_id ? (item.product_id as any).image_url : ''),
   ];
 
   for (const candidate of candidates) {

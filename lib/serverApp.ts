@@ -16901,16 +16901,31 @@ function getMatchingCachedOrdersForVendor(refValues: string[]): any[] {
  */
 function imageOfLine(item: any): string {
   if (!item || typeof item !== 'object') return '';
+  const product = item.product && typeof item.product === 'object' ? item.product : null;
   const candidates = [
     item.image, item.image_url, item.imageUrl, item.thumbnail, item.thumbnailUrl,
     item.productImage, item.product_image,
     ...(Array.isArray(item.images) ? item.images : []),
+    // Nested / joined product shapes: `item.product.image`, `item.product_id.image`
+    // (a populated reference, or a JSONB product snapshot joined onto the line).
+    product?.image, product?.image_url, product?.imageUrl, product?.thumbnail,
+    ...(Array.isArray(product?.images) ? product.images : []),
+    (typeof item.product_id === 'object' ? item.product_id?.image : ''),
+    item.product?.product?.image,
   ];
   for (const candidate of candidates) {
-    const value = typeof candidate === 'object' && candidate
-      ? (candidate.url || candidate.src || '')
+    const value = candidate && typeof candidate === 'object'
+      ? (candidate.url || candidate.src || candidate.image || candidate.image_url || '')
       : candidate;
-    if (typeof value === 'string' && value.trim() && value.trim() !== '#') return value.trim();
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      // The local placeholder is a FALLBACK, never a real image: treat it as
+      // "no photo" so a stored placeholder can still be resolved from the
+      // catalogue instead of being served as the product's picture forever.
+      if (trimmed && trimmed !== '#' && !/^\/?placeholder\.(svg|png|jpe?g|webp)$/i.test(trimmed)) {
+        return trimmed;
+      }
+    }
   }
   return '';
 }
@@ -16937,7 +16952,7 @@ async function backfillOrderItemImages(
     if (!Array.isArray(raw) && typeof raw === 'string' && raw.trim()) {
       try { const p = JSON.parse(raw); items = Array.isArray(p) ? p : []; } catch { items = []; }
     }
-    return { order, items };
+    return { order, items, original: raw };
   });
 
   const missing = new Set<string>();
@@ -16956,15 +16971,21 @@ async function backfillOrderItemImages(
     console.warn('[Server] order image backfill warning:', err?.message || err);
   }
 
-  return parsed.map(({ order, items }) => {
+  return parsed.map(({ order, items, original }) => {
     const hydrated = items.map((item: any) => {
       if (!item || typeof item !== 'object') return item;
       if (imageOfLine(item)) return item;
-      const pid = String(item.productId ?? item.product_id ?? '').trim();
+      const pid = String(item.productId ?? (typeof item.product_id === 'string' ? item.product_id : '') ?? '').trim();
       const image = (pid && found.get(pid)) || '';
-      return { ...item, image: image || PLACEHOLDER_IMAGE };
+      // Unresolved → `''`. The client's `SafeImage` renders the local fallback,
+      // but the RESPONSE keeps "no photo" distinguishable from "this product's
+      // photo". Baking `placeholder.svg` in is what made a later catalogue
+      // lookup impossible and showed the placeholder in the orders summary.
+      return { ...item, image };
     });
-    return { ...order, items: JSON.stringify(hydrated) };
+    // Array in, array out — the dashboard reads `items` as an array and a
+    // string here forced a re-parse it does not do.
+    return { ...order, items: Array.isArray(original) ? hydrated : JSON.stringify(hydrated) };
   });
 }
 
@@ -16986,21 +17007,14 @@ function hydrateOrderItemImages(order: any): any {
 
   const hydrated = items.map((item: any) => {
     if (!item || typeof item !== 'object') return item;
-    const image =
-      item.image ??
-      item.image_url ??
-      item.imageUrl ??
-      item.thumbnail ??
-      item.productImage ??
-      item.product_image ??
-      '';
-    if (typeof image === 'string' && image.trim() !== '' && image.trim() !== '#') {
-      return item;
-    }
-    return { ...item, image: PLACEHOLDER_IMAGE };
+    // Every spelling, including a nested product / populated product_id.
+    const image = imageOfLine(item);
+    if (image) return item;
+    // '' — never the placeholder URL. See `backfillOrderItemImages`.
+    return { ...item, image: '' };
   });
 
-  return { ...order, items: JSON.stringify(hydrated) };
+  return { ...order, items: Array.isArray(raw) ? hydrated : JSON.stringify(hydrated) };
 }
 
 // GET /api/orders — list orders with FLEXIBLE matching. Accepts the store
@@ -17286,8 +17300,24 @@ app.get('/api/customer/supabase-orders', async (req, res) => {
   try {
     const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
     const session = readCustomerSession(bearer) || readCustomerSession(req.query.token);
+    /*
+     * NO HARD 401.
+     *
+     * This used to answer 401 for any caller without a signed session, which
+     * surfaced in the browser console as a failed `supabase-orders?limit=100` on
+     * every history load — even though the page renders perfectly well from the
+     * server (MongoDB) list it has already fetched. The endpoint is an OPTIONAL
+     * merge, so it answers 200 with `orders: []` and says why. Nothing is
+     * disclosed: without a verified session the phone is unknown, so no row can
+     * match.
+     */
     if (!session) {
-      return res.status(401).json({ ok: false, orders: [], error: 'A verified customer session is required.' });
+      return res.status(200).json({
+        ok: true,
+        orders: [],
+        auth: 'none',
+        notice: 'No verified customer session — the history is served from the server list only.',
+      });
     }
 
     const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
@@ -17316,7 +17346,7 @@ app.get('/api/customer/supabase-orders', async (req, res) => {
     // resolver the Mongo read path uses, so a Supabase-sourced order in the
     // customer's "My Orders" renders the same thumbnails instead of blanks.
     const orders = (Array.isArray(rows) ? rows : []).map(hydrateOrderItemImages);
-    return res.status(200).json({ ok: true, orders });
+    return res.status(200).json({ ok: true, orders, auth: 'session' });
   } catch (err: any) {
     console.warn('[Server] GET /api/customer/supabase-orders warning:', err?.message || err);
     return res.status(200).json({ ok: true, orders: [] });
@@ -17731,13 +17761,22 @@ function buildOrderRecord(
       } catch {
         parsed = [];
       }
+      /*
+       * Keep each line's REAL photo and never bake a placeholder into storage.
+       *
+       * Only `image` was inspected here, so a line whose picture lived in
+       * `imageUrl` / `thumbnail` / `images[]` / `product.image` was rewritten to
+       * `/placeholder.svg` — which is why the orders summary rendered the
+       * placeholder instead of the product photo. `imageOfLine` reads every
+       * spelling; a line with genuinely no photo is stored with `''` and the
+       * read path backfills it from the catalogue.
+       */
       return JSON.stringify(
         parsed.map((it: any) => {
           if (!it || typeof it !== 'object') return it;
-          const image =
-            it.image ?? it.image_url ?? it.imageUrl ?? it.thumbnail ?? it.productImage ?? it.product_image ?? '';
-          if (typeof image === 'string' && image.trim() !== '' && image.trim() !== '#') return it;
-          return { ...it, image: PLACEHOLDER_IMAGE };
+          const image = imageOfLine(it);
+          if (image) return { ...it, image };
+          return { ...it, image: '' };
         }),
       );
     })(),

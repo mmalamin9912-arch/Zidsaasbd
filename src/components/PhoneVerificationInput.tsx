@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Check, MessageSquare, Loader2, ChevronDown, Phone, ShieldCheck } from 'lucide-react';
-import { 
+import {  
   SUPPORTED_COUNTRIES, 
   CountryCodeOption, 
   formatFullPhoneNumber, 
@@ -8,6 +8,7 @@ import {
   sendWhatsAppOtp, 
   verifyWhatsAppOtp 
 } from '../lib/whatsappOtpService';
+import { storeCustomerToken } from '../lib/marketplaceOrderSupabase';
 
 export interface PhoneVerificationInputProps {
   id?: string;
@@ -207,6 +208,20 @@ export const PhoneVerificationInput: React.FC<PhoneVerificationInputProps> = ({
     if (result.success && result.verified) {
       setIsOtpSent(false);
       setDevOtpCode(null);
+      /*
+       * KEEP THE SERVER SESSION.
+       *
+       * `/api/auth/whatsapp-otp/verify` returns a SIGNED customer token (bound
+       * to the verified number). Nothing used to save it, so the very next
+       * read — `/api/customer/supabase-orders`, which requires that token —
+       * answered 401 Unauthorized and the shopper's Supabase order history came
+       * back empty. Only a real signed token is stored; the legacy
+       * `sb_verified_…` / `wp_verified_…` placeholders are not, because the
+       * server can never verify them.
+       */
+      if (userType === 'customer' && result.token && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(result.token)) {
+        storeCustomerToken(result.token);
+      }
       if (onVerifiedChange) {
         onVerifiedChange(true);
       }
