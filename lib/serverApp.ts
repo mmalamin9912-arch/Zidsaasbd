@@ -16873,6 +16873,75 @@ function getMatchingCachedOrdersForVendor(refValues: string[]): any[] {
  * and substitutes the local placeholder when nothing is usable, then writes the
  * (possibly updated) items back as a JSON string on the same object.
  */
+function imageOfLine(item: any): string {
+  if (!item || typeof item !== 'object') return '';
+  const candidates = [
+    item.image, item.image_url, item.imageUrl, item.thumbnail, item.thumbnailUrl,
+    item.productImage, item.product_image,
+    ...(Array.isArray(item.images) ? item.images : []),
+  ];
+  for (const candidate of candidates) {
+    const value = typeof candidate === 'object' && candidate
+      ? (candidate.url || candidate.src || '')
+      : candidate;
+    if (typeof value === 'string' && value.trim() && value.trim() !== '#') return value.trim();
+  }
+  return '';
+}
+
+/**
+ * Fill in a product photo for order lines that were stored WITHOUT one.
+ *
+ * A checkout can save a line before the catalogue row carried a photo (or the
+ * client sent only a product id), and those orders then show a forever-broken
+ * thumbnail. The catalogue is consulted once per request for the distinct
+ * product ids that are missing an image; anything still unresolved gets the
+ * local placeholder, which `SafeImage` renders instead of a broken icon.
+ * Best-effort: a lookup failure leaves the placeholder in place.
+ */
+async function backfillOrderItemImages(
+  orders: any[],
+  loader: (productIds: string[]) => Promise<Map<string, string>>,
+): Promise<any[]> {
+  if (!Array.isArray(orders) || orders.length === 0) return orders;
+
+  const parsed = orders.map((order) => {
+    const raw = order?.items;
+    let items: any[] = Array.isArray(raw) ? raw : [];
+    if (!Array.isArray(raw) && typeof raw === 'string' && raw.trim()) {
+      try { const p = JSON.parse(raw); items = Array.isArray(p) ? p : []; } catch { items = []; }
+    }
+    return { order, items };
+  });
+
+  const missing = new Set<string>();
+  for (const { items } of parsed) {
+    for (const item of items) {
+      const pid = String(item?.productId ?? item?.product_id ?? '').trim();
+      if (pid && !imageOfLine(item)) missing.add(pid);
+    }
+  }
+  if (missing.size === 0) return orders;
+
+  let found: Map<string, string> = new Map();
+  try {
+    found = await loader([...missing].slice(0, 200));
+  } catch (err: any) {
+    console.warn('[Server] order image backfill warning:', err?.message || err);
+  }
+
+  return parsed.map(({ order, items }) => {
+    const hydrated = items.map((item: any) => {
+      if (!item || typeof item !== 'object') return item;
+      if (imageOfLine(item)) return item;
+      const pid = String(item.productId ?? item.product_id ?? '').trim();
+      const image = (pid && found.get(pid)) || '';
+      return { ...item, image: image || PLACEHOLDER_IMAGE };
+    });
+    return { ...order, items: JSON.stringify(hydrated) };
+  });
+}
+
 function hydrateOrderItemImages(order: any): any {
   if (!order || typeof order !== 'object') return order;
   let items: any[] = [];
@@ -17028,9 +17097,38 @@ app.get('/api/orders', async (req, res) => {
       res.setHeader('X-Orders-Degraded', 'true');
       res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
     }
-    // Embed a usable product image on every order line item so checkout,
-    // tracking and dashboard order rows never render a broken thumbnail.
-    const ordersWithImages = dedupedOrders.map(hydrateOrderItemImages);
+    /*
+     * Embed a usable product image on every order line item so checkout,
+     * tracking and dashboard order rows never render a broken thumbnail.
+     *
+     * `backfillOrderItemImages` first recovers photos for lines stored before
+     * the catalogue row had one (looked up from the merchant's own products, so
+     * the read never crosses tenant boundaries); `hydrateOrderItemImages` then
+     * guarantees every remaining line carries a renderable value.
+     */
+    const backfilled = await backfillOrderItemImages(dedupedOrders, async (productIds) => {
+      const map = new Map<string, string>();
+      if (!dbConnected || productIds.length === 0) return map;
+      // Products live in the same database as the orders collection.
+      const productDb = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+      if (!productDb) return map;
+      // Scoped by the SAME tenant query as the orders, so a product id can only
+      // ever be resolved inside the merchant whose dashboard is asking.
+      const scope = storeQuery
+        ? { $and: [{ id: { $in: productIds } }, storeQuery] }
+        : { id: { $in: productIds } };
+      const rows = await productDb.collection(PRODUCTS_COLLECTION)
+        .find(scope, { projection: { id: 1, image: 1, image_url: 1, imageUrl: 1, thumbnail: 1, images: 1 } })
+        .limit(1000)
+        .toArray()
+        .catch(() => []);
+      for (const row of rows as any[]) {
+        const image = imageOfLine(row);
+        if (row?.id && image) map.set(String(row.id), image);
+      }
+      return map;
+    }).catch(() => dedupedOrders);
+    const ordersWithImages = backfilled.map(hydrateOrderItemImages);
     return res.status(200).json(ordersWithImages);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
@@ -17188,7 +17286,11 @@ app.get('/api/customer/supabase-orders', async (req, res) => {
       return res.status(200).json({ ok: true, orders: [] });
     }
     const rows = await sbRes.json().catch(() => []);
-    return res.status(200).json({ ok: true, orders: Array.isArray(rows) ? rows : [] });
+    // `items` is a JSON STRING on this table; hydrate it through the SAME image
+    // resolver the Mongo read path uses, so a Supabase-sourced order in the
+    // customer's "My Orders" renders the same thumbnails instead of blanks.
+    const orders = (Array.isArray(rows) ? rows : []).map(hydrateOrderItemImages);
+    return res.status(200).json({ ok: true, orders });
   } catch (err: any) {
     console.warn('[Server] GET /api/customer/supabase-orders warning:', err?.message || err);
     return res.status(200).json({ ok: true, orders: [] });
@@ -17776,9 +17878,17 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
   };
 
   const children = splitOrderByVendor(items, fallback, toNumeric(masterOrder.deliveryCharge ?? masterOrder.delivery_charge, 0));
-  // No split requested and only one vendor → nothing to fan out.
-  if (!wantsSplit && children.length <= 1) return [];
-  if (children.length === 0) return [];
+  /*
+   * ONE VENDOR = ONE ORDER. Nothing to fan out.
+   *
+   * A caller used to be able to ask for a split (`split_by_vendor: true`)
+   * unconditionally, and that minted an extra CHILD row — with its own order
+   * number `<master>-1` — even when every line belonged to the master's own
+   * store. The buyer saw one purchase, the merchant saw two orders. A split is
+   * only meaningful when the basket genuinely spans MORE THAN ONE vendor, so a
+   * single-vendor basket keeps the master row it was given.
+   */
+  if (children.length <= 1) return [];
 
   const vendorIds = [...new Set(children.map((c) => c.vendor_id))];
   const masterId = String(masterRecord.id || masterOrder.id || `ord-${Date.now()}`);
@@ -17867,7 +17977,14 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
       [...new Set(categories)]
     );
 
-    // 3. Child order row.
+    /*
+     * 3. Child order row.
+     *
+     * Ids are `...-v1`, `...-v2`… — deterministic per (master, position) — so a
+     * retried POST updates the SAME child instead of inserting another one.
+     * `parent_order_id` / `parent_order_number` on every child are what group
+     * the fan-out under the single master the shopper placed.
+     */
     const childId = `${masterId}-v${index + 1}`;
     const childNumber = `${masterNumber}-${index + 1}`;
     const trackingCode = makeVendorTrackingCode(courierName, childNumber);

@@ -87,7 +87,22 @@ export function normalizeOrderItems(raw: unknown): OrderItem[] {
       variant: String(item?.variant ?? ''),
       quantity,
       unitPriceBDT: unitPrice,
+      /*
+       * An EMPTY string when the line carries no photo, never a placeholder
+       * URL — and every image alias is preserved beside `image`.
+       *
+       * The thumbnail is resolved again at render time by `SafeImage` (which
+       * swaps to the bundled placeholder after ONE failed request). Writing
+       * `/placeholder.svg` here instead made a later catalogue re-read unable to
+       * tell "no photo" from "a photo", and a re-normalised row kept the
+       * placeholder forever. Keeping `imageUrl` / `thumbnail` / `images` on the
+       * line means a legacy row written before `image` existed still renders.
+       */
       image,
+      ...(item?.imageUrl ? { imageUrl: String(item.imageUrl) } : {}),
+      ...(item?.image_url ? { image_url: String(item.image_url) } : {}),
+      ...(item?.thumbnail ? { thumbnail: String(item.thumbnail) } : {}),
+      ...(Array.isArray(item?.images) ? { images: item.images } : {}),
     } as OrderItem;
   });
 }

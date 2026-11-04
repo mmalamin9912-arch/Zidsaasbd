@@ -637,7 +637,15 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         const vendorBkashFee = isBkash ? Math.round((vendorSubtotal + vendorDelivery) * 0.01) : 0;
         const vendorTotal = vendorSubtotal + vendorDelivery + vendorBkashFee;
         const zoneLabel = resolvedZone === 'inside' ? 'Inside Dhaka' : resolvedZone === 'sub' ? 'Sub Dhaka' : 'Outside Dhaka';
-        const supabaseResult: SupabaseOrderResult = await createMarketplaceOrderInSupabase({
+        /*
+         * ONE VENDOR FAILING MUST NOT COST THE OTHER VENDORS THEIR ORDER.
+         *
+         * The call throws for a network error or a non-JSON reply, and an
+         * unguarded throw here aborted the whole basket mid-loop: the vendors
+         * already written kept their rows while the remaining ones were never
+         * saved, and the master order below was never posted at all.
+         */
+        const placeVendor = async (): Promise<SupabaseOrderResult> => createMarketplaceOrderInSupabase({
           orderNumber: vendorOrderNumber,
           customerName: form.name.trim(),
           customerPhone: form.phone.trim(),
@@ -676,6 +684,12 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           order_source_channel: 'marketplace',
           marketplace_order: true,
         });
+        const supabaseResult = await placeVendor().catch((err: any): SupabaseOrderResult => ({
+          ok: false,
+          itemRowsWritten: 0,
+          itemsJsonOnly: false,
+          error: err?.message || 'The order could not be submitted.',
+        }));
         orderResults.push({ ok: supabaseResult.ok, orderId: supabaseResult.orderId, orderNumber: vendorOrderNumber, error: supabaseResult.error });
         placedOrders.push({
           id: vendorId,
@@ -684,6 +698,8 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           vendorSlug: vendor.vendorSlug,
           vendorName: vendor.vendorName,
           total: vendorTotal,
+          subtotalBDT: vendorSubtotal,
+          deliveryCharge: vendorDelivery,
         });
       }
 
@@ -721,9 +737,16 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
             resolvedZone === 'inside' ? 'Inside Dhaka'
               : resolvedZone === 'sub' ? 'Sub Dhaka'
                 : 'Outside Dhaka',
-          subtotalBDT: subtotal,
-          deliveryCharge: totalDeliveryCharge,
-          totalBDT: total,
+          /*
+           * THIS ROW BELONGS TO ONE VENDOR, so its money is that vendor's share —
+           * not the basket total. Sending the basket total stamped the whole
+           * marketplace amount onto every vendor row (one per seller), so a
+           * two-seller checkout appeared to generate several full-price orders.
+           * The basket's own total lives on the master order posted below.
+           */
+          subtotalBDT: order.subtotalBDT,
+          deliveryCharge: order.deliveryCharge,
+          totalBDT: order.total,
           paymentMethod: PAYMENT_LABELS[payment],
           paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
           transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
@@ -735,7 +758,9 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           items: lines.map((line, index) => {
             const p = line.product as any;
             return {
-              id: `MP-${Date.now()}-${index + 1}`,
+              // Stable line ids: a retried checkout must reuse them so the order
+              // upsert reconciles lines instead of appending new ones.
+              id: `${order.orderNumber}-i${index + 1}`,
               productId: String(p.id || ''),
               productName: String(p.title || p.name || 'Item'),
               variant: String(p.variant || 'Standard'),
@@ -750,12 +775,26 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
               category: String(p.category || ''),
             };
           }),
-          split_by_vendor: true,
           vendor_ids: vendors.map((v) => v.vendorId).filter(Boolean),
           vendor_slugs: vendors.map((v) => v.vendorSlug).filter(Boolean),
-          vendor_count: vendors.length,
           order_source_channel: 'marketplace',
           marketplace_order: true,
+          /*
+           * NO SPLIT FOR AN ALREADY-SPLIT VENDOR ROW.
+           *
+           * This payload is ALREADY one vendor's order: its `store_id`,
+           * `merchant_id` and line items all belong to a single seller. Asking
+           * the server to split it again made it mint a CHILD (`...-v1`,
+           * number `<orderNumber>-1`) for that same vendor, on top of the master
+           * row and on top of the Supabase vendor order created above — three
+           * numbers for one seller's single order.
+           *
+           * A vendor order whose store could not be resolved is routed to the
+           * first vendor instead; `split_by_vendor` is what lets the server fan
+           * it out to the real sellers in that case.
+           */
+          split_by_vendor: !order.vendorId,
+          vendor_count: order.vendorId ? 1 : vendors.length,
           // The attempt stamp is reused by every retry, so the server upserts
           // the SAME master/child rows instead of creating another order.
           idempotencyKey: `${attemptStampRef.current}:${order.vendorId}`,
@@ -767,13 +806,81 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
             headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
             body: JSON.stringify({ orders: [mirrorPayload] }),
           });
-          await res.json().catch(() => null);
-          if (res.ok) mirrorSucceeded += 1;
-          if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          if (res.ok && data?.ok !== false) {
+            mirrorSucceeded += 1;
+          } else {
             console.warn('[MarketplaceCheckout] /api/orders mirror HTTP', res.status);
           }
         } catch (mirrorErr: any) {
           console.warn('[MarketplaceCheckout] /api/orders mirror failed:', mirrorErr?.message || mirrorErr);
+        }
+      }
+      /*
+       * THE WHOLE BASKET NEEDS ONE OWNER ROW.
+       *
+       * The loop above posts one doc per VENDOR — correct for routing, wrong as
+       * the order of record: the shopper placed ONE order, and the customer's
+       * "My Orders" must show one entry, not one per seller. The master is
+       * posted ONCE (all lines, every vendor) under the attempt stamp, with a
+       * `<stamp>:basket` idempotency key so a retry UPSERTS this same master
+       * instead of adding a second one.
+       *
+       * Child numbering is derived from it: the server names each child
+       * `<master>-v<n>` / `<master>-<n>`, so every vendor row is grouped under
+       * one parent number rather than each carrying its own unrelated number.
+       */
+      const masterNumber = attemptStampRef.current;
+      {
+        try {
+          const masterRes = await fetch('/api/orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({
+              orders: [{
+                id: masterNumber,
+                orderNumber: masterNumber,
+                customerName: form.name.trim(),
+                customerPhone: form.phone.trim(),
+                customerEmail: form.email.trim() || undefined,
+                district: form.district,
+                cityArea: form.area.trim(),
+                address: form.address.trim(),
+                customerNote: form.note.trim() || undefined,
+                deliveryZone:
+                  resolvedZone === 'inside' ? 'Inside Dhaka'
+                    : resolvedZone === 'sub' ? 'Sub Dhaka'
+                      : 'Outside Dhaka',
+                subtotalBDT: subtotal,
+                deliveryCharge: totalDeliveryCharge,
+                totalBDT: total,
+                paymentMethod: PAYMENT_LABELS[payment],
+                paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
+                transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
+                fulfillmentStatus: 'Unfulfilled',
+                status: 'New',
+                source: 'Store',
+                // Every line, each carrying its selling vendor — this is what
+                // the server groups into one child per merchant.
+                items,
+                // The MASTER is the only row that asks for a split; the vendor
+                // rows above are single-seller and posted without one.
+                split_by_vendor: true,
+                vendor_ids: vendors.map((v) => v.vendorId).filter(Boolean),
+                vendor_slugs: vendors.map((v) => v.vendorSlug).filter(Boolean),
+                vendor_count: vendors.length,
+                order_source_channel: 'marketplace',
+                marketplace_order: true,
+                idempotencyKey: `${masterNumber}:basket`,
+                idempotency_key: `${masterNumber}:basket`,
+              }],
+            }),
+          });
+          const masterData = await masterRes.json().catch(() => null);
+          if (masterRes.ok && masterData?.ok !== false) mirrorSucceeded += 1;
+          else console.warn('[MarketplaceCheckout] master order mirror HTTP', masterRes.status);
+        } catch (masterErr: any) {
+          console.warn('[MarketplaceCheckout] master order mirror failed:', masterErr?.message || masterErr);
         }
       }
       if (orderResults.every((result) => !result.ok) && mirrorSucceeded === 0) {
