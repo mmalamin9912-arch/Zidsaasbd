@@ -16,6 +16,63 @@ import type { SyntheticEvent } from 'react';
 export const PLACEHOLDER_IMAGE = '/placeholder.svg';
 
 /**
+ * Storage base prefixed to an image path that has no domain of its own.
+ *
+ * Merchants and older imports store what the upload API returned after stripping
+ * the host — `/storage/v1/object/public/product-images/…`, `product-images/x.jpg`
+ * or a bare `x.jpg`. In the browser such a value resolves against the APP's own
+ * origin (`/store/x.jpg`), i.e. a 404 and a broken-image icon in the cart, the
+ * checkout summary and the order cards.
+ */
+const STORAGE_BASE = (() => {
+  const env = (import.meta as any)?.env || {};
+  const raw = String(
+    env.VITE_SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '',
+  ).trim();
+  return raw ? raw.replace(/\/+$/, '') : '';
+})();
+
+/** Buckets that are served from the Supabase storage host. */
+const STORAGE_BUCKETS = ['product-images', 'products', 'product', 'uploads', 'media', 'store-assets'];
+
+/** True for a value that already carries a scheme or an absolute origin. */
+function isAbsoluteImageUrl(value: string): boolean {
+  return (
+    /^(https?:)?\/\//i.test(value) ||
+    /^data:/i.test(value) ||
+    /^blob:/i.test(value)
+  );
+}
+
+/**
+ * Turn any stored image value into something the browser can actually load.
+ *
+ * - absolute URL / data URI / blob     → unchanged
+ * - `/storage/v1/object/...`           → Supabase storage host + the path
+ * - `product-images/…` inside a bucket → Supabase storage public object URL
+ * - any other relative path            → resolved against THIS app's origin
+ *   (an in-repo asset such as `/images/tee.png` must keep working)
+ * - empty / `'#'`                      → '' so the caller shows a placeholder
+ */
+export function toRenderableImageUrl(value: unknown): string {
+  const raw = urlFromValue(value);
+  if (!raw) return '';
+  if (isAbsoluteImageUrl(raw)) return raw;
+
+  const path = raw.replace(/^\/+/, '');
+  if (STORAGE_BASE) {
+    // Already a storage path, just missing the host.
+    if (path.startsWith('storage/v1/object/')) return `${STORAGE_BASE}/${path}`;
+    const [bucket,...rest] = path.split('/');
+    if (STORAGE_BUCKETS.includes(bucket.toLowerCase()) && rest.length > 0) {
+      return `${STORAGE_BASE}/storage/v1/object/public/${bucket}/${rest.join('/')}`;
+    }
+  }
+  // A relative in-app asset (`/images/…`, `/placeholder.svg`) — keep as-is.
+  return raw;
+}
+
+/**
  * Pull a URL out of a value that may be a string or an `{ url }`-shaped object.
  * Product rows are written by several callers, some of which store
  * `images: [{ url, alt }]` rather than `images: ['https://…']`.
@@ -63,7 +120,9 @@ export function resolveProductImage(source: unknown): string {
   ];
 
   for (const candidate of candidates) {
-    const url = urlFromValue(candidate);
+    // Every candidate is normalised, so a relative storage path is turned into
+    // a loadable URL here instead of 404ing against the app origin at render.
+    const url = toRenderableImageUrl(candidate);
     if (url) return url;
   }
   return '';
@@ -107,7 +166,10 @@ export function imgErrorFallback(event: SyntheticEvent<HTMLImageElement>): void 
  * placeholder when no usable source was supplied.
  */
 export function resolveImageUrl(value?: string | null, fallback = PLACEHOLDER_IMAGE): string {
-  return hasImageSource(value) ? value.trim() : fallback;
+  // Normalised, so a relative storage path is not rendered against the app
+  // origin (the usual cause of a broken thumbnail).
+  const url = hasImageSource(value) ? toRenderableImageUrl(value) : '';
+  return url || fallback;
 }
 
 /**
@@ -125,7 +187,8 @@ export function loadBackgroundImage(
     return Promise.resolve(fallback);
   }
 
-  const url = src.trim();
+  const url = toRenderableImageUrl(src);
+  if (!url) return Promise.resolve(fallback);
 
   return new Promise<string>((resolve) => {
     const probe = new Image();

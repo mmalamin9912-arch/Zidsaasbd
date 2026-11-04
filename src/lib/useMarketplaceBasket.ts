@@ -14,6 +14,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MarketplaceProduct } from '../types';
+import { resolveProductImage } from '../utils/imageFallback';
 
 /** localStorage key. Never shared with a merchant's own single-store cart. */
 export const MARKETPLACE_BASKET_KEY = 'zid_marketplace_cart';
@@ -79,15 +80,23 @@ function normalizeLine(raw: any): BasketLine | null {
     source.vendor_id ?? source.vendorId ?? source.store_id ?? source.storeId ?? raw.vendorId ?? '',
   ).trim();
 
+  /*
+   * ONE image value, resolved from every spelling and NORMALISED to a loadable
+   * URL. A stored line may carry `image`, `image_url`, `imageUrl`, `thumbnail`
+   * or an `images[]` array, and the value may be a relative storage path —
+   * rendering that as-is is what broke the checkout thumbnails.
+   */
+  const image = resolveProductImage(source);
   const product = {
     ...source,
     id: String(id),
     title: title || 'Item',
     priceBDT,
-    image: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
-    image_url: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
-    imageUrl: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
-    thumbnail: String(source.image ?? source.image_url ?? source.imageUrl ?? source.thumbnail ?? ''),
+    image,
+    image_url: image,
+    imageUrl: image,
+    thumbnail: image,
+    images: image ? [image] : (Array.isArray(source.images) ? source.images : []),
     vendor_id: vendorId,
     vendor_name: String(source.vendor_name ?? source.vendorName ?? source.store_name ?? raw.vendorName ?? ''),
     vendor_slug: String(source.vendor_slug ?? source.vendorSlug ?? source.store_slug ?? raw.vendorSlug ?? ''),
@@ -159,7 +168,7 @@ function readBasket(): BasketLine[] {
 function compactBasketLines(lines: BasketLine[]): any[] {
   return lines.map((line) => {
     const p: any = line?.product || {};
-    const image = String(p.image ?? p.image_url ?? p.imageUrl ?? p.thumbnail ?? '');
+    const image = resolveProductImage(p);
     // Never persist heavy base64/data-URL images or large descriptions in
     // localStorage — they are what push the cart past the ~5MB quota.
     const safeImage = image.startsWith('data:') ? '' : image;

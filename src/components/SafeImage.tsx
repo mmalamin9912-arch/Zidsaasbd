@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { ImgHTMLAttributes, SyntheticEvent } from 'react';
-import { PLACEHOLDER_IMAGE, hasImageSource, imgErrorFallback } from '../utils/imageFallback';
+import { PLACEHOLDER_IMAGE, hasImageSource, imgErrorFallback, toRenderableImageUrl } from '../utils/imageFallback';
 
 type SafeImageProps = ImgHTMLAttributes<HTMLImageElement> & {
   /** Image source; external URLs are validated and fall back gracefully. */
@@ -26,15 +26,27 @@ const SafeImage: React.FC<SafeImageProps> = ({
   onError,
   ...rest
 }) => {
-  const fallback = hasImageSource(fallbackSrc) ? fallbackSrc : PLACEHOLDER_IMAGE;
+  const fallback = hasImageSource(fallbackSrc) ? toRenderableImageUrl(fallbackSrc) : PLACEHOLDER_IMAGE;
   const [failed, setFailed] = useState(false);
+
+  /*
+   * NORMALISE THE URL, not just validate it.
+   *
+   * A product stored with a relative storage path (`/storage/v1/object/…`,
+   * `product-images/x.jpg`) used to be handed to the browser verbatim, so it
+   * resolved against the APP origin and 404'd — the broken-image icon seen in
+   * the cart, the checkout summary and the order cards. `toRenderableImageUrl`
+   * prepends the Supabase storage host when the value has no domain of its own
+   * and leaves absolute URLs and data URIs untouched.
+   */
+  const normalizedSrc = hasImageSource(src) ? toRenderableImageUrl(src) : '';
 
   // A new, valid source should get a fresh chance after a previous failure.
   useEffect(() => {
     setFailed(false);
-  }, [src]);
+  }, [normalizedSrc]);
 
-  const resolvedSrc = failed || !hasImageSource(src) ? fallback : src;
+  const resolvedSrc = failed || !normalizedSrc ? fallback : normalizedSrc;
 
   const handleError = (event: SyntheticEvent<HTMLImageElement>): void => {
     onError?.(event);

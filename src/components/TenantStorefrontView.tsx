@@ -29,6 +29,7 @@ import {
   type StorefrontModules,
 } from '../lib/storeModulesApi';
 import { normalizeOrders, safeDate, safeAmount } from '../utils/orderUtils';
+import { resolveProductImage as resolveAnyProductImage } from '../utils/imageFallback';
 import {
   WALLET_PROVIDERS,
   WALLET_LABELS,
@@ -76,22 +77,17 @@ const HERO_ROTATION_MS = 4000;
  */
 function resolveProductImage(p: any): string {
   if (!p || typeof p !== 'object') return '';
-  const firstOf = (value: unknown): string =>
-    Array.isArray(value)
-      ? String(value.find((x) => typeof x === 'string' && String(x).trim()) || '').trim()
-      : '';
-  const candidate =
-    firstOf(p.images) ||
-    p.thumbnail ||
-    p.thumbnailUrl ||
-    p.thumbnail_url ||
-    p.imageUrl ||
-    p.image ||
-    p.image_url ||
-    firstOf(p.additionalImages) ||
-    firstOf(p.additional_images) ||
-    '';
-  return String(candidate || '').trim();
+  /*
+   * Delegated to the shared resolver.
+   *
+   * The local version read the keys directly, so two common stored shapes were
+   * still unreadable: `images: [{ url }]` (objects, not strings) and an image
+   * stored as a RELATIVE storage path (`/storage/v1/object/…`, `product-images/…`).
+   * Both rendered as a broken thumbnail in the grid, the cart and the order
+   * summary. The shared helper accepts both shapes and normalises the path to a
+   * URL the browser can actually load.
+   */
+  return resolveAnyProductImage(p);
 }
 
 function mapSupabaseProduct(p: any): Product {

@@ -6,6 +6,7 @@
 
 import { getSupabaseClient, isSupabaseConfigured, supabaseErrorMessage } from './supabase';
 import { createMarketplaceOrderInSupabase } from './marketplaceOrderSupabase';
+import { resolveProductImage } from '../utils/imageFallback';
 import type { MarketplaceProduct } from '../types';
 import type { MarketplaceFilters } from './marketplaceApi';
 
@@ -32,7 +33,15 @@ export async function fetchSupabaseNativeProducts(
     return { ok: false, products: [], total: 0, page, limit, pages: 0, price_range: null, error: error.message || 'Marketplace catalogue unavailable.' };
   }
   const products = Array.isArray(data)
-    ? (data as any[]).map((row) => ({ id: String(row.id || ''), title: String(row.title || 'Untitled'), description: row.description || '', sku: row.sku || '', priceBDT: Number(row.priceBDT || 0) || 0, compareAtPriceBDT: row.compareAtPriceBDT != null ? Number(row.compareAtPriceBDT) : undefined, stock: Number(row.stock ?? 0) || 0, status: row.status || 'active', is_published: Boolean(row.is_published), category: row.category || '', category_id: row.category_id || '', sub_category: row.sub_category || undefined, sub_category_id: row.sub_category_id || undefined, image: row.image || row.image_url || '', image_url: row.image_url || '', imageUrl: row.imageUrl || '', thumbnail: row.thumbnail || '', images: Array.isArray(row.images) ? row.images : [], variantsCount: Number(row.variantsCount || 0) || 0, salesCount: Number(row.salesCount || 0) || 0, createdAt: row.createdAt || undefined, updatedAt: row.updatedAt || undefined, vendor_id: row.vendor_id || row.store_id || '', vendor_name: row.vendor_name || '', vendor_slug: row.vendor_slug || row.store_slug || '', store_id: row.store_id || row.vendor_id || '', store_slug: row.store_slug || '' })) as MarketplaceProduct[]
+    ? (data as any[]).map((row) => ({ id: String(row.id || ''), title: String(row.title || 'Untitled'), description: row.description || '', sku: row.sku || '', priceBDT: Number(row.priceBDT || 0) || 0, compareAtPriceBDT: row.compareAtPriceBDT != null ? Number(row.compareAtPriceBDT) : undefined, stock: Number(row.stock ?? 0) || 0, status: row.status || 'active', is_published: Boolean(row.is_published), category: row.category || '', category_id: row.category_id || '', sub_category: row.sub_category || undefined, sub_category_id: row.sub_category_id || undefined, /*
+     * ONE resolved, normalised image for every spelling the row may use —
+     * `image`, `image_url`, `imageUrl`, `thumbnail`, `images[]` (string OR
+     * `{ url }`) — with a relative storage path turned into a loadable URL.
+     * Reading only `image || image_url` left a row whose photo lived in
+     * `images[]` with an empty src, i.e. a broken thumbnail in the cart and the
+     * checkout summary.
+     */
+    image: resolveProductImage(row), image_url: resolveProductImage(row), imageUrl: resolveProductImage(row), thumbnail: resolveProductImage(row), images: Array.isArray(row.images) ? row.images : [], variantsCount: Number(row.variantsCount || 0) || 0, salesCount: Number(row.salesCount || 0) || 0, createdAt: row.createdAt || undefined, updatedAt: row.updatedAt || undefined, vendor_id: row.vendor_id || row.store_id || '', vendor_name: row.vendor_name || '', vendor_slug: row.vendor_slug || row.store_slug || '', store_id: row.store_id || row.vendor_id || '', store_slug: row.store_slug || '' })) as MarketplaceProduct[]
     : [];
   const priceMin = products.reduce((m, p) => Math.min(m, Number(p.priceBDT) || 0), Number.POSITIVE_INFINITY);
   const priceMax = products.reduce((m, p) => Math.max(m, Number(p.priceBDT) || 0), Number.NEGATIVE_INFINITY);
