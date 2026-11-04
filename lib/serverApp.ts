@@ -15088,11 +15088,37 @@ async function editTelegramMessage(
 
 /** Reduce a pasted chat id to its bare value (`-100…` / `@channelname`). */
 function normalizeTelegramChatId(raw: unknown): string {
-  const value = String(raw ?? '').trim();
+  const value = String(raw ?? '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .replace(/^["'](.*)["']$/s, '$1')
+    .trim();
   // t.me/<name> or @name are both valid chat references.
   const linked = value.match(/t\.me\/([A-Za-z0-9_]+)/i);
   if (linked) return `@${linked[1]}`;
   return value.replace(/^https?:\/\//i, '').trim();
+}
+
+/**
+ * Is an incoming Telegram chat the one alerts are configured for?
+ *
+ * Telegram reports a group id as a NUMBER (`-1001234567890`) while the
+ * configured value is a STRING, and a `@name` reference can be typed with
+ * different casing. A plain `!==` between the two never matched, so every tap
+ * on an inline button was silently discarded as "This chat is not authorised".
+ */
+function telegramChatsMatch(incoming: unknown, expected: string): boolean {
+  const from = String(incoming ?? '').trim();
+  const want = normalizeTelegramChatId(expected);
+  if (!from || !want) return false;
+  if (from === want) return true;
+  if (from.toLowerCase() === want.toLowerCase()) return true;
+  // Numeric ids: compare as numbers so `-100…` and `-100… ` (or a float artefact
+  // from JSON round-trips) still agree.
+  const fromNum = Number(from);
+  const wantNum = Number(want);
+  if (Number.isFinite(fromNum) && Number.isFinite(wantNum) && fromNum === wantNum) return true;
+  return false;
 }
 
 /**
@@ -20159,6 +20185,72 @@ app.get('/api/admin/orders', async (req, res) => {
   }
 });
 
+/**
+ * Mirror a payment decision onto the Supabase `orders` row.
+ *
+ * The Mongo write alone left the Supabase copy (the shopper's history and the
+ * storefront's order-of-record) still showing "Pending Verification" after an
+ * admin approved from Telegram. Only columns the deployed table actually has are
+ * sent; `postgrestWrite` drops anything else and retries. Best-effort: a Supabase
+ * outage must not fail a decision that already landed in MongoDB.
+ */
+async function syncOrderStatusToSupabase(
+  orderNumber: string,
+  orderId: string,
+  patch: { payment_status: string; order_status?: string },
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+    if (!isConfigured) return { ok: false, error: 'Supabase is not configured.' };
+
+    const cleanNumber = String(orderNumber || '').replace(/^#/, '').trim();
+    const cleanId = String(orderId || '').replace(/^#/, '').trim();
+    if (!cleanNumber && !cleanId) return { ok: false, error: 'The order has no identifier.' };
+
+    // The deployed table uses `order_status`; `payment_status` is shared.
+    const body: Record<string, any> = {
+      payment_status: patch.payment_status,
+      ...(patch.order_status ? { order_status: patch.order_status } : {}),
+    };
+
+    /*
+     * A UUID here is the ROW id, not an order number — target `id`, otherwise
+     * the natural key `order_number`. A child order (`<master>-<n>`) has no
+     * Supabase row of its own, so after the exact match the PARENT number is
+     * tried and only then is the write reported as "no row".
+     */
+    const tryPatch = async (filter: string) => {
+      const res = await postgrestWrite(supabaseUrl, supabaseKey, `/rest/v1/orders?${filter}`, {
+        method: 'PATCH',
+        body,
+        headers: { Prefer: 'return=representation' },
+      });
+      const touched = res.ok && (() => {
+        try { return Array.isArray(JSON.parse(res.detail || 'null')); } catch { return false; }
+      })();
+      return { res, touched };
+    };
+
+    const filters: string[] = [];
+    if (isUuidLike(cleanId)) filters.push(`id=eq.${encodeURIComponent(cleanId)}`);
+    if (cleanNumber) filters.push(`order_number=eq.${encodeURIComponent(cleanNumber)}`);
+    const parentNumber = cleanNumber.replace(/(?:-v?\d+)+$/, '');
+    if (parentNumber && parentNumber !== cleanNumber) {
+      filters.push(`order_number=eq.${encodeURIComponent(parentNumber)}`);
+    }
+
+    let lastError = '';
+    for (const filter of filters) {
+      const { res } = await tryPatch(filter);
+      if (res.ok) return { ok: true };
+      lastError = res.detail || `HTTP ${res.status}`;
+    }
+    return { ok: false, error: lastError || 'No matching Supabase order row was updated.' };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Supabase sync failed.' };
+  }
+}
+
 /*
  * APPLY A PAYMENT-VERIFICATION DECISION.
  *
@@ -20244,7 +20336,28 @@ async function applyPaymentVerification(args: {
         attempted: lookupKeys,
       };
     }
-    const doc = located.doc as Record<string, any>;
+    /*
+     * A MASTER WITH SPLIT CHILDREN — decide the child that holds the money.
+     *
+     * A multi-vendor basket stores each seller's payable on a CHILD
+     * (`<master>-<n>`). The alert carries the MASTER number, so approving only
+     * the master leaves the child (what the seller's dashboard and the payout
+     * ledger read) still "Pending Verification". When the located row is a
+     * master whose `child_order_ids` are known, the FIRST child is resolved and
+     * the decision is applied to it — `findOrder` already walks back to the
+     * parent when a child number is given.
+     */
+    let effectiveDoc = located.doc as Record<string, any>;
+    const childIds = Array.isArray(effectiveDoc?.child_order_ids) ? effectiveDoc.child_order_ids : [];
+    if (effectiveDoc?.order_type === 'master' && childIds.length > 0) {
+      const firstChild = await findOrder(String(childIds[0]), {
+        order_number: String(childIds[0]),
+        store_id: effectiveDoc.store_id,
+        store_slug: effectiveDoc.store_slug,
+      }).catch(() => ({ doc: null }));
+      if (firstChild.doc) effectiveDoc = firstChild.doc;
+    }
+    const doc = effectiveDoc;
     /*
      * The id the WRITE is keyed on.
      *
@@ -20269,13 +20382,27 @@ async function applyPaymentVerification(args: {
       const result = await updateOrderFields(canonicalOrderId, {
         paymentStatus: 'Voided',
         payment_status: 'voided',
+        payment_verified_at: new Date(),
+        payment_verified_by: String(body.processed_by || 'super_admin'),
       }, { ...extra, order_number: orderNumber });
+      /*
+       * Mirror the decision into Supabase. Awaited, but not fatal: MongoDB is
+       * authoritative for the dashboards, so a Supabase hiccup is reported in
+       * `supabase` rather than turning a completed rejection into an error.
+       */
+      const supabase = result.ok
+        ? await syncOrderStatusToSupabase(orderNumber, canonicalOrderId, {
+          payment_status: 'voided',
+          order_status: 'Cancelled',
+        })
+        : { ok: false, error: 'Skipped — the MongoDB update failed.' };
       return {
         ok: result.ok,
         action: 'rejected',
         order: result.order ?? null,
         error: result.error ?? null,
         orderNumber,
+        supabase,
       };
     }
 
@@ -20297,6 +20424,12 @@ async function applyPaymentVerification(args: {
     if (!statusResult.ok) {
       return { ok: false, action: 'approved', error: statusResult.error || 'Could not mark the order paid.', orderNumber };
     }
+
+    // Same mirror as the reject branch — see the note there.
+    const supabaseSync = await syncOrderStatusToSupabase(orderNumber, canonicalOrderId, {
+      payment_status: 'paid',
+      order_status: 'Processing',
+    });
 
     // Credit the selling merchant's wallet with the net payable (prepaid
     // wallet order — customer already paid; the platform releases the funds).
@@ -20346,6 +20479,7 @@ async function applyPaymentVerification(args: {
       orderNumber,
       vendorId,
       netPayable,
+      supabase: supabaseSync,
     };
   }
 }
@@ -20479,6 +20613,21 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
     const expectedSecret = telegramEnv('TELEGRAM_WEBHOOK_SECRET');
     const providedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '').trim();
 
+    /*
+     * ANSWER THE BUTTON FIRST.
+     *
+     * Telegram stops the button's spinner only on `answerCallbackQuery`, and it
+     * must happen fast: a model cold start plus three database round-trips can
+     * easily outlive the client's patience, so the tap looks "dead" even though
+     * the work eventually completes. This is best-effort and deliberately NOT
+     * awaited before validation below — it only closes the loading state.
+     */
+    const earlyCallback = (req.body as any)?.callback_query;
+    const earlyToken = normalizeTelegramToken(telegramEnv('TELEGRAM_BOT_TOKEN'));
+    if (earlyCallback?.id && earlyToken && expectedSecret && providedSecret === expectedSecret) {
+      void answerCallbackQuery(earlyToken, earlyCallback.id, '⏳ Processing…');
+    }
+
     if (!expectedSecret) {
       console.warn('[TelegramWebhook] TELEGRAM_WEBHOOK_SECRET is not set — refusing all updates.');
       return res.status(200).json({ ok: false, error: 'Webhook secret is not configured.' });
@@ -20499,13 +20648,22 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
 
     const tg = await resolveTelegramAlertConfig();
     if (tg.source === 'none') {
+      console.warn('[TelegramWebhook] no bot token / chat id — cannot decide a payment.');
       return res.status(200).json({ ok: false, error: 'Telegram is not configured.' });
     }
 
-    // Only the configured admin chat may decide a payment.
+    /*
+     * Only the configured admin chat may decide a payment.
+     *
+     * Compared through `telegramChatsMatch` because Telegram sends the group id
+     * as a NUMBER while the configured value is a string — the old `!==` never
+     * matched, so every legitimate tap was dropped as "not authorised" with no
+     * feedback in the chat.
+     */
     const fromChatId = String(callback?.message?.chat?.id ?? '').trim();
-    if (fromChatId && tg.chatId && fromChatId !== tg.chatId) {
+    if (fromChatId && tg.chatId && !telegramChatsMatch(fromChatId, tg.chatId)) {
       console.warn('[TelegramWebhook] rejected: chat mismatch', { fromChatId, expected: tg.chatId });
+      await answerCallbackQuery(tg.botToken, callback.id, '⛔ This chat is not authorised.');
       return res.status(200).json({ ok: false, error: 'This chat is not authorised.' });
     }
 
@@ -20531,6 +20689,8 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
       chatId: fromChatId,
     });
 
+    // A master with split children is resolved to the child that holds the
+    // money inside `applyPaymentVerification` (see the note there).
     const result = await applyPaymentVerification({
       id: orderRef,
       action,
@@ -20567,6 +20727,18 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
     } else {
       lines.push('', '↩️ The order is voided and will not be dispatched.');
     }
+    /*
+     * SAY WHEN THE SUPABASE COPY DID NOT FOLLOW.
+     *
+     * MongoDB is authoritative for the dashboards, so the decision stands — but
+     * if the Supabase row could not be updated the shopper's history would keep
+     * showing "Pending Verification" with no trace of why. Surfacing it in the
+     * chat (and in the response body) makes that visible instead of silent.
+     */
+    const supabaseSync = (result as any).supabase as { ok?: boolean; error?: string } | undefined;
+    if (supabaseSync && supabaseSync.ok === false) {
+      lines.push('', `ℹ️ Supabase not updated: <i>${escapeHtmlForTelegram(supabaseSync.error || 'unknown error')}</i>`);
+    }
 
     await editTelegramMessage(tg.botToken, tg.chatId, callback?.message?.message_id, {
       text: lines.join('\n'),
@@ -20588,9 +20760,25 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
       severity: 'Info',
     }).catch(() => undefined);
 
-    return res.status(200).json({ ok: true, action: result.action, orderNumber });
+    return res.status(200).json({
+      ok: true,
+      action: result.action,
+      orderNumber,
+      supabase: (result as any).supabase ?? null,
+    });
   } catch (err: any) {
     console.error('[Server] POST /api/admin/telegram-webhook error:', err);
+    /*
+     * Even an unexpected failure must close the button's spinner — otherwise
+     * the tap looks like it did nothing at all.
+     */
+    try {
+      const cb = (req.body as any)?.callback_query;
+      const token = normalizeTelegramToken(telegramEnv('TELEGRAM_BOT_TOKEN'));
+      if (cb?.id && token) {
+        await answerCallbackQuery(token, cb.id, `❌ ${String(err?.message || 'Webhook failed')}`.slice(0, 190));
+      }
+    } catch { /* best-effort */ }
     // Still 200 — see the note above about Telegram retries.
     return res.status(200).json({ ok: false, error: err?.message || 'Webhook failed.' });
   }
