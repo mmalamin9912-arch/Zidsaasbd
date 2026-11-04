@@ -15046,15 +15046,30 @@ function escapeHtmlForTelegram(value: unknown): string {
  * `callback_query` updates MUST be answered or the button keeps its spinner
  * until it times out on the client. Failures are logged, never thrown.
  */
-async function answerCallbackQuery(botToken: string, callbackQueryId: string, text: string): Promise<void> {
+async function answerCallbackQuery(
+  botToken: string,
+  callbackQueryId: string,
+  text: string,
+  showAlert = false,
+): Promise<void> {
   if (!botToken || !callbackQueryId) return;
   try {
-    await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callback_query_id: callbackQueryId, text, show_alert: false }),
+      body: JSON.stringify({
+        callback_query_id: callbackQueryId,
+        text: String(text || '').slice(0, 190),
+        show_alert: showAlert,
+      }),
       signal: AbortSignal.timeout(8000),
     });
+    if (!res.ok) {
+      // "query is too old" / "query ID is invalid" — logged so a silent
+      // spinner becomes diagnosable.
+      const detail: any = await res.json().catch(() => null);
+      console.warn('[Telegram] answerCallbackQuery rejected:', detail?.description || res.status);
+    }
   } catch (err: any) {
     console.warn('[Telegram] answerCallbackQuery warning:', err?.message || err);
   }
@@ -15100,7 +15115,7 @@ async function editTelegramMessage(
 
 /** Reduce a pasted chat id to its bare value (`-100…` / `@channelname`). */
 function normalizeTelegramChatId(raw: unknown): string {
-  const value = String(raw ?? '')
+  let value = String(raw ?? '')
     .replace(/^\uFEFF/, '')
     .trim()
     .replace(/^["'](.*)["']$/s, '$1')
@@ -15108,7 +15123,17 @@ function normalizeTelegramChatId(raw: unknown): string {
   // t.me/<name> or @name are both valid chat references.
   const linked = value.match(/t\.me\/([A-Za-z0-9_]+)/i);
   if (linked) return `@${linked[1]}`;
-  return value.replace(/^https?:\/\//i, '').trim();
+  value = value.replace(/^https?:\/\//i, '').trim();
+  /*
+   * A group/channel id is often pasted WITH the `-100` prefix but from a UI
+   * that renders it as `-1001234567890 ` , ` -100…` or with a trailing `/`.
+   * Numbers are reduced to their digits (and sign) so the comparison in
+   * `telegramChatsMatch` is about the id, not its formatting.
+   */
+  if (/^[-+]?\s*\d[\d\s]*$/.test(value)) {
+    return value.replace(/\s+/g, '');
+  }
+  return value;
 }
 
 /**
@@ -15120,16 +15145,30 @@ function normalizeTelegramChatId(raw: unknown): string {
  * on an inline button was silently discarded as "This chat is not authorised".
  */
 function telegramChatsMatch(incoming: unknown, expected: string): boolean {
-  const from = String(incoming ?? '').trim();
-  const want = normalizeTelegramChatId(expected);
-  if (!from || !want) return false;
-  if (from === want) return true;
-  if (from.toLowerCase() === want.toLowerCase()) return true;
-  // Numeric ids: compare as numbers so `-100…` and `-100… ` (or a float artefact
-  // from JSON round-trips) still agree.
-  const fromNum = Number(from);
-  const wantNum = Number(want);
-  if (Number.isFinite(fromNum) && Number.isFinite(wantNum) && fromNum === wantNum) return true;
+  const normalizedIncoming = normalizeTelegramChatId(incoming);
+  // The configured value may be a LIST (`-100…,-100…` or one per line), so any
+  // entry matching is enough.
+  const wanted = String(expected ?? '')
+    .split(/[,;\s]+/)
+    .map((entry) => normalizeTelegramChatId(entry))
+    .filter(Boolean);
+  if (!normalizedIncoming || wanted.length === 0) return false;
+
+  for (const want of wanted) {
+    if (normalizedIncoming === want) return true;
+    if (normalizedIncoming.toLowerCase() === want.toLowerCase()) return true;
+    /*
+     * Numeric ids: compare as NUMBERS.
+     *
+     * Telegram delivers `chat.id` as a JSON number (`-1001234567890`) while the
+     * env var / dashboard field is a string — sometimes with a decimal part
+     * added by a JSON round-trip. `-100…` and `-100…` must agree; `==` on the
+     * numbers also copes with a leading `+`.
+     */
+    const fromNum = Number(normalizedIncoming);
+    const wantNum = Number(want);
+    if (Number.isFinite(fromNum) && Number.isFinite(wantNum) && fromNum === wantNum) return true;
+  }
   return false;
 }
 
@@ -20695,6 +20734,87 @@ app.patch('/api/admin/orders/:id/payment-verification', async (req, res) => {
 });
 
 /*
+ * ONE resolver for every webhook reply.
+ *
+ * A reply is impossible without the bot token, and a deployment that stores the
+ * token only in the Dashboard panel (not in Vercel) used to skip
+ * `answerCallbackQuery` entirely — which is exactly the "button spins forever"
+ * symptom. The token is therefore resolved from BOTH sources, and a failure to
+ * resolve it is logged with the reason instead of silently doing nothing.
+ */
+async function resolveTelegramWebhookToken(): Promise<{ token: string; chatId: string; source: string }> {
+  try {
+    const tg = await resolveTelegramAlertConfig();
+    return { token: tg.botToken, chatId: tg.chatId, source: tg.source };
+  } catch (err: any) {
+    console.warn('[TelegramWebhook] config resolve failed:', err?.message || err);
+    const envToken = normalizeTelegramToken(telegramEnv('TELEGRAM_BOT_TOKEN'));
+    const envChat = normalizeTelegramChatId(telegramEnv('TELEGRAM_CHAT_ID') || telegramEnv('TELEGRAM_CHATID'));
+    return { token: envToken, chatId: envChat, source: envToken ? 'env' : 'none' };
+  }
+}
+
+/*
+ * GET /api/admin/telegram-webhook/health
+ *
+ * Answers — without decrypting anything — the three questions that decide
+ * whether an inline button can work at all:
+ *   1. Is the bot token resolvable (env OR dashboard)?
+ *   2. Is TELEGRAM_WEBHOOK_SECRET present?
+ *   3. What does TELEGRAM say about this webhook (url, pending updates, LAST
+ *      DELIVERY ERROR)? `lastErrorMessage` is the smoking gun: a 404/401/500
+ *      from this host, or an empty url (never registered).
+ *
+ * No secrets are returned; only presence and a redacted preview.
+ */
+app.get('/api/admin/telegram-webhook/health', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const tg = await resolveTelegramWebhookToken();
+    const secret = telegramEnv('TELEGRAM_WEBHOOK_SECRET');
+    let webhook: any = null;
+    let webhookError: string | undefined;
+    if (tg.token) {
+      try {
+        const infoRes = await fetch(`https://api.telegram.org/bot${tg.token}/getWebhookInfo`, {
+          signal: AbortSignal.timeout(8000),
+        });
+        const data: any = await infoRes.json().catch(() => null);
+        if (data?.ok) webhook = data.result;
+        else webhookError = data?.description || `HTTP ${infoRes.status}`;
+      } catch (err: any) {
+        webhookError = err?.message || 'getWebhookInfo failed.';
+      }
+    }
+
+    return res.status(200).json({
+      ok: Boolean(tg.token && secret && webhook?.url),
+      botToken: tg.token ? `set (${tg.source})` : 'MISSING',
+      webhookSecret: secret ? 'set' : 'MISSING',
+      adminChatId: tg.chatId || 'MISSING',
+      webhook: webhook
+        ? {
+          url: webhook.url || '(not registered)',
+          pendingUpdateCount: webhook.pending_update_count,
+          lastErrorDate: webhook.last_error_date,
+          lastErrorMessage: webhook.last_error_message,
+          allowedUpdates: webhook.allowed_updates,
+        }
+        : { error: webhookError },
+      checks: [
+        tg.token ? null : 'Set TELEGRAM_BOT_TOKEN in Vercel (or the Admin panel) and redeploy.',
+        secret ? null : 'Set TELEGRAM_WEBHOOK_SECRET in Vercel and redeploy.',
+        webhook?.url ? null : 'Register the webhook: GET /api/admin/telegram-webhook/setup?url=https://<your-domain>',
+        webhook?.last_error_message ? `Telegram delivery error: ${webhook.last_error_message}` : null,
+      ].filter(Boolean),
+    });
+  } catch (err: any) {
+    return res.status(200).json({ ok: false, error: err?.message || 'Health check failed.' });
+  }
+});
+
+/*
  * GET|POST /api/admin/telegram-webhook/setup?url=https://<host>
  *
  * Registers this deployment's webhook with Telegram (setWebhook). Exists so
@@ -20724,7 +20844,16 @@ app.all('/api/admin/telegram-webhook/setup', async (req, res) => {
     if (!/^https:\/\/[a-z0-9.-]+/i.test(origin)) {
       return res.status(200).json({ ok: false, error: 'Pass ?url=https://<your-domain>' });
     }
-    const webhookUrl = `${origin}/api/admin/telegram-webhook`;
+    /*
+     * THE SECRET IS CARRIED IN BOTH PLACES.
+     *
+     * `secret_token` asks Telegram to send the secret as a header, and the route
+     * checks it. Some deployments (a proxy in front of the function, a host that
+     * normalises headers) drop it, and then EVERY tap is refused with 200 and
+     * nothing in Telegram — a dead button. The same value is therefore also put
+     * in the URL (`?secret=…`), which the route accepts as an equivalent.
+     */
+    const webhookUrl = `${origin}/api/admin/telegram-webhook?secret=${encodeURIComponent(secret)}`;
 
     const setRes = await fetch(`https://api.telegram.org/bot${tg.botToken}/setWebhook`, {
       method: 'POST',
@@ -20738,11 +20867,33 @@ app.all('/api/admin/telegram-webhook/setup', async (req, res) => {
       signal: AbortSignal.timeout(10000),
     });
     const data: any = await setRes.json().catch(() => null);
+
+    // Read the registration back so the REAL state is reported, not a guess.
+    let info: any = null;
+    try {
+      const infoRes = await fetch(`https://api.telegram.org/bot${tg.botToken}/getWebhookInfo`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      info = (await infoRes.json().catch(() => null))?.result ?? null;
+    } catch { /* informational only */ }
+
     console.log('[Telegram] setWebhook:', { webhookUrl, ok: data?.ok, description: data?.description });
     return res.status(200).json({
       ok: Boolean(data?.ok),
       webhookUrl,
       description: data?.description || `HTTP ${setRes.status}`,
+      webhook: info
+        ? {
+          url: info.url,
+          pendingUpdateCount: info.pending_update_count,
+          lastErrorDate: info.last_error_date,
+          lastErrorMessage: info.last_error_message,
+          allowedUpdates: info.allowed_updates,
+        }
+        : null,
+      hint: info?.last_error_message
+        ? `Telegram could not deliver updates: ${info.last_error_message}`
+        : 'Tap a button; the server log should show [TelegramWebhook] decision received.',
     });
   } catch (err: any) {
     console.error('[Server] telegram-webhook/setup error:', err);
@@ -20774,32 +20925,51 @@ app.all('/api/admin/telegram-webhook/setup', async (req, res) => {
 app.post('/api/admin/telegram-webhook', async (req, res) => {
   // Always 200: a non-2xx makes Telegram retry the same update repeatedly.
   res.setHeader('Content-Type', 'application/json');
+
+  /*
+   * THE CALLBACK, RESOLVED BEFORE ANYTHING CAN FAIL.
+   *
+   * Every rejection path below must still call `answerCallbackQuery`, or the
+   * button keeps its spinner until it times out — indistinguishable from a dead
+   * button. The token is resolved ONCE, up front, and the answer is fired
+   * immediately so the spinner stops even while the database work continues.
+   */
+  const callbackQuery = (req.body as any)?.callback_query;
+  const callbackId = String(callbackQuery?.id || '').trim();
+
+  const answer = async (text: string, showAlert = false): Promise<void> => {
+    if (!callbackId) return;
+    const { token } = await resolveTelegramWebhookToken();
+    if (!token) {
+      console.warn('[TelegramWebhook] cannot answer the callback — no bot token resolved.');
+      return;
+    }
+    await answerCallbackQuery(token, callbackId, text, showAlert);
+  };
+
   try {
     const expectedSecret = telegramEnv('TELEGRAM_WEBHOOK_SECRET');
     const providedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '').trim();
+    // Query-string form: some hosts strip custom headers. Same value, so the
+    // guarantee — only Telegram (which knows the secret) can reach this route —
+    // is unchanged.
+    const querySecret = String(req.query?.secret || req.query?.token || '').trim();
 
     /*
-     * ANSWER THE BUTTON FIRST.
-     *
-     * Telegram stops the button's spinner only on `answerCallbackQuery`, and it
-     * must happen fast: a model cold start plus three database round-trips can
-     * easily outlive the client's patience, so the tap looks "dead" even though
-     * the work eventually completes. This is best-effort and deliberately NOT
-     * awaited before validation below — it only closes the loading state.
+     * Stop the spinner NOW, before the cold-start/config/database work. This is
+     * fire-and-forget: the definitive toast is sent at the end of the decision.
      */
-    const earlyCallback = (req.body as any)?.callback_query;
-    const earlyToken = normalizeTelegramToken(telegramEnv('TELEGRAM_BOT_TOKEN'));
-    if (earlyCallback?.id && earlyToken && expectedSecret && providedSecret === expectedSecret) {
-      void answerCallbackQuery(earlyToken, earlyCallback.id, '⏳ Processing…');
-    }
+    if (callbackId) void answer('⏳ Processing…');
 
     if (!expectedSecret) {
       console.warn('[TelegramWebhook] TELEGRAM_WEBHOOK_SECRET is not set — refusing all updates.');
+      await answer('⚠️ Webhook secret is not configured.', true);
       return res.status(200).json({ ok: false, error: 'Webhook secret is not configured.' });
     }
-    if (providedSecret !== expectedSecret) {
+    if (providedSecret !== expectedSecret && querySecret !== expectedSecret) {
       console.warn('[TelegramWebhook] rejected: bad secret token', {
         hadHeader: Boolean(providedSecret),
+        hadQuery: Boolean(querySecret),
       });
       return res.status(200).json({ ok: false, error: 'Invalid secret token.' });
     }
@@ -20811,9 +20981,9 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
       return res.status(200).json({ ok: true, ignored: 'not a callback_query' });
     }
 
-    const tg = await resolveTelegramAlertConfig();
-    if (tg.source === 'none') {
-      console.warn('[TelegramWebhook] no bot token / chat id — cannot decide a payment.');
+    const tg = await resolveTelegramWebhookToken();
+    if (!tg.token) {
+      console.warn('[TelegramWebhook] no bot token resolved from env or dashboard — cannot decide a payment.');
       return res.status(200).json({ ok: false, error: 'Telegram is not configured.' });
     }
 
@@ -20824,22 +20994,42 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
      * as a NUMBER while the configured value is a string — the old `!==` never
      * matched, so every legitimate tap was dropped as "not authorised" with no
      * feedback in the chat.
+     *
+     * Identity is read from `callback.message.chat.id` AND `callback.from.id`:
+     * in a private chat they are the same, in a group they differ and either may
+     * be what the admin configured.
      */
     const fromChatId = String(callback?.message?.chat?.id ?? '').trim();
-    if (fromChatId && tg.chatId && !telegramChatsMatch(fromChatId, tg.chatId)) {
-      console.warn('[TelegramWebhook] rejected: chat mismatch', { fromChatId, expected: tg.chatId });
-      await answerCallbackQuery(tg.botToken, callback.id, '⛔ This chat is not authorised.');
-      return res.status(200).json({ ok: false, error: 'This chat is not authorised.' });
+    const fromUserId = String(callback?.from?.id ?? '').trim();
+    const chatOk = !tg.chatId
+      || telegramChatsMatch(fromChatId, tg.chatId)
+      || telegramChatsMatch(fromUserId, tg.chatId);
+    if (!chatOk) {
+      console.warn('[TelegramWebhook] rejected: chat mismatch', {
+        fromChatId,
+        fromUserId,
+        expected: tg.chatId,
+      });
+      await answer(`⛔ This chat is not authorised (chat ${fromChatId || '?'}).`, true);
+      return res.status(200).json({ ok: false, error: 'This chat is not authorised.', fromChatId, fromUserId });
     }
 
-    const data = String(callback?.data || '');
-    // Format: tvp:<approve|reject>:<order identifier>
-    const match = /^tvp:(approve|reject):(.+)$/.exec(data);
+    const data = String(callback?.data || '').trim();
+    /*
+     * `tvp:<approve|reject>:<order identifier>`.
+     *
+     * Parsed permissively: leading/trailing whitespace and stray segments are
+     * tolerated, and the identifier keeps any `#` prefix it was stored with —
+     * `findOrder` strips that itself. An unparseable payload now SAYS so in the
+     * chat instead of only in the server log.
+     */
+    const match = /^tvp\s*:\s*(approve|reject)\s*:\s*(.+)$/i.exec(data);
     if (!match) {
-      await answerCallbackQuery(tg.botToken, callback.id, 'Unrecognised action.');
-      return res.status(200).json({ ok: true, ignored: 'unknown callback data' });
+      console.warn('[TelegramWebhook] unrecognised callback data:', data);
+      await answer('⚠️ Unrecognised action.', true);
+      return res.status(200).json({ ok: true, ignored: 'unknown callback data', data });
     }
-    const action = match[1] as 'approve' | 'reject';
+    const action = match[1].toLowerCase() as 'approve' | 'reject';
     const orderRef = match[2].trim();
 
     const who = String(
@@ -20868,8 +21058,9 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
     if (!result.ok) {
       const error = String(result.error || 'The order could not be updated.');
       console.warn('[TelegramWebhook] decision failed:', { orderRef, action, error });
-      await answerCallbackQuery(tg.botToken, callback.id, `❌ ${error}`.slice(0, 190));
-      await editTelegramMessage(tg.botToken, tg.chatId, callback?.message?.message_id, {
+      // showAlert: a dismissed toast is how a failed decision goes unnoticed.
+      await answer(`❌ ${error}`, true);
+      await editTelegramMessage(tg.token, tg.chatId || fromChatId, callback?.message?.message_id, {
         text: `${String(callback?.message?.text || '').split('\n').slice(0, 1).join('\n')}\n\n⚠️ <b>Update failed</b>\n${escapeHtmlForTelegram(error)}`,
       }).catch(() => undefined);
       return res.status(200).json({ ok: false, error });
@@ -20905,14 +21096,20 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
       lines.push('', `ℹ️ Supabase not updated: <i>${escapeHtmlForTelegram(supabaseSync.error || 'unknown error')}</i>`);
     }
 
-    await editTelegramMessage(tg.botToken, tg.chatId, callback?.message?.message_id, {
+    /*
+     * Edit the message in the chat it was sent FROM.
+     *
+     * Using the CONFIGURED chat id failed whenever the alert was delivered to a
+     * different (but authorised) chat — the edit 400s and the buttons stay on
+     * screen, inviting a second tap. `callback.message.chat.id` is authoritative.
+     */
+    await editTelegramMessage(tg.token, fromChatId || tg.chatId, callback?.message?.message_id, {
       text: lines.join('\n'),
       reply_markup: { inline_keyboard: [] },
     }).catch((err: any) => console.warn('[TelegramWebhook] editMessageText warning:', err?.message || err));
 
-    await answerCallbackQuery(
-      tg.botToken,
-      callback.id,
+    // The definitive toast (the early "Processing…" already closed the spinner).
+    await answer(
       approved ? '✅ Payment approved — merchant credited.' : '🚫 Payment rejected — order voided.'
     );
 
@@ -20935,14 +21132,11 @@ app.post('/api/admin/telegram-webhook', async (req, res) => {
     console.error('[Server] POST /api/admin/telegram-webhook error:', err);
     /*
      * Even an unexpected failure must close the button's spinner — otherwise
-     * the tap looks like it did nothing at all.
+     * the tap looks like it did nothing at all. Uses the SAME token resolver as
+     * every other path, so a dashboard-only token still works here.
      */
     try {
-      const cb = (req.body as any)?.callback_query;
-      const token = normalizeTelegramToken(telegramEnv('TELEGRAM_BOT_TOKEN'));
-      if (cb?.id && token) {
-        await answerCallbackQuery(token, cb.id, `❌ ${String(err?.message || 'Webhook failed')}`.slice(0, 190));
-      }
+      if (callbackId) await answer(`❌ ${String(err?.message || 'Webhook failed')}`, true);
     } catch { /* best-effort */ }
     // Still 200 — see the note above about Telegram retries.
     return res.status(200).json({ ok: false, error: err?.message || 'Webhook failed.' });
