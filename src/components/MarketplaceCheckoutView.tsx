@@ -10,10 +10,6 @@ import { useCart } from './CartProvider';
 import { PLACEHOLDER_IMAGE, resolveProductImage } from '../utils/imageFallback';
 import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
-import {
-  createMarketplaceOrderInSupabase,
-  type SupabaseOrderResult,
-} from '../lib/marketplaceOrderSupabase';
 
 /**
  * The UNIFIED marketplace checkout — `/marketplace/checkout`.
@@ -26,11 +22,11 @@ import {
  * simply left behind.
  *
  * This page keeps the shopper inside the marketplace. It collects ONE delivery
- * address and ONE payment choice for the whole basket, then writes ONE order to
- * the Supabase `orders` table whose items each keep their selling vendor (see
- * `createMarketplaceOrderInSupabase`), mirrored to the app server which fans it
- * out into one child order per merchant — so a seller sees the order in
- * `/dashboard/orders` immediately, with no manual re-search.
+ * address and ONE payment choice for the whole basket, then sends ONE order
+ * request whose items each keep their selling vendor. The server persists it
+ * (MongoDB + Supabase) and fans it out into one child order per merchant — so a
+ * seller sees the order in `/dashboard/orders` immediately, with no manual
+ * re-search.
  *
  * ── What the shopper is shown ─────────────────────────────────────────────
  * A per-vendor split preview, because the biggest real risk in a multi-vendor
@@ -562,8 +558,10 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     setPlacing(true);
 
     try {
-      const id = `MP-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      const orderNumber = `ZID-${Date.now().toString().slice(-9)}`;
+      // The attempt stamp IS the order identity: the receipt shows it, the
+      // payload is keyed on it, and a retry re-sends the same one.
+      const orderNumber = attemptStampRef.current;
+      const id = orderNumber;
 
       const items = lines.map((line, index) => {
         const p = line.product as any;
@@ -591,246 +589,31 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       // The master's own store fields are intentionally OMITTED: this order has
       // no single seller. The server falls back to a platform bucket for the
       // master row and routes each child to its own vendor.
-      // (payload is no longer used — orders are written per-vendor above)
 
       /*
-       * ── 1. WRITE THE ORDER TO THE SUPABASE DATABASE ──────────────────────
+       * ── 1. ONE ORDER REQUEST FOR THE WHOLE BASKET ────────────────────────
        *
-       * This is the order of record. It was previously missing entirely: the
-       * page only POSTed `/api/orders`, which persists MongoDB and never
-       * INSERTs into Supabase — so the `orders` table stayed empty and the
-       * Network tab showed no database write on checkout.
+       * The previous version wrote once per VENDOR (through
+       * `createMarketplaceOrderInSupabase`), again per vendor in a separate
+       * mirror loop, and once more for a master — so a single click fired
+       * `2 × vendors + 1` simultaneous POSTs to `/api/orders`, and the
+       * dashboards showed several orders for one purchase.
        *
-       * `createMarketplaceOrderInSupabase` writes ONE row into `orders` (with
-       * the lines, each keeping its `vendor_id`, inside `orders.items`) and
-       * then the per-line rows into `order_items`. It never throws: a failure
-       * comes back as `{ ok: false, error }`.
+       * There is now exactly ONE request. It carries every line with its
+       * selling vendor; the server owns the fan-out (one child per merchant
+       * under a single master) and the Supabase mirror — what
+       * `createMarketplaceOrderInSupabase` used to be called for happens inside
+       * `/api/orders` with the service role.
        */
-      const orderResults = [];
-      const placedOrders = [];
-      for (const vendor of vendors) {
-        // Derived from the per-attempt stamp (see `attemptStampRef`) plus the
-        // vendor, so the SAME basket always maps to the SAME order numbers.
-        const slugPart = String(vendor.vendorSlug || vendor.vendorId || 'store').trim().toLowerCase();
-        const vendorId = `MP-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        const vendorOrderNumber = `${attemptStampRef.current}-${slugPart}`;
-        const vendorItems = vendor.lines.map((line, index) => {
-          const p = line.product as any;
-          return {
-            id: `${vendorId}-i${index + 1}`,
-            productId: String(p.id || ''),
-            productName: String(p.title || p.name || 'Item'),
-            variant: String(p.variant || 'Standard'),
-            quantity: Number(line.quantity || 1),
-            unitPriceBDT: Number(p.priceBDT) || 0,
-            image: productImageOf(p, line),
-            vendor_id: String(p.vendor_id || p.store_id || p.vendor_slug || p.store_slug || ''),
-            vendor_name: vendor.vendorName,
-            vendor_slug: String(p.vendor_slug || p.store_slug || p.storeSlug || ''),
-            store_id: String(p.store_id || p.vendor_id || ''),
-            store_slug: String(p.store_slug || p.vendor_slug || ''),
-            category: String(p.category || ''),
-          };
-        });
-        const vendorSubtotal = vendor.subtotal;
-        const vendorDelivery = itemCount === 0 ? 0 : deliveryFeeOf(resolvedZone);
-        const vendorBkashFee = isBkash ? Math.round((vendorSubtotal + vendorDelivery) * 0.01) : 0;
-        const vendorTotal = vendorSubtotal + vendorDelivery + vendorBkashFee;
-        const zoneLabel = resolvedZone === 'inside' ? 'Inside Dhaka' : resolvedZone === 'sub' ? 'Sub Dhaka' : 'Outside Dhaka';
-        /*
-         * ONE VENDOR FAILING MUST NOT COST THE OTHER VENDORS THEIR ORDER.
-         *
-         * The call throws for a network error or a non-JSON reply, and an
-         * unguarded throw here aborted the whole basket mid-loop: the vendors
-         * already written kept their rows while the remaining ones were never
-         * saved, and the master order below was never posted at all.
-         */
-        const placeVendor = async (): Promise<SupabaseOrderResult> => createMarketplaceOrderInSupabase({
-          orderNumber: vendorOrderNumber,
-          customerName: form.name.trim(),
-          customerPhone: form.phone.trim(),
-          customerEmail: form.email.trim() || undefined,
-          district: form.district,
-          cityArea: form.area.trim(),
-          address: form.address.trim(),
-          customerNote: form.note.trim() || undefined,
-          subtotalBDT: vendorSubtotal,
-          deliveryCharge: vendorDelivery,
-          totalBDT: vendorTotal,
-        paymentMethod: PAYMENT_LABELS[payment],
-        paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
-        transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
-        adminPaymentMethod: isWalletPayment ? payment : 'cod',
-        adminPaymentNumber: isWalletPayment ? adminWalletNumber || undefined : undefined,
-          lines: vendorItems.map((line) => ({
-            productId: line.productId,
-            productName: line.productName,
-            variant: line.variant,
-            quantity: line.quantity,
-            unitPriceBDT: line.unitPriceBDT,
-            image: line.image,
-            category: line.category,
-            vendor_id: line.vendor_id,
-            vendor_name: line.vendor_name,
-            vendor_slug: line.vendor_slug,
-            store_id: line.store_id,
-            store_slug: line.store_slug,
-          })),
-          deliveryZone: zoneLabel,
-          split_by_vendor: true,
-          vendor_ids: [vendor.vendorId].filter(Boolean),
-          vendor_slugs: [vendor.vendorSlug].filter(Boolean),
-          vendor_count: 1,
-          order_source_channel: 'marketplace',
-          marketplace_order: true,
-        });
-        const supabaseResult = await placeVendor().catch((err: any): SupabaseOrderResult => ({
-          ok: false,
-          itemRowsWritten: 0,
-          itemsJsonOnly: false,
-          error: err?.message || 'The order could not be submitted.',
-        }));
-        orderResults.push({ ok: supabaseResult.ok, orderId: supabaseResult.orderId, orderNumber: vendorOrderNumber, error: supabaseResult.error });
-        placedOrders.push({
-          id: vendorId,
-          orderNumber: vendorOrderNumber,
-          vendorId: vendor.vendorId,
-          vendorSlug: vendor.vendorSlug,
-          vendorName: vendor.vendorName,
-          total: vendorTotal,
-          subtotalBDT: vendorSubtotal,
-          deliveryCharge: vendorDelivery,
-        });
-      }
-
-      // ── 2. MIRROR TO THE APP SERVER (MongoDB / split child orders) ───────
-      //
-      // Best-effort: the order of record is already in Supabase above. A
-      // failure here must not turn a saved order into a failed checkout, so it
-      // is logged and the shipper/merchant dashboards that read the server
-      // store are reconciled by the next sync.
+      const orderResults: { ok: boolean; orderNumber: string; error?: string }[] = [];
       let mirrorSucceeded = 0;
-      for (const order of placedOrders) {
-        const mirrorPayload = {
-          id: order.id,
-          orderNumber: order.orderNumber,
-          // The server uses these fields to route the order to the vendor
-          // dashboard. Without them marketplace orders fall back to the
-          // synthetic "marketplace" store.
-          storeId: order.vendorId,
-          store_id: order.vendorId,
-          storeSlug: order.vendorSlug,
-          store_slug: order.vendorSlug,
-          merchantId: order.vendorId,
-          merchant_id: order.vendorId,
-          merchant_store_slug: order.vendorSlug,
-          vendor_id: order.vendorId,
-          vendor_slug: order.vendorSlug,
-          customerName: form.name.trim(),
-          customerPhone: form.phone.trim(),
-          customerEmail: form.email.trim() || undefined,
-          district: form.district,
-          cityArea: form.area.trim(),
-          address: form.address.trim(),
-          customerNote: form.note.trim() || undefined,
-          deliveryZone:
-            resolvedZone === 'inside' ? 'Inside Dhaka'
-              : resolvedZone === 'sub' ? 'Sub Dhaka'
-                : 'Outside Dhaka',
-          /*
-           * THIS ROW BELONGS TO ONE VENDOR, so its money is that vendor's share —
-           * not the basket total. Sending the basket total stamped the whole
-           * marketplace amount onto every vendor row (one per seller), so a
-           * two-seller checkout appeared to generate several full-price orders.
-           * The basket's own total lives on the master order posted below.
-           */
-          subtotalBDT: order.subtotalBDT,
-          deliveryCharge: order.deliveryCharge,
-          totalBDT: order.total,
-          paymentMethod: PAYMENT_LABELS[payment],
-          paymentStatus: isWalletPayment ? 'Pending Verification' : 'Unpaid',
-          transactionId: isWalletPayment ? txId.trim() || undefined : undefined,
-          adminPaymentMethod: isWalletPayment ? payment : 'cod',
-          adminPaymentNumber: isWalletPayment ? adminWalletNumber || undefined : undefined,
-          fulfillmentStatus: 'Unfulfilled',
-          status: 'New',
-          source: 'Store',
-          items: lines.map((line, index) => {
-            const p = line.product as any;
-            return {
-              // Stable line ids: a retried checkout must reuse them so the order
-              // upsert reconciles lines instead of appending new ones.
-              id: `${order.orderNumber}-i${index + 1}`,
-              productId: String(p.id || ''),
-              productName: String(p.title || p.name || 'Item'),
-              variant: String(p.variant || 'Standard'),
-              quantity: Number(line.quantity || 1),
-              unitPriceBDT: Number(p.priceBDT) || 0,
-              image: productImageOf(p, line),
-              vendor_id: String(p.vendor_id || p.store_id || p.vendor_slug || p.store_slug || ''),
-              vendor_name: String(p.vendor_name || p.store_name || p.storeName || 'Store'),
-              vendor_slug: String(p.vendor_slug || p.store_slug || p.storeSlug || ''),
-              store_id: String(p.store_id || p.vendor_id || ''),
-              store_slug: String(p.store_slug || p.vendor_slug || ''),
-              category: String(p.category || ''),
-            };
-          }),
-          vendor_ids: vendors.map((v) => v.vendorId).filter(Boolean),
-          vendor_slugs: vendors.map((v) => v.vendorSlug).filter(Boolean),
-          order_source_channel: 'marketplace',
-          marketplace_order: true,
-          /*
-           * NO SPLIT FOR AN ALREADY-SPLIT VENDOR ROW.
-           *
-           * This payload is ALREADY one vendor's order: its `store_id`,
-           * `merchant_id` and line items all belong to a single seller. Asking
-           * the server to split it again made it mint a CHILD (`...-v1`,
-           * number `<orderNumber>-1`) for that same vendor, on top of the master
-           * row and on top of the Supabase vendor order created above — three
-           * numbers for one seller's single order.
-           *
-           * A vendor order whose store could not be resolved is routed to the
-           * first vendor instead; `split_by_vendor` is what lets the server fan
-           * it out to the real sellers in that case.
-           */
-          split_by_vendor: !order.vendorId,
-          vendor_count: order.vendorId ? 1 : vendors.length,
-          // The attempt stamp is reused by every retry, so the server upserts
-          // the SAME master/child rows instead of creating another order.
-          idempotencyKey: `${attemptStampRef.current}:${order.vendorId}`,
-          idempotency_key: `${attemptStampRef.current}:${order.vendorId}`,
-        };
-        try {
-          const res = await fetch('/api/orders', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-            body: JSON.stringify({ orders: [mirrorPayload] }),
-          });
-          const data = await res.json().catch(() => null);
-          if (res.ok && data?.ok !== false) {
-            mirrorSucceeded += 1;
-          } else {
-            console.warn('[MarketplaceCheckout] /api/orders mirror HTTP', res.status);
-          }
-        } catch (mirrorErr: any) {
-          console.warn('[MarketplaceCheckout] /api/orders mirror failed:', mirrorErr?.message || mirrorErr);
-        }
-      }
       /*
-       * THE WHOLE BASKET NEEDS ONE OWNER ROW.
-       *
-       * The loop above posts one doc per VENDOR — correct for routing, wrong as
-       * the order of record: the shopper placed ONE order, and the customer's
-       * "My Orders" must show one entry, not one per seller. The master is
-       * posted ONCE (all lines, every vendor) under the attempt stamp, with a
-       * `<stamp>:basket` idempotency key so a retry UPSERTS this same master
-       * instead of adding a second one.
-       *
-       * Child numbering is derived from it: the server names each child
-       * `<master>-v<n>` / `<master>-<n>`, so every vendor row is grouped under
-       * one parent number rather than each carrying its own unrelated number.
+       * THE ONE AND ONLY WRITE FOR A CHECKOUT CLICK — see the block comment
+       * above. The attempt stamp is both the master number and the idempotency
+       * key, so a retry (or a second click that somehow got through) UPSERTS
+       * this same master instead of adding another.
        */
-      const masterNumber = attemptStampRef.current;
+      const masterNumber = orderNumber;
       {
         try {
           const masterRes = await fetch('/api/orders', {
@@ -863,27 +646,43 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                 // Every line, each carrying its selling vendor — this is what
                 // the server groups into one child per merchant.
                 items,
-                // The MASTER is the only row that asks for a split; the vendor
-                // rows above are single-seller and posted without one.
                 split_by_vendor: true,
                 vendor_ids: vendors.map((v) => v.vendorId).filter(Boolean),
                 vendor_slugs: vendors.map((v) => v.vendorSlug).filter(Boolean),
                 vendor_count: vendors.length,
                 order_source_channel: 'marketplace',
                 marketplace_order: true,
+                // One key for the whole basket; a retry upserts this master.
                 idempotencyKey: `${masterNumber}:basket`,
                 idempotency_key: `${masterNumber}:basket`,
               }],
             }),
           });
           const masterData = await masterRes.json().catch(() => null);
+          /*
+           * The server answers 200 and `duplicate: true` for a repeated
+           * submission of the same basket — that is a SUCCESS, not an error:
+           * the order exists and this response describes it.
+           */
           if (masterRes.ok && masterData?.ok !== false) mirrorSucceeded += 1;
-          else console.warn('[MarketplaceCheckout] master order mirror HTTP', masterRes.status);
+          else if (masterRes.ok && masterData?.duplicate === true) mirrorSucceeded += 1;
+          else {
+            orderResults.push({
+              ok: false,
+              orderNumber: masterNumber,
+              error: String(masterData?.error || `HTTP ${masterRes.status}`),
+            });
+          }
         } catch (masterErr: any) {
-          console.warn('[MarketplaceCheckout] master order mirror failed:', masterErr?.message || masterErr);
+          console.warn('[MarketplaceCheckout] order submission failed:', masterErr?.message || masterErr);
+          orderResults.push({
+            ok: false,
+            orderNumber: masterNumber,
+            error: masterErr?.message || 'The order could not be submitted.',
+          });
         }
       }
-      if (orderResults.every((result) => !result.ok) && mirrorSucceeded === 0) {
+      if (mirrorSucceeded === 0) {
         const firstError = orderResults[0]?.error || 'Your order could not be saved. Please try again.';
         throw new Error(firstError);
       }

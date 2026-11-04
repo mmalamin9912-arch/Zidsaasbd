@@ -17497,8 +17497,19 @@ function orderIdempotencyKey(order: any, storeSlug: string): string {
   const explicit = String(order?.idempotencyKey ?? order?.idempotency_key ?? '').trim();
   if (explicit) return `key:${storeSlug}:${explicit.toLowerCase()}`;
 
+  /*
+   * The order number ALONE is the natural key of an order.
+   *
+   * The store segment used to be part of this key, but a multi-vendor basket is
+   * mirrored as several docs that all share the shopper's ONE order number while
+   * carrying different store references (and `marketplace` for the master).
+   * Two docs with the same number but a different resolved slug therefore got
+   * DIFFERENT keys and both were created — duplicates that no retry guard could
+   * see. Insert/upsert is already keyed on `order_number` everywhere else, so
+   * the idempotency key now matches it.
+   */
   const orderNumber = normalizedOrderNumber(order);
-  if (orderNumber) return `num:${storeSlug}:${orderNumber.toLowerCase()}`;
+  if (orderNumber) return `num:${orderNumber.toLowerCase()}`;
 
   // No stable identifier was sent (legacy caller): fall back to the content
   // fingerprint, still scoped to the store so two shops never collide.
@@ -17550,14 +17561,15 @@ async function claimOrderIdempotency(
 
   const collection = db.collection(ORDER_IDEMPOTENCY_COLLECTION);
   try {
-    // Expire old claims (self-healing on instances without a TTL index).
-    await collection
-      .deleteMany({ at: { $lt: new Date(now - ORDER_IDEMPOTENCY_TTL_MS) } })
-      .catch(() => undefined);
     /*
      * ATOMIC CLAIM. `insertOne` on a UNIQUE `_id` is the arbiter: exactly one
      * concurrent request gets the document, every other gets a duplicate-key
      * error and is treated as a retry. This is the only place that decides.
+     *
+     * There is deliberately NO `deleteMany` sweep in front of it: purging
+     * expired claims inside the claim path made two concurrent requests each
+     * delete the other's just-inserted claim, so both won. Expiry is enforced
+     * by the `_id` check below and by the TTL index.
      */
     await collection.insertOne({ _id: key, order_number: orderNumber, at: new Date(now) });
     // Give the claim a TTL so abandoned attempts do not linger forever.
@@ -17572,6 +17584,19 @@ async function claimOrderIdempotency(
       return { duplicateOf: null };
     }
     const existing = await collection.findOne({ _id: key }).catch(() => null);
+    /*
+     * A LAPSED claim is not a duplicate.
+     *
+     * After ORDER_IDEMPOTENCY_TTL_MS the slot is free again: drop it and let
+     * THIS request create the order, otherwise a genuinely new purchase made a
+     * day later would be silently answered with the old order number.
+     */
+    const claimedAt = existing?.at ? new Date(existing.at).getTime() : 0;
+    if (existing && now - claimedAt >= ORDER_IDEMPOTENCY_TTL_MS) {
+      await collection.deleteOne({ _id: key }).catch(() => undefined);
+      inflightOrderKeys.set(key, { orderNumber, at: now });
+      return { duplicateOf: null };
+    }
     return { duplicateOf: String(existing?.order_number || orderNumber) };
   }
 }
