@@ -7388,9 +7388,21 @@ app.post('/api/stores/update', async (req, res) => {
         if (cleanMerchant.themeConfig && sbPayload.theme_config === undefined) sbPayload.theme_config = cleanMerchant.themeConfig;
         if (storeSlug && sbPayload.store_slug === undefined) sbPayload.store_slug = storeSlug;
 
+        /*
+         * MATCH THE DECLARED COLUMN TYPES.
+         *
+         * A merchant UI can post `is_cod_enabled: 'true'`, `inside_dhaka_fee:
+         * '৳80'` or `duration_days: '30 days'`. PostgREST rejects those for a
+         * boolean/numeric/integer column, and `postgrestWrite` then DROPS the
+         * column and retries — so the value silently never lands and the log
+         * fills with "Dropped unknown column". Coercing here (see migration
+         * 0017 for the schema) keeps every field in the payload.
+         */
+        const typedPayload = coerceStoreSupabasePayload(sbPayload);
+
         // A theme_config can itself embed gallery images; strip those too so the
         // Supabase mirror does not 400 on size.
-        const sbSanitized = sanitizeImagePayload(sbPayload);
+        const sbSanitized = sanitizeImagePayload(typedPayload);
         const cleanSbPayload = sbSanitized.value as Record<string, any>;
 
         if (Object.keys(cleanSbPayload).length > 0) {
@@ -20223,6 +20235,120 @@ app.get('/api/admin/orders', async (req, res) => {
     return res.status(500).json({ ok: false, error: err?.message || 'Could not load admin orders.', orders: [] });
   }
 });
+
+/*
+ * ── Column type coercion for the Supabase `stores` mirror ───────────────────
+ *
+ * `postgrestWrite` survives a rejected value by DROPPING the column and
+ * retrying, so a value the column cannot accept is silently lost — a merchant's
+ * COD switch or delivery fee never reaches Supabase even though the request is
+ * "ok". The helpers below adapt a value to the declared column type before it
+ * is sent:
+ *
+ *   boolean  ← true/false, 1/0, 'true'/'on'/'yes'
+ *   numeric  ← number, or a number inside a string ('৳80', '80.00', '')
+ *   integer  ← same, truncated
+ *   timestamptz ← ISO-8601, or null for an unparseable value
+ *
+ * `undefined` means "do not write this column"; `null` is an explicit clear.
+ */
+function toBooleanColumn(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null as unknown as boolean;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on', 'enabled', 'active'].includes(text)) return true;
+  if (['false', '0', 'no', 'n', 'off', 'disabled', 'inactive', ''].includes(text)) return false;
+  return undefined;
+}
+
+function toNumericColumn(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  // Strip currency symbols, thousands separators and whitespace: '৳1,250.50'.
+  const raw = String(value).trim();
+  if (raw === '') return null; // an empty field is "not priced", not zero
+  const cleaned = raw.replace(/[^0-9.+-]/g, '');
+  if (cleaned === '' || cleaned === '-' || cleaned === '+') return undefined;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function toIntegerColumn(value: unknown): number | null | undefined {
+  const n = toNumericColumn(value);
+  if (n === undefined || n === null) return n;
+  return Math.trunc(n);
+}
+
+function toTimestampColumn(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/**
+ * Coerce every typed column of a `stores` mirror payload.
+ *
+ * Applied right before the write so the payload matches the schema declared by
+ * migration 0017, whatever shape the merchant UI posted.
+ */
+function coerceStoreSupabasePayload(payload: Record<string, any>): Record<string, any> {
+  const BOOLEAN_COLUMNS = [
+    'is_cod_enabled',
+    'advance_delivery_charge_enabled',
+    'is_locked',
+  ];
+  const NUMERIC_COLUMNS = [
+    'inside_dhaka_fee',
+    'sub_dhaka_fee',
+    'outside_dhaka_fee',
+    'advance_amount',
+  ];
+  const INTEGER_COLUMNS = ['duration_days', 'trial_days_remaining'];
+  const TIMESTAMP_COLUMNS = [
+    'expires_at',
+    'subscription_expiry',
+    'plan_started_at',
+    'trial_ends_at',
+    'payment_approved_at',
+    'created_at',
+    'updated_at',
+  ];
+
+  const out: Record<string, any> = { ...payload };
+  for (const key of BOOLEAN_COLUMNS) {
+    if (key in out) {
+      const coerced = toBooleanColumn(out[key]);
+      if (coerced === undefined) delete out[key];
+      else out[key] = coerced;
+    }
+  }
+  for (const key of NUMERIC_COLUMNS) {
+    if (key in out) {
+      const coerced = toNumericColumn(out[key]);
+      if (coerced === undefined) delete out[key];
+      else out[key] = coerced;
+    }
+  }
+  for (const key of INTEGER_COLUMNS) {
+    if (key in out) {
+      const coerced = toIntegerColumn(out[key]);
+      if (coerced === undefined) delete out[key];
+      else out[key] = coerced;
+    }
+  }
+  for (const key of TIMESTAMP_COLUMNS) {
+    if (key in out) {
+      const coerced = toTimestampColumn(out[key]);
+      if (coerced === undefined) delete out[key];
+      else out[key] = coerced;
+    }
+  }
+  return out;
+}
 
 /**
  * Mirror a payment decision onto the Supabase `orders` row.
