@@ -756,6 +756,10 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           vendor_count: vendors.length,
           order_source_channel: 'marketplace',
           marketplace_order: true,
+          // The attempt stamp is reused by every retry, so the server upserts
+          // the SAME master/child rows instead of creating another order.
+          idempotencyKey: `${attemptStampRef.current}:${order.vendorId}`,
+          idempotency_key: `${attemptStampRef.current}:${order.vendorId}`,
         };
         try {
           const res = await fetch('/api/orders', {

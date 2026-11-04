@@ -17359,38 +17359,127 @@ app.get('/api/customer/orders', async (req, res) => {
 
 // POST /api/orders — batch sync updated orders into MongoDB.
 //
-// DUPLICATE PREVENTION (5-second window):
-// A double-tap on "Confirm Order" (or a retry before the first request
-// settles) used to insert the SAME order twice — the frontend guard is a
-// best-effort, but two browser tabs / a flaky network can still race. The
-// route therefore computes a fingerprint per order (store + customer phone +
-// cart contents + total + payment method) and treats a repeat submission of
-// the SAME fingerprint within 5 seconds as a duplicate: it is acknowledged
-// with the FIRST order's number and skipped, so the customer's UI and the
-// merchant's dashboard each see exactly one order.
+// IDEMPOTENCY (one "Place order" click = exactly one order):
 //
-// The fingerprint is content-based (not session-id-based) so it also catches
-// the classic "two tabs, same cart" case, while a genuinely NEW order — even
-// an identical re-order minutes later — still goes through.
-const ORDER_DEDUP_WINDOW_MS = 5_000;
-type OrderDedupEntry = { orderNumber: string; at: number };
-// Keyed by the fingerprint string; process-local, which is the right scope for
-// a double-submit race (both requests land on the same warm instance).
-const recentOrderSubmissions = new Map<string, OrderDedupEntry>();
+// A checkout can reach this route more than once for ONE click: React StrictMode
+// or a duplicated handler can fire two POSTs, a mobile network retry re-sends
+// the request, and a cold lambda restart wipes any in-process memory. The route
+// therefore keys every order on an IDEMPOTENCY KEY taken from the payload:
+//
+//   1. `idempotencyKey` / `idempotency_key` sent by the checkout (the durable
+//      attempt id the storefront reuses for every retry),
+//   2. else the client order number (`orderNumber` / `order_number`), which the
+//      storefront generates ONCE per checkout attempt,
+//   3. else a content fingerprint (store + phone + cart + total + payment).
+//
+// The key is claimed ATOMICALLY in MongoDB (unique index + insert of a claim
+// document), so two requests that race — in the same process, in two lambdas,
+// or after a restart — can never both create the order: the loser is answered
+// with the WINNER's order number and writes nothing. Claims older than
+// ORDER_IDEMPOTENCY_TTL_MS are released so a merchant can deliberately re-place
+// an identical order later.
+//
+// Supabase is idempotent on the same key (`order_number` is the natural key of
+// the upsert), so a retried request PATCHes the same row instead of adding one.
+const ORDER_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const ORDER_IDEMPOTENCY_COLLECTION = 'order_idempotency';
 
-function orderFingerprintOf(order: any, storeSlug: string): string {
-  const items = Array.isArray(order.items) ? order.items : [];
-  const itemKey = items
-    .map((i: any) => `${String(i?.productName ?? i?.id ?? '')}x${Number(i?.quantity ?? 0)}`)
+/** In-process fast path / fallback when MongoDB is unavailable. */
+const inflightOrderKeys = new Map<string, { orderNumber: string; at: number }>();
+
+function normalizedOrderNumber(order: any): string {
+  return String(order?.orderNumber ?? order?.order_number ?? '').replace(/^#/, '').trim();
+}
+
+function orderIdempotencyKey(order: any, storeSlug: string): string {
+  const explicit = String(order?.idempotencyKey ?? order?.idempotency_key ?? '').trim();
+  if (explicit) return `key:${storeSlug}:${explicit.toLowerCase()}`;
+
+  const orderNumber = normalizedOrderNumber(order);
+  if (orderNumber) return `num:${storeSlug}:${orderNumber.toLowerCase()}`;
+
+  // No stable identifier was sent (legacy caller): fall back to the content
+  // fingerprint, still scoped to the store so two shops never collide.
+  const items = Array.isArray(order.items)
+    ? order.items
+    : (() => { try { return JSON.parse(String(order.items || '[]')); } catch { return []; } })();
+  const itemKey = (Array.isArray(items) ? items : [])
+    .map((i: any) => `${String(i?.productId ?? i?.productName ?? i?.id ?? '')}x${Number(i?.quantity ?? 0)}`)
     .sort()
     .join('|');
   return [
+    'fp',
     storeSlug,
     String(order.customerPhone ?? order.customer_phone ?? '').replace(/\D/g, ''),
     itemKey,
     String(toNumeric(order.totalBDT ?? order.total_price ?? order.total ?? 0, 0)),
     String(order.paymentMethod ?? order.payment_method ?? ''),
   ].join('::');
+}
+
+/**
+ * Claim an idempotency key. Returns the order number of the request that
+ * already owns it (a duplicate), or null when THIS request won the claim and
+ * must proceed to create the order. Never throws: any storage failure degrades
+ * to the in-process map / a fresh claim rather than blocking checkout.
+ */
+async function claimOrderIdempotency(
+  db: any,
+  key: string,
+  orderNumber: string,
+): Promise<{ duplicateOf: string | null }> {
+  const now = Date.now();
+  const previous = inflightOrderKeys.get(key);
+  // Same-process double submit: the first request has not finished yet, so the
+  // order it is about to create is not readable yet — answer with its number.
+  if (previous && now - previous.at < ORDER_IDEMPOTENCY_TTL_MS) {
+    if (previous.orderNumber !== orderNumber || now - previous.at < 10_000) {
+      return { duplicateOf: previous.orderNumber || orderNumber };
+    }
+  }
+  inflightOrderKeys.set(key, { orderNumber, at: now });
+  if (inflightOrderKeys.size > 2000) {
+    for (const [k, v] of inflightOrderKeys) {
+      if (now - v.at > ORDER_IDEMPOTENCY_TTL_MS) inflightOrderKeys.delete(k);
+    }
+  }
+
+  if (!db) return { duplicateOf: null };
+
+  const collection = db.collection(ORDER_IDEMPOTENCY_COLLECTION);
+  try {
+    // Expire old claims (self-healing on instances without a TTL index).
+    await collection
+      .deleteMany({ at: { $lt: new Date(now - ORDER_IDEMPOTENCY_TTL_MS) } })
+      .catch(() => undefined);
+    /*
+     * ATOMIC CLAIM. `insertOne` on a UNIQUE `_id` is the arbiter: exactly one
+     * concurrent request gets the document, every other gets a duplicate-key
+     * error and is treated as a retry. This is the only place that decides.
+     */
+    await collection.insertOne({ _id: key, order_number: orderNumber, at: new Date(now) });
+    // Give the claim a TTL so abandoned attempts do not linger forever.
+    await collection
+      .createIndex({ at: 1 }, { expireAfterSeconds: Math.floor(ORDER_IDEMPOTENCY_TTL_MS / 1000) })
+      .catch(() => undefined);
+    return { duplicateOf: null };
+  } catch (claimErr: any) {
+    if (!/E11000|duplicate key/i.test(String(claimErr?.message || ''))) {
+      // Unknown failure — do not block the order on bookkeeping.
+      console.warn('[Server] order idempotency claim warning:', claimErr?.message || claimErr);
+      return { duplicateOf: null };
+    }
+    const existing = await collection.findOne({ _id: key }).catch(() => null);
+    return { duplicateOf: String(existing?.order_number || orderNumber) };
+  }
+}
+
+/** Release a claim so a FAILED attempt does not block the customer's retry. */
+async function releaseOrderIdempotency(db: any, key: string): Promise<void> {
+  const entry = inflightOrderKeys.get(key);
+  if (entry) inflightOrderKeys.delete(key);
+  if (!db) return;
+  await db.collection(ORDER_IDEMPOTENCY_COLLECTION).deleteOne({ _id: key }).catch(() => undefined);
 }
 
 /**
@@ -18063,9 +18152,22 @@ app.post('/api/orders', async (req, res) => {
 
     const inserted: any[] = [];
     const rejected: { index: number; error: string }[] = [];
+    // Idempotency claims taken by THIS request; released again if nothing was
+    // persisted, so a failed first click never blocks the customer's retry.
+    const claimedOrderKeys: string[] = [];
     // Per-order outcome of the server-side Supabase mirror (diagnostics only).
     const supabaseMirrors: any[] = [];
     const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+
+    // Last line of defence for a database restored from before the idempotency
+    // layer existed: keep ONE row per order number. The index is only created
+    // when the collection does not already hold duplicates (building it would
+    // otherwise fail); the upserts below are keyed on `order_number` anyway.
+    if (db) {
+      await db.collection(ORDERS_COLLECTION)
+        .createIndex({ order_number: 1 }, { unique: true, background: true })
+        .catch(() => undefined);
+    }
 
     for (let index = 0; index < arr.length; index += 1) {
       const order = arr[index];
@@ -18189,44 +18291,40 @@ app.post('/api/orders', async (req, res) => {
       );
       const source = isManual ? (rawSource || 'Manual') : (rawSource || 'Store');
 
-      // ── Duplicate-submission guard (5-second window) ──────────────────
-      const dedupKey = orderFingerprintOf(order, slug);
-      const now = Date.now();
-      if (recentOrderSubmissions.size > 500) {
-        for (const [key, entry] of recentOrderSubmissions) {
-          if (now - entry.at > ORDER_DEDUP_WINDOW_MS) recentOrderSubmissions.delete(key);
-        }
-      }
-      const previous = recentOrderSubmissions.get(dedupKey);
-      if (previous && now - previous.at < ORDER_DEDUP_WINDOW_MS) {
-        /*
-         * DROPPED TRANSACTION — a real bug, not just a log line.
-         *
-         * The duplicate is correctly skipped as a WRITE, but it must still be
-         * reported in `inserted`. The route persists every entry of `inserted`
-         * into the in-memory/local order cache (and that cache feeds the
-         * dashboard's read path). A `continue` sent the pasted-in order number
-         * only, so a client that re-submitted after a timeout — the exact case
-         * this guard exists for — got a 200 back and the order was then missing
-         * from BOTH the cache and the dashboard list until Mongo was re-read.
-         *
-         * The previously cached master is therefore re-broadcast under the same
-         * identity, flagged `duplicate` so the caller can tell it was not a new
-         * row.
-         */
+      /*
+       * ── IDEMPOTENCY CLAIM (durable, atomic) ──────────────────────────
+       *
+       * One checkout attempt has one key. The claim is inserted into MongoDB
+       * under a unique `_id`, so of two requests carrying the same key — a
+       * double submit, a StrictMode double effect, a network retry, or two
+       * lambdas — exactly ONE wins and creates the order. The loser is
+       * acknowledged with the winner's order number and performs NO write
+       * (neither MongoDB nor Supabase), flagged `duplicate` for the caller.
+       */
+      const idempotencyKey = orderIdempotencyKey(order, slug);
+      const claimOrderNumber = normalizedOrderNumber(order) || `ORD-${Date.now()}`;
+      const claim = await claimOrderIdempotency(db, idempotencyKey, claimOrderNumber);
+      if (claim.duplicateOf) {
         console.log('[Server] POST /api/orders duplicate submission ignored:', {
-          order_number: previous.orderNumber,
-          age_ms: now - previous.at,
+          order_number: claim.duplicateOf,
+          idempotency_key: idempotencyKey,
           store: slug,
         });
-        const cached = recentOrdersCache.get(String(previous.orderNumber || '').replace(/^#/, '').trim());
+        /*
+         * The duplicate is correctly skipped as a WRITE, but it must still be
+         * reported in `inserted`: the route re-broadcasts every entry of
+         * `inserted` into the in-memory/local order cache that feeds the
+         * dashboard's read path, so a client that re-submitted after a timeout
+         * still gets the SAME order back instead of a 200 with nothing.
+         */
+        const announcedNumber = String(claim.duplicateOf || '').replace(/^#/, '').trim();
+        const cached = recentOrdersCache.get(announcedNumber);
         inserted.push(cached
-          ? { ...cached, order_number: previous.orderNumber, duplicate: true }
-          : { order_number: previous.orderNumber, duplicate: true });
+          ? { ...cached, order_number: announcedNumber, duplicate: true }
+          : { order_number: announcedNumber, duplicate: true });
         continue;
       }
-      const dedupOrderNumber = String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, '');
-      recentOrderSubmissions.set(dedupKey, { orderNumber: dedupOrderNumber, at: now });
+      claimedOrderKeys.push(idempotencyKey);
 
       /*
        * A line is attributable to its vendor from the moment it enters the API.
@@ -18600,6 +18698,12 @@ app.post('/api/orders', async (req, res) => {
      * vendor's dashboard sees the rows that did land.
      */
     if (inserted.length === 0) {
+      /*
+       * Nothing was written, so the idempotency claims this request took MUST
+       * be released. Holding them would make the customer's retry look like a
+       * duplicate of an order that does not exist.
+       */
+      await Promise.all(claimedOrderKeys.map((key) => releaseOrderIdempotency(db, key)));
       return res.status(422).json({
         ok: false,
         success: false,
@@ -18625,6 +18729,9 @@ app.post('/api/orders', async (req, res) => {
       success: true,
       synced: inserted.length,
       rejected,
+      // True when this request only re-acknowledged an existing order (a
+      // retried or double-submitted checkout); no new row was created.
+      duplicate: inserted.length > 0 && inserted.every((o) => o?.duplicate === true),
       // `ok: false` here means "not mirrored to Supabase", not "order failed".
       supabase: supabaseMirrors,
       ...(rejected.length > 0

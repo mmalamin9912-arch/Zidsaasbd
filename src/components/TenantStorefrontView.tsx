@@ -2046,6 +2046,12 @@ The render below must not guess. A merchant may paste
   // Synchronous re-entry guard: `setIsPlacingOrder` is async, so two clicks in
   // the same tick would both pass an `isPlacingOrder` check.
   const placingOrderRef = React.useRef(false);
+  // Idempotency key for the CURRENT checkout attempt. Created once when the
+  // shopper first confirms and reused by every retry (a failed request, a
+  // second click after an error, a StrictMode double effect), so the server and
+  // Supabase can recognise all of them as the SAME order. Rotated only after a
+  // confirmed success, so the next order gets a fresh key.
+  const orderAttemptRef = React.useRef<{ key: string; orderNumber: string } | null>(null);
   const [confirmedOrderNum, setConfirmedOrderNum] = useState('');
   const [codAdvanceProvider, setCodAdvanceProvider] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [copiedNum, setCopiedNum] = useState(false);
@@ -2984,6 +2990,10 @@ The render below must not guess. A merchant may paste
   };
 
   const placeOrder = async () => {
+    // A second entry while the first request is still in flight must never
+    // create a second order — the ref is synchronous, unlike the state flag.
+    if (placingOrderRef.current) return;
+
     // Enforce the merchant's minimum order rule (Settings -> Checkout).
     if (minOrderShortfall > 0) return;
 
@@ -3024,7 +3034,20 @@ The render below must not guess. A merchant may paste
       return;
     }
 
-    const orderNum = '#' + Math.floor(100000 + Math.random() * 900000);
+    // ONE order number and ONE idempotency key per checkout attempt. If a
+    // previous submit failed and the shopper presses again, the attempt is
+    // reused — the server acknowledges the original instead of writing a
+    // second order.
+    if (!orderAttemptRef.current) {
+      const attemptId = (() => {
+        const c: any = typeof crypto !== 'undefined' ? crypto : null;
+        if (c?.randomUUID) return c.randomUUID();
+        return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      })();
+      orderAttemptRef.current = { key: attemptId, orderNumber: '#' + Math.floor(100000 + Math.random() * 900000) };
+    }
+    const orderNum = orderAttemptRef.current.orderNumber;
+    const idempotencyKey = orderAttemptRef.current.key;
 
     // Every line records its SELLING VENDOR. The server groups these by
     // `vendor_id` to create one child order (and one courier slip) per
@@ -3238,6 +3261,10 @@ The render below must not guess. A merchant may paste
       // split; `split_by_vendor` is the server's instruction to fan out.
       vendor_count: distinctVendors.size,
       split_by_vendor: isMultiVendor,
+      // Server-side idempotency: every retry of this attempt carries the same
+      // key, so only the first request can create the order.
+      idempotencyKey,
+      idempotency_key: idempotencyKey,
     };
 
     // Save order to backend API (MongoDB-backed). Non-blocking: log failures
@@ -3257,6 +3284,8 @@ The render below must not guess. A merchant may paste
     onPlaceOrder(newOrder);
     setCheckoutStep('success');
     setCart([]);
+    // The attempt is complete: the next order must use a new key.
+    orderAttemptRef.current = null;
 
     // Report the conversion to whichever pixels the merchant configured.
     // Guarded so a missing/blocked script can never break the checkout flow.
