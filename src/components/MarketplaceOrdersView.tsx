@@ -625,7 +625,17 @@ const OrderCard: React.FC<{
         <div className="flex flex-wrap gap-2">
           {items.slice(0, 4).map((item, idx) => (
             <div key={`${item.id}-${idx}`} className="flex min-w-0 flex-1 items-center gap-2.5 sm:max-w-[300px]">
+              {/*
+                * Render the whole LINE, not just `item.image`.
+                *
+                * `normalizeOrderItems` resolves `image` from every alias, but a
+                * row cached/normalised by an older client only carries
+                * `imageUrl` / `image_url` / `thumbnail` / `images[]`. Passing the
+                * line lets `SafeImage` re-resolve it, and the flat keys are still
+                * the fallback if the line is a plain `{ image }` object.
+                */}
               <SafeImage
+                item={item}
                 src={item.image}
                 alt={item.productName}
                 className="h-12 w-12 shrink-0 rounded-lg border object-cover"

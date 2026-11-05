@@ -7,7 +7,7 @@ import {
 import SafeImage from './SafeImage';
 import type { AdminPaymentGatewayConfig } from '../types';
 import { useCart } from './CartProvider';
-import { PLACEHOLDER_IMAGE, resolveProductImage } from '../utils/imageFallback';
+import { resolveProductImage } from '../utils/imageFallback';
 import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
 
@@ -71,7 +71,15 @@ function productImageOf(p: any, line?: any): string {
     loggedImageItems.add(itemKey);
     console.debug('[MarketplaceCheckout] resolved cart item image', { itemKey, image });
   }
-  return image || PLACEHOLDER_IMAGE;
+  /*
+   * Return '' when the line has no photo — do NOT bake `PLACEHOLDER_IMAGE` in.
+   *
+   * `SafeImage` already renders the placeholder for an empty source, and a
+   * real '/placeholder.svg' here made "no photo" indistinguishable from "a
+   * photo" (the same reason `normalizeOrderItems` keeps `image` empty). The
+   * caller passes the result straight to the `<img>` src.
+   */
+  return image;
 }
 
 /** All 64 districts — a courier needs the real one, not a header shortcut. */
@@ -1149,7 +1157,6 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                           <div key={`${vendor.vendorId}-${p.id}`} className="mb-2 flex gap-2.5 last:mb-0">
                           <SafeImage
                             src={productImageOf(p, line)}
-                            fallbackSrc="/placeholder.svg"
                             alt={p.title || p.name || 'Item'}
                             width={80}
                             height={80}

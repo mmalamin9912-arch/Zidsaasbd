@@ -1,12 +1,24 @@
 import React, { useEffect, useState } from 'react';
 import type { ImgHTMLAttributes, SyntheticEvent } from 'react';
-import { PLACEHOLDER_IMAGE, hasImageSource, imgErrorFallback, toRenderableImageUrl } from '../utils/imageFallback';
+import { PLACEHOLDER_IMAGE, hasImageSource, imgErrorFallback, resolveProductImage, toRenderableImageUrl } from '../utils/imageFallback';
 
 type SafeImageProps = ImgHTMLAttributes<HTMLImageElement> & {
   /** Image source; external URLs are validated and fall back gracefully. */
   src?: string | null;
   /** Optional fallback override (defaults to the local placeholder asset). */
   fallbackSrc?: string;
+  /**
+   * When set, `src` is treated as a raw (possibly NOT normalised) order/basket
+   * line and resolved through the shared `resolveProductImage` rules —
+   * `image` → `imageUrl`/`image_url` → `thumbnail` → `images[0]` →
+   * `product.image` / `product.image_url` / `product.images[0]`.
+   *
+   * Order history renders `OrderItem.image`, which `normalizeOrderItems` fills
+   * from those aliases. A line persisted before that ran (or written by an
+   * older client) still carries only `imageUrl` / `thumbnail` / `images[]`, and
+   * reading `item.image` alone left it with a blank thumbnail.
+   */
+  item?: unknown;
 };
 
 /**
@@ -23,9 +35,12 @@ type SafeImageProps = ImgHTMLAttributes<HTMLImageElement> & {
 const SafeImage: React.FC<SafeImageProps> = ({
   src,
   fallbackSrc,
+  item,
   onError,
   ...rest
 }) => {
+  // A resolved-but-empty line falls back to `src`, so callers can pass both.
+  const lineSrc = resolveProductImage(item) || src;
   const fallback = hasImageSource(fallbackSrc) ? toRenderableImageUrl(fallbackSrc) : PLACEHOLDER_IMAGE;
   const [failed, setFailed] = useState(false);
 
@@ -39,7 +54,7 @@ const SafeImage: React.FC<SafeImageProps> = ({
    * prepends the Supabase storage host when the value has no domain of its own
    * and leaves absolute URLs and data URIs untouched.
    */
-  const normalizedSrc = hasImageSource(src) ? toRenderableImageUrl(src) : '';
+  const normalizedSrc = hasImageSource(lineSrc) ? toRenderableImageUrl(lineSrc) : '';
 
   // A new, valid source should get a fresh chance after a previous failure.
   useEffect(() => {
