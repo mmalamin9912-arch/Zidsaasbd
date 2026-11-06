@@ -1156,7 +1156,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                         return (
                           <div key={`${vendor.vendorId}-${p.id}`} className="mb-2 flex gap-2.5 last:mb-0">
                           <SafeImage
-                            item={line}
+                            item={p}
                             src={productImageOf(p, line)}
                             alt={p.title || p.name || 'Item'}
                             width={80}

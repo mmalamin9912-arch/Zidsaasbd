@@ -77,6 +77,26 @@ export function toRenderableImageUrl(value: unknown): string {
  * Product rows are written by several callers, some of which store
  * `images: [{ url, alt }]` rather than `images: ['https://…']`.
  */
+/** Return the first non-empty, non-placeholder string from the given values.
+ * `??` alone is not enough: `{ image: '', image_url: 'valid.jpg' }` would
+ * resolve to `''` because `??` only skips `null`/`undefined`, not `''`.
+ */
+function firstNonEmpty(...values: unknown[]): string {
+  for (const v of values) {
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if (
+        trimmed !== '' &&
+        trimmed !== '#' &&
+        !/^(null|undefined)$/i.test(trimmed)
+      ) {
+        return trimmed;
+      }
+    }
+  }
+  return '';
+}
+
 function urlFromValue(value: unknown): string {
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -89,10 +109,17 @@ function urlFromValue(value: unknown): string {
   }
   if (!value || typeof value !== 'object') return '';
   const record = value as Record<string, unknown>;
-  const inner =
-    record.url ?? record.src ?? record.image ?? record.image_url ??
-    record.imageUrl ?? record.thumbnail ?? record.path ?? '';
-  return typeof inner === 'string' ? inner.trim() : '';
+  // Check every URL-shaped key on the object, skipping empty/placeholder values
+  // so a real database URL in `image_url` isn't shadowed by an empty `image`.
+  return firstNonEmpty(
+    record.url,
+    record.src,
+    record.image,
+    record.image_url,
+    record.imageUrl,
+    record.thumbnail,
+    record.path,
+  );
 }
 
 /**
