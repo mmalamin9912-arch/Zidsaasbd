@@ -80,7 +80,12 @@ export function toRenderableImageUrl(value: unknown): string {
 function urlFromValue(value: unknown): string {
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    return trimmed === '#' ? '' : trimmed;
+    // Legacy rows and a few API serializers write the LITERAL strings
+    // 'null' / 'undefined' into an image column. Rendering them produced a
+    // request for `/null` (a 404 → placeholder) instead of falling through to
+    // the next candidate that may still carry a real database URL.
+    if (trimmed === '#' || /^(null|undefined)$/i.test(trimmed)) return '';
+    return trimmed;
   }
   if (!value || typeof value !== 'object') return '';
   const record = value as Record<string, unknown>;
@@ -113,14 +118,27 @@ export function resolveProductImage(source: unknown): string {
 
   const candidates: unknown[] = [
     item.image, item.imageUrl, item.image_url, item.thumbnail, item.thumbnailUrl,
-    item.productImage, item.product_image, item.photo, item.photoUrl,
+    item.productImage, item.product_image, item.photo, item.photoUrl, item.img,
+    item.coverImage, item.cover_image,
     ...(Array.isArray(item.images) ? item.images : []),
+    ...(Array.isArray(item.gallery) ? item.gallery : []),
     product?.image, product?.imageUrl, product?.image_url, product?.thumbnail,
+    product?.thumbnailUrl, product?.thumbnail_url, product?.productImage,
+    product?.product_image, product?.photo, product?.photoUrl, product?.img,
+    product?.coverImage, product?.cover_image,
     ...(Array.isArray(product?.images) ? product.images : []),
+    ...(Array.isArray(product?.additionalImages) ? product.additionalImages : []),
+    ...(Array.isArray(product?.additional_images) ? product.additional_images : []),
     // A POPULATED reference: `product_id` may be an id string or a joined row
     // (`{ image, image_url, … }`) depending on which API produced the order.
-    (typeof item.product_id === 'object' && item.product_id ? (item.product_id as any).image : ''),
-    (typeof item.product_id === 'object' && item.product_id ? (item.product_id as any).image_url : ''),
+    ...(typeof item.product_id === 'object' && item.product_id
+      ? [(item.product_id as any).image, (item.product_id as any).image_url,
+         (item.product_id as any).imageUrl, (item.product_id as any).thumbnail]
+      : []),
+    ...(typeof item.productId === 'object' && item.productId
+      ? [(item.productId as any).image, (item.productId as any).image_url,
+         (item.productId as any).imageUrl, (item.productId as any).thumbnail]
+      : []),
   ];
 
   for (const candidate of candidates) {
