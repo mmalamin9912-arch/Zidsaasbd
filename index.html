@@ -41,15 +41,17 @@
 
       ORDER MATTERS: the first rel="icon" tag is the primary favicon browsers
       and Google prefer. It is the brand mark PNG (/favicon-48.png, rendered
-      from /logo.png) so a tab shows our logo — NOT the SVG and not /favicon.ico,
-      which are fallbacks only. `id="app-favicon"` is the single element the app
+      from /logo.png) so a tab shows our logo — NOT /favicon.ico, which is a
+      legacy fallback only. `id="app-favicon"` is the single element the app
       mutates at runtime (dashboard branding, or a merchant's storefront icon);
       it stays on a raster icon and is restored on the way out — see
-      src/lib/brandIdentity.ts.
+      applyStoreFavicon() in src/lib/storeModulesApi.ts.
+
+      There is deliberately NO SVG icon link: the only SVG ever shipped here
+      was an unrelated gold mark, and Google ignores SVG favicons anyway.
     -->
     <link id="app-favicon" rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" data-brand-src="/favicon-48.png" />
     <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
@@ -69,6 +71,7 @@
     <meta property="og:image" content="https://zidbdsaas.vercel.app/logo.png" />
     <meta property="og:image:alt" content="Zid SaaS BD - Multi-Vendor Marketplace logo" />
     <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:secure_url" content="https://zidbdsaas.vercel.app/logo.png" />
     <meta property="og:image:width" content="512" />
     <meta property="og:image:height" content="512" />
     <meta property="og:locale" content="en_BD" />
