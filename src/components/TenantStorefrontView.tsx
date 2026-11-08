@@ -1268,8 +1268,11 @@ The render below must not guess. A merchant may paste
     applyStoreSeo(storeModules.seoConfig, storeDisplayName);
   }, [storeModules.seoConfig, storeDisplayName]);
 
+  // Restore the platform icon when the storefront unmounts, so the dashboard
+  // tab never keeps a merchant's icon (or one whose URL no longer loads).
   useEffect(() => {
     applyStoreFavicon(storeModules.brandConfig?.faviconUrl);
+    return () => applyStoreFavicon(null);
   }, [storeModules.brandConfig?.faviconUrl]);
 
   // Legal policies (set in Settings → Legal policies). When `showInFooter` is on,

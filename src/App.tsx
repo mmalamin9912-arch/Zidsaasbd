@@ -1776,8 +1776,7 @@ export default function App() {
   // client-side title that disagrees with it is a competing signal for the site
   // name. A per-merchant storefront sets its own title and is left alone.
   React.useEffect(() => {
-    const PLATFORM_TITLE = "Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS";
-    document.title = PLATFORM_TITLE;
+    const PLATFORM_TITLE = `Zid SaaS BD - Multi-Vendor Marketplace`;
     const interval = setInterval(() => {
       if (document.title !== PLATFORM_TITLE && !document.body.hasAttribute('data-owns-title')) {
         document.title = PLATFORM_TITLE;
@@ -1792,14 +1791,9 @@ export default function App() {
     }
   }, [authLoading]);
 
-  React.useEffect(() => {
-    document.title = "Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS";
-
-    const faviconEl = document.getElementById('app-favicon') as HTMLLinkElement | null;
-    if (faviconEl) {
-      faviconEl.href = '/favicon.svg';
-    }
-  }, []);
+  // Keep the tab icon on the brand mark. `index.html` already points
+  // #app-favicon at the raster logo; leaving it alone here is what stops the
+  // dashboard from replacing it with the SVG (which Google ignores).
 
   React.useEffect(() => {
     safeSetItem('ZID_THEME_PURCHASE_REQUESTS', themePurchaseRequests);

@@ -3,16 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS</title>
+    <title>Zid SaaS BD - Multi-Vendor Marketplace</title>
     <meta name="application-name" content="Zid SaaS BD" />
     <meta name="author" content="Zid SaaS BD" />
     <meta
       name="description"
-      content="Zid SaaS BD is Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly."
+      content="Zid SaaS BD is Bangladesh's multi-vendor marketplace and e-commerce SaaS. Shop verified sellers across all 64 districts with fast delivery, bKash/Nagad payments and cash on delivery, or launch your own online store in minutes."
     />
     <meta
       name="keywords"
-      content="Zid SaaS BD, Bangladesh Marketplace, Multi-Vendor SaaS, Online Shopping BD"
+      content="Zid SaaS BD, Bangladesh marketplace, multi-vendor marketplace Bangladesh, online shopping BD, bKash payment, Nagad payment, cash on delivery Bangladesh, e-commerce Bangladesh"
     />
     <!--
       DISAMBIGUATION FROM SAUDI ARABIA'S "ZID" (zid.sa).
@@ -38,43 +38,50 @@
       the brand name — without them the domain can be labelled with the host
       (e.g. "Vercel"). Icon tags below must point at raster files: Google does
       not use SVG favicons.
+
+      ORDER MATTERS: the first rel="icon" tag is the primary favicon browsers
+      and Google prefer. It is the brand mark PNG (/favicon-48.png, rendered
+      from /logo.png) so a tab shows our logo — NOT the SVG and not /favicon.ico,
+      which are fallbacks only. `id="app-favicon"` is the single element the app
+      mutates at runtime (dashboard branding, or a merchant's storefront icon);
+      it stays on a raster icon and is restored on the way out — see
+      src/lib/brandIdentity.ts.
     -->
-    <link id="app-favicon" rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
+    <link id="app-favicon" rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" data-brand-src="/favicon-48.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
-    <!--
-      NOTE: no `type` here. The generated brand mark is a PNG served from
-      /logo.png; unless the server sets Content-Type: image/png for it (Vercel
-      treats it as octet-stream), a declared image/svg+xml type would make
-      browsers reject the icon.
-    -->
-    <link rel="icon" type="image/png" href="/logo.png" />
+
+    <meta name="theme-color" content="#1E40AF" />
+    <meta name="msapplication-TileImage" content="/logo.png" />
+    <meta name="msapplication-TileColor" content="#1E40AF" />
 
     <meta property="og:site_name" content="Zid SaaS BD" />
-    <meta property="og:title" content="Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS" />
+    <meta property="og:title" content="Zid SaaS BD - Multi-Vendor Marketplace" />
     <meta
       property="og:description"
-      content="Zid SaaS BD is Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly."
+      content="Zid SaaS BD is Bangladesh's multi-vendor marketplace and e-commerce SaaS. Shop verified sellers across all 64 districts with fast delivery, bKash/Nagad payments and cash on delivery, or launch your own online store in minutes."
     />
     <meta property="og:url" content="https://zidbdsaas.vercel.app/" />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="https://zidbdsaas.vercel.app/logo.png" />
-    <meta property="og:image:alt" content="Zid SaaS BD logo" />
+    <meta property="og:image:alt" content="Zid SaaS BD - Multi-Vendor Marketplace logo" />
     <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="512" />
     <meta property="og:image:height" content="512" />
     <meta property="og:locale" content="en_BD" />
     <meta property="og:locale:alternate" content="bn_BD" />
+    <meta property="article:publisher" content="https://github.com/mmalamin9912-arch/Zidsaasbd" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Zid SaaS BD - Multi-Vendor Marketplace & E-Commerce SaaS" />
+    <meta name="twitter:title" content="Zid SaaS BD - Multi-Vendor Marketplace" />
     <meta
       name="twitter:description"
-      content="Zid SaaS BD is Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly."
+      content="Zid SaaS BD is Bangladesh's multi-vendor marketplace and e-commerce SaaS. Shop verified sellers across all 64 districts with fast delivery, bKash/Nagad payments and cash on delivery, or launch your own online store in minutes."
     />
     <meta name="twitter:image" content="https://zidbdsaas.vercel.app/logo.png" />
-    <meta name="twitter:image:alt" content="Zid SaaS BD logo" />
+    <meta name="twitter:image:alt" content="Zid SaaS BD - Multi-Vendor Marketplace logo" />
     <link rel="canonical" href="https://zidbdsaas.vercel.app/" />
 
     <script type="application/ld+json">
@@ -85,7 +92,7 @@
         "name": "Zid SaaS BD",
         "alternateName": ["Zid SaaS BD", "Zid BD", "Zid SaaS Bangladesh"],
         "url": "https://zidbdsaas.vercel.app/",
-        "description": "Multi-Vendor Marketplace and E-Commerce SaaS in Bangladesh",
+        "description": "Zid SaaS BD is Bangladesh's multi-vendor marketplace and e-commerce SaaS, connecting buyers with verified sellers across all 64 districts.",
         "inLanguage": ["en", "bn"],
         "publisher": { "@id": "https://zidbdsaas.vercel.app/#organization" }
       }
@@ -99,9 +106,17 @@
         "legalName": "Zid SaaS BD",
         "alternateName": ["Zid SaaS BD", "Zid BD"],
         "url": "https://zidbdsaas.vercel.app/",
-        "description": "Bangladesh's premier multi-vendor marketplace platform enabling sellers to manage stores, categories, and orders seamlessly.",
+        "description": "Zid SaaS BD is Bangladesh's multi-vendor marketplace and e-commerce SaaS, connecting buyers with verified sellers across all 64 districts. Fast delivery, bKash/Nagad payments, cash on delivery.",
         "logo": "https://zidbdsaas.vercel.app/logo.png",
         "image": "https://zidbdsaas.vercel.app/logo.png",
+        "foundingLocation": {
+          "@type": "Place",
+          "name": "Dhaka, Bangladesh"
+        },
+        "nationality": {
+          "@type": "Country",
+          "name": "Bangladesh"
+        },
         "sameAs": ["https://github.com/mmalamin9912-arch/Zidsaasbd"],
         "address": {
           "@type": "PostalAddress",
@@ -124,7 +139,6 @@
          never executes the React bundle, so a tag injected at runtime would not
          be seen. -->
     <meta name="google-site-verification" content="_3GUXjJBEeN8CRNT24ED0yvQ0vwI1pt7mqk0ur9mdiI" />
-    <meta name="theme-color" content="#12151F" />
     <!--
       Marketplace language bootstrap.
 

@@ -1,11 +1,11 @@
 {
-  "name": "Zid SaaS BD",
+  "name": "Zid SaaS BD - Multi-Vendor Marketplace",
   "short_name": "Zid BD",
-  "description": "Bangladesh's multi-vendor marketplace and e-commerce SaaS platform.",
+  "description": "Bangladesh's largest multi-vendor e-commerce marketplace. Shop from verified sellers with bKash, Nagad, and cash on delivery.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#12151F",
-  "theme_color": "#12151F",
+  "background_color": "#0f172a",
+  "theme_color": "#1E40AF",
   "icons": [
     {
       "src": "/favicon-48.png",
@@ -13,9 +13,16 @@
       "type": "image/png"
     },
     {
+      "src": "/favicon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
       "src": "/logo.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
     }
   ]
 }

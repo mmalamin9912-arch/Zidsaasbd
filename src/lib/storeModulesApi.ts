@@ -257,11 +257,20 @@ export function applyStoreSeo(seo: Partial<SeoConfig> | null | undefined, storeN
   setMeta('property', 'og:image', (seo?.ogImage || '').trim());
 }
 
-/** Apply the merchant's favicon to the document head. */
+/** The platform's own raster brand icon, as declared in index.html. */
+const PLATFORM_FAVICON = '/favicon-48.png';
+
+/**
+ * Apply the merchant's favicon to the document head.
+ *
+ * With no URL (or the empty string a merchant can save by clearing the field)
+ * the icon is restored to the platform brand mark. Without that reset, leaving
+ * a storefront left the previous merchant's icon in the tab — and on the
+ * dashboard, which shares the same element.
+ */
 export function applyStoreFavicon(faviconUrl: string | null | undefined) {
   if (typeof document === 'undefined') return;
-  const href = (faviconUrl || '').trim();
-  if (!href) return;
   const el = document.getElementById('app-favicon') as HTMLLinkElement | null;
-  if (el) el.href = href;
+  if (!el) return;
+  el.href = (faviconUrl || '').trim() || el.dataset.brandSrc || PLATFORM_FAVICON;
 }
