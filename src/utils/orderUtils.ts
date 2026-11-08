@@ -291,3 +291,67 @@ export function isMarketplaceOrder(ord: any): boolean {
   if (Array.isArray(ord.vendor_slugs ?? ord.vendorSlugs) && (ord.vendor_slugs ?? ord.vendorSlugs).length > 1) return true;
   return false;
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * PAYMENT-STATUS OWNERSHIP
+ *
+ * WHO may change an order's payment status, and to WHAT.
+ *
+ * A MARKETPLACE order is paid to the platform, not to the vendor: the customer's
+ * bKash/Nagad transfer is reconciled against the TrxID by the Super Admin, who
+ * then credits the vendor's wallet (applyPaymentVerification in serverApp.ts).
+ * If a vendor could flip that status themselves they could mark an
+ * unverified transfer "Paid", dispatch the parcel, and/or claim a payout the
+ * platform never received — so a vendor may never touch a marketplace order's
+ * payment status.
+ *
+ * A STORE order (the merchant's own storefront link, a manual/POS entry, or a
+ * WhatsApp order) is settled with the merchant directly, so the merchant owns
+ * its payment status outright.
+ *
+ * KEEP IN SYNC: serverApp.ts (enforceVendorPaymentWrite) imports THIS module, so
+ * the API and the UI cannot drift apart. Anything that needs "is this vendor
+ * allowed to set the payment status?" must call these helpers rather than
+ * re-deriving the rule.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Marketplace orders the CUSTOMER may still pay; the platform settles them. */
+export const MARKETPLACE_CUSTOMER_PAYABLE = ['Pending Verification', 'Unpaid'] as const;
+
+/** The only payment statuses a marketplace order may ever hold. */
+export const MARKETPLACE_ALLOWED_PAYMENT_STATUSES = ['Paid', 'Pending Verification', 'Unpaid', 'Voided'] as const;
+
+/** Canonical status value, tolerant of casing / spacing / snake_case input. */
+function normalizePaymentStatus(value: unknown): string {
+  return String(value ?? '').trim().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * True when a VENDOR is allowed to change this order's payment status.
+ * `false` for every marketplace order, whatever status it currently holds.
+ */
+export function vendorCanEditPaymentStatus(ord: any): boolean {
+  return !isMarketplaceOrder(ord);
+}
+
+/**
+ * May a vendor CHANGE the payment status of this order to `nextStatus`?
+ *
+ * Marketplace orders: never. Store orders: any status, except that an order the
+ * customer already paid online cannot be moved back to a "customer may pay
+ * again" state by the merchant — that would let the same order be collected
+ * twice.
+ */
+export function vendorMaySetPaymentStatus(ord: any, nextStatus: unknown): boolean {
+  if (!ord) return false;
+  if (!vendorCanEditPaymentStatus(ord)) return false;
+  const next = normalizePaymentStatus(nextStatus);
+  if (!next) return false;
+  const current = normalizePaymentStatus(ord.paymentStatus ?? ord.payment_status);
+  if (current === 'paid' && (next === 'pending verification' || next === 'unpaid')) return false;
+  return true;
+}
+
+/** A human-readable reason, for the UI tooltip and the API's 403 body. */
+export const VENDOR_PAYMENT_LOCK_REASON =
+  'Marketplace orders are paid to the platform. Only the Super Admin can change this payment status — vendor store links and manual orders can still be edited here.';

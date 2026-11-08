@@ -1,6 +1,18 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { Order, OrderItem } from '../../types';
-import { safeAmount, safeDate, toNumber, normalizeOrder, normalizeOrders, canonicalStatusOf, isManualOrder, isMarketplaceOrder } from '../../utils/orderUtils';
+import {
+  safeAmount,
+  safeDate,
+  toNumber,
+  normalizeOrder,
+  normalizeOrders,
+  canonicalStatusOf,
+  isManualOrder,
+  isMarketplaceOrder,
+  vendorCanEditPaymentStatus,
+  vendorMaySetPaymentStatus,
+  VENDOR_PAYMENT_LOCK_REASON,
+} from '../../utils/orderUtils';
 import SafeImage from '../SafeImage';
 import { useToast } from '../ToastProvider';
 import { loadCourierConfig } from '../../lib/logisticsApi';
@@ -18,6 +30,7 @@ import {
 } from '../../lib/orderShareLinks';
 import {
   ShoppingBag,
+  Lock,
   Search,
   Filter,
   Truck,
@@ -1361,8 +1374,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         data = {};
       }
 
+      /* 403 PAYMENT_STATUS_LOCKED — the server refused because this is a
+       * marketplace order. The control should already be read-only, so this
+       * only fires on a stale render; surface the server's own reason and
+       * restore the server's value instead of a generic failure. */
       if (!res.ok || !data.ok) {
-        throw new Error(data.error || `The server responded with HTTP ${res.status}.`);
+        const error: any = new Error(data.error || `The server responded with HTTP ${res.status}.`);
+        error.code = data.code;
+        error.serverOrder = data.order || null;
+        throw error;
       }
 
       // The server returns the fresh document — adopt it so canonicalised values
@@ -1384,10 +1404,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     } catch (err: any) {
       console.warn(`${opts.label} update failed for order ${orderId}:`, err?.message || err);
       // Restore the pre-click value immediately for a clean revert, then let the
-      // next poll reconcile drift.
-      if (opts.previous) {
+      // next poll reconcile drift. When the server sent the real row back
+      // (a locked payment status), prefer it — it is not a guess.
+      const restore = err?.serverOrder ? normalizeOrder(err.serverOrder) : opts.previous;
+      if (restore) {
         onUpdateOrders(
-          latestOrdersRef.current.map(o => (o.id === orderId ? opts.previous as Order : o))
+          latestOrdersRef.current.map(o => (o.id === orderId ? restore as Order : o))
         );
       }
       return false;
@@ -1456,7 +1478,20 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   };
 
   const handleBulkUpdatePaymentStatus = async (newPaymentStatus: Order['paymentStatus']) => {
-    const ids = orders.filter(o => selectedOrderIds.includes(o.id)).map(o => o.id);
+    /* A bulk action must not become a back door around the per-row lock: a
+     * marketplace order in the selection is silently skipped (the admin owns
+     * its payment status), and only the editable store orders are written. */
+    const selected = orders.filter(o => selectedOrderIds.includes(o.id));
+    const lockedCount = selected.filter(o => !vendorMaySetPaymentStatus(o, newPaymentStatus)).length;
+    const ids = selected.filter(o => vendorMaySetPaymentStatus(o, newPaymentStatus)).map(o => o.id);
+
+    if (lockedCount > 0) {
+      toast.warning(
+        lockedCount === selected.length
+          ? VENDOR_PAYMENT_LOCK_REASON
+          : `${lockedCount} marketplace order${lockedCount === 1 ? ' was' : 's were'} skipped — the Super Admin owns their payment status.`
+      );
+    }
     if (ids.length === 0) return;
 
     const snapshots = new Map<string, Order>();
@@ -1504,6 +1539,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     orderId: string,
     newPaymentStatus: Order['paymentStatus']
   ) => {
+    /* Defence in depth: the row control is already disabled for a marketplace
+     * order, but a stale render (or a future caller) must not slip a write
+     * through. The API rejects it too — see enforceVendorPaymentWrite. */
+    const target = latestOrdersRef.current.find(o => o.id === orderId);
+    if (target && !vendorMaySetPaymentStatus(target, newPaymentStatus)) {
+      toast.error(VENDOR_PAYMENT_LOCK_REASON);
+      return;
+    }
+
     beginWrite(orderId);
     const previous = paintOrder(orderId, { paymentStatus: newPaymentStatus });
 
@@ -2066,6 +2110,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     const isOpen = activeMenu?.id === ord.id && activeMenu?.type === 'payment';
     const isSaving = savingOrderIds.includes(ord.id);
 
+    /* PAYMENT STATUS OWNERSHIP — a marketplace order is paid to the PLATFORM.
+     * The Super Admin reconciles the TrxID and credits the merchant's wallet
+     * (PATCH /api/admin/orders/:id/payment-verification). A vendor editing it
+     * here could mark an unverified transfer Paid and dispatch the parcel, so
+     * the control is rendered READ-ONLY for them. Store-link and manual orders
+     * are settled with the merchant directly and stay fully editable. The same
+     * rule is enforced server-side; see vendorCanEditPaymentStatus(). */
+    const paymentLocked = !vendorCanEditPaymentStatus(ord);
+
     const getStyle = (status: Order['paymentStatus']) => {
       switch (status) {
         case 'Paid':
@@ -2087,40 +2140,63 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       <div className="relative inline-block text-left" onClick={(e) => e.stopPropagation()}>
         <button
           type="button"
-          onClick={() => setActiveMenu(isOpen ? null : { id: ord.id, type: 'payment' })}
-          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border transition cursor-pointer inline-flex items-center gap-1.5 shadow-md ${getStyle(current)} ${isSaving ? 'opacity-70' : ''}`}
+          disabled={paymentLocked}
+          aria-disabled={paymentLocked}
+          aria-label={paymentLocked ? `${current} — locked, Super Admin only` : `Payment status: ${current}`}
+          title={paymentLocked ? VENDOR_PAYMENT_LOCK_REASON : 'Change payment status'}
+          onClick={() => {
+            if (paymentLocked) return;
+            setActiveMenu(isOpen ? null : { id: ord.id, type: 'payment' });
+          }}
+          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-extrabold border inline-flex items-center gap-1.5 shadow-md ${getStyle(current)} ${
+            paymentLocked
+              ? 'cursor-not-allowed opacity-80 saturate-50 hover:bg-transparent'
+              : 'cursor-pointer'
+          } ${isSaving ? 'opacity-70' : ''}`}
         >
           <span>{current}</span>
           {isSaving ? (
             <RefreshCw className="w-3.5 h-3.5 animate-spin" title="Saving…" />
+          ) : paymentLocked ? (
+            <Lock className="w-3.5 h-3.5" aria-hidden="true" />
           ) : (
             <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
           )}
         </button>
 
-        {isOpen && (
+        {isOpen && !paymentLocked && (
           <div className="absolute left-0 mt-1.5 w-44 bg-[#1D212E] border border-[#2E3548] rounded-xl shadow-2xl z-[100] py-1 divide-y divide-[#2E3548]">
             <div className="px-3 py-1.5 text-[9px] font-black uppercase text-slate-400 tracking-wider">
               Payment Status
             </div>
             <div className="py-1">
-              {PAYMENT_STATUS_OPTIONS.map((opt) => (
-                <button
-                  key={opt.label}
-                  type="button"
-                  onClick={() => {
-                    handleQuickUpdatePaymentStatus(ord.id, opt.label);
-                    setActiveMenu(null);
-                  }}
-                  className={`w-full text-left px-3 py-1.5 text-xs font-bold flex items-center justify-between hover:bg-[#252B3B] transition cursor-pointer ${opt.color}`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${opt.bg}`} />
-                    <span>{opt.label}</span>
-                  </div>
-                  {current === opt.label && <Check className="w-3.5 h-3.5 text-[#00D68F]" />}
-                </button>
-              ))}
+              {PAYMENT_STATUS_OPTIONS.map((opt) => {
+                // A reversed/paid store order cannot go back to a collectable
+                // state; see vendorMaySetPaymentStatus().
+                const allowed = vendorMaySetPaymentStatus(ord, opt.label);
+                return (
+                  <button
+                    key={opt.label}
+                    type="button"
+                    disabled={!allowed}
+                    title={allowed ? undefined : 'A paid order cannot be moved back to a payable state.'}
+                    onClick={() => {
+                      if (!allowed) return;
+                      handleQuickUpdatePaymentStatus(ord.id, opt.label);
+                      setActiveMenu(null);
+                    }}
+                    className={`w-full text-left px-3 py-1.5 text-xs font-bold flex items-center justify-between transition ${opt.color} ${
+                      allowed ? 'hover:bg-[#252B3B] cursor-pointer' : 'opacity-40 cursor-not-allowed'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${opt.bg}`} />
+                      <span>{opt.label}</span>
+                    </div>
+                    {current === opt.label && <Check className="w-3.5 h-3.5 text-[#00D68F]" />}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}

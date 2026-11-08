@@ -191,6 +191,10 @@ import {
 import { generateFaqFromPolicies } from './faqGenerator.js';
 import { ZID_AI_SYSTEM_INSTRUCTION } from '../src/lib/aiService.js';
 import { getZidAiSmartFallback } from '../src/lib/zidAiFallback.js';
+// Payment-status ownership. The UI and the API must agree on WHO may change a
+// payment status, so the rule is defined once in src/utils/orderUtils.ts and
+// imported here — never re-derived inline (see enforceVendorPaymentWrite).
+import { isMarketplaceOrder, VENDOR_PAYMENT_LOCK_REASON } from '../src/utils/orderUtils.js';
 import {
   canonicalOrderStatus,
   canonicalPaymentStatus,
@@ -19897,6 +19901,69 @@ app.post('/api/taxonomy/resolve', async (req, res) => {
   }
 });
 
+/*
+ * ENFORCE PAYMENT-STATUS OWNERSHIP ON THE VENDOR WRITE PATH.
+ *
+ * Returns `allowed: false` only when the order is a MARKETPLACE order and the
+ * caller is trying to change its payment status. Marketplace money is settled
+ * by the Super Admin — the customer transfers to the platform, the admin
+ * reconciles the TrxID and credits the merchant's wallet
+ * (PATCH /api/admin/orders/:id/payment-verification). Letting the merchant set
+ * 'Paid' themselves would release an unverified parcel and entitle them to a
+ * payout the platform never received.
+ *
+ * STORE orders (storefront link, manual/POS, WhatsApp) are settled directly with
+ * the merchant and stay fully editable.
+ *
+ * FAILS CLOSED on a marketplace order: if the status cannot be read we cannot
+ * show the write was permitted, so it is refused. FAILS OPEN when the order
+ * cannot be found at all — `updateOrderFields` then answers its own "not found"
+ * and an unknown row cannot be identified as marketplace.
+ *
+ * The record is re-read from the database rather than trusting anything in the
+ * request body: `marketplace_order` / `order_source_channel` are client-supplied
+ * columns and must never be the basis of an authorization decision.
+ */
+async function enforceVendorPaymentWrite(args: {
+  id: string;
+  requestedPaymentStatus: string;
+  store_slug?: unknown;
+  store_id?: unknown;
+  merchant_id?: unknown;
+}): Promise<{
+  allowed: boolean;
+  doc?: any;
+  currentStatus?: string;
+  error?: string;
+}> {
+  const { id, requestedPaymentStatus } = args;
+  let doc: any = null;
+  try {
+    const located = await findOrder(id, {
+      store_slug: args.store_slug ? String(args.store_slug) : undefined,
+      store_id: args.store_id ? String(args.store_id) : undefined,
+      merchant_id: args.merchant_id ? String(args.merchant_id) : undefined,
+    });
+    doc = located?.doc || null;
+  } catch (err: any) {
+    console.warn('[Server] payment-status gate lookup warning:', err?.message || err);
+  }
+
+  if (!doc) return { allowed: true };
+
+  const isMarketplace = isMarketplaceOrder(doc);
+  if (!isMarketplace) return { allowed: true, doc };
+
+  const currentStatus = canonicalPaymentStatus(doc.payment_status ?? doc.paymentStatus) || 'Unpaid';
+
+  // A no-op (the same status the order already holds) is not an edit.
+  if (canonicalPaymentStatus(requestedPaymentStatus) === currentStatus) {
+    return { allowed: true, doc, currentStatus };
+  }
+
+  return { allowed: false, doc, currentStatus, error: VENDOR_PAYMENT_LOCK_REASON };
+}
+
 // ── PUT / PATCH /api/orders/:id — update status / payment_status ──────────────
 //
 // The Status and Payment Status dropdowns post here. The identifiers and the
@@ -19910,6 +19977,10 @@ app.post('/api/taxonomy/resolve', async (req, res) => {
 //    would snap back.
 //
 // Answers 200 with the FRESH document so the UI renders server truth.
+//
+// AUTHORIZATION: this is the VENDOR-facing write path. It must never let a
+// merchant change the payment status of a MARKETPLACE order — that money is
+// settled by the Super Admin (see enforceVendorPaymentWrite below).
 const handleOrderUpdate = async (req: any, res: any) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -19925,6 +19996,30 @@ const handleOrderUpdate = async (req: any, res: any) => {
 
     const status = canonicalOrderStatus(rawStatus);
     const paymentStatus = canonicalPaymentStatus(rawPayment);
+
+    // ── Payment-status ownership gate (server-side enforcement) ──────────
+    // The dashboard disables the control for a marketplace order, but a crafted
+    // request can bypass the UI entirely — so the refusal happens HERE, before
+    // anything is written. Every other field in the same payload is allowed
+    // through: a blocked payment edit must not also silently drop a shipment.
+    const paymentGate = paymentStatus
+      ? await enforceVendorPaymentWrite({
+          id,
+          requestedPaymentStatus: paymentStatus,
+          store_slug: req.query.store_slug || req.query.storeSlug || body.store_slug || body.storeSlug,
+          store_id: req.query.store_id || body.store_id,
+          merchant_id: req.query.merchant_id || body.merchant_id || body.merchantId,
+        })
+      : { allowed: true as const, doc: null };
+    if (!paymentGate.allowed) {
+      return res.status(403).json({
+        ok: false,
+        code: 'PAYMENT_STATUS_LOCKED',
+        error: paymentGate.error || VENDOR_PAYMENT_LOCK_REASON,
+        payment_status: paymentGate.currentStatus || null,
+        order: paymentGate.doc ? normalizeOrderRow(paymentGate.doc) : null,
+      });
+    }
 
     const fields: Record<string, any> = {};
     if (status) {
