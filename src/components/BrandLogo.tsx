@@ -5,44 +5,40 @@ interface BrandLogoProps {
   showSubtitle?: boolean;
   subtitle?: string;
   isDarkMode?: boolean;
+  className?: string;
 }
 
 export const BrandLogo: React.FC<BrandLogoProps> = ({
   size = 'md',
-  showSubtitle = true,
-  subtitle = 'Merchant Dashboard',
+  showSubtitle = false,
+  subtitle = 'E-commerce Marketplace',
   isDarkMode = true,
+  className = '',
 }) => {
-  const zidTextSizes = {
-    sm: 'text-base font-black',
-    md: 'text-xl font-black',
-    lg: 'text-2xl font-black',
-  };
-
-  const badgeSizes = {
-    sm: 'text-xs px-2.5 py-0.5',
-    md: 'text-sm px-3 py-1',
-    lg: 'text-base px-3.5 py-1.5',
+  const logoHeights = {
+    sm: 'h-8 sm:h-9',
+    md: 'h-10 sm:h-11',
+    lg: 'h-14 sm:h-16',
   };
 
   return (
-    <div className="flex items-center gap-2.5 bg-transparent">
-      <div className="flex items-center gap-2">
-        <span className={`tracking-wide ${isDarkMode ? 'text-white' : 'text-slate-900'} ${zidTextSizes[size]}`}>
-          ZID
-        </span>
-        <span className={`bg-amber-400 text-slate-950 font-black rounded-full uppercase shadow-xs inline-flex items-center ${badgeSizes[size]}`}>
-          SAAS
-          <span className="text-[9px] font-black uppercase ml-0.5 tracking-tighter inline-block align-super">
-            BD
-          </span>
-        </span>
-      </div>
+    <div className={`flex items-center gap-2.5 bg-transparent ${className}`}>
+      <img
+        src="/logo.png"
+        alt="Zid SaaS BD - E-commerce Marketplace"
+        className={`${logoHeights[size]} w-auto object-contain rounded-md shadow-xs`}
+      />
       {showSubtitle && subtitle && (
-        <div className={`hidden sm:block pl-2 border-l ${isDarkMode ? 'border-slate-700/60 text-slate-400' : 'border-slate-300 text-slate-600'} text-[10px] uppercase tracking-widest font-semibold`}>
+        <div
+          className={`hidden sm:block pl-2 border-l ${
+            isDarkMode ? 'border-slate-700/60 text-slate-400' : 'border-slate-300 text-slate-600'
+          } text-[10.5px] uppercase tracking-widest font-bold`}
+        >
           {subtitle}
         </div>
       )}
     </div>
   );
 };
+
+export default BrandLogo;

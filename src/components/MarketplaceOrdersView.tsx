@@ -636,6 +636,7 @@ const OrderCard: React.FC<{
                 */}
               <SafeImage
                 item={item}
+                src={item.image}
                 alt={item.productName}
                 className="h-12 w-12 shrink-0 rounded-lg border object-cover"
               />

@@ -909,6 +909,85 @@ function getServerSupabaseConfig() {
   return { supabaseUrl, supabaseKey, isConfigured };
 }
 
+/**
+ * NORMALISE A STORED IMAGE PATH TO A FULL, LOADABLE PUBLIC URL (server-side).
+ *
+ * Product and order writes used to persist whatever string the client sent —
+ * including what an upload API returns after stripping the host
+ * (`/storage/v1/object/public/product-images/x.jpg`, `product-images/x.jpg`, or
+ * a bare `x.jpg`). Stored like that, the value resolves against THIS app's own
+ * origin in the browser (a 404 → placeholder) even though the object exists in
+ * Supabase storage.
+ *
+ * Every IMAGE COLUMN WRITE goes through this so the database holds either a
+ * full absolute URL or an in-app relative path that the client resolver
+ * (`toRenderableImageUrl`) can render as-is — never a hostless storage path.
+ *
+ * Mirrors the client rules in `src/utils/imageFallback.ts` and must stay in
+ * sync with its STORAGE_BUCKETS list.
+ */
+const SERVER_STORAGE_BUCKETS = [
+  'product-images', 'products', 'product', 'uploads', 'media',
+  'store-assets', 'review-images', 'merchant-logos',
+  'categories', 'category-images', 'banners', 'covers', 'avatars', 'profiles', 'documents',
+];
+
+function normalizeStoredImageUrl(value: unknown): string {
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, any>;
+    value = record.url || record.src || record.image || record.image_url || record.imageUrl || record.thumbnail || record.publicUrl || record.public_url || '';
+  }
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    trimmed === '#' ||
+    /^(null|undefined)$/i.test(trimmed) ||
+    /^\/?placeholder\.(svg|png|jpe?g|webp)$/i.test(trimmed)
+  ) {
+    return '';
+  }
+  // Already absolute (URL, protocol-relative, data/blob URI) — keep as-is.
+  if (/^(https?:)?\/\//i.test(trimmed) || /^(data|blob):/i.test(trimmed)) return trimmed;
+
+  const { supabaseUrl } = getServerSupabaseConfig();
+  let path = trimmed.replace(/^\/+/, '');
+  if (supabaseUrl && isValidUrl(supabaseUrl)) {
+    if (path.toLowerCase().startsWith('supabase/')) {
+      path = path.slice('supabase/'.length).replace(/^\/+/, '');
+    }
+    // A storage object path that merely lacks its host: storage/v1/object/...
+    if (/^storage\/v1\/object\//i.test(path)) return `${supabaseUrl}/${path}`;
+    // storage/v1/product-images/...
+    if (/^storage\/v1\//i.test(path)) {
+      const sub = path.slice('storage/v1/'.length);
+      return `${supabaseUrl}/storage/v1/object/public/${sub}`;
+    }
+    // object/public/...
+    if (/^object\/public\//i.test(path)) return `${supabaseUrl}/storage/v1/${path}`;
+    // public/<bucket>/...
+    if (/^public\//i.test(path)) {
+      const parts = path.slice('public/'.length).split('/');
+      const bucket = parts[0]?.toLowerCase();
+      if (SERVER_STORAGE_BUCKETS.includes(bucket) && parts.length > 1) {
+        return `${supabaseUrl}/storage/v1/object/${path}`;
+      }
+    }
+    // `bucket/object-path` inside a known bucket → public object URL.
+    const slash = path.indexOf('/');
+    if (slash > 0) {
+      const bucket = path.slice(0, slash).toLowerCase();
+      const objectPath = path.slice(slash + 1);
+      if (SERVER_STORAGE_BUCKETS.includes(bucket) && objectPath) {
+        return `${supabaseUrl}/storage/v1/object/public/${bucket}/${objectPath}`;
+      }
+    }
+  }
+  // An in-app asset (`/images/tee.png`) or a value we cannot attribute to any
+  // storage host — persist verbatim so the client keeps its current behaviour.
+  return trimmed;
+}
+
 // Orders always live in the 'orders' collection of the 'zidbdsaas' database.
 const ORDERS_DB_NAME = DB_NAME;
 const ORDERS_COLLECTION = 'orders';
@@ -997,6 +1076,10 @@ const productSchema = new mongoose.Schema({
   store_collection: String,
   image_url: String,
   image: String,
+  imageUrl: String,
+  thumbnail: String,
+  thumbnailUrl: String,
+  images: [String],
   status: String,
   is_published: Boolean,
   description: String,
@@ -4935,8 +5018,8 @@ app.all('/api/categories', async (req, res) => {
               storeSlug: storeSlug || cat.store_slug || cat.storeSlug || 'bd',
               name: String(cat.name || cat.title || 'Category'),
               title: String(cat.name || cat.title || 'Category'),
-              image_url: String(cat.image || cat.coverImage || cat.image_url || ''),
-              image: String(cat.image || cat.coverImage || cat.image_url || ''),
+              image_url: normalizeStoredImageUrl(cat.image || cat.coverImage || cat.image_url || ''),
+              image: normalizeStoredImageUrl(cat.image || cat.coverImage || cat.image_url || ''),
               status: cat.status || 'active',
               is_published: cat.status !== 'hidden',
               parent_id: cat.parentId || cat.parent_id || null,
@@ -5895,6 +5978,21 @@ const handleProductUpsert = async (req: any, res: any) => {
     const id = String(body.id || `prod-${Date.now()}`).trim();
     const title = String(body.title || body.name || 'Untitled Product').trim();
 
+    /*
+     * IMAGE PATH NORMALISATION ON WRITE.
+     *
+     * Whatever spelling the client used (`image`, `image_url`, `imageUrl`,
+     * `thumbnail`, `thumbnailUrl`, `images[]`), a value that is only a RELATIVE
+     * storage path is rewritten to a full Supabase public URL before it reaches
+     * Mongo or the Supabase mirror. The checkout, the marketplace cards and the
+     * dashboard then read a URL that loads directly — no 404s resolved against
+     * the app origin, no premature placeholder swaps.
+     */
+    const resolvedImage = normalizeStoredImageUrl(body.image || body.image_url || body.imageUrl || body.thumbnail || body.thumbnailUrl || '');
+    const normalizedImages = Array.isArray(body.images)
+      ? body.images.map((v: unknown) => normalizeStoredImageUrl(typeof v === 'string' ? v : (v as any)?.url ?? (v as any)?.src ?? '')).filter(Boolean)
+      : body.images;
+
     const product = {
       ...body,
       id,
@@ -5906,6 +6004,16 @@ const handleProductUpsert = async (req: any, res: any) => {
       stock,
       status: body.status || 'active',
       is_published: body.is_published !== false,
+      // One resolved image on every spelling, so any reader (marketplace,
+      // storefront, checkout, dashboard) gets a loadable URL.
+      ...(resolvedImage || normalizedImages?.length ? {
+        image: resolvedImage,
+        image_url: resolvedImage,
+        imageUrl: resolvedImage,
+        thumbnail: body.thumbnail ? normalizeStoredImageUrl(body.thumbnail) : resolvedImage,
+        thumbnailUrl: body.thumbnailUrl ? normalizeStoredImageUrl(body.thumbnailUrl) : resolvedImage,
+        images: normalizedImages?.length ? normalizedImages : (resolvedImage ? [resolvedImage] : []),
+      } : {}),
       // Per-product delivery charges, persisted as an explicit inside/outside
       // pair so the storefront and checkout can read a fee directly instead of
       // having to interpret the `deliveryRates` zone names. `deliveryRates`
@@ -5995,8 +6103,8 @@ const handleProductUpsert = async (req: any, res: any) => {
           price,
           stock_quantity,
           stock,
-          image_url: String(product.image || product.image_url || ''),
-          image: String(product.image || product.image_url || ''),
+          image_url: normalizeStoredImageUrl(product.image || product.image_url || ''),
+          image: normalizeStoredImageUrl(product.image || product.image_url || ''),
           category_id: String(product.categoryId || product.category_id || product.category || ''),
           category: String(product.category || ''),
           status: 'active',
@@ -6767,7 +6875,8 @@ app.post('/api/storefront', async (req, res) => {
               price: Number(p.price || p.priceBDT || 0),
               stock_quantity: Number(p.stock || p.stock_quantity || 0),
               category: String(p.category || 'General'),
-              image_url: String(p.image || p.imageUrl || p.image_url || ''),
+              image_url: normalizeStoredImageUrl(p.image || p.imageUrl || p.image_url || ''),
+              image: normalizeStoredImageUrl(p.image || p.imageUrl || p.image_url || ''),
               store_slug: storeSlug,
             }));
 
@@ -16952,29 +17061,66 @@ function getMatchingCachedOrdersForVendor(refValues: string[]): any[] {
  */
 function imageOfLine(item: any): string {
   if (!item || typeof item !== 'object') return '';
-  const product = item.product && typeof item.product === 'object' ? item.product : null;
+  const product = item.product && typeof item.product === 'object'
+    ? item.product
+    : (typeof item.product === 'string' && item.product.trim().startsWith('{')
+      ? (() => { try { return JSON.parse(item.product); } catch { return null; } })()
+      : null);
+
+  const populatedId = typeof item.product_id === 'object'
+    ? item.product_id
+    : (typeof item.product_id === 'string' && item.product_id.trim().startsWith('{')
+      ? (() => { try { return JSON.parse(item.product_id); } catch { return null; } })()
+      : null);
+
+  const populatedIdCamel = typeof item.productId === 'object'
+    ? item.productId
+    : (typeof item.productId === 'string' && item.productId.trim().startsWith('{')
+      ? (() => { try { return JSON.parse(item.productId); } catch { return null; } })()
+      : null);
+
+  const toArr = (v: any) => {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string' && v.trim().startsWith('[')) {
+      try { const p = JSON.parse(v); if (Array.isArray(p)) return p; } catch {}
+    }
+    return [];
+  };
+
   const candidates = [
-    item.image, item.image_url, item.imageUrl, item.thumbnail, item.thumbnailUrl,
-    item.productImage, item.product_image,
-    ...(Array.isArray(item.images) ? item.images : []),
-    // Nested / joined product shapes: `item.product.image`, `item.product_id.image`
-    // (a populated reference, or a JSONB product snapshot joined onto the line).
+    item.image, item.imageUrl, item.image_url, item.thumbnail, item.thumbnailUrl, item.thumbnail_url,
+    item.productImage, item.product_image, item.photo, item.photoUrl, item.img, item.coverImage, item.cover_image,
+    item.picture, item.src, item.url, item.path, item.publicUrl, item.public_url,
+    ...toArr(item.images), ...toArr(item.gallery), ...toArr(item.photos),
+    ...toArr(item.additionalImages), ...toArr(item.additional_images),
+
     product?.image, product?.image_url, product?.imageUrl, product?.thumbnail,
-    ...(Array.isArray(product?.images) ? product.images : []),
-    (typeof item.product_id === 'object' ? item.product_id?.image : ''),
-    item.product?.product?.image,
+    product?.thumbnailUrl, product?.thumbnail_url, product?.productImage, product?.product_image,
+    product?.photo, product?.photoUrl, product?.img, product?.coverImage, product?.cover_image,
+    product?.picture, product?.src, product?.url, product?.path, product?.publicUrl, product?.public_url,
+    ...toArr(product?.images), ...toArr(product?.gallery), ...toArr(product?.photos),
+    ...toArr(product?.additionalImages), ...toArr(product?.additional_images),
+    product?.product?.image, product?.product?.image_url,
+
+    populatedId?.image, populatedId?.image_url, populatedId?.imageUrl, populatedId?.thumbnail,
+    populatedId?.thumbnailUrl, populatedId?.productImage, ...toArr(populatedId?.images),
+
+    populatedIdCamel?.image, populatedIdCamel?.image_url, populatedIdCamel?.imageUrl, populatedIdCamel?.thumbnail,
+    populatedIdCamel?.thumbnailUrl, populatedIdCamel?.productImage, ...toArr(populatedIdCamel?.images),
+
+    item.line?.image, item.line?.imageUrl, item.line?.image_url, item.line?.thumbnail,
   ];
+
   for (const candidate of candidates) {
+    if (!candidate) continue;
     const value = candidate && typeof candidate === 'object'
-      ? (candidate.url || candidate.src || candidate.image || candidate.image_url || '')
+      ? (candidate.url || candidate.src || candidate.image || candidate.image_url || candidate.imageUrl || candidate.thumbnail || candidate.publicUrl || candidate.public_url || '')
       : candidate;
     if (typeof value === 'string') {
       const trimmed = value.trim();
-      // The local placeholder is a FALLBACK, never a real image: treat it as
-      // "no photo" so a stored placeholder can still be resolved from the
-      // catalogue instead of being served as the product's picture forever.
       if (trimmed && trimmed !== '#' && !/^\/?placeholder\.(svg|png|jpe?g|webp)$/i.test(trimmed)) {
-        return trimmed;
+        const resolved = normalizeStoredImageUrl(trimmed);
+        if (resolved) return resolved;
       }
     }
   }
@@ -17826,7 +17972,15 @@ function buildOrderRecord(
         parsed.map((it: any) => {
           if (!it || typeof it !== 'object') return it;
           const image = imageOfLine(it);
-          if (image) return { ...it, image };
+          if (image) {
+            return {
+              ...it,
+              image,
+              image_url: image,
+              imageUrl: image,
+              thumbnail: it.thumbnail ? normalizeStoredImageUrl(it.thumbnail) : image,
+            };
+          }
           return { ...it, image: '' };
         }),
       );
@@ -18309,9 +18463,18 @@ async function writeOrderToSupabase(order: Record<string, any>): Promise<{ ok: b
      * `status`. Vendor attribution is kept inside `items` (each line carries its
      * vendor), and `items` is TEXT, so it is stored as a JSON STRING.
      */
-    const items = Array.isArray(order.items)
+    const rawItems = Array.isArray(order.items)
       ? order.items
       : (() => { try { return JSON.parse(String(order.items || '[]')); } catch { return []; } })();
+
+    const normalizedItems = (Array.isArray(rawItems) ? rawItems : []).map((it: any) => {
+      if (!it || typeof it !== 'object') return it;
+      const img = imageOfLine(it);
+      return {
+        ...it,
+        ...(img ? { image: img, image_url: img, imageUrl: img } : {}),
+      };
+    });
 
     const payload: Record<string, any> = {
       store_id: storeId,
@@ -18321,7 +18484,7 @@ async function writeOrderToSupabase(order: Record<string, any>): Promise<{ ok: b
       district: String(order.district || order.customer_district || ''),
       city_area: String(order.city_area || order.customer_area || ''),
       shipping_address: String(order.shipping_address || order.address || ''),
-      items: JSON.stringify(Array.isArray(items) ? items : []),
+      items: JSON.stringify(normalizedItems),
       total_amount: toNumeric(order.total_price ?? order.totalBDT ?? order.total_amount, 0),
       payment_method: String(order.payment_method || order.paymentMethod || 'COD'),
       payment_status: String(order.paymentStatus || order.payment_status || 'Unpaid'),

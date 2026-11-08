@@ -951,7 +951,11 @@ export function splitOrderByVendor(
       variant: String(raw.variant || 'Standard'),
       quantity,
       unitPriceBDT: unitPrice,
-      image: String(raw.image || raw.image_url || raw.imageUrl || raw.thumbnail || ''),
+      image: String(
+        raw.image || raw.image_url || raw.imageUrl || raw.thumbnail || raw.thumbnailUrl ||
+        (Array.isArray(raw.images) ? (typeof raw.images[0] === 'string' ? raw.images[0] : raw.images[0]?.url) : '') ||
+        raw.product?.image || raw.product?.image_url || raw.product?.imageUrl || ''
+      ),
       // Both spellings, so the order query's `$or` and the UI normaliser match
       // without a translation step.
       vendor_id: vendorId,

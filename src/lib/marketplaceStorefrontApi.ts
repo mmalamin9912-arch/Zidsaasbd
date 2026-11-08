@@ -21,6 +21,8 @@
  * still render when the API hiccups.
  */
 
+import { resolveProductImage } from '../utils/imageFallback';
+
 /* ─────────────────────────────── types ─────────────────────────────── */
 
 export interface MarketplaceBanner {
@@ -222,7 +224,7 @@ export function toMarketplaceProduct(raw: any): any {
     // cards fall back to English, and no search or facet key changes.
     titleBn: String(raw?.titleBn || raw?.title_bn || raw?.nameBn || ''),
     priceBDT: price,
-    image: raw?.image || raw?.image_url || raw?.imageUrl || raw?.thumbnail || '',
+    image: resolveProductImage(raw),
     vendor_id: String(raw?.vendor_id || raw?.store_id || raw?.storeId || raw?.store_slug || ''),
     vendor_name: String(raw?.vendor_name || raw?.store_name || raw?.storeName || raw?.store_slug || 'Store'),
     vendor_slug: String(raw?.vendor_slug || raw?.store_slug || raw?.storeSlug || ''),
@@ -325,7 +327,7 @@ export async function fetchAdminFeatured(): Promise<{
       id: String(row?.id ?? row?._id ?? ''),
       title: String(row?.title || row?.name || 'Untitled'),
       price: Number(row?.priceBDT ?? row?.price ?? 0) || 0,
-      image: row?.image || row?.image_url || row?.imageUrl || row?.thumbnail || '',
+      image: resolveProductImage(row),
       vendor_name: String(row?.vendor_name || row?.store_name || row?.store_slug || ''),
       vendor_slug: String(row?.vendor_slug || row?.store_slug || ''),
       category: String(row?.category || ''),

@@ -2123,17 +2123,9 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             type="button"
             onClick={() => { clearAll(); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
             className="flex h-11 shrink-0 items-center gap-1.5 px-1"
-            aria-label="ZID Marketplace home"
+            aria-label="Zid SaaS BD Marketplace home"
           >
-            <span
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-sm font-black text-white"
-              style={{ backgroundColor: THEME.brand }}
-            >
-              Z
-            </span>
-            <span className="text-[15px] font-black tracking-tight" style={{ color: THEME.ink }}>
-              ZID<span style={{ color: THEME.brand }}>Market</span>
-            </span>
+            <img src="/logo.png" alt="Zid SaaS BD" className="h-8 w-auto object-contain rounded" />
           </button>
 
           <div className="flex-1" />
@@ -2261,22 +2253,9 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             type="button"
             onClick={() => { clearAll(); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
             className="flex shrink-0 items-center gap-2"
-            aria-label="ZID Marketplace home"
+            aria-label="Zid SaaS BD Marketplace home"
           >
-            <span
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-base font-black text-white shadow-sm"
-              style={{ backgroundColor: THEME.brand }}
-            >
-              Z
-            </span>
-            <span className="flex flex-col leading-none">
-              <span className="text-[17px] font-black tracking-tight" style={{ color: THEME.ink }}>
-                ZID<span style={{ color: THEME.brand }}>Market</span>
-              </span>
-              <span className="text-[9px] font-bold uppercase tracking-[0.22em] text-slate-400">
-                {language === 'bn' ? 'মাল্টি-ভেন্ডর বাজার' : 'Multi-vendor bazaar'}
-              </span>
-            </span>
+            <img src="/logo.png" alt="Zid SaaS BD" className="h-9 w-auto object-contain rounded-md" />
           </button>
 
           {/* LOCATION SELECTOR — the delivery destination drives the promise

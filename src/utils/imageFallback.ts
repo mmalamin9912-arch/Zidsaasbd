@@ -24,16 +24,62 @@ export const PLACEHOLDER_IMAGE = '/placeholder.svg';
  * origin (`/store/x.jpg`), i.e. a 404 and a broken-image icon in the cart, the
  * checkout summary and the order cards.
  */
-const STORAGE_BASE = (() => {
-  const env = (import.meta as any)?.env || {};
-  const raw = String(
-    env.VITE_SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '',
-  ).trim();
-  return raw ? raw.replace(/\/+$/, '') : '';
-})();
+export function getStorageBase(): string {
+  let raw = '';
+  try {
+    const metaEnv = (typeof import.meta !== 'undefined' && (import.meta as any)?.env) || {};
+    raw =
+      metaEnv.VITE_SUPABASE_URL ||
+      metaEnv.NEXT_PUBLIC_SUPABASE_URL ||
+      metaEnv.SUPABASE_URL ||
+      '';
+  } catch {}
+
+  if (!raw) {
+    try {
+      const procEnv = (typeof process !== 'undefined' && process.env) || {};
+      raw =
+        procEnv.VITE_SUPABASE_URL ||
+        procEnv.NEXT_PUBLIC_SUPABASE_URL ||
+        procEnv.SUPABASE_URL ||
+        '';
+    } catch {}
+  }
+
+  if (!raw && typeof window !== 'undefined') {
+    try {
+      raw =
+        (window as any)?.__ENV__?.VITE_SUPABASE_URL ||
+        (window as any)?.VITE_SUPABASE_URL ||
+        (window as any)?.__SUPABASE_URL__ ||
+        '';
+    } catch {}
+  }
+
+  const trimmed = String(raw || '').trim();
+  return trimmed ? trimmed.replace(/\/+$/, '') : '';
+}
+
+export const STORAGE_BASE = getStorageBase();
 
 /** Buckets that are served from the Supabase storage host. */
-const STORAGE_BUCKETS = ['product-images', 'products', 'product', 'uploads', 'media', 'store-assets'];
+export const STORAGE_BUCKETS = [
+  'product-images',
+  'products',
+  'product',
+  'uploads',
+  'media',
+  'store-assets',
+  'review-images',
+  'merchant-logos',
+  'categories',
+  'category-images',
+  'banners',
+  'covers',
+  'avatars',
+  'profiles',
+  'documents',
+];
 
 /** True for a value that already carries a scheme or an absolute origin. */
 function isAbsoluteImageUrl(value: string): boolean {
@@ -59,15 +105,50 @@ export function toRenderableImageUrl(value: unknown): string {
   if (!raw) return '';
   if (isAbsoluteImageUrl(raw)) return raw;
 
-  const path = raw.replace(/^\/+/, '');
-  if (STORAGE_BASE) {
-    // Already a storage path, just missing the host.
-    if (path.startsWith('storage/v1/object/')) return `${STORAGE_BASE}/${path}`;
-    const [bucket,...rest] = path.split('/');
-    if (STORAGE_BUCKETS.includes(bucket.toLowerCase()) && rest.length > 0) {
-      return `${STORAGE_BASE}/storage/v1/object/public/${bucket}/${rest.join('/')}`;
+  let path = raw.replace(/^\/+/, '');
+  const storageBase = getStorageBase() || STORAGE_BASE;
+
+  if (storageBase) {
+    if (path.toLowerCase().startsWith('supabase/')) {
+      path = path.slice('supabase/'.length).replace(/^\/+/, '');
+    }
+
+    // Already a storage path, e.g. storage/v1/object/public/... or storage/v1/object/...
+    if (/^storage\/v1\/object\//i.test(path)) {
+      return `${storageBase}/${path}`;
+    }
+
+    // e.g. storage/v1/product-images/...
+    if (/^storage\/v1\//i.test(path)) {
+      const sub = path.slice('storage/v1/'.length);
+      return `${storageBase}/storage/v1/object/public/${sub}`;
+    }
+
+    // e.g. object/public/...
+    if (/^object\/public\//i.test(path)) {
+      return `${storageBase}/storage/v1/${path}`;
+    }
+
+    // e.g. public/<bucket>/...
+    if (/^public\//i.test(path)) {
+      const parts = path.slice('public/'.length).split('/');
+      const bucket = parts[0]?.toLowerCase();
+      if (STORAGE_BUCKETS.includes(bucket) && parts.length > 1) {
+        return `${storageBase}/storage/v1/object/${path}`;
+      }
+    }
+
+    // Bucket followed by object path: e.g. product-images/xxx.jpg
+    const slashIdx = path.indexOf('/');
+    if (slashIdx > 0) {
+      const bucket = path.slice(0, slashIdx).toLowerCase();
+      const rest = path.slice(slashIdx + 1);
+      if (STORAGE_BUCKETS.includes(bucket) && rest.length > 0) {
+        return `${storageBase}/storage/v1/object/public/${bucket}/${rest}`;
+      }
     }
   }
+
   // A relative in-app asset (`/images/…`, `/placeholder.svg`) — keep as-is.
   return raw;
 }
@@ -88,7 +169,8 @@ function firstNonEmpty(...values: unknown[]): string {
       if (
         trimmed !== '' &&
         trimmed !== '#' &&
-        !/^(null|undefined)$/i.test(trimmed)
+        !/^(null|undefined)$/i.test(trimmed) &&
+        !/^\/?placeholder\.(svg|png|jpe?g|webp)$/i.test(trimmed)
       ) {
         return trimmed;
       }
@@ -104,10 +186,37 @@ function urlFromValue(value: unknown): string {
     // 'null' / 'undefined' into an image column. Rendering them produced a
     // request for `/null` (a 404 → placeholder) instead of falling through to
     // the next candidate that may still carry a real database URL.
-    if (trimmed === '#' || /^(null|undefined)$/i.test(trimmed)) return '';
+    // A STORED placeholder URL is likewise "no photo": keeping it would
+    // short-circuit the resolver before the catalogue fallback could supply
+    // the real image.
+    if (
+      !trimmed ||
+      trimmed === '#' ||
+      /^(null|undefined)$/i.test(trimmed) ||
+      /^\/?placeholder\.(svg|png|jpe?g|webp)$/i.test(trimmed)
+    ) {
+      return '';
+    }
+    // If it's a JSON string representing an array or object, parse it
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        const resolved = urlFromValue(parsed);
+        if (resolved) return resolved;
+      } catch {}
+    }
     return trimmed;
   }
   if (!value || typeof value !== 'object') return '';
+
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      const res = urlFromValue(v);
+      if (res) return res;
+    }
+    return '';
+  }
+
   const record = value as Record<string, unknown>;
   // Check every URL-shaped key on the object, skipping empty/placeholder values
   // so a real database URL in `image_url` isn't shadowed by an empty `image`.
@@ -118,7 +227,18 @@ function urlFromValue(value: unknown): string {
     record.image_url,
     record.imageUrl,
     record.thumbnail,
+    record.thumbnailUrl,
+    record.thumbnail_url,
+    record.productImage,
+    record.product_image,
+    record.publicUrl,
+    record.public_url,
     record.path,
+    record.uri,
+    record.link,
+    (record.data && typeof record.data === 'object')
+      ? (record.data as any).publicUrl || (record.data as any).public_url || (record.data as any).url
+      : '',
   );
 }
 
@@ -139,41 +259,162 @@ function urlFromValue(value: unknown): string {
  * with NO thumbnail at all even though the catalogue row carried several.
  */
 export function resolveProductImage(source: unknown): string {
-  if (!source || typeof source !== 'object') return urlFromValue(source);
+  if (!source) return '';
+  if (typeof source === 'string') {
+    const trimmed = source.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        source = JSON.parse(trimmed);
+      } catch {
+        return toRenderableImageUrl(trimmed);
+      }
+    } else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        source = JSON.parse(trimmed);
+      } catch {
+        return toRenderableImageUrl(trimmed);
+      }
+    } else {
+      return toRenderableImageUrl(trimmed);
+    }
+  }
+
+  if (Array.isArray(source)) {
+    for (const item of source) {
+      const url = resolveProductImage(item);
+      if (url) return url;
+    }
+    return '';
+  }
+
+  if (typeof source !== 'object') return '';
   const item = source as Record<string, any>;
-  const product = item.product && typeof item.product === 'object' ? item.product : null;
+
+  // Check if item has nested product or wrapped data
+  const rawTarget = item.product || item.item || item.record || item._record || item.data || item.raw;
+  let product: Record<string, any> | null = null;
+  if (rawTarget && typeof rawTarget === 'object') {
+    product = rawTarget;
+  } else if (typeof rawTarget === 'string' && rawTarget.trim().startsWith('{')) {
+    try { product = JSON.parse(rawTarget); } catch {}
+  }
+
+  let populatedProductId: Record<string, any> | null = null;
+  if (item.product_id && typeof item.product_id === 'object') {
+    populatedProductId = item.product_id;
+  } else if (typeof item.product_id === 'string' && item.product_id.trim().startsWith('{')) {
+    try { populatedProductId = JSON.parse(item.product_id); } catch {}
+  }
+
+  let populatedProductIdCamel: Record<string, any> | null = null;
+  if (item.productId && typeof item.productId === 'object') {
+    populatedProductIdCamel = item.productId;
+  } else if (typeof item.productId === 'string' && item.productId.trim().startsWith('{')) {
+    try { populatedProductIdCamel = JSON.parse(item.productId); } catch {}
+  }
+
+  const toCandidateArray = (v: unknown): unknown[] => {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string' && v.trim().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+    return [];
+  };
 
   const candidates: unknown[] = [
-    item.image, item.imageUrl, item.image_url, item.thumbnail, item.thumbnailUrl,
-    item.productImage, item.product_image, item.photo, item.photoUrl, item.img,
-    item.coverImage, item.cover_image,
-    ...(Array.isArray(item.images) ? item.images : []),
-    ...(Array.isArray(item.gallery) ? item.gallery : []),
-    product?.image, product?.imageUrl, product?.image_url, product?.thumbnail,
-    product?.thumbnailUrl, product?.thumbnail_url, product?.productImage,
-    product?.product_image, product?.photo, product?.photoUrl, product?.img,
-    product?.coverImage, product?.cover_image,
-    ...(Array.isArray(product?.images) ? product.images : []),
-    ...(Array.isArray(product?.additionalImages) ? product.additionalImages : []),
-    ...(Array.isArray(product?.additional_images) ? product.additional_images : []),
-    // A POPULATED reference: `product_id` may be an id string or a joined row
-    // (`{ image, image_url, … }`) depending on which API produced the order.
-    ...(typeof item.product_id === 'object' && item.product_id
-      ? [(item.product_id as any).image, (item.product_id as any).image_url,
-         (item.product_id as any).imageUrl, (item.product_id as any).thumbnail]
-      : []),
-    ...(typeof item.productId === 'object' && item.productId
-      ? [(item.productId as any).image, (item.productId as any).image_url,
-         (item.productId as any).imageUrl, (item.productId as any).thumbnail]
-      : []),
+    // 1. Direct item keys
+    item.image,
+    item.imageUrl,
+    item.image_url,
+    item.thumbnail,
+    item.thumbnailUrl,
+    item.thumbnail_url,
+    item.productImage,
+    item.product_image,
+    item.photo,
+    item.photoUrl,
+    item.photo_url,
+    item.img,
+    item.coverImage,
+    item.cover_image,
+    item.picture,
+    item.src,
+    item.url,
+    item.path,
+    item.featured_image,
+    item.featuredImage,
+    item.publicUrl,
+    item.public_url,
+    ...toCandidateArray(item.images),
+    ...toCandidateArray(item.gallery),
+    ...toCandidateArray(item.photos),
+    ...toCandidateArray(item.additionalImages),
+    ...toCandidateArray(item.additional_images),
+
+    // 2. Nested product keys
+    product?.image,
+    product?.image_url,
+    product?.imageUrl,
+    product?.thumbnail,
+    product?.thumbnailUrl,
+    product?.thumbnail_url,
+    product?.productImage,
+    product?.product_image,
+    product?.photo,
+    product?.photoUrl,
+    product?.photo_url,
+    product?.img,
+    product?.coverImage,
+    product?.cover_image,
+    product?.picture,
+    product?.src,
+    product?.url,
+    product?.path,
+    product?.featured_image,
+    product?.featuredImage,
+    product?.publicUrl,
+    product?.public_url,
+    ...toCandidateArray(product?.images),
+    ...toCandidateArray(product?.gallery),
+    ...toCandidateArray(product?.photos),
+    ...toCandidateArray(product?.additionalImages),
+    ...toCandidateArray(product?.additional_images),
+    product?.product?.image,
+    product?.product?.image_url,
+
+    // 3. Populated product_id / productId keys
+    populatedProductId?.image,
+    populatedProductId?.image_url,
+    populatedProductId?.imageUrl,
+    populatedProductId?.thumbnail,
+    populatedProductId?.thumbnailUrl,
+    populatedProductId?.productImage,
+    ...toCandidateArray(populatedProductId?.images),
+
+    populatedProductIdCamel?.image,
+    populatedProductIdCamel?.image_url,
+    populatedProductIdCamel?.imageUrl,
+    populatedProductIdCamel?.thumbnail,
+    populatedProductIdCamel?.thumbnailUrl,
+    populatedProductIdCamel?.productImage,
+    ...toCandidateArray(populatedProductIdCamel?.images),
+
+    // 4. Fallback line / item inside item
+    item.line?.image,
+    item.line?.imageUrl,
+    item.line?.image_url,
+    item.line?.thumbnail,
   ];
 
   for (const candidate of candidates) {
-    // Every candidate is normalised, so a relative storage path is turned into
-    // a loadable URL here instead of 404ing against the app origin at render.
+    if (!candidate) continue;
     const url = toRenderableImageUrl(candidate);
     if (url) return url;
   }
+
   return '';
 }
 

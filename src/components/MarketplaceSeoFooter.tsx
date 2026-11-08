@@ -401,6 +401,9 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
         {/* ── 3. Overview + links ── */}
         <div className="mt-7 grid gap-6 border-t pt-6 lg:grid-cols-[1.6fr_1fr_1fr]" style={{ borderColor: THEME.line }}>
           <section aria-labelledby="mm-about-heading">
+            <div className="mb-3">
+              <img src="/logo.png" alt="Zid SaaS BD - E-commerce Marketplace" className="h-9 w-auto object-contain rounded shadow-xs" />
+            </div>
             <h3 id="mm-about-heading" className="text-[12.5px] font-black" style={{ color: THEME.ink }}>
               {t('Shop Bangladesh’s multi-vendor marketplace', 'বাংলাদেশের মাল্টি-ভেন্ডর মার্কেটপ্লেসে কিনুন')}
             </h3>
@@ -657,9 +660,12 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           className="mt-6 flex flex-col items-center justify-between gap-2 border-t pt-4 text-[11px] sm:flex-row"
           style={{ borderColor: THEME.line, color: THEME.inkSubtle }}
         >
-          <span>
-            © {new Date().getFullYear()} ZID Market — {t('ZID SAAS Bangladesh', 'জিআইডি সাস বাংলাদেশ')}
-          </span>
+          <div className="flex items-center gap-2">
+            <img src="/logo.png" alt="Zid SaaS BD" className="h-6 w-auto object-contain rounded" />
+            <span>
+              © {new Date().getFullYear()} Zid SaaS BD — {t('E-commerce Marketplace', 'ই-কমার্স মার্কেটপ্লেস')}
+            </span>
+          </div>
           <span className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
             <span>{t('All prices in BDT (৳)', 'সব দাম বাংলাদেশি টাকায় (৳)')}</span>
             <span className="flex items-center gap-1">
