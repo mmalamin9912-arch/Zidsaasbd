@@ -41,6 +41,34 @@ function readMongoUri(role: MongoConnectionRole = 'primary'): string {
   ).trim();
 }
 
+/**
+ * Every configured URI, in the order they should be tried.
+ *
+ * PRIMARY first (MONGODB_URI, then its legacy aliases), then MONGODB_URI_2.
+ * `MONGODB_URI_2` was previously reachable ONLY by explicitly asking for the
+ * 'secondary' role, so a deployment where the primary variable was renamed,
+ * cleared or pointed at a cluster that no longer existed reported "Database is
+ * not configured" while a perfectly good string sat unused in MONGODB_URI_2.
+ * Duplicates are removed so an environment that sets URI and URI_2 to the same
+ * cluster is tried once, not twice.
+ */
+export function listMongoUriCandidates(): string[] {
+  const candidates = [
+    readMongoUri('primary'),
+    readMongoUri('secondary'),
+  ].filter(Boolean);
+  return Array.from(new Set(candidates));
+}
+
+/**
+ * The role whose URI is actually in effect when no explicit secondary is asked
+ * for: 'primary' when MONGODB_URI (or an alias) is set, otherwise 'secondary'
+ * so a MONGODB_URI_2-only deployment still resolves a database at all.
+ */
+export function resolveMongoRole(): MongoConnectionRole {
+  return readMongoUri('primary') ? 'primary' : 'secondary';
+}
+
 type MongooseCache = {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
@@ -74,14 +102,32 @@ const secondaryCached: SecondaryCache =
     promise: null,
   });
 
-export function getMongoUri(role: MongoConnectionRole = 'primary'): string {
-  return readMongoUri(role);
+/**
+ * The URI for a role.
+ *
+ * With no argument this answers "the URI the app will actually use": the
+ * primary when set, otherwise MONGODB_URI_2. That matters because ~10 modules
+ * (auth, admin merchants/requests, analytics, orders, platform config, …) gate
+ * their entire Mongo path on `if (!getMongoUri())`. While this only read the
+ * primary variables, a MONGODB_URI_2-only deployment made every one of them
+ * skip the database and answer from an empty mirror.
+ *
+ * An EXPLICIT role still returns exactly that role's URI (possibly ''), so
+ * "is the secondary configured?" keeps its precise meaning.
+ */
+export function getMongoUri(role?: MongoConnectionRole): string {
+  if (role) return readMongoUri(role);
+  const configured = resolveMongoRole();
+  return readMongoUri(configured);
 }
 
 export const MONGODB_URI = getMongoUri('primary');
 export const MONGODB_URI_2 = getMongoUri('secondary');
 
-export function isMongoConfigured(role: MongoConnectionRole = 'primary'): boolean {
+export function isMongoConfigured(role?: MongoConnectionRole): boolean {
+  // No role → "is A database reachable?" which MONGODB_URI_2 alone satisfies.
+  // With a role → "is that specific URI set?" (unchanged behaviour).
+  if (!role) return listMongoUriCandidates().length > 0;
   return Boolean(readMongoUri(role));
 }
 
@@ -112,7 +158,7 @@ export const mongooseConnectionPromise: Promise<typeof mongoose> | null = null;
  * HTTP 500 in serverless routes. Only the camelCase driver options below are
  * standard and supported by Mongoose 9 / MongoDB driver 6.
  */
-function getConnectionOpts(dbName: string) {
+export function getConnectionOpts(dbName: string) {
   return {
     dbName,
     bufferCommands: false,
@@ -142,10 +188,10 @@ export function describeMongoError(err: unknown): MongoFailure {
   const raw = (err as any)?.message || String(err || '');
   const detail = raw && !/MONGODB_URI is not set/.test(raw) ? raw : undefined;
 
-  if (!readMongoUri()) {
+  if (!isMongoConfigured()) {
     return {
       code: 'not_configured',
-      message: 'Database is not configured: MONGODB_URI is missing on the server. Add it in Vercel > Settings > Environment Variables.',
+      message: 'Database is not configured: neither MONGODB_URI nor MONGODB_URI_2 is set on the server. Add one in Vercel > Settings > Environment Variables.',
     };
   }
   if (/authentication failed|bad auth|unauthorized|invalid credentials/i.test(raw)) {
@@ -160,15 +206,33 @@ export function describeMongoError(err: unknown): MongoFailure {
   return { code: 'connection_failed', message: 'Database unavailable: could not establish a MongoDB connection.', detail };
 }
 
+/** Credentials stripped, so a failure log can never leak the URI. */
+function redactUri(uri: string): string {
+  return uri.replace(/\/\/[^@/]*@/, '//***:***@');
+}
+
 /**
  * Establish (or reuse) a single shared mongoose connection.
- * Throws a descriptive Error if the connection cannot be established so that
- * callers can surface real details instead of an opaque 500.
+ *
+ * URI FAILOVER: the candidates from `listMongoUriCandidates()` are tried in
+ * order (MONGODB_URI, then MONGODB_URI_2). If the primary is missing, malformed
+ * or its cluster is unreachable/DNS-failing, the next URI is used instead of
+ * failing the request. A broken primary used to surface as an error on every
+ * data route at once; the secondary is often a working replica of the same data.
+ *
+ * A wrong PASSWORD is not treated as failover-worthy — that points at a
+ * configuration mistake the operator must see, not a dead cluster — so it is
+ * rethrown with a clear message.
+ *
+ * Throws a descriptive Error only when EVERY candidate has failed, so callers
+ * can surface real details instead of an opaque 500.
  */
 export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeof mongoose> {
-  const uri = readMongoUri('primary');
-  if (!uri) {
-    throw new Error('[MongoDB] MONGODB_URI is not set. Set it in your environment variables.');
+  const candidates = listMongoUriCandidates();
+  if (candidates.length === 0) {
+    throw new Error(
+      '[MongoDB] Neither MONGODB_URI nor MONGODB_URI_2 is set. Add one in your environment variables.'
+    );
   }
 
   if (cached.conn && mongoose.connection.readyState === 1) {
@@ -191,12 +255,9 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
   if (!cached.promise) {
     const opts = getConnectionOpts(dbName);
 
-    console.log(`[MongoDB] Opening new connection pool (dbName=${dbName})`);
-
-    cached.promise = mongoose
-      .connect(uri, opts)
+    cached.promise = connectWithFailover(candidates, opts, dbName)
       .then((m) => {
-        console.log('[MongoDB] Connected successfully');
+        cached.conn = m;
         return m;
       })
       .catch((err) => {
@@ -204,7 +265,7 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
         cached.promise = null;
         cached.conn = null;
         console.error('[MongoDB] Connection failed:', err?.message || err);
-        throw new Error(`[MongoDB] Connection failed: ${err?.message || err}`);
+        throw err;
       });
   }
 
@@ -219,14 +280,62 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
 }
 
 /**
+ * Try each candidate URI in order and return the first connection that opens.
+ *
+ * `mongoose.connect()` leaves the default connection in a failed state after a
+ * rejection, so the connection is explicitly torn down between attempts —
+ * otherwise the SECOND URI would be tried on a poisoned handle and fail too.
+ */
+async function connectWithFailover(
+  candidates: string[],
+  opts: ReturnType<typeof getConnectionOpts>,
+  dbName: string
+): Promise<typeof mongoose> {
+  const failures: string[] = [];
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const uri = candidates[i];
+    const label = i === 0 ? 'primary' : 'secondary';
+    console.log(`[MongoDB] Opening new connection pool via ${label} URI (dbName=${dbName}, host=${redactUri(uri)})`);
+
+    try {
+      // Clear any socket/model state left behind by a previous failed attempt.
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.disconnect().catch(() => undefined);
+      }
+      const connection = await mongoose.connect(uri, opts);
+      console.log(`[MongoDB] Connected successfully via ${label} URI`);
+      return connection;
+    } catch (err: any) {
+      const message = String(err?.message || err);
+      failures.push(`${label}: ${message}`);
+      console.error(`[MongoDB] ${label} URI failed:`, message);
+
+      // A rejected credential is an operator error, not a dead cluster: trying
+      // the other URI would mask a mistyped password behind an unrelated one.
+      if (/bad auth|authentication failed|auth failed/i.test(message)) {
+        throw new Error(`[MongoDB] Authentication failed for the ${label} URI. Check the username and password.`);
+      }
+      // Fall through to the next candidate.
+    }
+  }
+
+  throw new Error(`[MongoDB] All configured URIs failed — ${failures.join(' | ')}`);
+}
+
+/**
  * Open the secondary Atlas pool independently from Mongoose's primary pool.
  * This is intentionally a separate `Connection`: switching URI 2 must never
  * replace the models and transactions used by core order/auth routes.
  */
 export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
-  const uri = readMongoUri('secondary');
+  /* SECONDARY is a preference, not a requirement. A deployment with only
+   * MONGODB_URI set used to throw here and every catalogue read silently
+   * dropped to the file mirror; the primary is a perfectly good catalog
+   * source, so it is the fallback rather than an error. */
+  const uri = readMongoUri('secondary') || readMongoUri('primary');
   if (!uri) {
-    throw new Error('[MongoDB] MONGODB_URI_2 is not set for the secondary database.');
+    throw new Error('[MongoDB] Neither MONGODB_URI_2 nor MONGODB_URI is set for the secondary database.');
   }
   if (secondaryCached.conn?.readyState === 1) return secondaryCached.conn;
   if (!secondaryCached.promise) {
@@ -286,7 +395,9 @@ export async function getMongoDb(
   dbName: string = DB_NAME,
   role: MongoConnectionRole = 'primary',
 ) {
-  if (!readMongoUri(role)) return null;
+  // `listMongoUriCandidates()` — not `readMongoUri(role)` — so a
+  // MONGODB_URI_2-only deployment resolves a database instead of returning null.
+  if (listMongoUriCandidates().length === 0) return null;
   if (role === 'secondary') {
     const connection = await connectToSecondaryDatabase(dbName);
     return connection.db ?? null;

@@ -27,7 +27,7 @@
  * (api/server.ts) and standalone functions (api/*.ts).
  */
 
-import { getMongoDb, getMongoUri, describeMongoError, DB_NAME } from './db.js';
+import { getMongoDb, getMongoUri, describeMongoError, isMongoConfigured, DB_NAME } from './db.js';
 
 /* ────────────────────────── provider config ────────────────────────── */
 function cleanEnvUrl(raw?: string): string {
@@ -289,9 +289,19 @@ export async function querySupabaseTableFiltered<T = Record<string, any>>(
 
 /* ────────────────────────── MongoDB helper ────────────────────────── */
 
-/** Native Db handle, or null. Never throws. */
+/**
+ * Native Db handle, or null. Never throws.
+ *
+ * `isMongoConfigured()` — not `getMongoUri()` — because the latter reads the
+ * primary variables only. A deployment with just MONGODB_URI_2 set used to be
+ * treated as "no database" here, so every subscription / merchant / admin read
+ * silently skipped MongoDB and answered from the empty file mirror even though
+ * a working connection string was configured.
+ */
 async function safeMongoDb(): Promise<{ db: any | null; error?: string }> {
-  if (!getMongoUri()) return { db: null, error: describeMongoError(new Error('MONGODB_URI is not set')).message };
+  if (!isMongoConfigured()) {
+    return { db: null, error: describeMongoError(new Error('Neither MONGODB_URI nor MONGODB_URI_2 is set')).message };
+  }
   try {
     const db = await getMongoDb(DB_NAME);
     return db ? { db } : { db: null, error: 'MongoDB connection handle unavailable.' };
@@ -307,10 +317,10 @@ export async function queryMongoCollection<T = Record<string, any>>(
   opts: { limit?: number; sort?: Record<string, 1 | -1>; dbName?: string } = {}
 ): Promise<{ rows: T[]; error?: string }> {
   try {
-    const resolved = opts.dbName ? await (async () => {
-      if (!getMongoUri()) return { db: null, error: 'MONGODB_URI is not set' };
-      return { db: await getMongoDb(opts.dbName!) };
-    })() : await safeMongoDb();
+    const resolved = opts.dbName ? await (async (dbName: string) => {
+      if (!isMongoConfigured()) return { db: null, error: 'Neither MONGODB_URI nor MONGODB_URI_2 is set' };
+      return { db: await getMongoDb(dbName) };
+    })(opts.dbName) : await safeMongoDb();
     const db = (resolved as any).db;
     if (!db) return { rows: [], error: (resolved as any).error || 'MongoDB unavailable.' };
 

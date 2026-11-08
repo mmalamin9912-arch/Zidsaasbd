@@ -465,6 +465,30 @@ export function readMongoUri(role: 'primary' | 'secondary' = 'primary'): string 
   ).trim();
 }
 
+/**
+ * Every configured URI, in the order they are tried.
+ *
+ * MONGODB_URI (and its legacy aliases) first, then MONGODB_URI_2. Without this,
+ * MONGODB_URI_2 was only reachable by explicitly asking for the secondary role,
+ * so a deployment whose primary variable was missing or pointed at a dead
+ * cluster reported "not configured" while a working string sat in URI_2.
+ * KEEP IN SYNC with lib/db.ts.
+ */
+export function listMongoUriCandidates(): string[] {
+  const candidates = [readMongoUri('primary'), readMongoUri('secondary')].filter(Boolean);
+  return Array.from(new Set(candidates));
+}
+
+/** The role actually in effect when no explicit secondary is requested. */
+export function resolveMongoRole(): 'primary' | 'secondary' {
+  return readMongoUri('primary') ? 'primary' : 'secondary';
+}
+
+/** Credentials stripped, so a failure log can never leak the URI. */
+function redactMongoUri(uri: string): string {
+  return uri.replace(/\/\/[^@/]*@/, '//***:***@');
+}
+
 const MONGODB_URI = readMongoUri();
 
 type MongooseCache = {
@@ -493,7 +517,7 @@ export function getMongoUri(role: 'primary' | 'secondary' = 'primary'): string {
 }
 
 export function isMongoConfigured(): boolean {
-  return Boolean(readMongoUri());
+  return listMongoUriCandidates().length > 0;
 }
 
 /**
@@ -502,9 +526,14 @@ export function isMongoConfigured(): boolean {
  * details instead of an opaque 500.
  */
 export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeof mongoose> {
-  const uri = readMongoUri('primary');
-  if (!uri) {
-    throw new Error('[MongoDB] MONGODB_URI is not set. Set it in your environment variables.');
+  // ORDERED FAILOVER: MONGODB_URI, then MONGODB_URI_2. A missing, malformed or
+  // unreachable primary now moves on to the secondary instead of failing every
+  // data route. KEEP IN SYNC with lib/db.ts.
+  const candidates = listMongoUriCandidates();
+  if (candidates.length === 0) {
+    throw new Error(
+      '[MongoDB] Neither MONGODB_URI nor MONGODB_URI_2 is set. Add one in your environment variables.'
+    );
   }
 
   if (cached.conn && mongoose.connection.readyState === 1) {
@@ -526,12 +555,8 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
       connectTimeoutMS: 10000,
     };
 
-    console.log(`[MongoDB] Opening new connection pool (dbName=${dbName})`);
-
-    cached.promise = mongoose
-      .connect(uri, opts)
+    cached.promise = connectMongoWithFailover(candidates, opts, dbName)
       .then((m) => {
-        console.log('[MongoDB] Connected successfully');
         cached.conn = m;
         return m;
       })
@@ -540,7 +565,7 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
         cached.promise = null;
         cached.conn = null;
         console.error('[MongoDB] Connection failed:', err?.message || err);
-        throw new Error(`[MongoDB] Connection failed: ${err?.message || err}`);
+        throw err;
       });
   }
 
@@ -554,9 +579,57 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
   }
 }
 
+/**
+ * Try each candidate URI in order; return the first connection that opens.
+ *
+ * The default mongoose connection is left in a failed state after a rejection,
+ * so it is torn down between attempts — otherwise the SECOND URI fails on a
+ * poisoned handle and the whole fallback is pointless.
+ * KEEP IN SYNC with lib/db.ts (connectWithFailover).
+ */
+async function connectMongoWithFailover(
+  candidates: string[],
+  opts: Record<string, any>,
+  dbName: string
+): Promise<typeof mongoose> {
+  const failures: string[] = [];
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const uri = candidates[i];
+    const label = i === 0 ? 'primary' : 'secondary';
+    console.log(
+      `[MongoDB] Opening new connection pool via ${label} URI (dbName=${dbName}, host=${redactMongoUri(uri)})`
+    );
+
+    try {
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.disconnect().catch(() => undefined);
+      }
+      const connection = await mongoose.connect(uri, opts);
+      console.log(`[MongoDB] Connected successfully via ${label} URI`);
+      return connection;
+    } catch (err: any) {
+      const message = String(err?.message || err);
+      failures.push(`${label}: ${message}`);
+      console.error(`[MongoDB] ${label} URI failed:`, message);
+
+      // Rejected credentials are an operator error, not a dead cluster: trying
+      // the other URI would hide a mistyped password behind an unrelated one.
+      if (/bad auth|authentication failed|auth failed/i.test(message)) {
+        throw new Error(`[MongoDB] Authentication failed for the ${label} URI. Check the username and password.`);
+      }
+      // Fall through to the next candidate.
+    }
+  }
+
+  throw new Error(`[MongoDB] All configured URIs failed — ${failures.join(' | ')}`);
+}
+
 export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
-  const uri = readMongoUri(SECONDARY_DB_ROLE);
-  if (!uri) throw new Error('[MongoDB] MONGODB_URI_2 is not set for the secondary database.');
+  // SECONDARY is a preference: with only MONGODB_URI set, the primary is a valid
+  // catalogue source, so it is used instead of throwing.
+  const uri = readMongoUri(SECONDARY_DB_ROLE) || readMongoUri('primary');
+  if (!uri) throw new Error('[MongoDB] Neither MONGODB_URI_2 nor MONGODB_URI is set for the secondary database.');
   if (secondaryCached.conn?.readyState === 1) return secondaryCached.conn;
   if (!secondaryCached.promise) {
     secondaryCached.promise = mongoose
@@ -588,8 +661,9 @@ export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Prom
  * shared (global-cached) mongoose connection pool.
  */
 export async function getMongoDb(dbName: string = DB_NAME, role: 'primary' | 'secondary' = 'primary') {
-  const uri = readMongoUri(role);
-  if (!uri) return null;
+  // Any configured URI counts — a MONGODB_URI_2-only deployment must not
+  // silently resolve `null` here.
+  if (listMongoUriCandidates().length === 0) return null;
   if (role === SECONDARY_DB_ROLE) {
     const connection = await connectToSecondaryDatabase(dbName);
     return connection.db ?? null;
