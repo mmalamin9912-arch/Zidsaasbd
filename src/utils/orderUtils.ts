@@ -19,7 +19,7 @@
  */
 
 import type { Order, OrderItem } from '../types';
-import { resolveProductImage } from './imageFallback';
+import { resolveProductImage } from './imageFallback.js';
 
 /** Coerce anything to a finite number, defaulting to 0. */
 export function toNumber(value: unknown, fallback = 0): number {
