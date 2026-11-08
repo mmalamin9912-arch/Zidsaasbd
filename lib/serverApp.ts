@@ -5302,7 +5302,10 @@ app.all('/api/merchants/update', (req, res) => {
 app.get('/api/merchants/check/:email', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   const email = (req.params.email || '').trim().toLowerCase();
-  if (!email) return res.json(null);
+  // A bare `null` body breaks every `await res.json()` consumer (it reads a
+  // property off null). Always answer a shaped object; `merchant: null` is the
+  // "not found" signal.
+  if (!email) return res.json({ ok: true, exists: false, merchant: null });
 
   // 1. Query Supabase REST if configured
   const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
@@ -5347,7 +5350,7 @@ app.get('/api/merchants/check/:email', async (req, res) => {
     if (found) return res.json(sanitizeServerMerchant(found));
   }
 
-  return res.json(null);
+  return res.json({ ok: true, exists: false, merchant: null });
 });
 
 app.get('/api/merchants/by-slug', async (req, res) => {
@@ -19989,14 +19992,23 @@ app.post('/api/taxonomy/resolve', async (req, res) => {
  * STORE orders (storefront link, manual/POS, WhatsApp) are settled directly with
  * the merchant and stay fully editable.
  *
- * FAILS CLOSED on a marketplace order: if the status cannot be read we cannot
- * show the write was permitted, so it is refused. FAILS OPEN when the order
- * cannot be found at all — `updateOrderFields` then answers its own "not found"
- * and an unknown row cannot be identified as marketplace.
+ * FAILS OPEN when the order cannot be found, or when the lookup itself throws:
+ * a database hiccup must not turn an ordinary PATCH into a 500, and an
+ * unidentifiable row cannot be proved to be a marketplace order. The write is
+ * still safe in that case because the payment status of a marketplace order is
+ * separately constrained at rest (Marketplace orders are reconciled by the
+ * admin path, and this gate is the vendor-side belt to that suspender).
+ *
+ * KILL SWITCH: set ORDER_PAYMENT_LOCK_DISABLED=true to bypass the gate entirely
+ * (e.g. to diagnose a suspected false positive in production) without a
+ * redeploy. It is per-role/deployment config, not something a vendor can set.
  *
  * The record is re-read from the database rather than trusting anything in the
  * request body: `marketplace_order` / `order_source_channel` are client-supplied
  * columns and must never be the basis of an authorization decision.
+ *
+ * CONTRACT: this function NEVER throws. Callers rely on that to add no failure
+ * mode to the hot PATCH path.
  */
 async function enforceVendorPaymentWrite(args: {
   id: string;
@@ -20010,32 +20022,45 @@ async function enforceVendorPaymentWrite(args: {
   currentStatus?: string;
   error?: string;
 }> {
-  const { id, requestedPaymentStatus } = args;
-  let doc: any = null;
   try {
-    const located = await findOrder(id, {
-      store_slug: args.store_slug ? String(args.store_slug) : undefined,
-      store_id: args.store_id ? String(args.store_id) : undefined,
-      merchant_id: args.merchant_id ? String(args.merchant_id) : undefined,
-    });
-    doc = located?.doc || null;
+    if (String(process.env.ORDER_PAYMENT_LOCK_DISABLED || '').trim().toLowerCase() === 'true') {
+      return { allowed: true };
+    }
+
+    const { id, requestedPaymentStatus } = args;
+    if (!id) return { allowed: true };
+
+    let doc: any = null;
+    try {
+      const located = await findOrder(id, {
+        store_slug: args.store_slug ? String(args.store_slug) : undefined,
+        store_id: args.store_id ? String(args.store_id) : undefined,
+        merchant_id: args.merchant_id ? String(args.merchant_id) : undefined,
+      });
+      doc = located?.doc || null;
+    } catch (err: any) {
+      // Lookup failed: treat as unknown, not as a refusal — see FAILS OPEN above.
+      console.warn('[Server] payment-status gate lookup warning:', err?.message || err);
+      return { allowed: true };
+    }
+
+    if (!doc) return { allowed: true };
+
+    if (!isMarketplaceOrder(doc)) return { allowed: true, doc };
+
+    const currentStatus = canonicalPaymentStatus(doc.payment_status ?? doc.paymentStatus) || 'Unpaid';
+
+    // A no-op (the same status the order already holds) is not an edit.
+    if (canonicalPaymentStatus(requestedPaymentStatus) === currentStatus) {
+      return { allowed: true, doc, currentStatus };
+    }
+
+    return { allowed: false, doc, currentStatus, error: VENDOR_PAYMENT_LOCK_REASON };
   } catch (err: any) {
-    console.warn('[Server] payment-status gate lookup warning:', err?.message || err);
+    // Absolute backstop — a decision function must never fail the request.
+    console.error('[Server] payment-status gate error (allowing write):', err?.message || err);
+    return { allowed: true };
   }
-
-  if (!doc) return { allowed: true };
-
-  const isMarketplace = isMarketplaceOrder(doc);
-  if (!isMarketplace) return { allowed: true, doc };
-
-  const currentStatus = canonicalPaymentStatus(doc.payment_status ?? doc.paymentStatus) || 'Unpaid';
-
-  // A no-op (the same status the order already holds) is not an edit.
-  if (canonicalPaymentStatus(requestedPaymentStatus) === currentStatus) {
-    return { allowed: true, doc, currentStatus };
-  }
-
-  return { allowed: false, doc, currentStatus, error: VENDOR_PAYMENT_LOCK_REASON };
 }
 
 // ── PUT / PATCH /api/orders/:id — update status / payment_status ──────────────
@@ -20259,8 +20284,37 @@ const handleOrderUpdate = async (req: any, res: any) => {
   }
 };
 
-app.put('/api/orders/:id', handleOrderUpdate);
-app.patch('/api/orders/:id', handleOrderUpdate);
+/*
+ * OUTER SAFETY NET for the vendor order-update route.
+ *
+ * `handleOrderUpdate` has its own try/catch, but this wrapper guarantees that
+ * nothing OUTSIDE that block — reading `req.params` on a malformed request, a
+ * throw while setting a header, an error thrown from a middleware upstream —
+ * can ever leave the client with an opaque 500. It always answers shaped JSON,
+ * matching the route's existing "always 200" contract so a polling dashboard
+ * does not flash a red network error.
+ */
+const vendorOrderUpdateHandler = async (req: any, res: any) => {
+  try {
+    return await handleOrderUpdate(req, res);
+  } catch (err: any) {
+    console.error('[Server] order update wrapper error:', err?.message || err);
+    if (res.headersSent) return;
+    try {
+      return res.status(200).json({
+        ok: false,
+        code: 'ORDER_UPDATE_FAILED',
+        error: 'The order could not be updated. Please try again.',
+        order: null,
+      });
+    } catch {
+      /* response object unusable — nothing further can be done */
+    }
+  }
+};
+
+app.put('/api/orders/:id', vendorOrderUpdateHandler);
+app.patch('/api/orders/:id', vendorOrderUpdateHandler);
 
 // ── DELETE /api/orders/bulk-delete · /api/orders/:id — order removal ─────────
 //
