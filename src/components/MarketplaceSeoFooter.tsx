@@ -303,7 +303,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
   // rendered by the root-level route in `App.tsx` (which falls back to a
   // branded placeholder when the merchant has not written the page), so the
   // anchor NEVER routes a general customer into the merchant dashboard.
-  const navigatePolicy = (pageKey: string, onNavigatePolicy: (pageKey: string) => void) => {
+  const navigatePolicy = (pageKey: string) => {
     const slugMap: Record<string, string> = {
       'Terms of Use': 'terms-of-service',
       'Privacy Policy': 'privacy-policy',
@@ -311,6 +311,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
     };
     const slug = slugMap[pageKey] || 'about-us';
     window.history.pushState({}, '', slug ? `/store/marketplace/pages/${slug}` : '/marketplace');
+    // Navigate policy - safely call the prop if provided
     onNavigatePolicy?.(pageKey);
   };
 
