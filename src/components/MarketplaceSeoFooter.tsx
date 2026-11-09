@@ -294,6 +294,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
   sellerCount,
   onBrowseCategories,
   onGoToPlans,
+  onNavigatePolicy,
   theme,
 }) => {
   const THEME: FooterTheme = { ...LIGHT, ...(theme || {}) };
@@ -544,7 +545,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
               // These never touch the merchant dashboard.
               const isSell = link.label === 'Sell in BD';
               const isPolicy = link.label === 'Terms of Use' || link.label === 'Privacy Policy' || link.label === 'About Us';
-              const handled = isSell ? onGoToPlans : (isPolicy ? () => navigatePolicy(link.label, onNavigatePolicy) : undefined);
+              const handled = isSell ? onGoToPlans : (isPolicy ? () => navigatePolicy(link.label) : undefined);
               const disabled = !handled;
               return (
                 <a
@@ -559,7 +560,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                       : isPolicy
                       ? (e) => {
                           e.preventDefault();
-                          navigatePolicy(link.label, onNavigatePolicy);
+                          navigatePolicy(link.label);
                         }
                       : undefined
                    }

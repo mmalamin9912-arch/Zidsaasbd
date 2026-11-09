@@ -1164,6 +1164,8 @@ export interface MegaMarketplaceViewProps {
   onOpenSignIn?: () => void;
   /** Return to the SaaS pricing landing. */
   onGoToPlans?: () => void;
+  /** Navigate to a public policy/corporate page key (e.g. `terms-of-service`). */
+  onNavigatePolicy?: (pageKey: string) => void;
   /** First path segment already in the URL (e.g. `/marketplace?category=x`). */
   initialFilters?: MarketplaceFilters;
   /**
@@ -1183,6 +1185,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   onOpenCustomerAccount,
   onOpenSignIn,
   onGoToPlans,
+  onNavigatePolicy,
   initialFilters,
   slides: slidesOverride,
   title = 'Marketplace',
