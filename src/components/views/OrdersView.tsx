@@ -30,6 +30,7 @@ import {
 } from '../../lib/orderShareLinks';
 import {
   ShoppingBag,
+  Loader2,
   Lock,
   Search,
   Filter,
@@ -2432,7 +2433,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           onClick={() => setActiveMenu(null)}
         />
       )}
-      {/* 1. Header & Orders Sub-menu */}
+      {/* While the first /api/orders request is in flight (ordersHydrated === false),
+          show a loader so the merchant isn't left with an empty orders table. */}
+      {!ordersHydrated && (
+        <div className="flex flex-col items-center justify-center py-20 text-slate-500">
+          <Loader2 className="w-10 h-10 animate-spin mb-3 text-slate-400" />
+          <p className="font-medium">Loading your orders…</p>
+        </div>
+      )}
+      {!ordersHydrated ? null : (
+        <>
+          {/* 1. Header & Orders Sub-menu */}
       <div className="bg-[#202533] border border-[#2E3548] p-5 sm:p-6 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
@@ -4270,6 +4281,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           </div>
         </div>
       )}
+      </>)}
     </div>
   );
 };
