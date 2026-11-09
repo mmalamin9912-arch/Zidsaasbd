@@ -57,6 +57,7 @@ import {
   Copy,
   ExternalLink,
   SlidersHorizontal,
+  Store,
   PackageCheck,
   Printer,
   FileText,
@@ -367,6 +368,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'amount_high' | 'amount_low'>('newest');
   const [isFilterModalOpen, setIsFilterModalOpen] = useState(false);
   const [filterSource, setFilterSource] = useState<string>('All');
+  // Order source type: Marketplace vs Store-link (custom storefront link / manual / POS).
+  const [sourceTypeTab, setSourceTypeTab] = useState<'All' | 'Marketplace' | 'Store-link'>('All');
   const [filterPlatform, setFilterPlatform] = useState<string>('All');
   const [filterPaymentMethod, setFilterPaymentMethod] = useState<string>('All');
   const [filterPaymentStatus, setFilterPaymentStatus] = useState<string>('All');
@@ -1209,6 +1212,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
       // 4. Modal filters
       if (filterSource !== 'All' && (ord.source || 'Store') !== filterSource) return false;
+      // Source type filter: Marketplace vs Store-link
+      if (sourceTypeTab === 'Marketplace' && !isMarketplaceOrder(ord)) return false;
+      if (sourceTypeTab === 'Store-link' && isMarketplaceOrder(ord)) return false;
       if (filterPlatform !== 'All' && (ord.platform || 'Mobile web') !== filterPlatform) return false;
       if (filterPaymentMethod !== 'All' && ord.paymentMethod !== filterPaymentMethod) return false;
       if (filterPaymentStatus !== 'All' && ord.paymentStatus !== filterPaymentStatus) return false;
@@ -1224,7 +1230,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       if (sortBy === 'amount_low') return toNumber(a.totalBDT) - toNumber(b.totalBDT);
       return 0;
     });
-  }, [orders, subMenu, statusTab, searchQuery, filterSource, filterPlatform, filterPaymentMethod, filterPaymentStatus, filterCourier, sortBy]);
+  }, [orders, subMenu, statusTab, searchQuery, sourceTypeTab, filterSource, filterPlatform, filterPaymentMethod, filterPaymentStatus, filterCourier, sortBy]);
 
   /**
    * Send a WhatsApp recovery coupon for one abandoned cart.
@@ -2517,6 +2523,50 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         </button>
       </div>
 
+      {/* Orders Source Tabs — top-level toggle between Marketplace orders and
+          Store-link (custom storefront / manual / POS) orders. Always shown on
+          the "All orders" sub-view so merchants never confuse the two flows. */}
+      {subMenu === 'all' && (
+        <div className="flex items-center gap-2 border-b border-[#2E3548] pb-3">
+          <button
+            onClick={() => setSourceTypeTab('All')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-2 ${
+              sourceTypeTab === 'All'
+                ? 'bg-[#00D68F] text-slate-950 shadow-md'
+                : 'bg-[#202533] text-slate-300 border border-[#2E3548] hover:border-slate-500'
+            }`}
+          >
+            <ShoppingBag className="w-4 h-4" />
+            <span>All Orders</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-slate-950/20">{orders.length}</span>
+          </button>
+          <button
+            onClick={() => setSourceTypeTab('Marketplace')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-2 ${
+              sourceTypeTab === 'Marketplace'
+                ? 'bg-indigo-500 text-slate-950 shadow-md'
+                : 'bg-[#202533] text-slate-300 border border-[#2E3548] hover:border-slate-500'
+            }`}
+          >
+            <Store className="w-4 h-4" />
+            <span>Marketplace</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-slate-950/20">{orders.filter(o => isMarketplaceOrder(o)).length}</span>
+          </button>
+          <button
+            onClick={() => setSourceTypeTab('Store-link')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-2 ${
+              sourceTypeTab === 'Store-link'
+                ? 'bg-[#00D68F] text-slate-950 shadow-md'
+                : 'bg-[#202533] text-slate-300 border border-[#2E3548] hover:border-slate-500'
+            }`}
+          >
+            <Globe className="w-4 h-4" />
+            <span>Store-link</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-slate-950/20">{orders.filter(o => !isMarketplaceOrder(o)).length}</span>
+          </button>
+        </div>
+      )}
+
       {subMenu === 'returns' ? (
         renderReturnsPanel()
       ) : subMenu !== 'abandoned' ? (
@@ -2890,20 +2940,25 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                               />
                             </td>
 
-                            {/* Order Number & Source */}
+                            {/* Order Number & Source Type (Marketplace vs Store-link) */}
                             <td className="p-3.5">
                               <div className="font-mono font-black text-white text-xs flex items-center gap-1.5">
                                 <span>{ord.orderNumber}</span>
                               </div>
+                              {/* Primary badge: Marketplace order vs Store-link (custom storefront /
+                                  manual / POS) order. isMarketplaceOrder() reads the
+                                  marketplace_order / order_source_channel / vendor_slugs
+                                  flags the platform sets at checkout time. */}
                               <span className={`inline-block mt-0.5 text-[9px] font-bold px-1.5 py-0.2 rounded border uppercase ${
-                                sourceName === 'Store'
-                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                                  : sourceName === 'Manual' || sourceName === 'POS'
-                                  ? 'bg-purple-500/10 text-purple-400 border-purple-500/20'
-                                  : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                                isMarketplaceOrder(ord)
+                                  ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
+                                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                               }`}>
-                                {sourceName}
+                                {isMarketplaceOrder(ord) ? 'Marketplace' : 'Store-link'}
                               </span>
+                              {sourceName !== 'Store' && (
+                                <span className="ml-1.5 inline-block mt-0.5 text-[8px] font-bold px-1.5 py-0.2 rounded border bg-slate-700/50 text-slate-400 border-slate-600 uppercase">{sourceName}</span>
+                              )}
                             </td>
 
                             {/* Customer */}
