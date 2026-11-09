@@ -2370,6 +2370,16 @@ onPlaceOrder={async (newOrder) => {
           window.history.pushState({}, '', '/pricing');
           setCurrentPath('/pricing');
         }}
+        onNavigatePolicy={(pageKey) => {
+          const slugMap: Record<string, string> = {
+            'Terms of Use': 'terms-of-service',
+            'Privacy Policy': 'privacy-policy',
+            'About Us': 'about-us',
+          };
+          const slug = slugMap[pageKey] || 'about-us';
+          window.history.pushState({}, '', slug ? `/store/marketplace/pages/${slug}` : '/marketplace');
+          setCurrentPath(slug ? `/store/marketplace/pages/${slug}` : '/marketplace');
+        }}
       />
     );
   }

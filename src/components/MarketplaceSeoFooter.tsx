@@ -242,13 +242,13 @@ const NAV_COLUMNS: NavColumn[] = [
   },
 ];
 
-/** About / Careers / Terms / Privacy / Sell — the utility strip. */
+/** About / Careers / Terms / Privacy / Sell in BD — the utility strip. */
 const UTILITY_LINKS: { label: string; labelBn: string }[] = [
   { label: 'About Us', labelBn: 'আমাদের সম্পর্কে' },
   { label: 'Careers', labelBn: 'ক্যারিয়ার' },
   { label: 'Terms of Use', labelBn: 'ব্যবহারের শর্তাবলী' },
   { label: 'Privacy Policy', labelBn: 'গোপনীয়তা নীতি' },
-  { label: 'Sell with Us', labelBn: 'আমাদের সাথে বিক্রি করুন' },
+  { label: 'Sell in BD', labelBn: 'আমাদের সাথে বিক্রি করুন' },
 ];
 
 /**
@@ -281,6 +281,8 @@ interface Props {
   onBrowseCategories?: () => void;
   /** Open the merchant signup / plans page. */
   onGoToPlans?: () => void;
+  /** Navigate to a public policy/corporate page key (e.g. `terms-of-service`). */
+  onNavigatePolicy?: (pageKey: string) => void;
   /** Runtime palette from the marketplace. Falls back to the light set. */
   theme?: Partial<FooterTheme>;
 }
@@ -296,6 +298,21 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
 }) => {
   const THEME: FooterTheme = { ...LIGHT, ...(theme || {}) };
   const t = (en: string, bn: string) => (lang === 'bn' ? bn : en);
+
+  // Public policy/corporate pages: `/terms`, `/privacy`, `/about`. These are
+  // rendered by the root-level route in `App.tsx` (which falls back to a
+  // branded placeholder when the merchant has not written the page), so the
+  // anchor NEVER routes a general customer into the merchant dashboard.
+  const navigatePolicy = (pageKey: string, onNavigatePolicy: (pageKey: string) => void) => {
+    const slugMap: Record<string, string> = {
+      'Terms of Use': 'terms-of-service',
+      'Privacy Policy': 'privacy-policy',
+      'About Us': 'about-us',
+    };
+    const slug = slugMap[pageKey] || 'about-us';
+    window.history.pushState({}, '', slug ? `/store/marketplace/pages/${slug}` : '/marketplace');
+    onNavigatePolicy?.(pageKey);
+  };
 
   const totalTags = useMemo(
     () => SEARCH_GROUPS.reduce((n, g) => n + g.tags.length, 0),
@@ -447,7 +464,7 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
 
           <nav aria-labelledby="mm-sellerlinks-heading">
             <h3 id="mm-sellerlinks-heading" className="text-[12.5px] font-black" style={{ color: THEME.ink }}>
-              {t('Sell with us', 'আমাদের সাথে বিক্রি করুন')}
+              {t('Sell in BD', 'আমাদের সাথে বিক্রি করুন')}
             </h3>
             <ul className="mt-2 space-y-1.5">
               {[
@@ -521,20 +538,38 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
           >
             {UTILITY_LINKS.map((link) => {
               const label = lang === 'bn' ? link.labelBn : link.label;
-              const isSell = link.label === 'Sell with Us';
+              // "Sell in BD" is the only true action; legal/corporate links route
+              // to the public storefront policy pages (/terms, /privacy, /about).
+              // These never touch the merchant dashboard.
+              const isSell = link.label === 'Sell in BD';
+              const isPolicy = link.label === 'Terms of Use' || link.label === 'Privacy Policy' || link.label === 'About Us';
+              const handled = isSell ? onGoToPlans : (isPolicy ? () => navigatePolicy(link.label, onNavigatePolicy) : undefined);
+              const disabled = !handled;
               return (
-                <button
+                <a
                   key={link.label}
-                  type="button"
-                  onClick={isSell && onGoToPlans ? onGoToPlans : undefined}
-                  disabled={!isSell || !onGoToPlans}
-                  className={`text-[11.5px] font-semibold transition ${isSell ? 'hover:underline' : 'well-link'} disabled:cursor-default`}
-                  style={{ color: isSell ? THEME.brand : THEME.inkMuted }}
-                >
-                  {label}
-                </button>
-              );
-            })}
+                  href={isSell ? '/pricing' : undefined}
+                  onClick={
+                    isSell
+                      ? (e) => {
+                          e.preventDefault();
+                          onGoToPlans?.();
+                        }
+                      : isPolicy
+                      ? (e) => {
+                          e.preventDefault();
+                          navigatePolicy(link.label, onNavigatePolicy);
+                        }
+                      : undefined
+                   }
+                   disabled={disabled}
+                   className={`text-[11.5px] font-semibold transition ${isSell ? 'hover:underline' : 'well-link'} disabled:cursor-default`}
+                   style={{ color: isSell ? THEME.brand : THEME.inkMuted }}
+                 >
+                   {label}
+                 </a>
+               );
+             })}
           </div>
         </nav>
 

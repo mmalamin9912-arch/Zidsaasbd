@@ -3452,6 +3452,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
           onGoToPlans={onGoToPlans}
+          onNavigatePolicy={onNavigatePolicy}
           theme={{
             ink: THEME.ink,
             inkMuted: THEME.inkMuted,
