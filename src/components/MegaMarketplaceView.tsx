@@ -4007,6 +4007,18 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 <User className="h-5 w-5" style={{ color: THEME.inkMuted }} />
                 My account
               </button>
+              {/* My Orders — customer order history, never the merchant dashboard. Mirrors
+                  the desktop account menu ORDERS row (onOpenCustomerAccount('orders')). */}
+              <button
+                type="button"
+                onClick={() => { setShowMenu(false); onOpenCustomerAccount?.('orders'); }}
+                className="mm-hover flex min-h-[52px] w-full items-center gap-3 px-4 text-left text-[14px] font-bold"
+                style={{ color: THEME.ink }}
+                title={copy('my_orders')}
+              >
+                <Receipt className="h-5 w-5" style={{ color: THEME.inkMuted }} />
+                {copy('my_orders')}
+              </button>
               <button
                 type="button"
                 onClick={() => { setShowMenu(false); setShowBasket(true); }}
