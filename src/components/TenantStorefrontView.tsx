@@ -31,6 +31,7 @@ import {
 import { normalizeOrders, safeDate, safeAmount } from '../utils/orderUtils';
 import { resolveProductImage as resolveAnyProductImage } from '../utils/imageFallback';
 import SmartSupportPanel, { type SupportIssue } from './SmartSupportPanel';
+import FloatingSupportButton from './FloatingSupportButton';
 import {
   WALLET_PROVIDERS,
   WALLET_LABELS,
@@ -2808,6 +2809,8 @@ The render below must not guess. A merchant may paste
   // What lives here is account configuration — identity, saved addresses,
   // password and support.
   const [profileModal, setProfileModal] = useState<'edit' | 'addresses' | 'password' | 'support' | null>(null);
+  // The floating Help button opens the SAME smart support modal — one state, one
+  // panel, two entry points (profile row + always-visible floating widget).
   const [profileNotice, setProfileNotice] = useState('');
   const [profileError, setProfileError] = useState('');
   // Edit Profile form — seeded from the session each time the modal opens.
@@ -6894,6 +6897,14 @@ The render below must not guess. A merchant may paste
         );
       })()}
       </div>
+
+      {/* GLOBAL FLOATING HELP BUTTON — visible on every storefront page.
+          Opens the smart support modal (predefined issues + vendor routing).
+          Sits above the Messenger/WhatsApp float so both stay tappable. */}
+      <FloatingSupportButton
+        onClick={() => openProfileModal('support')}
+        label={isBn ? 'সহায়তা' : 'Help / Support'}
+      />
 
       {/* SINGLE primary floating chat button (Messenger first, WhatsApp second).
           Only ONE floats at a time to keep the storefront look clean — the

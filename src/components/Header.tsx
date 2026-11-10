@@ -131,6 +131,9 @@ interface HeaderProps {
   onOpenReturns?: () => void;
   onQuickAddProduct?: () => void;
   onToggleSidebarMobile?: () => void;
+  /** Open the customer/merchant support center (smart support panel). Falls
+   *  back to the old toast notice when the host doesn't wire a panel. */
+  onOpenSupport?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -150,8 +153,14 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenReturns,
   onQuickAddProduct,
   onToggleSidebarMobile,
+  onOpenSupport,
 }) => {
   const toast = useToast();
+  /** Open the support center; falls back to the old toast when no panel wired. */
+  const handleOpenSupport = useCallback(() => {
+    if (onOpenSupport) onOpenSupport();
+    else toast.info('Support Center: Opening Zid Merchant Help Desk...');
+  }, [onOpenSupport, toast]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -907,7 +916,7 @@ export const Header: React.FC<HeaderProps> = ({
 
             <div className="flex items-center gap-3">
               <button
-                onClick={() => toast.info('Support Center: Opening Zid Merchant Help Desk...')}
+                onClick={handleOpenSupport}
                 className="p-2 text-slate-300 hover:text-[#00D68F] bg-[#202E34] hover:bg-[#283C44] rounded-xl border border-[#00D68F]/20 transition cursor-pointer"
                 title="Help & Support"
               >
@@ -968,7 +977,7 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
 
               <button
-                onClick={() => toast.info('Support Center: Opening Zid Merchant Help Desk...')}
+                onClick={handleOpenSupport}
                 className="p-2 text-slate-300 hover:text-[#E6C587] bg-[#252B3B] hover:bg-[#2E3548] rounded-xl border border-[#3A435E] transition cursor-pointer"
                 title="Help & Support"
               >
