@@ -30,6 +30,7 @@ import {
 } from '../lib/storeModulesApi';
 import { normalizeOrders, safeDate, safeAmount } from '../utils/orderUtils';
 import { resolveProductImage as resolveAnyProductImage } from '../utils/imageFallback';
+import SmartSupportPanel, { type SupportIssue } from './SmartSupportPanel';
 import {
   WALLET_PROVIDERS,
   WALLET_LABELS,
@@ -2675,6 +2676,52 @@ The render below must not guess. A merchant may paste
     safeSetItem('zid_customer_session', session);
     setCustomerSession(session);
   };
+
+  /*
+   * ── SMART SUPPORT ESCALATION (predefined-issue workflow) ─────────────────
+   *
+   * When a customer selects a CRITICAL issue (cancel/reject, payment
+   * verification, wrong item) the request is pushed to the VENDOR through the
+   * shared notification API, so it lands in their dashboard bell feed with the
+   * customer's phone number and order details attached. The storefront
+   * meanwhile shows the vendor's direct WhatsApp / phone link to the customer —
+   * both sides connect directly, without admin intervention.
+   *
+   * Best-effort: a dead API degrades to an empty bell, never a thrown error
+   * (house convention from src/lib/notificationsApi.ts).
+   */
+  const handleSupportEscalate = React.useCallback(async (issue: SupportIssue, order: Order | null) => {
+    const orderNumber = String(order?.orderNumber || order?.id || '').trim();
+    const title = isBn
+      ? `গুরুত্বপূর্ণ কাস্টমার সাপোর্ট রিকোয়েস্ট: ${issue.labelBn}`
+      : `Customer support request: ${issue.label}`;
+    const message = [
+      `Customer: ${customerSession?.name || 'Guest'}`,
+      customerSession?.phone ? `Phone: ${customerSession.phone}` : '',
+      orderNumber ? `Order: #${orderNumber}` : '',
+      order ? `Total: ৳${Number(order.totalBDT || 0).toLocaleString()}` : '',
+      `Issue: ${issue.label}`,
+    ].filter(Boolean).join(' | ');
+
+    try {
+      const res = await fetch('/api/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          title,
+          message,
+          type: 'warning',
+          merchantIds: currentVendor.id ? [currentVendor.id] : [],
+          targetAudience: currentVendor.id ? 'specific' : 'all',
+          audienceFilter: 'all',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!data?.ok) console.warn('[support] vendor escalation could not be delivered:', data?.error || res.status);
+    } catch (err: any) {
+      console.warn('[support] vendor escalation failed:', err?.message || err);
+    }
+  }, [customerSession, isBn, currentVendor.id]);
 
   const handleCustomerAuthSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -6344,9 +6391,27 @@ The render below must not guess. A merchant may paste
                 </form>
               )}
               {profileModal === 'support' && (
-                <div className="space-y-2">
-                  {(supportPhone || supportEmail || supportAddress) ? (
-                    <>
+                <div className="space-y-4">
+                  {/*
+                   * SMART SUPPORT — predefined issue selector with AI replies and
+                   * vendor routing. Critical issues (cancel / payment / wrong item)
+                   * push a notification into the vendor's dashboard bell with the
+                   * customer's phone + order details, and surface the vendor's
+                   * direct WhatsApp / phone link here so both sides connect
+                   * directly without admin intervention.
+                   */}
+                  <SmartSupportPanel
+                    orders={customerOrders}
+                    customerPhone={customerSession?.phone || ''}
+                    customerName={customerSession?.name || ''}
+                    vendorPhone={supportPhone}
+                    vendorName={String((merchant as any)?.storeName || (merchant as any)?.store_name || '')}
+                    isBangla={isBn}
+                    onEscalate={handleSupportEscalate}
+                  />
+
+                  {(supportPhone || supportEmail || supportAddress) && (
+                    <div className="space-y-2 border-t border-slate-200 pt-3">
                       {supportPhone && (
                         <a
                           href={`https://wa.me/${supportPhone}`}
@@ -6373,9 +6438,7 @@ The render below must not guess. A merchant may paste
                           <span className="leading-relaxed">{supportAddress}</span>
                         </div>
                       )}
-                    </>
-                  ) : (
-                    <p className="text-sm text-slate-500">{t('sf_support_desc')}</p>
+                    </div>
                   )}
                 </div>
               )}
