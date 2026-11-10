@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { MerchantProfile, Product, BankAccount, MobileBankingConfig, CodConfig, Order, OrderItem, ThemeConfig } from '../types';
 import { buildCategoryDbPayload, buildProductDbPayload, maxCatalogId, packCatalogItem, toCatalogSlug, ensureCategory, mapApiProduct, mapApiCategory } from '../utils/catalogPayload';
 import { resolveDeliveryCharge, resolveProductDeliveryRates, readMerchantFee, toFee } from '../utils/deliveryCharges';
@@ -11,7 +11,7 @@ import {
   isSubDhakaArea,
   resolveDeliveryZoneForCity,
 } from '../../lib/deliveryZones';
-import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera, HelpCircle } from 'lucide-react';
+import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera } from 'lucide-react';
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
@@ -21,7 +21,8 @@ import { fetchStoreByRef, storeIdFromRecord } from '../lib/storeApi';
 import { LanguageToggle } from './LanguageToggle';
 import SafeImage from './SafeImage';
 import { useStorefrontTracking } from '../hooks/useStorefrontTracking';
-import { MessengerChatWidget, resolveMessengerHref } from './MessengerChatWidget';
+import { resolveMessengerHref } from './MessengerChatWidget';
+import ContactStoreOwnerWidget from './ContactStoreOwnerWidget';
 import {
   EMPTY_MODULES,
   applyStoreSeo,
@@ -30,8 +31,6 @@ import {
 } from '../lib/storeModulesApi';
 import { normalizeOrders, safeDate, safeAmount } from '../utils/orderUtils';
 import { resolveProductImage as resolveAnyProductImage } from '../utils/imageFallback';
-import SmartSupportPanel, { type SupportIssue } from './SmartSupportPanel';
-import FloatingSupportButton from './FloatingSupportButton';
 import {
   WALLET_PROVIDERS,
   WALLET_LABELS,
@@ -2678,52 +2677,6 @@ The render below must not guess. A merchant may paste
     setCustomerSession(session);
   };
 
-  /*
-   * ── SMART SUPPORT ESCALATION (predefined-issue workflow) ─────────────────
-   *
-   * When a customer selects a CRITICAL issue (cancel/reject, payment
-   * verification, wrong item) the request is pushed to the VENDOR through the
-   * shared notification API, so it lands in their dashboard bell feed with the
-   * customer's phone number and order details attached. The storefront
-   * meanwhile shows the vendor's direct WhatsApp / phone link to the customer —
-   * both sides connect directly, without admin intervention.
-   *
-   * Best-effort: a dead API degrades to an empty bell, never a thrown error
-   * (house convention from src/lib/notificationsApi.ts).
-   */
-  const handleSupportEscalate = React.useCallback(async (issue: SupportIssue, order: Order | null) => {
-    const orderNumber = String(order?.orderNumber || order?.id || '').trim();
-    const title = isBn
-      ? `গুরুত্বপূর্ণ কাস্টমার সাপোর্ট রিকোয়েস্ট: ${issue.labelBn}`
-      : `Customer support request: ${issue.label}`;
-    const message = [
-      `Customer: ${customerSession?.name || 'Guest'}`,
-      customerSession?.phone ? `Phone: ${customerSession.phone}` : '',
-      orderNumber ? `Order: #${orderNumber}` : '',
-      order ? `Total: ৳${Number(order.totalBDT || 0).toLocaleString()}` : '',
-      `Issue: ${issue.label}`,
-    ].filter(Boolean).join(' | ');
-
-    try {
-      const res = await fetch('/api/notifications', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          title,
-          message,
-          type: 'warning',
-          merchantIds: currentVendor.id ? [currentVendor.id] : [],
-          targetAudience: currentVendor.id ? 'specific' : 'all',
-          audienceFilter: 'all',
-        }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!data?.ok) console.warn('[support] vendor escalation could not be delivered:', data?.error || res.status);
-    } catch (err: any) {
-      console.warn('[support] vendor escalation failed:', err?.message || err);
-    }
-  }, [customerSession, isBn, currentVendor.id]);
-
   const handleCustomerAuthSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setAuthNotice('');
@@ -2808,7 +2761,7 @@ The render below must not guess. A merchant may paste
   // stepper, review button and return button lives in the Orders tab only.
   // What lives here is account configuration — identity, saved addresses,
   // password and support.
-  const [profileModal, setProfileModal] = useState<'edit' | 'addresses' | 'password' | 'support' | null>(null);
+  const [profileModal, setProfileModal] = useState<'edit' | 'addresses' | 'password' | null>(null);
   // The floating Help button opens the SAME smart support modal — one state, one
   // panel, two entry points (profile row + always-visible floating widget).
   const [profileNotice, setProfileNotice] = useState('');
@@ -2821,10 +2774,6 @@ The render below must not guess. A merchant may paste
   // Saved delivery addresses, scoped per store so two shops don't share them.
   const [savedAddresses, setSavedAddresses] = useState<string[]>([]);
 
-  // Merchant contact details for the Support / Help Center row.
-  const supportPhone = String(resolvedTheme.contactPhone || storefrontMerchant.supportPhone || '').replace(/\D/g, '');
-  const supportEmail = String(resolvedTheme.contactEmail || storefrontMerchant.supportEmail || '');
-  const supportAddress = String(resolvedTheme.dhakaAddress || '');
 
   useEffect(() => {
     try {
@@ -2842,7 +2791,7 @@ The render below must not guess. A merchant may paste
     } catch (e) { /* ignore quota / privacy errors */ }
   }, [savedAddresses, storeSlug]);
 
-  const openProfileModal = (kind: 'edit' | 'addresses' | 'password' | 'support') => {
+  const openProfileModal = (kind: 'edit' | 'addresses' | 'password') => {
     setProfileNotice('');
     setProfileError('');
     if (kind === 'edit') {
@@ -4019,16 +3968,6 @@ The render below must not guess. A merchant may paste
                   </span>
                 )}
               </button>
-
-              {/* HELP — opens the smart support panel (predefined issues + vendor routing). */}
-              <button
-                onClick={() => { openProfileModal('support'); }}
-                className="p-1.5 text-slate-300 hover:text-amber-400 transition rounded-lg hover:bg-slate-800/80 border border-transparent hover:border-slate-700/60"
-                title={t('sf_help')}
-                aria-label={t('sf_help')}
-              >
-                <HelpCircle className="w-5 h-5" />
-              </button>
             </div>
           </div>
 
@@ -4108,13 +4047,6 @@ The render below must not guess. A merchant may paste
               >
                 <User className="w-4 h-4 text-slate-400" /> {t('sf_tab_profile')}
               </button>
-
-              <button
-                onClick={() => { openProfileModal('support'); setIsMobileMenuOpen(false); }}
-                className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition text-slate-300 hover:bg-slate-800/60"
-              >
-                <HelpCircle className="w-4 h-4 text-slate-400" /> {t('sf_help')}
-              </button>
             </div>
           )}
         </header>
@@ -4138,13 +4070,6 @@ The render below must not guess. A merchant may paste
               className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition ${mobileTab === 'profile' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
             >
               <User className="w-4 h-4" /> {t('sf_tab_profile')}
-            </button>
-
-            <button
-              onClick={() => { openProfileModal('support'); setIsMobileMenuOpen(false); }}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition text-slate-600 hover:bg-slate-50"
-            >
-              <HelpCircle className="w-4 h-4" /> {t('sf_help')}
             </button>
           </div>
         )}
@@ -4937,20 +4862,6 @@ The render below must not guess. A merchant may paste
                         {t('sf_account_actions')}
                       </h3>
                       <div className="divide-y divide-slate-100">
-                        <button
-                          onClick={() => openProfileModal('support')}
-                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-slate-50 transition cursor-pointer"
-                        >
-                          <div className="w-9 h-9 shrink-0 rounded-xl bg-slate-100 flex items-center justify-center">
-                            <MessageCircle className="w-4 h-4 text-slate-600" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm font-bold text-slate-800">{t('sf_support_center')}</div>
-                            <div className="text-[11px] text-slate-500 truncate">{t('sf_support_desc')}</div>
-                          </div>
-                          <ChevronRight className="w-4 h-4 shrink-0 text-slate-300" />
-                        </button>
-
                         <button
                           onClick={handleCustomerSignOut}
                           className="w-full flex items-center gap-3 p-4 text-left hover:bg-red-50 transition cursor-pointer"
@@ -6295,7 +6206,6 @@ The render below must not guess. A merchant may paste
                 {profileModal === 'edit' && t('sf_edit_profile')}
                 {profileModal === 'addresses' && t('sf_saved_addresses')}
                 {profileModal === 'password' && t('sf_change_password')}
-                {profileModal === 'support' && t('sf_support_center')}
               </h3>
               <button
                 onClick={closeProfileModal}
@@ -6417,59 +6327,6 @@ The render below must not guess. A merchant may paste
                   </button>
                 </form>
               )}
-              {profileModal === 'support' && (
-                <div className="space-y-4">
-                  {/*
-                   * SMART SUPPORT — predefined issue selector with AI replies and
-                   * vendor routing. Critical issues (cancel / payment / wrong item)
-                   * push a notification into the vendor's dashboard bell with the
-                   * customer's phone + order details, and surface the vendor's
-                   * direct WhatsApp / phone link here so both sides connect
-                   * directly without admin intervention.
-                   */}
-                  <SmartSupportPanel
-                    orders={customerOrders}
-                    customerPhone={customerSession?.phone || ''}
-                    customerName={customerSession?.name || ''}
-                    vendorPhone={supportPhone}
-                    vendorName={String((merchant as any)?.storeName || (merchant as any)?.store_name || '')}
-                    isBangla={isBn}
-                    onEscalate={handleSupportEscalate}
-                  />
-
-                  {(supportPhone || supportEmail || supportAddress) && (
-                    <div className="space-y-2 border-t border-slate-200 pt-3">
-                      {supportPhone && (
-                        <a
-                          href={`https://wa.me/${supportPhone}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-3 rounded-xl border border-slate-200 px-3.5 py-3 text-sm text-slate-700 hover:bg-slate-50 transition"
-                        >
-                          <Phone className="h-4 w-4 shrink-0 text-slate-400" />
-                          <span className="font-semibold">{supportPhone}</span>
-                        </a>
-                      )}
-                      {supportEmail && (
-                        <a
-                          href={`mailto:${supportEmail}`}
-                          className="flex items-center gap-3 rounded-xl border border-slate-200 px-3.5 py-3 text-sm text-slate-700 hover:bg-slate-50 transition"
-                        >
-                          <Globe className="h-4 w-4 shrink-0 text-slate-400" />
-                          <span className="truncate font-semibold">{supportEmail}</span>
-                        </a>
-                      )}
-                      {supportAddress && (
-                        <div className="flex items-center gap-3 rounded-xl border border-slate-200 px-3.5 py-3 text-sm text-slate-700">
-                          <MapPin className="h-4 w-4 shrink-0 text-slate-400" />
-                          <span className="leading-relaxed">{supportAddress}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
               {profileError && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">
                   {profileError}
@@ -6922,39 +6779,14 @@ The render below must not guess. A merchant may paste
       })()}
       </div>
 
-      {/* GLOBAL FLOATING HELP BUTTON — visible on every storefront page.
-          Opens the smart support modal (predefined issues + vendor routing).
-          Sits above the Messenger/WhatsApp float so both stay tappable. */}
-      <FloatingSupportButton
-        onClick={() => openProfileModal('support')}
-        label={isBn ? 'সহায়তা' : 'Help / Support'}
+      {/* CONTACT STORE OWNER — direct chat links (WhatsApp / Messenger / Telegram)
+          for the channels the merchant configured in their store profile.
+          Replaces the AI Smart Support Panel on custom store links. */}
+      <ContactStoreOwnerWidget
+        whatsappNumber={resolvedTheme.whatsappNumber || undefined}
+        messengerHref={resolveMessengerHref(messengerPageId, resolvedTheme.facebookHandle) || undefined}
+        telegramHandle={(storefrontMerchant as any)?.telegramHandle || undefined}
       />
-
-      {/* SINGLE primary floating chat button (Messenger first, WhatsApp second).
-          Only ONE floats at a time to keep the storefront look clean — the
-          social-links section still shows every configured channel. */}
-      {(() => {
-        const messengerHref = resolveMessengerHref(messengerPageId, resolvedTheme.facebookHandle);
-        if (messengerHref) {
-          return <MessengerChatWidget pageId={messengerPageId} pageUrl={resolvedTheme.facebookHandle} />;
-        }
-        if (resolvedTheme.showWhatsapp && resolvedTheme.whatsappNumber) {
-          return (
-            <a
-              href={`https://wa.me/${resolvedTheme.whatsappNumber}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Chat on WhatsApp"
-              aria-label="Chat on WhatsApp"
-              data-testid="floating-whatsapp-widget"
-              className="fixed bottom-6 right-6 z-[9999] flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-2xl shadow-black/40 ring-1 ring-white/20 transition hover:scale-110"
-            >
-              <MessageCircle className="h-7 w-7" />
-            </a>
-          );
-        }
-        return null;
-      })()}
     </div>
   );
 };
