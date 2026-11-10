@@ -107,6 +107,7 @@ import {
   Menu,
   ShieldAlert,
   HelpCircle,
+  Headphones,
   Trash2,
   Copy,
   MapPin,
@@ -1420,6 +1421,16 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Globe className="w-3.5 h-3.5 text-[#E6C587]" />
             <span className="text-[#E6C587] font-bold">{merchant?.currency || 'BDT'} ({merchant?.currency === 'USD' ? '$' : '৳'})</span>
+          </button>
+
+          {/* Support / Help Center — opens the Smart Support Panel modal */}
+          <button
+            onClick={handleOpenSupport}
+            className="hidden sm:flex items-center gap-1 bg-[#252B3B] hover:bg-[#2E3548] text-slate-300 text-xs font-semibold px-2.5 py-2 rounded-xl border border-[#3A435E] transition cursor-pointer"
+            title="Help & Support"
+          >
+            <Headphones className="w-3.5 h-3.5 text-[#E6C587]" />
+            <span className="font-bold">Support</span>
           </button>
 
           {/* Storefront Preview */}
