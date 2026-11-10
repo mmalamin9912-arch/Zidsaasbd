@@ -11,7 +11,7 @@ import {
   isSubDhakaArea,
   resolveDeliveryZoneForCity,
 } from '../../lib/deliveryZones';
-import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera } from 'lucide-react';
+import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera, HelpCircle } from 'lucide-react';
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
@@ -4019,6 +4019,16 @@ The render below must not guess. A merchant may paste
                   </span>
                 )}
               </button>
+
+              {/* HELP — opens the smart support panel (predefined issues + vendor routing). */}
+              <button
+                onClick={() => { openProfileModal('support'); }}
+                className="p-1.5 text-slate-300 hover:text-amber-400 transition rounded-lg hover:bg-slate-800/80 border border-transparent hover:border-slate-700/60"
+                title={t('sf_help')}
+                aria-label={t('sf_help')}
+              >
+                <HelpCircle className="w-5 h-5" />
+              </button>
             </div>
           </div>
 
@@ -4098,6 +4108,13 @@ The render below must not guess. A merchant may paste
               >
                 <User className="w-4 h-4 text-slate-400" /> {t('sf_tab_profile')}
               </button>
+
+              <button
+                onClick={() => { openProfileModal('support'); setIsMobileMenuOpen(false); }}
+                className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition text-slate-300 hover:bg-slate-800/60"
+              >
+                <HelpCircle className="w-4 h-4 text-slate-400" /> {t('sf_help')}
+              </button>
             </div>
           )}
         </header>
@@ -4121,6 +4138,13 @@ The render below must not guess. A merchant may paste
               className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition ${mobileTab === 'profile' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
             >
               <User className="w-4 h-4" /> {t('sf_tab_profile')}
+            </button>
+
+            <button
+              onClick={() => { openProfileModal('support'); setIsMobileMenuOpen(false); }}
+              className="w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-black flex items-center gap-2.5 transition text-slate-600 hover:bg-slate-50"
+            >
+              <HelpCircle className="w-4 h-4" /> {t('sf_help')}
             </button>
           </div>
         )}
