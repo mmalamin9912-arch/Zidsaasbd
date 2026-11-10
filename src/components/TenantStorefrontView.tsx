@@ -11,7 +11,7 @@ import {
   isSubDhakaArea,
   resolveDeliveryZoneForCity,
 } from '../../lib/deliveryZones';
-import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera } from 'lucide-react';
+import { ShoppingBag, X, Check, Copy, CreditCard, Building2, Smartphone, ShieldCheck, Search, Globe, Phone, MapPin, ArrowRight, ArrowLeft, ExternalLink, Clock, Menu, User, Lock, Sparkles, PackageCheck, LogOut, Home, Star, Share2, RotateCcw, MessageSquare, MessageCircle, ChevronRight, ChevronLeft, Trash2, Flame, Eye, Plus, Minus, Tag, Zap, Loader2, Facebook, Instagram, Youtube, Music, Play, Camera, Send } from 'lucide-react';
 import { sendWhatsAppOtp, verifyWhatsAppOtp, formatFullPhoneNumber } from '../lib/whatsappOtpService';
 import { PhoneVerificationInput } from './PhoneVerificationInput';
 import { readZidStoreData, subscribeToZidStoreData, writeZidStoreData, type ZidStoreData } from '../lib/storeData';
@@ -687,6 +687,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     instagramHandle?: string;
     whatsappNumber?: string;
     tiktokHandle?: string;
+    /** Resolved chat-channel links (m.me / t.me) from Social & Chat Setup. */
+    messengerHandle?: string;
+    telegramHandle?: string;
     youtubeHandle?: string;
     showFacebook?: boolean;
     showInstagram?: boolean;
@@ -889,6 +892,9 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     facebookHandle: resolveSocialUrl('facebook', storefrontMerchant, merchantThemeConfig),
     instagramHandle: resolveSocialUrl('instagram', storefrontMerchant, merchantThemeConfig),
     whatsappNumber: resolveSocialUrl('whatsapp', storefrontMerchant, merchantThemeConfig),
+    // Chat handles (m.me / t.me) resolved from the Settings → Social & Chat Setup fields.
+    messengerHandle: resolveSocialUrl('messenger', storefrontMerchant, merchantThemeConfig),
+    telegramHandle: resolveSocialUrl('telegram', storefrontMerchant, merchantThemeConfig),
     tiktokHandle: resolveSocialUrl('tiktok', storefrontMerchant, merchantThemeConfig),
     youtubeHandle: (typeof merchantThemeConfig.youtubeHandle === 'string' && merchantThemeConfig.youtubeHandle) || '',
     showFacebook: merchantThemeConfig.showFacebook !== false,
@@ -1044,7 +1050,7 @@ The render below must not guess. A merchant may paste
    * the caller prefixes `https://wa.me/`.
    */
   function resolveSocialUrl(
-    channel: 'facebook' | 'instagram' | 'tiktok' | 'whatsapp',
+    channel: 'facebook' | 'instagram' | 'tiktok' | 'whatsapp' | 'messenger' | 'telegram',
     profile: Record<string, any>,
     theme: Record<string, any>,
   ): string {
@@ -1054,6 +1060,9 @@ The render below must not guess. A merchant may paste
       instagram: ['instagramUrl', 'instagramProfile', 'instagram_profile', 'instagram'],
       tiktok: ['tiktokUrl', 'tikTokLink', 'tiktok', 'tikTok'],
       whatsapp: ['whatsappNumber', 'whatsapp', 'whatsapp_number'],
+      // Chat handles saved by Settings → Social & Chat Setup.
+      messenger: ['messengerHandle', 'messenger_username', 'messenger_handle', 'messenger'],
+      telegram: ['telegramHandle', 'telegram_username', 'telegram_handle', 'telegram'],
     };
     /** The theme-editor handle keys each channel may carry. */
     const themeKeys: Record<string, string[]> = {
@@ -1061,6 +1070,8 @@ The render below must not guess. A merchant may paste
       instagram: ['instagramHandle'],
       tiktok: ['tiktokHandle', 'tikTokHandle'],
       whatsapp: ['whatsappNumber'],
+      messenger: ['messengerHandle'],
+      telegram: ['telegramHandle'],
     };
 
     const first = (source: Record<string, any>, keys: string[]): string => {
@@ -1090,7 +1101,25 @@ The render below must not guess. A merchant may paste
       facebook: (h) => /(^|\.)facebook\.com$/.test(h) || /(^|\.)fb\.com$/.test(h) || /(^|\.)m\.me$/.test(h) || /(^|\.)messenger\.com$/.test(h),
       instagram: (h) => /(^|\.)instagram\.com$/.test(h),
       tiktok: (h) => /(^|\.)tiktok\.com$/.test(h),
+      telegram: (h) => /(^|\.)t\.me$/.test(h) || /(^|\.)telegram\.me$/.test(h) || /(^|\.)telegram\.org$/.test(h),
     };
+
+    // MESSENGER shares the facebook branch: an m.me link / bare page identity
+    // resolves to `https://m.me/<username>` either way.
+    if (channel === 'messenger') channel = 'facebook';
+
+    // TELEGRAM: an @username (or bare name, or full t.me URL) → t.me link.
+    if (channel === 'telegram') {
+      const tgBare = raw.replace(/^@/, '').replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+      const tgMe = String(tgBare).match(/^(?:t\.me|telegram\.me)\/([^\/?#]+)/i);
+      if (tgMe) return `https://t.me/${tgMe[1]}`;
+      const tgHost = tgBare.split('/')[0].toLowerCase();
+      if (tgHost.includes('.') && !hostMatches.telegram(tgHost)) return '';
+      const tgName = tgHost.includes('.')
+        ? String(tgBare).split('/').filter(Boolean).slice(1).join('/')
+        : tgBare.replace(/[^a-zA-Z0-9_-]/g, '');
+      return tgName ? `https://t.me/${tgName.replace(/^@/, '')}` : '';
+    }
 
     // A bare numeric Page ID pasted into the Facebook field — keep it as-is so
     // the Messenger widget can link it via m.me (e.g. "130070660193001").
@@ -4667,6 +4696,9 @@ The render below must not guess. A merchant may paste
                   {resolvedTheme.showWhatsapp && resolvedTheme.whatsappNumber && (
                     <a href={`https://wa.me/${resolvedTheme.whatsappNumber}`} target="_blank" rel="noreferrer" title="WhatsApp" className="p-2.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:scale-110 transition"><MessageCircle className="w-4 h-4" /></a>
                   )}
+                  {resolvedTheme.telegramHandle && (
+                    <a href={resolvedTheme.telegramHandle} target="_blank" rel="noreferrer" title="Telegram" className="p-2.5 rounded-full bg-sky-500/15 text-sky-400 border border-sky-500/30 hover:scale-110 transition"><Send className="w-4 h-4" /></a>
+                  )}
                   {resolvedTheme.showTikTok && resolvedTheme.tiktokHandle && (
                     <a href={resolvedTheme.tiktokHandle} target="_blank" rel="noreferrer" title="TikTok" className="p-2.5 rounded-full bg-slate-500/15 text-slate-200 border border-slate-500/30 hover:scale-110 transition"><Music className="w-4 h-4" /></a>
                   )}
@@ -6785,7 +6817,7 @@ The render below must not guess. A merchant may paste
       <ContactStoreOwnerWidget
         whatsappNumber={resolvedTheme.whatsappNumber || undefined}
         messengerHref={resolveMessengerHref(messengerPageId, resolvedTheme.facebookHandle) || undefined}
-        telegramHandle={(storefrontMerchant as any)?.telegramHandle || undefined}
+        telegramHandle={(resolvedTheme.telegramHandle || (storefrontMerchant as any)?.telegramHandle || undefined) as string | undefined}
       />
     </div>
   );

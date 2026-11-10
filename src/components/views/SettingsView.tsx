@@ -50,6 +50,37 @@ import {
   MessageCircle
 } from 'lucide-react';
 
+/**
+ * Normalise the Messenger / Telegram handle inputs into the canonical fields
+ * persisted on the merchant record.
+ *
+ * - ``@name`` / ``name``            → ``https://m.me/name`` / ``https://t.me/name``
+ * - already a full URL              → kept verbatim (host sanity checked loosely)
+ * - blank                            → empty strings (icon hidden on storefront)
+ */
+function normalizeChatHandles(messenger: string, telegram: string): {
+  messengerHandle: string;
+  telegramHandle: string;
+  messenger_username: string;
+  telegram_username: string;
+} {
+  const expand = (value: string, base: string): string => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const name = raw.replace(/^@/, '').replace(/\/$/, '');
+    return name ? `${base}/${name}` : '';
+  };
+  const m = expand(messenger, 'https://m.me');
+  const t = expand(telegram, 'https://t.me');
+  return {
+    messengerHandle: m,
+    telegramHandle: t,
+    messenger_username: m ? m.replace(/^https?:\/\//i, '') : '',
+    telegram_username: t ? t.replace(/^https?:\/\//i, '') : '',
+  };
+}
+
 interface SettingsViewProps {
   merchant: MerchantProfile;
   onUpdateMerchant: (updated: MerchantProfile) => void;
@@ -93,6 +124,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [facebookUrl, setFacebookUrl] = useState(merchant?.facebookUrl || '');
   const [instagramUrl, setInstagramUrl] = useState(merchant?.instagramUrl || '');
   const [tiktokUrl, setTiktokUrl] = useState(merchant?.tiktokUrl || '');
+  // Chat-channel handles: Messenger (m.me) + Telegram (t.me). A bare username
+  // (@name or name) is expanded to the canonical share URL at save time so the
+  // storefront never has to guess.
+  const [messengerHandle, setMessengerHandle] = useState(
+    (merchant as any)?.messengerHandle || (merchant as any)?.messenger_username || ''
+  );
+  const [telegramHandle, setTelegramHandle] = useState(
+    (merchant as any)?.telegramHandle || (merchant as any)?.telegram_username || ''
+  );
 
   const [currency, setCurrency] = useState(merchant?.currency || 'BDT');
   const [language, setLanguage] = useState(merchant?.language || 'en-US');
@@ -1564,6 +1604,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       facebookUrl,
       instagramUrl,
       tiktokUrl,
+      /*
+       * Chat handles — Messenger (m.me) and Telegram (t.me).
+       *
+       * A bare @username or username is normalised to the canonical share URL
+       * before saving, so the storefront can render the chat link directly
+       * without re-deriving it. A full https URL the merchant already pasted is
+       * kept verbatim.
+       */
+      ...normalizeChatHandles(messengerHandle, telegramHandle),
       currency: currency as any,
       language: language as any,
       themeConfig: updatedThemeConfig,
@@ -2261,8 +2310,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
                     />
                     <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
-                      আপনার অফিশিয়াল ফেসবুক পেজের সম্পূর্ণ লিংক বা m.me লিংক এখানে দিন।
-                      (m.me লিংক দিলে গ্রাহক সরাসরি মেসেঞ্জার চ্যাটে চলে যাবে।)
+                      আপনার অফিশিয়াল ফেসবুক পেজের সম্পূর্ণ লিংক এখানে দিন।
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">Facebook Messenger (m.me link or username)</label>
+                    <input
+                      type="text"
+                      value={messengerHandle}
+                      onChange={(e) => setMessengerHandle(e.target.value)}
+                      placeholder="@yourpage  অথবা  https://m.me/yourpage"
+                      className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      মেসেঞ্জার ইউজারনেম বা m.me লিংক দিন — গ্রাহক ক্লিক করলে সরাসরি m.me/username চ্যাটে যাবে।
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">Telegram (t.me link or username)</label>
+                    <input
+                      type="text"
+                      value={telegramHandle}
+                      onChange={(e) => setTelegramHandle(e.target.value)}
+                      placeholder="@yourbrand  অথবা  https://t.me/yourbrand"
+                      className="w-full bg-[#181B26] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                      টেলিগ্রাম ইউজারনেম দিন — গ্রাহক ক্লিক করলে সরাসরি t.me/username চ্যাটে যাবে।
                     </p>
                   </div>
 
