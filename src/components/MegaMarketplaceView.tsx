@@ -23,7 +23,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Search, ShoppingBasket, Store, User, ChevronDown, ChevronLeft, ChevronRight,
-  SlidersHorizontal, X, Star, Truck, ShieldCheck, BadgePercent, Loader2,
+  Headphones, SlidersHorizontal, X, Star, Truck, ShieldCheck, BadgePercent, Loader2,
   MapPin, TruckIcon, HeadphonesIcon, RotateCcw, Check, Plus, Minus,
   LayoutGrid, Flame, Sparkles, ArrowRight, Menu, ArrowUpDown, LogOut,
   Heart, Receipt, Globe, TrendingUp, Clock, Smartphone, Watch, Gamepad2,
@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import SafeImage from './SafeImage';
 import MarketplaceSeoFooter from './MarketplaceSeoFooter';
+import SmartSupportPanel, { type SupportIssue } from './SmartSupportPanel';
 import { useToast } from './ToastProvider';
 import {
   fetchMarketplaceProducts,
@@ -1193,6 +1194,40 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const toast = useToast();
   const basket = useMarketplaceBasket();
 
+  /* ── Platform support (HEADSET ICON, main marketplace header only) ──────
+     The smart support center lives HERE — on the marketplace's own mega-
+     header — and nowhere else. Tenant storefronts never render it: a
+     merchant's own store talks to shoppers through the direct social links
+     (WhatsApp / Messenger / Telegram / Instagram / TikTok) the merchant
+     configured, via ContactStoreOwnerWidget in TenantStorefrontView. */
+  const [supportPanelOpen, setSupportPanelOpen] = useState(false);
+  const openSupport = useCallback(() => {
+    setShowLocation(false);
+    setShowAccountMenu(false);
+    setShowLangMenu(false);
+    setSupportPanelOpen(true);
+  }, []);
+
+  /** Critical issues POST to the shared platform notifications feed — the
+      marketplace-level escalation goes to the platform team, not a vendor. */
+  const handleSupportEscalate = useCallback(async (issue: SupportIssue) => {
+    try {
+      await fetch('/api/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          title: `Marketplace support request: ${issue.label}`,
+          message: `A shopper opened the marketplace Help & Support Center and selected: "${issue.label}". Please route this to the responsible team.`,
+          type: 'warning',
+          targetAudience: 'all',
+          audienceFilter: 'all',
+        }),
+      });
+    } catch (err: any) {
+      console.warn('[support] marketplace escalation failed:', err?.message || err);
+    }
+  }, []);
+
   /* ── Dark / Light mode ────────────────────────────────────────────────── */
   const [isDark, toggleDark] = useDarkMode();
   /* The theme engine writes ONE attribute that both our own tokens and every
@@ -2145,6 +2180,18 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             />
           </div>
 
+          {/* Platform support headset — mobile compact bar (icon only). */}
+          <button
+            type="button"
+            onClick={openSupport}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl active:opacity-80"
+            style={{ color: THEME.ink }}
+            aria-label="Help & Support"
+            title="Help & Support"
+          >
+            <Headphones className="h-5 w-5" />
+          </button>
+
           <button
             type="button"
             onClick={() => setSearchOpen((v) => !v)}
@@ -2427,6 +2474,21 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
                 label={isDark ? copy('switch_to_light') : copy('switch_to_dark')}
               />
             </div>
+
+            {/* PLATFORM SUPPORT HEADSET — RIGHT SIDE of the mega-header, strictly
+                on the main marketplace (never on tenant storefronts, which use
+                the merchant's own social links). */}
+            <button
+              type="button"
+              onClick={openSupport}
+              className="mm-hover flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 transition"
+              style={{ color: THEME.ink }}
+              title="Help & Support"
+              aria-label="Help & Support"
+            >
+              <Headphones className="h-[18px] w-[18px]" style={{ color: THEME.brand }} />
+              <span className="hidden xl:inline text-[12px] font-bold">Support</span>
+            </button>
 
             {/* ACCOUNT DROPDOWN */}
             <div className="relative">
@@ -3469,6 +3531,46 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           }}
         />
       </main>
+
+      {/* ═════════ SMART SUPPORT PANEL (platform-wide) ═════════
+          Opened ONLY from the headset icon in this mega-header. Escalations
+          POST to the shared /api/notifications feed so the platform team picks
+          the request up; individual vendor storefronts do NOT mount this —
+          they rely on the merchant's configured direct social links. */}
+      {supportPanelOpen && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-end sm:items-center justify-center bg-slate-950/70 backdrop-blur-sm p-0 sm:p-4"
+          onClick={() => setSupportPanelOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-t-3xl sm:rounded-3xl bg-white text-slate-800 border border-slate-200 shadow-2xl max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-5 py-4 rounded-t-3xl">
+              <h3 className="text-base font-black">Help & Support Center</h3>
+              <button
+                onClick={() => setSupportPanelOpen(false)}
+                aria-label="Close"
+                className="p-1 rounded-lg text-slate-500 hover:bg-slate-100 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-5">
+              <p className="mb-3 text-xs text-slate-500">Select your issue below — critical problems are routed to the responsible team, others get instant answers.</p>
+              <SmartSupportPanel
+                orders={[]}
+                customerPhone=""
+                customerName={shopperFirstName || 'Shopper'}
+                vendorPhone=""
+                vendorName="Zid Marketplace Support"
+                isBangla={language === 'bn'}
+                onEscalate={handleSupportEscalate}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═════════ WISHLIST DRAWER ═════════
           Same sheet mechanics as the basket, but no checkout: a wishlist is
