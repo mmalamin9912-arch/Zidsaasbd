@@ -23,7 +23,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Search, ShoppingBasket, Store, User, ChevronDown, ChevronLeft, ChevronRight,
-  Headphones, SlidersHorizontal, X, Star, Truck, ShieldCheck, BadgePercent, Loader2,
+  SlidersHorizontal, X, Star, Truck, ShieldCheck, BadgePercent, Loader2,
   MapPin, TruckIcon, HeadphonesIcon, RotateCcw, Check, Plus, Minus,
   LayoutGrid, Flame, Sparkles, ArrowRight, Menu, ArrowUpDown, LogOut,
   Heart, Receipt, Globe, TrendingUp, Clock, Smartphone, Watch, Gamepad2,
@@ -1194,12 +1194,14 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
   const toast = useToast();
   const basket = useMarketplaceBasket();
 
-  /* ── Platform support (HEADSET ICON, main marketplace header only) ──────
-     The smart support center lives HERE — on the marketplace's own mega-
-     header — and nowhere else. Tenant storefronts never render it: a
-     merchant's own store talks to shoppers through the direct social links
-     (WhatsApp / Messenger / Telegram / Instagram / TikTok) the merchant
-     configured, via ContactStoreOwnerWidget in TenantStorefrontView. */
+  /* ── Platform support (floating widget, main marketplace only) ─────────
+     The smart support center lives HERE — on the marketplace's own page —
+     and nowhere else. It is opened from the bottom-right floating support
+     widget (never from the header, never on tenant storefronts). Tenant
+     storefronts never render it: a merchant's own store talks to shoppers
+     through the direct social links (WhatsApp / Messenger / Telegram /
+     Instagram / TikTok) the merchant configured, via ContactStoreOwnerWidget
+     in TenantStorefrontView. */
   const [supportPanelOpen, setSupportPanelOpen] = useState(false);
   const openSupport = useCallback(() => {
     setShowLocation(false);
@@ -2180,17 +2182,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
             />
           </div>
 
-          {/* Platform support headset — mobile compact bar (icon only). */}
-          <button
-            type="button"
-            onClick={openSupport}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl active:opacity-80"
-            style={{ color: THEME.ink }}
-            aria-label="Help & Support"
-            title="Help & Support"
-          >
-            <Headphones className="h-5 w-5" />
-          </button>
+
 
           <button
             type="button"
@@ -2475,20 +2467,7 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
               />
             </div>
 
-            {/* PLATFORM SUPPORT HEADSET — RIGHT SIDE of the mega-header, strictly
-                on the main marketplace (never on tenant storefronts, which use
-                the merchant's own social links). */}
-            <button
-              type="button"
-              onClick={openSupport}
-              className="mm-hover flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 transition"
-              style={{ color: THEME.ink }}
-              title="Help & Support"
-              aria-label="Help & Support"
-            >
-              <Headphones className="h-[18px] w-[18px]" style={{ color: THEME.brand }} />
-              <span className="hidden xl:inline text-[12px] font-bold">Support</span>
-            </button>
+
 
             {/* ACCOUNT DROPDOWN */}
             <div className="relative">
@@ -4319,6 +4298,48 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
           article.group:hover { box-shadow: var(--mm-card-shadow); }
         }
       `}</style>
+
+
+      {/* ═════════ BOTTOM-RIGHT FLOATING SUPPORT WIDGET ═════════
+          Platform-only live-help entry point: a friendly human agent wearing a
+          headset, with a glowing green "Online" dot and a pill label. Clicking
+          opens the same SmartSupportPanel as the old header headset. Never
+          rendered by TenantStorefrontView. */}
+      <button
+        type="button"
+        onClick={openSupport}
+        aria-label="Help / Support — online agent"
+        title="Help / Support"
+        data-testid="floating-support-widget"
+        className="fixed bottom-6 right-6 z-50 flex flex-col items-center rounded-full border border-slate-200 bg-white/95 backdrop-blur-md p-2.5 text-slate-700 shadow-2xl shadow-green-50/40 transition hover:scale-105 hover:shadow-[0_0_24px_rgba(74,222,128,0.35)] active:scale-95 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-400/60 dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-200"
+      >
+        <div className="relative flex h-13 w-13 shrink-0 items-center justify-center">
+          {/* Human agent bust with headset + microphone (custom SVG, no line icon) */}
+          <svg className="h-12 w-12" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            {/* Headset band */}
+            <path d="M17 18 Q32 10 47 18" stroke="#6B7280" stroke-width="3.5" stroke-linecap="round" />
+            {/* Head */}
+            <circle cx="32" cy="24" r="10" fill="#E7D5C4" stroke="#B98A5E" stroke-width="1.5" />
+            {/* Hair */}
+            <path d="M20 16 Q32 12 44 16" stroke="#4B3320" stroke-width="5" stroke-linecap="round" />
+            {/* Face */}
+            <circle cx="27" cy="21.5" r="1.4" fill="#374151" />
+            <circle cx="37" cy="21.5" r="1.4" fill="#374151" />
+            <path d="M28.5 26.5 Q32 28.5 35.5 26.5" stroke="#374151" stroke-width="1.6" stroke-linecap="round" fill="none" />
+            {/* Mic arm + capsule */}
+            <line x1="42.5" y1="19" x2="49.5" y2="26" stroke="#6B7280" stroke-width="2.5" stroke-linecap="round" />
+            <circle cx="50.5" cy="27.5" r="2.4" fill="#9CA3AF" />
+          </svg>
+          {/* Glowing green "Online" status dot */}
+          <span className="absolute bottom-0 right-0 flex h-3 w-3 items-center justify-center">
+            <span
+              className="h-2 w-2 rounded-full bg-green-400 ring-2 ring-white shadow-[0_0_0_10px_rgba(74,222,128,0.55)] animate-pulse"
+              aria-label="Online"
+            />
+          </span>
+        </div>
+        <span className="mt-1 text-[11px] font-bold leading-none whitespace-nowrap">Help / Support</span>
+      </button>
     </div>
   );
 };
