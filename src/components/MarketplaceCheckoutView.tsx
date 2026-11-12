@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, Truck, Wallet, CreditCard, Banknote, ShieldCheck,
   Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail, Copy, Check,
@@ -10,6 +10,8 @@ import { useCart } from './CartProvider';
 import { resolveProductImage } from '../utils/imageFallback';
 import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
+import { loadShippingConfig } from '../lib/logisticsApi';
+import type { ShippingConfig } from '../lib/logisticsApi';
 
 /**
  * The UNIFIED marketplace checkout — `/marketplace/checkout`.
@@ -508,14 +510,81 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     () => lines.reduce((sum, line) => sum + (Number(line.product?.priceBDT) || 0) * Number(line.quantity || 0), 0),
     [lines],
   );
-  // Delivery zone: derived from district, overridable by the shopper
-  const [shippingZone, setShippingZone] = useState<ShippingZone | null>(null);
-  const resolvedZone = shippingZone ?? shippingZoneOf(form.district);
-  const isInsideDhaka = resolvedZone === 'inside';
+  // Per-vendor shipping configs (each merchant's store district + own rates),
+  // loaded once so every seller prices the basket from their own location.
+  const [vendorConfigs, setVendorConfigs] = useState<Map<string, ShippingConfig | null>>(
+    new Map()
+  );
 
-  // Per-vendor delivery: each store charges its own delivery fee for the zone.
-  const perVendorDelivery = itemCount === 0 ? 0 : deliveryFeeOf(resolvedZone);
-  const totalDeliveryCharge = perVendorDelivery * vendors.length;
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const map = new Map<string, ShippingConfig | null>();
+      await Promise.all(
+        vendors.map(async (v) => {
+          try {
+            map.set(
+              v.vendorId,
+              await loadShippingConfig(v.vendorSlug || v.vendorId || undefined)
+            );
+          } catch {
+            map.set(v.vendorId, null);
+          }
+        })
+      );
+      if (!cancelled) setVendorConfigs(map);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vendors]);
+
+  // The customer's chosen district drives everything — there is no manual zone
+  // picker anymore, so a shopper can never tick the cheaper "Inside City"
+  // option from a district they do not live in.
+  const customerDistrict = String(form.district || '').trim();
+
+  // Per-vendor delivery: each merchant charges by THEIR store district vs the
+  // customer's district. An unconfigured older merchant defaults to Dhaka.
+  const perVendorDelivery = useMemo(() => {
+    if (itemCount === 0) return [];
+    return vendors.map((vendor) => {
+      const cfg = vendorConfigs.get(vendor.vendorId);
+      const merchantDistrict = (cfg?.baseCity || 'Dhaka') || 'Dhaka';
+      const sameCity =
+        customerDistrict.toLowerCase() === merchantDistrict.toLowerCase();
+      let zone: 'inside' | 'sub' | 'outside';
+      let fee: number;
+      if (sameCity) {
+        zone = 'inside';
+        fee = Number(cfg?.insideDhakaFee ?? 60);
+      } else if (
+        SUB_DHAKA_DISTRICTS.has(customerDistrict) &&
+        cfg?.subDhakaFee != null
+      ) {
+        zone = 'sub';
+        fee = cfg.subDhakaFee;
+      } else {
+        zone = 'outside';
+        fee = Number(cfg?.outsideDhakaFee ?? 120);
+      }
+      return {
+        vendorId: vendor.vendorId,
+        vendorName: vendor.vendorName,
+        zone,
+        fee,
+        merchantDistrict,
+      };
+    });
+  }, [vendors, vendorConfigs, customerDistrict, itemCount]);
+
+  const totalDeliveryCharge = perVendorDelivery.reduce(
+    (sum, d) => sum + d.fee,
+    0
+  );
+  const zones = perVendorDelivery.map((d) => d.zone);
+  const detectedZone =
+    zones.length > 0 && zones.every((z) => z === zones[0]) ? zones[0] : 'outside';
 
   // bKash cash-out charge (merchant-configured percentage, default 1%).
   const isBkash = payment === 'bkash';
@@ -639,9 +708,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                 address: form.address.trim(),
                 customerNote: form.note.trim() || undefined,
                 deliveryZone:
-                  resolvedZone === 'inside' ? 'Inside Dhaka'
-                    : resolvedZone === 'sub' ? 'Sub Dhaka'
-                      : 'Outside Dhaka',
+                  detectedZone === 'inside' ? 'Inside City'
+                    : detectedZone === 'sub' ? 'Sub-Dhaka / Suburbs'
+                      : 'Outside City',
+                customerDistrict: customerDistrict,
+                perVendorDelivery: perVendorDelivery,
                 subtotalBDT: subtotal,
                 deliveryCharge: totalDeliveryCharge,
                 totalBDT: total,
@@ -906,28 +977,56 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                       ))}
                     </select>
                   </label>
-                  {/* ── DELIVERY ZONE SELECTOR ── */}
+                  {/* ── AUTO-DETECTED DELIVERY BREAKDOWN (read-only) ── */}
                   <label className="block">
                     <span className="mb-1 flex items-center gap-1 text-[11px] font-bold text-slate-600">
-                      <Truck className="h-3 w-3" /> {t('Delivery zone', 'ডেলিভারি ज़োন')} *
+                      <MapPin className="h-3 w-3" />
+                      {t('Auto-detected delivery', 'স্বয়ংক্রিয় ডেলিভারি শনাক্তকরণ')}
                     </span>
-                    <select
-                      value={resolvedZone}
-                      onChange={(e) => setShippingZone(e.target.value as ShippingZone)}
-                      className="w-full rounded-lg border px-3 py-2.5 text-[13px] text-slate-800 focus:border-[#3b2fd6] focus:outline-none"
-                      style={{ borderColor: THEME.line }}
-                    >
-                      <option value="inside">{t('Inside City', 'শহরের ভিতরে')}</option>
-                      <option value="sub">{t('Sub-Dhaka / Suburbs', 'সাব-ঢাকা / উপশহর')}</option>
-                      <option value="outside">{t('Outside City', 'শহরের বাইরে')}</option>
-                    </select>
-                    <p className="mt-1 text-[10.5px] text-slate-500">
-                      {t(
-                        'Delivery fee applies per seller store.',
- 'ডেলিভারি ফি প্রতিটি সেলার স্টোরের জন্য लागू হয়।'
+                    <div className="mt-1 rounded-lg border px-3 py-2.5 text-[12.5px]" style={{ borderColor: THEME.line, backgroundColor: '#fbfdff' }}>
+                      {perVendorDelivery.length > 0 ? (
+                        <>
+                          <div className="mb-1.5 text-[10.5px] font-bold text-slate-700">
+                            {t('Detected district', 'শনাক্ত জেলা')}:{' '}
+                            <span className="font-black">{customerDistrict || '—'}</span>
+                          </div>
+                          {perVendorDelivery.map((d) => (
+                            <div
+                              key={d.vendorId}
+                              className="flex items-center justify-between gap-2 text-[10.5px] text-slate-600"
+                            >
+                              <span className="truncate">{d.vendorName}</span>
+                              <span className="ml-auto flex items-center gap-1">
+                                <span
+                                  className={d.zone === 'inside'
+                                    ? 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold bg-green-50 text-green-700 border border-green-100'
+                                    : d.zone === 'sub'
+                                      ? 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-100'
+                                      : 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold bg-slate-50 text-slate-700 border border-slate-100'}
+                                >
+                                  {d.zone === 'inside'
+                                    ? t('Inside City', 'শহরের ভিতরে')
+                                    : d.zone === 'sub'
+                                      ? t('Sub-Dhaka', 'সাব-ঢাকা')
+                                      : t('Outside City', 'শহরের বাইরে')}
+                                </span>
+                                <span>{bdt(d.fee)}</span>
+                              </span>
+                            </div>
+                          ))}
+                          <p className="mt-1.5 text-[10px] text-slate-500 leading-relaxed">
+                            {t(
+                              'Each seller charges delivery from their own store district to your district.',
+                              'প্রত্যেক সেলার তাদের স্টোরের জেলা থেকে আপনার জেলায় ডেলিভারি চার্জ নেন।'
+                            )}
+                          </p>
+                        </>
+                      ) : (
+                        <span className="text-slate-500">{t('Add items to see delivery fees.', 'ডেলিভারি ফি দেখতে পণ্য যোগ করুন।')}</span>
                       )}
-                    </p>
+                    </div>
                   </label>
+
                   <Field
                     label={t('Area / Thana', 'এলাকা / থানা')}
                     Icon={MapPin}
@@ -1183,31 +1282,36 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
 
                 <div className="space-y-1.5 border-t px-4 py-3 text-[12px]" style={{ borderColor: THEME.line }}>
                   <Row label={t('Subtotal', 'সাবটোটাল')} value={bdt(subtotal)} />
-                  {vendors.length > 1 && (
-                    <Row
-                      label={
-                        resolvedZone === 'inside'
-                          ? t('Delivery (per store)', 'ডেলিভারি (প্রতি স্টোর)')
-                          : resolvedZone === 'sub'
-                            ? t('Delivery (per store)', 'ডেলিভারি (প্রতি স্টোর)')
-                            : t('Delivery (per store)', 'ডেলিভারি (প্রতি স্টোর)')
-                      }
-                      value={bdt(perVendorDelivery) + t(' per store', 'প্রতি স্টোর')}
-                    />
+                                    {perVendorDelivery.length > 0 && (
+                    <div className="space-y-1">
+                      {perVendorDelivery.map((d) => (
+                        <Row
+                          key={d.vendorId}
+                          label={t(
+                            'Delivery · ' + d.vendorName,
+                            'ডেলিভারি · ' + d.vendorName
+                          )}
+                          value={
+                            bdt(d.fee) +
+                            ' · ' +
+                            (d.zone === 'inside'
+                              ? t('Inside City', 'শহরের ভিতরে')
+                              : d.zone === 'sub'
+                                ? t('Sub-Dhaka', 'সাব-ঢাকা')
+                                : t('Outside City', 'শহরের বাইরে')) +
+                            ' (' +
+                            d.merchantDistrict +
+                            ')'
+                        }
+                      />
+                      ))}
+                      <Row
+                        label={t('Total delivery', 'মোট ডেলিভারি')}
+                        value={bdt(totalDeliveryCharge)}
+                      />
+                    </div>
                   )}
-                  {vendors.length === 1 && (
-                    <Row
-                      label={
-                        resolvedZone === 'inside'
-                          ? t('Delivery (inside Dhaka)', 'ডেলিভারি (ঢাকার ভিতরে)')
-                          : resolvedZone === 'sub'
-                            ? t('Delivery (sub Dhaka)', 'ডেলিভারি (সাব-ঢাকা)')
-                            : t('Delivery (outside Dhaka)', 'ডেলিভারি (ঢাকার বাইরে)')
-                      }
-                      value={bdt(totalDeliveryCharge)}
-                    />
-                  )}
-                  {isBkash && (
+{isBkash && (
                     <Row
                       label={t('bKash cash-out fee', 'বিকাশ ক্যাশ-আউট ফি')}
                       value={bdt(bkashCashOutFee)}
@@ -1326,3 +1430,5 @@ const Row: React.FC<{ label: string; value: string }> = ({ label, value }) => (
 );
 
 export default MarketplaceCheckoutView;
+
+

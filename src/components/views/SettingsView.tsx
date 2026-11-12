@@ -292,7 +292,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [expressMobileBankingOnly, setExpressMobileBankingOnly] = useState(false);
   // The merchant's base city — the anchor for the checkout's delivery-zone
   // validation. Persisted with the fees in the shipping config.
-  const [baseCity, setBaseCity] = useState(merchant?.baseCity || '');
+  const [baseCity, setBaseCity] = useState(merchant?.baseCity || 'Dhaka');
   const [constraintsSaving, setConstraintsSaving] = useState(false);
   const [constraintsNotice, setConstraintsNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
@@ -1661,6 +1661,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveConstraints = async () => {
     if (!storeRef) {
       setConstraintsNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      return;
+    }
+    if (!baseCity || baseCity.trim() === '') {
+      setConstraintsNotice({
+        type: 'error',
+        text: 'Store District / City is required. Please choose your store\'s district before saving.',
+      });
       return;
     }
     setConstraintsSaving(true);
@@ -3535,7 +3542,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       onChange={(e) => setBaseCity(e.target.value)}
                       className="w-full max-w-sm bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
                     >
-                      <option value="">Not set — allow both delivery zones</option>
                       {BANGLADESH_DISTRICTS.map((district) => (
                         <option key={district} value={district}>{district}</option>
                       ))}
