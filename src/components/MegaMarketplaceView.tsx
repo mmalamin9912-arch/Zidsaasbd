@@ -4300,45 +4300,46 @@ export const MegaMarketplaceView: React.FC<MegaMarketplaceViewProps> = ({
       `}</style>
 
 
-      {/* ═════════ BOTTOM-RIGHT FLOATING SUPPORT WIDGET ═════════
-          Platform-only live-help entry point: a friendly human agent wearing a
-          headset, with a glowing green "Online" dot and a pill label. Clicking
-          opens the same SmartSupportPanel as the old header headset. Never
-          rendered by TenantStorefrontView. */}
+      {/* BOTTOM-RIGHT FLOATING SUPPORT WIDGET — custom flat-vector support agent graphic */}
       <button
         type="button"
         onClick={openSupport}
         aria-label="Help / Support — online agent"
         title="Help / Support"
         data-testid="floating-support-widget"
-        className="fixed bottom-6 right-6 z-50 flex flex-col items-center rounded-full border border-slate-200 bg-white/95 backdrop-blur-md p-2.5 text-slate-700 shadow-2xl shadow-green-50/40 transition hover:scale-105 hover:shadow-[0_0_24px_rgba(74,222,128,0.35)] active:scale-95 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-400/60 dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-200"
+        className="fixed bottom-6 right-6 z-50 w-24 h-24 shrink-0 cursor-pointer hover:scale-105 transition-transform drop-shadow-xl rounded-lg bg-white border border-slate-200 dark:border-slate-700 dark:bg-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
       >
-        <div className="relative flex h-13 w-13 shrink-0 items-center justify-center">
-          {/* Human agent bust with headset + microphone (custom SVG, no line icon) */}
-          <svg className="h-12 w-12" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-            {/* Headset band */}
-            <path d="M17 18 Q32 10 47 18" stroke="#6B7280" stroke-width="3.5" stroke-linecap="round" />
-            {/* Head */}
-            <circle cx="32" cy="24" r="10" fill="#E7D5C4" stroke="#B98A5E" stroke-width="1.5" />
-            {/* Hair */}
-            <path d="M20 16 Q32 12 44 16" stroke="#4B3320" stroke-width="5" stroke-linecap="round" />
-            {/* Face */}
-            <circle cx="27" cy="21.5" r="1.4" fill="#374151" />
-            <circle cx="37" cy="21.5" r="1.4" fill="#374151" />
-            <path d="M28.5 26.5 Q32 28.5 35.5 26.5" stroke="#374151" stroke-width="1.6" stroke-linecap="round" fill="none" />
-            {/* Mic arm + capsule */}
-            <line x1="42.5" y1="19" x2="49.5" y2="26" stroke="#6B7280" stroke-width="2.5" stroke-linecap="round" />
-            <circle cx="50.5" cy="27.5" r="2.4" fill="#9CA3AF" />
-          </svg>
-          {/* Glowing green "Online" status dot */}
-          <span className="absolute bottom-0 right-0 flex h-3 w-3 items-center justify-center">
-            <span
-              className="h-2 w-2 rounded-full bg-green-400 ring-2 ring-white shadow-[0_0_0_10px_rgba(74,222,128,0.55)] animate-pulse"
-              aria-label="Online"
-            />
-          </span>
-        </div>
-        <span className="mt-1 text-[11px] font-bold leading-none whitespace-nowrap">Help / Support</span>
+        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" className="h-full w-full">
+          {/* Yellow SUPPORT badge */}
+          <rect x="2" y="44" width="60" height="16" rx="8" fill="#F5E05A" />
+          <text x="32" y="56" text-anchor="middle" fill="#2F6FD8" font-size="10" font-weight="800" letter-spacing="0.6">SUPPORT</text>
+
+          {/* Pink collared shirt */}
+          <rect x="14" y="30" width="36" height="12" rx="10" fill="#E75480" />
+          <path d="M24 30 Q32 26 40 30 L40 36 Q32 38 24 36 Z" fill="#FFFFFF" />
+          <path d="M28 30 Q32 32 36 30 L36 36 Q32 38 28 36 Z" fill="#E7C4A4" />
+
+          {/* Brown hair (behind face) */}
+          <path d="M18 20 Q24 12 32 12 Q40 12 46 20 Q48 28 44 34 Q40 38 32 38 Q24 38 20 34 Q16 28 18 20 Z" fill="#9C6636" />
+
+          {/* Face */}
+          <circle cx="32" cy="22" r="9" fill="#E7C4A4" />
+
+          {/* Grey headset band */}
+          <path d="M22 14 Q32 10 42 14" stroke="#8B8B8B" stroke-width="4" stroke-linecap="round" />
+
+          {/* Grey ear cups */}
+          <circle cx="22" cy="16" r="3.5" fill="#6B7280" />
+          <circle cx="42" cy="16" r="3.5" fill="#6B7280" />
+
+          {/* Grey boom arm + blue-tipped mic */}
+          <path d="M42 18 Q46 22 44 28 Q42 30 36 30" stroke="#B0B0B0" stroke-width="2.5" fill="none" stroke-linecap="round" />
+          <circle cx="36" cy="30" r="2" fill="#2F6FD8" />
+
+          {/* Eyes */}
+          <rect x="27" y="20" width="2" height="2" fill="#374151" rx="1" />
+          <rect x="35" y="20" width="2" height="2" fill="#374151" rx="1" />
+        </svg>
       </button>
     </div>
   );
