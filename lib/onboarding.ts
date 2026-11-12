@@ -350,14 +350,49 @@ export function deriveOnboardingStatus(input: {
   };
 
   // ── the four data-derived steps + payment ──
-  const phone = firstValue(store, ['phone', 'support_contact', 'supportContact', 'support_phone', 'supportPhone', 'contact_phone']);
+  // Step 03 — Support Contact. Every spelling the tenant settings form and the
+  // signup flow actually write: `phone` (registration), `supportPhone` /
+  // `support_phone` / `support_contact` (Settings → General), `contactPhone`,
+  // and `whatsappNumber` (Settings → Social links). Any one of them being set
+  // satisfies the step.
+  const phone = firstValue(store, [
+    'supportPhone', 'support_phone', 'support_contact', 'supportContact',
+    'phone', 'contactPhone', 'contact_phone', 'contact_phone_number',
+    'whatsappNumber', 'whatsapp_number',
+  ]);
   const logo = firstValue(store, ['logo_url', 'logoUrl', 'logo']);
   const theme = firstValue(store, ['theme', 'active_theme_id', 'activeThemeId', 'theme_config', 'themeConfig', 'branding', 'banner_url', 'bannerUrl']);
-  const pickup = firstValue(store, ['pickup_address', 'pickupAddress', 'pickup_point', 'pickupLocation', 'address', 'store_address', 'storeAddress']);
-  const payment = firstValue(store, [
-    'payment_config', 'paymentConfig', 'adminPaymentConfig', 'payment_methods', 'paymentMethods',
-    'payment_gateways', 'paymentGateways', 'bkash_number', 'bank_account', 'bank_details', 'bankDetails',
+  // Step 04 — Pickup Point. Covers the courier-setup pickup address
+  // (`pickupAddress` / `pickup_address`), the LogisticsView courier entry,
+  // the generic `address`, the Settings → Constraints base district
+  // (`baseCity` / `base_city`, plus the requested `storeDistrict` spelling)
+  // and the store-address aliases.
+  const pickup = firstValue(store, [
+    'pickup_address', 'pickupAddress', 'pickup_point', 'pickupLocation',
+    'address', 'store_address', 'storeAddress', 'storeDistrict',
+    'store_district', 'baseCity', 'base_city',
   ]);
+  // Step 05 — Payment & Finance. Checks BOTH the flat numeric fields and the
+  // structured collections the Merchant Payment Accounts Setup writes
+  // (`mobileBanking` — bKash/Nagad/Rocket wallets, `bankAccounts` — payout
+  // banks). A wallet only counts when it is enabled AND carries an account
+  // number; a bank only counts when it has an account number.
+  const payment = firstValue(store, [
+    'payment_config', 'paymentConfig', 'adminPaymentConfig',
+    'payment_methods', 'paymentMethods', 'payment_gateways', 'paymentGateways',
+    'bkashNumber', 'bkash_number', 'nagadNumber', 'nagad_number',
+    'rocketNumber', 'rocket_number', 'bankAccount', 'bank_account',
+    'bank_details', 'bankDetails', 'payout_settings', 'payoutSettings',
+  ]);
+  const mobileWallets = Array.isArray(store?.mobileBanking)
+    ? (store.mobileBanking as any[]).filter((w) => {
+        const number = String(w?.number || '').trim();
+        return String(w?.isEnabled ?? true) !== 'false' && w?.isEnabled !== false && number !== '';
+      })
+    : [];
+  const bankAccounts = Array.isArray(store?.bankAccounts)
+    ? (store.bankAccounts as any[]).filter((a) => String(a?.accountNumber || '').trim() !== '')
+    : [];
 
   const steps: OnboardingStepStatus[] = [
     {
@@ -391,7 +426,11 @@ export function deriveOnboardingStatus(input: {
     {
       id: 'payment_setup',
       label: STEP_LABELS.payment_setup,
-      completed: Boolean(payment) || previous.paymentSetupCompleted === true,
+      completed:
+        Boolean(payment) ||
+        mobileWallets.length > 0 ||
+        bankAccounts.length > 0 ||
+        previous.paymentSetupCompleted === true,
       detail: payment ? 'Payment method configured' : 'No payment method configured',
       completedAt: completedAtFor('payment_setup'),
     },
@@ -603,9 +642,20 @@ export const STEP_FIELD_MAP: Record<OnboardingStepId, string[]> = {
   // product completion is derived from the products collection, not a store field.
   add_product: [],
   setup_branding: ['logo_url', 'logoUrl'],
-  confirm_phone: ['phone', 'support_contact', 'support_phone'],
-  pickup_point: ['pickup_address', 'store_address'],
-  payment_setup: ['payment_config', 'payment_methods', 'bank_details'],
+  confirm_phone: [
+    'phone', 'support_contact', 'supportContact', 'support_phone', 'supportPhone',
+    'contactPhone', 'whatsappNumber', 'whatsapp_number',
+  ],
+  pickup_point: [
+    'pickup_address', 'pickupAddress', 'store_address', 'storeAddress',
+    'address', 'storeDistrict', 'baseCity', 'base_city',
+  ],
+  payment_setup: [
+    'payment_config', 'paymentConfig', 'payment_methods', 'paymentMethods',
+    'bank_details', 'bankDetails', 'bkashNumber', 'bkash_number',
+    'nagadNumber', 'nagad_number', 'bankAccount', 'bank_account',
+    'mobileBanking', 'bankAccounts', 'payout_settings', 'payoutSettings',
+  ],
 };
 
 /** Every step id this module understands, for request validation. */

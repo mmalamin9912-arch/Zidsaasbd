@@ -44,6 +44,8 @@ interface DashboardViewProps {
   products: Product[];
   onNavigateTab: (tab: any) => void;
   onOpenSubscriptionModal: () => void;
+  /** Jump straight to a Settings sub-tab (used by the onboarding checklist). */
+  onNavigateToSettings?: (subTab: string) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -53,6 +55,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   products,
   onNavigateTab,
   onOpenSubscriptionModal,
+  onNavigateToSettings,
 }) => {
   const toast = useToast();
   const totalSalesBDT = orders.reduce((sum, o) => sum + o.totalBDT, 0);
@@ -121,6 +124,36 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   }, [storeSlug]);
 
+  //
+  // Re-check when a SAVED merchant field that drives a step changes. Saving in
+  // Settings / Payments calls `setMerchant` upstream, so this signature flips
+  // and the checklist re-fetches the authoritative status immediately — the
+  // progress bar reaches 100% without leaving the page.
+  const onboardingMerchantSignature = JSON.stringify([
+    (merchant as any)?.supportPhone, (merchant as any)?.phone, (merchant as any)?.contactPhone,
+    (merchant as any)?.whatsappNumber,
+    (merchant as any)?.pickupAddress, (merchant as any)?.address, (merchant as any)?.storeAddress,
+    (merchant as any)?.storeDistrict, (merchant as any)?.baseCity,
+    ((merchant as any)?.mobileBanking || []).map((w: any) => w?.number || '').join(','),
+    ((merchant as any)?.bankAccounts || []).map((b: any) => b?.accountNumber || '').join(','),
+  ]);
+  // Remembers the last signature this mount saw. The FIRST render must NOT
+  // fire (the slug-guarded mount effect above already issues exactly one GET);
+  // only a genuine CHANGE — i.e. the merchant saved settings — triggers the
+  // re-fetch here.
+  const lastOnboardingSignatureRef = useRef<string>(onboardingMerchantSignature);
+  useEffect(() => {
+    if (!storeSlug) return;
+    if (lastOnboardingSignatureRef.current === onboardingMerchantSignature) return;
+    lastOnboardingSignatureRef.current = onboardingMerchantSignature;
+    const controller = new AbortController();
+    void refreshOnboarding(controller.signal);
+    return () => controller.abort();
+    // refreshOnboarding is memoised on the slug only; the signature is what
+    // intentionally triggers the re-check after a settings save.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onboardingMerchantSignature]);
+
   // Slug this mount already checked. A remount (switching back to the
   // dashboard tab, or StrictMode's double-invoked effects in dev) creates a
   // fresh run, but the guard skips it when the SAME slug was already checked —
@@ -183,16 +216,58 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const step1Complete = serverCompleted('add_product') || products.length > 0;
   const step2Complete = serverCompleted('setup_branding') || !!brandLogo;
-  const step3Complete = serverCompleted('confirm_phone');
-  const step4Complete = serverCompleted('pickup_point');
-  const step5Complete = serverCompleted('payment_setup');
+
+  //
+  // Steps 03–05 fall back to the LOCAL merchant profile when the server status
+  // has not landed yet (or flags a step incomplete even though the merchant
+  // object already carries the saved value). Every alias the settings form and
+  // the signup flow write is checked, so a step can never read "not set" while
+  // the data actually exists in the tenant object.
+  //
+  const m = merchant as any;
+  const hasPhone = [m?.supportPhone, m?.phone, m?.contactPhone, m?.whatsappNumber]
+    .some((v) => String(v || '').trim() !== '');
+  const step3Complete = serverCompleted('confirm_phone') || hasPhone;
+
+  const hasPickup = [
+    m?.pickupAddress, m?.address, m?.storeAddress, m?.storeDistrict,
+    m?.baseCity, m?.base_city,
+  ].some((v) => String(v || '').trim() !== '');
+  const step4Complete = serverCompleted('pickup_point') || hasPickup;
+
+  const hasPaymentConfigured = (() => {
+    // Flat field aliases the tenant record may carry.
+    if ([
+      m?.bkashNumber, m?.nagadNumber, m?.bankAccount, m?.paymentMethods,
+      m?.payoutSettings, m?.paymentConfig, m?.payment_config,
+    ].some((v) => {
+      if (v == null) return false;
+      if (typeof v === 'string') return v.trim() !== '';
+      if (Array.isArray(v)) return v.length > 0;
+      if (typeof v === 'object') return Object.keys(v).length > 0;
+      return Boolean(v);
+    })) return true;
+    // Structured collections saved by the Merchant Payment Accounts Setup.
+    const wallets = Array.isArray(m?.mobileBanking) ? m.mobileBanking : [];
+    if (wallets.some((w: any) => String(w?.number || '').trim() !== '')) return true;
+    const banks = Array.isArray(m?.bankAccounts) ? m.bankAccounts : [];
+    if (banks.some((b: any) => String(b?.accountNumber || '').trim() !== '')) return true;
+    return false;
+  })();
+  const step5Complete = serverCompleted('payment_setup') || hasPaymentConfigured;
 
   // Prefer the server's percentage (it counts all five steps); fall back to a
-  // local computation before the first response lands.
-  const completedStepsCount = [step1Complete, step2Complete, step3Complete, step4Complete, step5Complete].filter(Boolean).length;
-  const onboardingPercent = onboarding?.ok
-    ? onboarding.progress
-    : Math.round((completedStepsCount / 5) * 100);
+  // local computation before the first response lands. When the local alias
+  // check finds MORE completed steps than the server did (the exact bug this
+  // fixes — a saved phone/address/payment stuck on "not set"), the LOCAL count
+  // wins, because it is derived from fresher data than the last status fetch.
+  const stepBooleans = [step1Complete, step2Complete, step3Complete, step4Complete, step5Complete];
+  const completedStepsCount = stepBooleans.filter(Boolean).length;
+  const serverPercent = onboarding?.progress ?? 0;
+  const localPercent = Math.round((completedStepsCount / 5) * 100);
+  const onboardingPercent = !onboarding?.ok
+    ? localPercent
+    : (completedStepsCount === onboarding.completedCount ? serverPercent : localPercent);
 
   const stepDetail = (id: string, fallback: string) => stepById.get(id)?.detail || fallback;
 
@@ -416,8 +491,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <button
               onClick={() => {
-                setTempInput(supportPhone);
-                setActiveModal('phone');
+                // Navigate to the EXACT settings section that owns the support
+                // phone field (Settings → General), so the merchant lands
+                // directly on the form instead of a generic tab.
+                if (onNavigateToSettings) {
+                  onNavigateToSettings('settings_general');
+                } else {
+                  setTempInput(supportPhone);
+                  setActiveModal('phone');
+                }
               }}
               className={`mt-3 w-full py-2 px-3 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition ${
                 step3Complete
@@ -454,8 +536,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <button
               onClick={() => {
-                setTempInput(pickupLocation);
-                setActiveModal('location');
+                // Navigate to the EXACT settings section that owns the base
+                // district field (Settings → Shipping and payment constraints).
+                if (onNavigateToSettings) {
+                  onNavigateToSettings('settings_constraints');
+                } else {
+                  setTempInput(pickupLocation);
+                  setActiveModal('location');
+                }
               }}
               className={`mt-3 w-full py-2 px-3 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition ${
                 step4Complete 
@@ -491,9 +579,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </p>
             </div>
             <button
-              onClick={() => onNavigateTab('payments')}
+              onClick={() => {
+                // Navigate straight to the Merchant Payment Accounts Setup
+                // (the section that saves bKash/Nagad/Bank details).
+                if (onNavigateToSettings) {
+                  onNavigateToSettings('payments');
+                } else {
+                  onNavigateTab('payments');
+                }
+              }}
               className={`mt-3 w-full py-2 px-3 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition ${
-                step5Complete 
+                step5Complete  
                   ? 'bg-[#221D19] hover:bg-[#2E241D] text-slate-400 border border-[#3E342B]' 
                   : 'bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 border border-transparent shadow-lg shadow-[#BF953F]/10'
               }`}

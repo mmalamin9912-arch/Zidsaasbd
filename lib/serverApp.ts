@@ -7650,9 +7650,12 @@ app.post('/api/stores/update', async (req, res) => {
     // of the step-defining fields, to avoid a pointless round trip per keystroke.
     const ONBOARDING_RELEVANT_KEYS = [
       'phone', 'support_contact', 'supportContact', 'support_phone', 'supportPhone',
+      'contactPhone', 'whatsappNumber', 'whatsapp_number',
       'logo_url', 'logoUrl', 'logo', 'theme', 'active_theme_id', 'activeThemeId',
-      'theme_config', 'themeConfig', 'pickup_address', 'pickupAddress', 'address',
-      'payment_config', 'paymentConfig',
+      'theme_config', 'themeConfig',
+      'pickup_address', 'pickupAddress', 'address', 'store_address', 'storeAddress',
+      'storeDistrict', 'baseCity', 'base_city',
+      'payment_config', 'paymentConfig', 'mobileBanking', 'bankAccounts',
     ];
     let onboardingStatus: Record<string, any> | undefined;
     if (storeSlug && ONBOARDING_RELEVANT_KEYS.some((key) => cleanMerchant[key] !== undefined)) {
@@ -10664,9 +10667,26 @@ app.post('/api/store/payment-accounts', async (req, res) => {
       console.warn('[Server] payment-accounts Supabase upsert warning:', sbErr?.message || sbErr);
       return false;
     });
+    // Onboarding trigger: saving bKash/Nagad/Rocket wallets or bank payout
+    // accounts satisfies Step 05 (Payment & Finance). Recompute the status so
+    // the response carries the fresh `onboarding` block the dashboard can apply
+    // immediately, without a second round-trip. Best-effort.
+    let onboardingStatus: Record<string, any> | undefined;
+    try {
+      const status = await checkOnboardingStatus(storeRef, { persist: true });
+      onboardingStatus = {
+        progress: status.progress,
+        completedCount: status.completedCount,
+        totalCount: status.totalCount,
+        steps: status.steps,
+      };
+    } catch (onbErr: any) {
+      console.warn('[Server] payment-accounts onboarding stamp warning:', onbErr?.message || onbErr);
+    }
     return res.status(200).json({
       ...saved,
       supabaseSynced,
+      ...(onboardingStatus ? { onboarding: onboardingStatus } : {}),
       message: supabaseSynced
         ? 'Payment accounts saved to the database.'
         : 'Payment accounts saved (Supabase mirror pending).',
@@ -13330,6 +13350,11 @@ for (const route of CONFIG_ROUTES) {
 
       const config = await writeStoreConfig(name, storeRef, extractConfig(body));
 
+      // An onboarding status block (only set by the shipping save, which can
+      // satisfy the pickup-point step via its base district) to merge into the
+      // response below.
+      let onboardingFromSave: Record<string, any> | undefined;
+
       // Mirror the delivery fees onto `codConfig`, which is the shape the
       // storefront checkout already reads. Without this the merchant's fee
       // change would persist but the customer would still be quoted the old one.
@@ -13340,12 +13365,29 @@ for (const route of CONFIG_ROUTES) {
         } catch (mirrorErr: any) {
           console.warn('[Server] codConfig shipping mirror warning:', mirrorErr?.message || mirrorErr);
         }
+        // Onboarding trigger: the base district saved here is the pickup point
+        // step's fallback alias (`baseCity`). Recompute + stamp best-effort so
+        // the checklist picks the step up on the response.
+        let shippingOnboarding: Record<string, any> | undefined;
+        try {
+          const status = await checkOnboardingStatus(storeRef, { persist: true });
+          shippingOnboarding = {
+            progress: status.progress,
+            completedCount: status.completedCount,
+            totalCount: status.totalCount,
+            steps: status.steps,
+          };
+        } catch (onbErr: any) {
+          console.warn('[Server] shipping-config onboarding stamp warning:', onbErr?.message || onbErr);
+        }
+        onboardingFromSave = shippingOnboarding;
       }
 
       return res.status(200).json({
         ok: true,
         store_slug: storeRef,
         ...Object.fromEntries(configKeys(name).map((k) => [k, serialize(config)])),
+        ...(onboardingFromSave ? { onboarding: onboardingFromSave } : {}),
         message: `${label} saved.`,
       });
     } catch (err: any) {

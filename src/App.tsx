@@ -1991,11 +1991,16 @@ export default function App() {
 
   const handleUpdateMobileBanking = (configs: MobileBankingConfig[]): Promise<boolean> => {
     setMobileBanking(configs);
+    // Mirror onto the merchant profile so the dashboard's onboarding checklist
+    // (which derives Step 05 from the tenant object) sees the change and
+    // re-fetches its status — the progress bar updates without a reload.
+    setMerchant((prev: any) => ({ ...prev, mobileBanking: configs }));
     return persistPaymentAccounts({ mobileBanking: configs });
   };
 
   const handleUpdateBankAccounts = (accounts: BankAccount[]): Promise<boolean> => {
     setBankAccounts(accounts);
+    setMerchant((prev: any) => ({ ...prev, bankAccounts: accounts }));
     return persistPaymentAccounts({ bankAccounts: accounts });
   };
 
@@ -2780,6 +2785,17 @@ onPlaceOrder={async (newOrder) => {
                 ordersHydrated={ordersHydrated}
                 products={products}
                 onNavigateTab={setActiveTab}
+                onNavigateToSettings={(subTab) => {
+                  // Onboarding checklist shortcut: Settings sub-tabs go to
+                  // the settings view with the sub-tab preselected; the
+                  // payment accounts setup lives on its own top-level tab.
+                  if (subTab === 'payments') {
+                    setActiveTab('payments');
+                  } else {
+                    setSettingsSubTab(subTab as SettingsSubTab);
+                    setActiveTab('settings');
+                  }
+                }}
                 onOpenSubscriptionModal={() => setIsSubscriptionModalOpen(true)}
               />
             )}
