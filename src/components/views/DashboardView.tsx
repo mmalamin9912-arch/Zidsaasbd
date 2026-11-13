@@ -32,7 +32,6 @@ import {
   Layout
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { ZidAiAssistant } from '../ZidAiAssistant';
 import { useToast } from '../ToastProvider';
 
 interface DashboardViewProps {
@@ -964,7 +963,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       )}
-      <ZidAiAssistant />
     </div>
   );
 };

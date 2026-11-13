@@ -31,8 +31,8 @@ import { PublicPricingLanding } from './components/PublicPricingLanding';
 import { PublicCheckout } from './PublicCheckout';
 import { AuthFlow } from './components/AuthFlow';
 import { Header } from './components/Header';
+import { ZidAiAssistant } from './components/ZidAiAssistant';
 import { Sidebar } from './components/Sidebar';
-import SmartSupportPanel, { type SupportIssue } from './components/SmartSupportPanel';
 import { SubscriptionModal } from './components/SubscriptionModal';
 import { StorefrontPreviewModal } from './components/StorefrontPreviewModal';
 import { TenantStorefrontView } from './components/TenantStorefrontView';
@@ -1806,8 +1806,6 @@ export default function App() {
 
   // Modal States
   const [isSubscriptionModalOpen, setIsSubscriptionModalOpen] = useState(false);
-  // Merchant-side smart support center (opened from the header Help icon).
-  const [supportCenterOpen, setSupportCenterOpen] = useState(false);
   const [isStorefrontPreviewOpen, setIsStorefrontPreviewOpen] = useState(false);
   const [isAdminLoginModalOpen, setIsAdminLoginModalOpen] = useState(false);
 
@@ -2751,30 +2749,21 @@ onPlaceOrder={async (newOrder) => {
             }}
             onQuickAddProduct={() => setActiveTab('products')}
             onToggleSidebarMobile={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
-            onOpenSupport={() => setSupportCenterOpen(true)}
           />
 
-          {/* Merchant-side smart support center (predefined issues + vendor routing). */}
-          {supportCenterOpen && (
-            <div
-              className="fixed inset-0 z-[10000] flex items-end sm:items-center justify-center bg-slate-950/70 backdrop-blur-sm p-0 sm:p-4"
-              onClick={() => setSupportCenterOpen(false)}
-            >
-              <div
-                className="w-full max-w-md rounded-t-3xl sm:rounded-3xl bg-white text-slate-800 border border-slate-200 shadow-2xl max-h-[90vh] overflow-y-auto"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-5 py-4 rounded-t-3xl">
-                  <h3 className="text-base font-black">Help & Support Center</h3>
-                  <button onClick={() => setSupportCenterOpen(false)} aria-label="Close" className="p-1 rounded-lg text-slate-500 hover:bg-slate-100 cursor-pointer">✕</button>
-                </div>
-                <div className="p-5">
-                  <p className="mb-3 text-xs text-slate-500">Select your issue below — critical problems are routed straight to the store, others get instant answers.</p>
-                  <MerchantSupportModalBody onClose={() => setSupportCenterOpen(false)} />
-                </div>
-              </div>
-            </div>
-          )}
+          {/* ── MERCHANT AI SUPPORT WIDGET ──
+              The floating Zid AI live-chat button lives at the dashboard-layout
+              level so it shows on EVERY merchant route, not just the home
+              dashboard. Strictly separated from the customer Help & Support
+              Center (storefront/marketplace only) — the two never render in the
+              same surface. */}
+          <ZidAiAssistant />
+
+          {/* ── CUSTOMER SUPPORT SEPARATION ──
+              The customer "Help & Support Center" modal (cancel/reject order,
+              damaged item, …) is storefront/marketplace ONLY and is no longer
+              rendered on merchant dashboard routes. The merchant's support
+              surface is the Zid AI assistant (header pill + floating widget). */}
 
           {/* View Container */}
           <main className="p-4 lg:p-6 max-w-7xl w-full mx-auto space-y-6">
@@ -3058,41 +3047,8 @@ onPlaceOrder={async (newOrder) => {
 }
 
 /**
- * Body of the merchant-side Help & Support Center modal.
- *
- * Reuses the SAME predefined-issue + vendor-routing panel the customer
- * storefront uses (SmartSupportPanel). Escalations POST to the shared
- * /api/notifications feed; merchant notifications reach this store's own bell,
- * so a merchant can even test the routing against their own store.
+ * REMOVED: MerchantSupportModalBody — the merchant-side "Help & Support Center"
+ * reused the CUSTOMER storefront's SmartSupportPanel (cancel/reject order,
+ * damaged item, …). That panel is customer-only now; the merchant's support
+ * surface is the Zid AI assistant. Body kept as documentation marker.
  */
-function MerchantSupportModalBody({ onClose }: { onClose: () => void }) {
-  const handleEscalate = React.useCallback(async (issue: SupportIssue) => {
-    try {
-      await fetch('/api/notifications', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          title: `Merchant support request: ${issue.label}`,
-          message: `A merchant opened the Help & Support Center and selected: "${issue.label}". Please route this to the responsible team.`,
-          type: 'warning',
-          targetAudience: 'all',
-          audienceFilter: 'all',
-        }),
-      });
-    } catch (err: any) {
-      console.warn('[support] merchant escalation failed:', err?.message || err);
-    }
-  }, []);
-
-  return (
-    <SmartSupportPanel
-      orders={[]}
-      customerPhone={String((initialMerchant as any)?.phone || '')}
-      customerName={String(initialMerchant?.ownerName || initialMerchant?.storeName || 'Merchant')}
-      vendorPhone={String(initialMerchant?.supportPhone || initialMerchant?.phone || '')}
-      vendorName={String(initialMerchant?.storeName || 'Zid Support')}
-      isBangla={false}
-      onEscalate={handleEscalate}
-    />
-  );
-}

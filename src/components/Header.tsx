@@ -107,7 +107,6 @@ import {
   Menu,
   ShieldAlert,
   HelpCircle,
-  Headphones,
   Trash2,
   Copy,
   MapPin,
@@ -157,7 +156,12 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSupport,
 }) => {
   const toast = useToast();
-  /** Open the support center; falls back to the old toast when no panel wired. */
+  /* ── CUSTOMER SUPPORT SEPARATION ──
+   * The customer-facing "Help & Support Center" (cancel order, damaged item,
+   * …) belongs to the storefront/marketplace ONLY. The merchant dashboard's
+   * support entry point is the Zid AI assistant (header pill + floating
+   * widget), so this handler intentionally no longer opens the customer
+   * panel. Kept as a no-op fallback for any stray caller. */
   const handleOpenSupport = useCallback(() => {
     if (onOpenSupport) onOpenSupport();
     else toast.info('Support Center: Opening Zid Merchant Help Desk...');
@@ -916,14 +920,8 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             <div className="flex items-center gap-3">
-              <button
-                onClick={handleOpenSupport}
-                className="p-2 text-slate-300 hover:text-[#00D68F] bg-[#202E34] hover:bg-[#283C44] rounded-xl border border-[#00D68F]/20 transition cursor-pointer"
-                title="Help & Support"
-              >
-                <HelpCircle className="w-4 h-4" />
-              </button>
-
+              {/* The customer Help & Support button was removed here — merchant
+                  support is the Zid AI assistant (header pill + floating widget). */}
               <button
                 onClick={onOpenSubscriptionModal}
                 className="bg-gradient-to-r from-[#00D68F] to-[#00B377] hover:from-[#00E699] text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-md shadow-[#00D68F]/20 cursor-pointer shrink-0"
@@ -977,14 +975,8 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               </div>
 
-              <button
-                onClick={handleOpenSupport}
-                className="p-2 text-slate-300 hover:text-[#E6C587] bg-[#252B3B] hover:bg-[#2E3548] rounded-xl border border-[#3A435E] transition cursor-pointer"
-                title="Help & Support"
-              >
-                <HelpCircle className="w-4 h-4" />
-              </button>
-
+              {/* Trial banner: customer Help & Support button removed — merchants
+                  use Zid AI (header pill + floating widget) for support. */}
               <button
                 onClick={onOpenSubscriptionModal}
                 className="bg-gradient-to-r from-[#BF953F] via-[#FCF6BA] to-[#B38728] hover:from-[#FCF6BA] hover:to-[#BF953F] text-slate-950 font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-md shadow-[#D4AF37]/20 cursor-pointer shrink-0"
@@ -1253,11 +1245,13 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Action Icons: Zid AI, Notifications, Dark/Light Mode, Currency, Storefront & Profile */}
         <div className="flex items-center justify-end gap-2 sm:gap-2.5 flex-wrap">
-          {/* Zid AI Assistant Icon Button */}
+          {/* Zid AI Assistant — the MERCHANT's support entry point. The customer
+              "Help & Support Center" (cancel/damaged item panel) is storefront-
+              only and deliberately NOT rendered on dashboard routes. */}
           <button
             onClick={() => setShowAiModal(true)}
             className="flex items-center gap-1.5 bg-gradient-to-r from-indigo-600/30 via-purple-600/30 to-[#D4AF37]/20 hover:from-indigo-600/40 hover:to-[#D4AF37]/30 text-slate-100 text-xs font-semibold px-3 py-2 rounded-xl border border-indigo-500/40 transition cursor-pointer shadow-sm group"
-            title="Open Zid AI Assistant"
+            title="Help & Support — Zid AI Assistant"
           >
             <Bot className="w-4 h-4 text-[#E6C587] group-hover:rotate-12 transition-transform" />
             <span className="font-bold text-white">Zid AI</span>
@@ -1423,15 +1417,9 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="text-[#E6C587] font-bold">{merchant?.currency || 'BDT'} ({merchant?.currency === 'USD' ? '$' : '৳'})</span>
           </button>
 
-          {/* Support / Help Center — opens the Smart Support Panel modal */}
-          <button
-            onClick={handleOpenSupport}
-            className="hidden sm:flex items-center gap-1 bg-[#252B3B] hover:bg-[#2E3548] text-slate-300 text-xs font-semibold px-2.5 py-2 rounded-xl border border-[#3A435E] transition cursor-pointer"
-            title="Help & Support"
-          >
-            <Headphones className="w-3.5 h-3.5 text-[#E6C587]" />
-            <span className="font-bold">Support</span>
-          </button>
+          {/* Customer "Support / Help Center" button REMOVED from the merchant
+              dashboard — that panel is storefront-only. Merchant support is
+              Zid AI (the header pill above + the floating widget). */}
 
           {/* Storefront Preview */}
           <button
