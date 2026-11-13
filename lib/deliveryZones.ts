@@ -619,6 +619,53 @@ export function buildDeliveryZoneOptions(
   }));
 }
 
+/**
+ * The customer-visible names of the three delivery zones for a given merchant
+ * base city / district, so the dashboard and the checkout are never hardcoded
+ * to "Dhaka".
+ *
+ *   baseCity = 'Khulna'  →  { inside: 'Inside Khulna Fee',
+ *                            sub:    'Sub-Khulna / Sub-District Fee',
+ *                            outside:'Outside Khulna Fee' }
+ *
+ * Falls back to 'Dhaka' when no base city is configured.
+ */
+export interface DeliveryZoneLabels {
+  inside: string;
+  sub: string;
+  outside: string;
+}
+
+/** Build the zone labels for the merchant's configured base city. */
+export function deliveryZoneLabels(baseCity?: string | null): DeliveryZoneLabels {
+  const city = String(baseCity ?? '').trim() || 'Dhaka';
+  return {
+    inside: `Inside ${city} Fee`,
+    sub: `Sub-${city} / Sub-District Fee`,
+    outside: `Outside ${city} Fee`,
+  };
+}
+
+/**
+ * Short helper text shown under each fee input in the dashboard, tailored to
+ * the merchant's base city.
+ */
+export interface DeliveryZoneHints {
+  inside: string;
+  sub: string;
+  outside: string;
+}
+
+/** Build the zone hint text for the merchant's configured base city. */
+export function deliveryZoneHints(baseCity?: string | null): DeliveryZoneHints {
+  const city = String(baseCity ?? '').trim() || 'Dhaka';
+  return {
+    inside: `${city} metro / your own city — courier city rate.`,
+    sub: `Optional separate rate for sub-areas around ${city} (saved as comma-separated sub-areas).`,
+    outside: `All other districts — courier upazila rate.`,
+  };
+}
+
 export default {
   BANGLADESH_DISTRICTS,
   BANGLADESH_DISTRICT_AREAS,
@@ -630,4 +677,6 @@ export default {
   resolveMerchantBaseCity,
   resolveDeliveryZoneForCity,
   buildDeliveryZoneOptions,
+  deliveryZoneLabels,
+  deliveryZoneHints,
 };

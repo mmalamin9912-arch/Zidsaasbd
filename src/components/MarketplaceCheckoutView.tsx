@@ -71,7 +71,7 @@ function productImageOf(p: any, line?: any): string {
   const itemKey = String(p?.id || p?.productId || p?.product_id || line?.productId || '');
   if (import.meta.env.DEV && itemKey && !loggedImageItems.has(itemKey)) {
     loggedImageItems.add(itemKey);
-    console.debug('[MarketplaceCheckout] resolved cart item image', { itemKey, image });
+    console.debug('[MarketplaceCheckout] resolved cart item image', { itemKey, image, pImage: p?.image, pImageUrl: p?.imageUrl, pImage_raw: p?.image_url, lineProductImage: line?.product?.image, lineProductImageUrl: line?.product?.imageUrl, lineProductImage_raw: line?.product?.image_url });
   }
   /*
    * Return '' when the line has no photo — do NOT bake `PLACEHOLDER_IMAGE` in.
@@ -81,7 +81,7 @@ function productImageOf(p: any, line?: any): string {
    * photo" (the same reason `normalizeOrderItems` keeps `image` empty). The
    * caller passes the result straight to the `<img>` src.
    */
-  return image;
+  return image || resolveProductImage(line) || '';
 }
 
 /** All 64 districts — a courier needs the real one, not a header shortcut. */

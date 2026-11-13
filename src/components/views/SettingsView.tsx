@@ -7,7 +7,11 @@ import { useToast } from '../ToastProvider';
 // with the storefront checkout so the merchant picks the SAME city names the
 // customer selects.
 import { loadShippingConfig, saveShippingConfig } from '../../lib/logisticsApi';
-import { BANGLADESH_DISTRICTS } from '../../../lib/deliveryZones';
+import {
+  BANGLADESH_DISTRICTS,
+  deliveryZoneLabels,
+  deliveryZoneHints,
+} from '../../../lib/deliveryZones';
 import {
   Settings as SettingsIcon,
   User,
@@ -293,6 +297,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // The merchant's base city — the anchor for the checkout's delivery-zone
   // validation. Persisted with the fees in the shipping config.
   const [baseCity, setBaseCity] = useState(merchant?.baseCity || 'Dhaka');
+  // Delivery-fee labels derived from the merchant's base city so the shipping
+  // rates panel is never hardcoded to "Dhaka" (e.g. Khulna → "Inside Khulna Fee").
+  const settingsZoneLabels = React.useMemo(() => deliveryZoneLabels(baseCity), [baseCity]);
+  const settingsZoneHints = React.useMemo(() => deliveryZoneHints(baseCity), [baseCity]);
   const [constraintsSaving, setConstraintsSaving] = useState(false);
   const [constraintsNotice, setConstraintsNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
@@ -3547,14 +3555,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       ))}
                     </select>
                     <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
-                      আপনার স্টোরের নিজের শহর। এই শহরের গ্রাহকরা শুধু &quot;Inside City&quot; বেছে নিতে পারবে;
-                      অন্য জেলার গ্রাহকদের জন্য &quot;Outside City&quot; ফোরস করা হবে।
+                      আপনার স্টোরের নিজের শহর। এই শহরের গ্রাহকরা শুধু &quot;{settingsZoneLabels.inside}&quot;
+                      বেছে নিতে পারবে; অন্য জেলার গ্রাহকদের জন্য &quot;{settingsZoneLabels.outside}&quot; ফোরস করা হবে।
                     </p>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-slate-300 font-bold mb-1.5 text-sm">Flat Delivery Charge Inside City (৳)</label>
+                      <label className="block text-slate-300 font-bold mb-1.5 text-sm">{settingsZoneLabels.inside} (৳)</label>
                       <input
                         type="number"
                         value={insideCityFee}
@@ -3564,7 +3572,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-slate-300 font-bold mb-1.5 text-sm">Flat Delivery Charge Outside City (৳)</label>
+                      <label className="block text-slate-300 font-bold mb-1.5 text-sm">{settingsZoneLabels.outside} (৳)</label>
                       <input
                         type="number"
                         value={outsideCityFee}

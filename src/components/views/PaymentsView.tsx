@@ -20,7 +20,12 @@ import {
 import type { CommissionRate } from '../../types';
 // The canonical Bangladesh district list, shared with the storefront checkout
 // so the merchant picks the SAME city names the customer selects.
-import { BANGLADESH_DISTRICTS, SUB_DHAKA_AREAS } from '../../../lib/deliveryZones';
+import {
+  BANGLADESH_DISTRICTS,
+  SUB_DHAKA_AREAS,
+  deliveryZoneLabels,
+  deliveryZoneHints,
+} from '../../../lib/deliveryZones';
 import {
   CreditCard,
   Building2,
@@ -221,6 +226,15 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
   // COD State
   const [codForm, setCodForm] = useState<CodConfig>(codConfig);
+
+  // Delivery-fee labels derived from the merchant's base city so the COD form
+  // is never hardcoded to "Dhaka" (e.g. Khulna → "Inside Khulna Fee").
+  const zoneLabels = React.useMemo(() => deliveryZoneLabels(codForm.baseCity), [
+    codForm.baseCity,
+  ]);
+  const zoneHints = React.useMemo(() => deliveryZoneHints(codForm.baseCity), [
+    codForm.baseCity,
+  ]);
 
   // Payment Link Generator State
   const [linkAmount, setLinkAmount] = useState('');
@@ -1264,7 +1278,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1 font-semibold">Inside Dhaka Delivery Fee (৳ BDT)</label>
+              <label className="block text-slate-300 mb-1 font-semibold">{zoneLabels.inside} (৳ BDT)</label>
               <input
                 type="number"
                 value={codForm.insideDhakaFee}
@@ -1272,10 +1286,11 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 placeholder="e.g. 60"
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
               />
+              <p className="mt-1 text-[10px] text-slate-500">{zoneHints.inside}</p>
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1 font-semibold">Outside Dhaka Delivery Fee (৳ BDT)</label>
+              <label className="block text-slate-300 mb-1 font-semibold">{zoneLabels.outside} (৳ BDT)</label>
               <input
                 type="number"
                 value={codForm.outsideDhakaFee}
@@ -1283,10 +1298,11 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 placeholder="e.g. 120"
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
               />
+              <p className="mt-1 text-[10px] text-slate-500">{zoneHints.outside}</p>
             </div>
 
             <div>
-              <label className="block text-slate-300 mb-1 font-semibold">Sub-Dhaka / Dhaka Suburbs Fee (৳ BDT)</label>
+              <label className="block text-slate-300 mb-1 font-semibold">{zoneLabels.sub} (৳ BDT)</label>
               <input
                 type="number"
                 value={codForm.subDhakaFee}
@@ -1294,8 +1310,36 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 placeholder="e.g. 80"
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
               />
+              <p className="mt-1 text-[10px] text-slate-500">{zoneHints.sub}</p>
+            </div>
+
+            {/* ── Sub-areas around your district (comma-separated) ─────────────
+                The merchant types the sub-areas / sub-districts around their
+                base city (e.g. Dumuria, Phultala, Rupsha for Khulna). These are
+                saved alongside the Sub-District fee and surfaced as selectable
+                options at checkout; when a customer picks one, the Sub-District
+                fee is applied automatically. ─────────────────────────────── */}
+            <div>
+              <label className="block text-slate-300 mb-1 font-semibold text-sm">
+                Sub-Areas around {codForm.baseCity || 'your district'}
+              </label>
+              <input
+                type="text"
+                value={(codForm.subDhakaAreas || []).join(', ')}
+                onChange={(e) => {
+                  const areas = e.target.value
+                    .split(',')
+                    .map((a) => a.trim())
+                    .filter(Boolean);
+                  setCodForm({ ...codForm, subDhakaAreas: areas });
+                }}
+                placeholder="e.g. Dumuria, Phultala, Rupsha"
+                className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-white font-bold placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
+              />
               <p className="mt-1 text-[10px] text-slate-500">
-                Applied to the suburb areas you tick below. Blank = those areas pay the Inside fee.
+                Comma-separated sub-areas / sub-districts around your base city
+                that carry the {zoneLabels.sub.toLowerCase()}. Leave blank to
+                fall back to the built-in suburb list.
               </p>
             </div>
           </div>
@@ -1623,8 +1667,8 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         const simZone: 'inside' | 'sub' | 'outside' =
           simCity === 'Dhaka' ? 'inside' : simCity === 'Savar' ? 'sub' : 'outside';
         const simZoneLabel = simZone === 'inside'
-          ? 'Inside City'
-          : simZone === 'sub' ? 'Sub-Dhaka / Suburbs' : 'Outside City';
+          ? zoneLabels.inside
+          : simZone === 'sub' ? zoneLabels.sub : zoneLabels.outside;
         // A blank Sub-Dhaka fee falls back to the Inside fee — the same rule the
         // checkout applies, so the simulator never quotes a phantom ৳0.
         const simShippingFee = simZone === 'inside'

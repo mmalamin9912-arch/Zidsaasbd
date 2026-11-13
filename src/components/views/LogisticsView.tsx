@@ -5,7 +5,11 @@ import SafeImage from '../SafeImage';
 import {  useToast } from '../ToastProvider';
 // The canonical Bangladesh district list, shared with the storefront checkout
 // so the merchant picks the SAME city names the customer selects.
-import { BANGLADESH_DISTRICTS } from '../../../lib/deliveryZones';
+import {
+  BANGLADESH_DISTRICTS,
+  deliveryZoneLabels,
+  deliveryZoneHints,
+} from '../../../lib/deliveryZones';
 import {
   loadShippingConfig,
   saveShippingConfig,
@@ -70,6 +74,17 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
 
   // Standard Shipping Settings State
   const [shippingForm, setShippingForm] = useState<CodConfig>(codConfig);
+
+  // Delivery-fee labels derived from the merchant's base city so the shipping
+  // panel and the rate calculator are never hardcoded to "Dhaka".
+  const shippingZoneLabels = React.useMemo(
+    () => deliveryZoneLabels(shippingForm.baseCity),
+    [shippingForm.baseCity]
+  );
+  const shippingZoneHints = React.useMemo(
+    () => deliveryZoneHints(shippingForm.baseCity),
+    [shippingForm.baseCity]
+  );
 
   // Shipping Rate Calculator State
   const [calcWeightKg, setCalcWeightKg] = useState<number>(1);
@@ -419,15 +434,15 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
               ))}
             </select>
             <p className="text-[10px] text-slate-400">
-              Your store&apos;s own city. Customers in this city may only choose &quot;Inside City&quot;;
-              customers in any other district are forced to &quot;Outside City&quot;. Sub-urban areas
-              (Keraniganj, Savar, Tongi, …) are always priced as &quot;Sub-Dhaka / Suburbs&quot;.
+              Your store&apos;s own city. Customers in this city may only choose &quot;{shippingZoneLabels.inside}&quot;;
+              customers in any other district are forced to &quot;{shippingZoneLabels.outside}&quot;. Sub-urban areas
+              are always priced as &quot;{shippingZoneLabels.sub}&quot;.
             </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300 block">Inside Dhaka Delivery Fee</label>
+              <label className="text-xs font-semibold text-slate-300 block">{shippingZoneLabels.inside}</label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">৳</span>
                 <input 
@@ -440,7 +455,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
               </div>
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300 block">Outside Dhaka Delivery Fee</label>
+              <label className="text-xs font-semibold text-slate-300 block">{shippingZoneLabels.outside}</label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">৳</span>
                 <input 
@@ -453,7 +468,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
               </div>
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300 block">Sub-Dhaka / Suburbs Fee</label>
+              <label className="text-xs font-semibold text-slate-300 block">{shippingZoneLabels.sub}</label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">৳</span>
                 <input
@@ -467,10 +482,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
               {/* The suburb thanas are listed for the merchant so the zone is
                   not a mystery: these are exactly the areas the checkout
                   re-prices from "Inside City" to "Sub-Dhaka". */}
-              <p className="text-[10px] text-slate-500 italic">
-                For Keraniganj, Savar, Tongi, Demra, Uttarkhan, Southkhan, Rupganj &amp; other outskirts.
-                Left blank, those areas pay the Inside fee.
-              </p>
+              <p className="text-[10px] text-slate-500 italic">{shippingZoneHints.sub}</p>
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-300 block">Free Shipping Threshold</label>
@@ -846,9 +858,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
                 onChange={(e) => setCalcDestination(e.target.value as any)}
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-3 py-2 text-white font-semibold"
               >
-                <option value="inside">Inside Dhaka (Metropolitan)</option>
-                <option value="sub">Sub-Dhaka / Dhaka Suburbs</option>
-                <option value="outside">Outside Dhaka (64 Districts)</option>
+                <option value="inside">{shippingZoneLabels.inside}</option>
+                <option value="sub">{shippingZoneLabels.sub}</option>
+                <option value="outside">{shippingZoneLabels.outside}</option>
               </select>
             </div>
 
