@@ -15156,11 +15156,10 @@ const COURIER_KEY_BY_NAME: Record<string, string> = {
  * Flow:
  *   1. Resolve the child order from Mongo (falls back to the body fields) so a
  *      client that only knows the order number still gets a complete parcel.
- *   2. STRICT vendor pickup: the parcel is collected at the SELLER'S OWN shop,
- *      so the request FAILS unless that merchant has configured BOTH a pickup
- *      address AND a pickup/store phone. There is deliberately NO central
- *      fallback warehouse — a guessed pickup address would misroute the
- *      courier's collection.
+ *   2. Pickup resolution: the ADMIN's central pickup address/phone (platform
+ *      config → env) is preferred; the selling store's own address is a
+ *      fallback so the courier still knows where the goods are. The merchant
+ *      is never blocked — marketplace dispatch is fully admin-controlled.
  *   3. Build a courier booking request EXACTLY the way handleCourierBooking
  *      does and call the provider directly, then persist with the SAME
  *      recordCourierDispatch helper so the tracking code reaches the child
@@ -15674,12 +15673,16 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       });
     }
 
-    // ── 2. STRICT VENDOR PICKUP — the merchant's OWN address and phone. ──
-    // A marketplace parcel is collected at the merchant's shop. There is NO
-    // central fallback warehouse: if this seller has not configured a real
-    // pickup address AND phone number, the dispatch is REFUSED and the
-    // merchant is told to complete their profile first. Booking a parcel with
-    // a guessed/admin address would misroute the courier pickup.
+    // ── 2. PICKUP RESOLUTION — CENTRAL ADMIN FIRST. ──
+    // Marketplace parcels are dispatched through the ADMIN's courier account
+    // (step 3 uses ONLY the central credentials). The pickup location follows
+    // the same rule: the Super Admin's configured central pickup address/phone
+    // (adminPaymentConfig.centralCourier.pickupAddress / pickupPhone, with env
+    // fallbacks) wins. The selling store's own address is used only as a last
+    // resort so the courier still knows where the goods physically are — but
+    // the merchant is NEVER BLOCKED with "pickup details required": when the
+    // store has no address the central pickup is used, and when neither exists
+    // the parcel is booked with the provider's default store pickup.
     const storeRef = String(body.storeSlug || body.store_slug || order.store_slug || order.vendor_slug || '').trim();
     const bodyPickup = String(body.pickupAddress || body.pickup_address || '').trim();
 
@@ -15731,26 +15734,26 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       ''
     ).replace(/[^0-9+]/g, '').trim();
 
-    // An EXPLICIT pickup address sent by the merchant in the dispatch request
-    // (the confirmation modal's verified value) wins; otherwise the store
-    // record's courier pickup, then the store profile address. The phone must
-    // ALWAYS come from the vendor's record — the courier calls this number to
-    // arrange collection, so no default is acceptable.
-    const pickupAddress = bodyPickup || courierPickup || profileAddress;
-    const pickupPhone = storePhone;
+    // Priority: explicit body value (modal-confirmed) → ADMIN's central pickup
+    // (platform config, then env) → the selling store's own address/phone.
+    // The merchant's own pickup config is never REQUIRED for a marketplace
+    // order — the admin backend fully controls the dispatch.
+    const centralPickupAddress = String(
+      centralCfg.pickupAddress || process.env.CENTRAL_PICKUP_ADDRESS || ''
+    ).trim();
+    const centralPickupPhone = String(
+      centralCfg.pickupPhone || process.env.CENTRAL_PICKUP_PHONE || ''
+    ).replace(/[^0-9+]/g, '').trim();
 
+    const pickupAddress = bodyPickup || centralPickupAddress || courierPickup || profileAddress;
+    const pickupPhone = centralPickupPhone || storePhone;
+
+    // Informational only — the dispatch is NOT refused when the seller has no
+    // pickup profile. The response still carries what was used so the merchant
+    // (and the admin audit trail) can see where the parcel was collected from.
     const missing: string[] = [];
     if (!pickupAddress) missing.push('pickup address');
     if (!pickupPhone || pickupPhone.replace(/\D/g, '').length < 10) missing.push('pickup phone number');
-    if (missing.length > 0) {
-      return res.status(200).json({
-        ok: false,
-        code: 'missing_vendor_pickup',
-        missing,
-        error: `This seller has not configured a valid ${missing.join(' and ')} yet. Add it in Dashboard → Logistics → Courier API → Setup before dispatching marketplace orders.`,
-        storeSlug: storeRef,
-      });
-    }
 
     // ── 3. Book directly with the provider (central admin credentials). ──
     const customerName = String(order.customer_name || 'Customer');
@@ -15879,8 +15882,12 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       courier: courierKey,
       tracking_code: trackingCode,
       persisted,
-      pickup_address: pickupAddress,
-      pickup_phone: pickupPhone,
+      pickup_address: pickupAddress || undefined,
+      pickup_phone: pickupPhone || undefined,
+      // Where the pickup came from: 'central' (admin config / env) or 'store'
+      // (the selling merchant's own profile). The UI shows this so the merchant
+      // knows the platform backend handled the collection point.
+      pickup_source: bodyPickup || centralPickupAddress || centralPickupPhone ? 'central' : 'store',
       warning: persisted ? undefined : 'The parcel was booked, but the tracking code could not be saved to this order.',
     });
   } catch (err: any) {

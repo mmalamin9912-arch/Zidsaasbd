@@ -746,7 +746,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const pickupPreviewAddress = String(resolvedPickupInfo.address || '').trim();
   const pickupPreviewPhone = String(resolvedPickupInfo.phone || '').trim();
   const selectedOrderLocked = selectedOrderForCourier ? paymentVerificationLock(selectedOrderForCourier) : false;
-  const canDispatch = Boolean(pickupPreviewAddress) && !selectedOrderLocked;
+  /* ── MARKETPLACE vs STORE-LINK DISPATCH ──
+   * A marketplace order is dispatched through the ADMIN's central courier
+   * backend: the merchant's own pickup address and API keys are never
+   * required, so canDispatch skips the pickup check entirely for them. The
+   * only remaining gate is the payment-verification lock (wallet TrxID). */
+  const selectedOrderIsMarketplace = selectedOrderForCourier ? isMarketplaceOrder(selectedOrderForCourier) : false;
+  const canDispatch = (
+    selectedOrderIsMarketplace
+      ? true // central backend handles pickup — no merchant pickup needed
+      : Boolean(pickupPreviewAddress)
+  ) && !selectedOrderLocked;
 
   /** Monotonic counter behind sandbox test tracking IDs (1001, 1002, …). */
   const sandboxSequenceRef = React.useRef(1);
@@ -833,17 +843,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           const reason = centralData.error
             || (centralData.code === 'missing_credentials'
               ? 'The platform has not configured its courier API keys yet — contact the marketplace administrator.'
-              : centralData.code === 'missing_vendor_pickup'
-              ? 'Add your pickup address and phone in Dashboard → Logistics → Courier API → Setup, then try again.'
               : centralData.code === 'payment_unverified'
               ? 'The marketplace administrator has not verified this wallet payment yet. Dispatch unlocks once the payment is marked Paid.'
               : `Central courier booking failed (${centralData.code || centralRes.status}).`);
-          toast.error(
-            centralData.code === 'missing_vendor_pickup'
-              ? 'Pickup details required'
-              : 'Central courier booking failed',
-            { description: reason },
-          );
+          toast.error('Central courier booking failed', { description: reason });
           return;
         }
 
@@ -865,7 +868,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         toast.success(`Booked via central ${dispatchCourier}`, {
           description: centralData.warning
             ? `Tracking ID: ${centralTracking}. ${centralData.warning}`
-            : `Tracking ID: ${centralTracking}. Pickup from ${centralData.pickup_address || 'store address'}.`,
+            : `Tracking ID: ${centralTracking}. ${centralData.pickup_source === 'central' ? 'Handled by the platform central admin courier backend.' : `Pickup from ${centralData.pickup_address || 'store address'}.`}`,
         });
         return;
       }
@@ -4195,9 +4198,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             </div>
 
             {/* ── PICKUP PREVIEW ── the address the courier will collect from.
-                The vendor must SEE and CONFIRM it before dispatch; if the
-                profile has none, dispatch is blocked until it is added in
-                Dashboard → Logistics. */}
+                STORE-LINK orders: the vendor sees and confirms their own
+                profile address before dispatch. MARKETPLACE orders: the
+                platform's central courier backend handles pickup — the
+                merchant's profile is not required and nothing is blocked. */}
             {selectedOrderLocked && (
               <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs">
                 <div className="flex items-center gap-2 font-black text-amber-400">
@@ -4208,6 +4212,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 </p>
               </div>
             )}
+            {selectedOrderIsMarketplace ? (
+              <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3.5 text-xs space-y-1">
+                <div className="flex items-center gap-1.5 text-[10px] uppercase font-black text-indigo-400">
+                  <Truck className="w-3 h-3" /> Marketplace order — central dispatch
+                </div>
+                <p className="leading-relaxed text-indigo-200/90">
+                  This marketplace order ships through the platform's <b className="text-white">central admin courier account</b>. No pickup address or courier API keys are needed from you — COD collections and settlements are routed to the marketplace automatically.
+                </p>
+              </div>
+            ) : (
             <div className="bg-[#181B26] p-3.5 rounded-xl border border-[#2E3548] space-y-1.5 text-xs">
               <div className="flex items-center gap-1.5 text-[10px] uppercase font-black text-slate-500">
                 <MapPin className="w-3 h-3" /> Pickup from your store
@@ -4236,9 +4250,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 </div>
               )}
             </div>
+            )}
 
             <div className="space-y-3 pt-2">
-              <label className="block text-xs font-bold text-slate-300">Select Logistics Courier API:</label>
+              <label className="block text-xs font-bold text-slate-300">
+                {selectedOrderIsMarketplace ? 'Central Admin Courier (marketplace dispatch)' : 'Select Logistics Courier API:'}
+              </label>
               <select
                 value={dispatchCourier}
                 onChange={(e) => setDispatchCourier(e.target.value)}
@@ -4251,7 +4268,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 <option value="Paperfly">Paperfly GO</option>
               </select>
 
-              {/* Vendor must explicitly confirm the pickup details. */}
+              {/* Vendor must explicitly confirm the pickup details. Store-link
+                  orders only — a marketplace order is collected under the
+                  platform's central configuration and needs no confirmation. */}
+              {!selectedOrderIsMarketplace && (
               <label className={`flex items-start gap-2.5 rounded-xl border p-3 text-xs ${canDispatch ? 'cursor-pointer border-[#2E3548] hover:bg-[#181B26]' : 'cursor-not-allowed border-amber-500/30 bg-amber-500/5'}`}>
                 <input
                   type="checkbox"
@@ -4264,6 +4284,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   I verify the pickup address shown above is correct and a courier agent can collect the parcel from there.
                 </span>
               </label>
+              )}
 
               <button
                 onClick={async () => {
@@ -4274,11 +4295,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     await handleBooking(targetOrd);
                   }
                 }}
-                disabled={Boolean(!canDispatch || !dispatchConfirmed || (selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id]))}
-                className="w-full bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-extrabold py-3 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#00D68F]/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={Boolean(!canDispatch || (!selectedOrderIsMarketplace && !dispatchConfirmed) || (selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id]))}
+                className={`w-full font-extrabold py-3 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg disabled:opacity-40 disabled:cursor-not-allowed ${
+                  selectedOrderIsMarketplace
+                    ? 'bg-indigo-500 hover:bg-indigo-400 text-white shadow-indigo-500/20'
+                    : 'bg-[#00D68F] hover:bg-[#00E699] text-slate-950 shadow-[#00D68F]/20'
+                }`}
               >
                 <Truck className="w-4 h-4" />
-                <span>{selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id] ? 'Booking Courier...' : `Confirm & Dispatch via ${dispatchCourier} API`}</span>
+                <span>{selectedOrderForCourier && isBookingCourier[selectedOrderForCourier.id] ? 'Booking Courier...' : selectedOrderIsMarketplace ? `Dispatch via Admin Central ${dispatchCourier} Account` : `Confirm & Dispatch via ${dispatchCourier} API`}</span>
               </button>
             </div>
           </div>
