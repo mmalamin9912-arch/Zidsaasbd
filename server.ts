@@ -36,7 +36,7 @@ async function startServer() {
 // Only bind a port for local dev / traditional Node hosting. On Vercel
 // (serverless) the app is imported by api/index.ts and must NOT call
 // app.listen(), otherwise the function hangs and every /api/* route 500s.
-if (!process.env.VERCEL && process.env.NODE_ENV !== 'production') {
+if (!process.env.VERCEL) {
   startServer();
 }
 
