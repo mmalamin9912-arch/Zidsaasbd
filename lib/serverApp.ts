@@ -15775,7 +15775,11 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
           error: 'The Super Admin has not configured Steadfast API keys in Logistics → Courier Settings.',
         });
       }
-      requestUrl = 'https://portal.steadfast.com.bd/api/v1/create_order';
+      // Use provided API base URL or fall back to the default endpoint.
+      // Admins can set VITE_STEADFAST_API_URL (or process.env.STEADFAST_API_URL) to
+      // point at a different host/port if the default portal.steadfast.com.bd cannot be resolved.
+      const steadfastApiUrl = process.env.STEADFAST_API_URL || 'https://portal.steadfast.com.bd/api/v1/create_order';
+      requestUrl = steadfastApiUrl;
       requestHeaders = { 'Content-Type': 'application/json', 'Api-Key': defaults.apiKey, 'Secret-Key': defaults.secretKey };
       requestBody = JSON.stringify({
         invoice,
