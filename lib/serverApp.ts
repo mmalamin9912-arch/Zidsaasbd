@@ -15763,7 +15763,6 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
     const note = String(order.customer_note || 'Handle with care');
     const invoice = String(order.invoice_id || orderNumber);
 
-    let bookingResponse: Response | null = null;
     let requestBody = '';
     let requestUrl = '';
     let requestHeaders: Record<string, string> = {};
@@ -15836,16 +15835,36 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       });
     }
 
-    bookingResponse = await fetch(requestUrl, {
+    // ── Dispatch through courierRequest — NEVER a bare fetch. ──
+    // A bare fetch that fails (DNS, firewall, provider down) surfaces as the
+    // literal string "fetch failed" with no cause. courierRequest adds a
+    // timeout, classifies the failure (abort vs network) and logs the exact
+    // error code to the server console, so the merchant gets an actionable
+    // message instead of a generic one.
+    console.log(`[Courier] central dispatch → ${courierKey} ${requestUrl}`);
+    const dispatched = await courierRequest(courierKey.toUpperCase(), requestUrl, {
       method: 'POST',
       headers: requestHeaders,
       body: requestBody,
     });
-    const providerData: any = await readJson(bookingResponse);
+    if (!dispatched.ok) {
+      console.error('[Courier] central dispatch failed:', {
+        courier: courierKey,
+        url: requestUrl,
+        message: dispatched.message,
+      });
+      return res.status(200).json({
+        ok: false,
+        code: 'dispatch_failed',
+        error: dispatched.message || `The ${courierKey} booking request could not be sent. Check the server's network access and try again.`,
+      });
+    }
+    const providerData: any = dispatched.data ?? {};
     const tracking = extractTrackingCode(providerData);
     const accepted = isBookingAccepted(providerData, tracking);
     if (!accepted) {
       const reason = describeProviderFailure(providerData, 'The central courier rejected this booking.');
+      console.warn('[Courier] central dispatch rejected by provider:', { courier: courierKey, status: dispatched.response?.status, reason });
       return res.status(200).json({ ok: false, code: 'booking_rejected', error: reason, provider_response: providerData });
     }
 
@@ -15891,8 +15910,26 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       warning: persisted ? undefined : 'The parcel was booked, but the tracking code could not be saved to this order.',
     });
   } catch (err: any) {
-    console.error('[Courier] POST /api/admin/marketplace-courier error:', err);
-    return res.status(200).json({ ok: false, code: 'dispatch_failed', error: err?.message || 'The central courier dispatch failed.' });
+    // Detailed diagnostics — "fetch failed" on its own is useless. The cause
+    // carries the real reason (ENOTFOUND / ECONNREFUSED / cert error, …).
+    console.error('[Courier] POST /api/admin/marketplace-courier error:', {
+      message: err?.message,
+      code: err?.cause?.code || err?.code,
+      cause: err?.cause?.message || err?.cause,
+      stack: err?.stack?.split('\n').slice(0, 4).join(' | '),
+    });
+    const hint = err?.cause?.code || err?.code || '';
+    const friendly =
+      hint === 'ENOTFOUND' ? 'The courier API hostname could not be resolved — the server has no working internet/DNS access.'
+      : hint === 'ECONNREFUSED' ? 'The courier API refused the connection — the provider may be down or blocking this server.'
+      : hint === 'CERT_HAS_EXPIRED' || String(err?.message || '').toLowerCase().includes('certificate') ? 'The courier API TLS certificate is invalid or expired.'
+      : err?.name === 'AbortError' ? 'The courier API took too long to respond (timeout).'
+      : '';
+    return res.status(200).json({
+      ok: false,
+      code: 'dispatch_failed',
+      error: friendly || err?.message || 'The central courier dispatch failed. Check the server logs for the exact cause.',
+    });
   }
 });
 
