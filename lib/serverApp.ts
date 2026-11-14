@@ -14789,56 +14789,28 @@ async function handleCourierBooking(
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
- * STEADFAST API ENDPOINT
+ * STEADFAST API ENDPOINT — OFFICIAL PRODUCTION BASE URL, NO OVERRIDE
  *
- * Steadfast's production REST API lives on `portal.packzy.com` (Packzy is
- * Steadfast's own platform; the API docs and every published SDK use
- * `https://portal.packzy.com/api/v1/...`). `portal.steadfast.com.bd` no longer
- * resolves — Node's fetch on Render failed with `getaddrinfo ENOTFOUND`, so
- * every parcel booking died before it left the server.
+ * Steadfast's official production REST API is
+ *   https://portal.packzy.com/api/v1/...
+ * (Packzy is Steadfast's own platform; the API docs and every published SDK
+ * use that origin).
  *
- * One resolver builds every Steadfast URL so a bad value in STEADFAST_API_URL
- * (a bare host, a host without `https://`, a base URL, or the legacy domain)
- * cannot reintroduce that failure.
+ * `portal.steadfast.com.bd` is RETIRED and no longer resolves — it has no A or
+ * CNAME record, which is exactly the `getaddrinfo ENOTFOUND` that Render logged
+ * when every parcel booking died before leaving the server. It must never be
+ * used, so it is not referenced anywhere in this file.
+ *
+ * There is deliberately NO environment override and NO fallback logic here:
+ * one frozen constant, and every Steadfast call is built from it. Whatever
+ * `STEADFAST_API_URL` may still be set on a host is ignored, so a stale value
+ * cannot point the courier at a dead domain again.
  * ──────────────────────────────────────────────────────────────────────────── */
-const STEADFAST_DEFAULT_HOST = 'portal.packzy.com';
-const STEADFAST_LEGACY_HOSTS = ['portal.steadfast.com.bd', 'steadfast.com.bd', 'www.steadfast.com.bd'];
+const STEADFAST_API_BASE_URL = 'https://portal.packzy.com/api/v1';
 
-/** Normalised, absolute Steadfast API URL for `path` (e.g. '/create_order'). */
+/** Absolute Steadfast API URL for `path` (e.g. '/create_order'). */
 function steadfastApiUrl(path: string): string {
-  const suffix = `/api/v1/${String(path || '').replace(/^\/+/, '')}`;
-  let raw = String(process.env.STEADFAST_API_URL || '').trim().replace(/^["']+|["']+$/g, '');
-
-  // Accept a bare host ('portal.packzy.com'), a base URL with or without a
-  // trailing slash, or a full endpoint URL ('…/api/v1/create_order').
-  if (raw && !/^https?:\/\//i.test(raw)) raw = `https://${raw.replace(/^\/+/, '')}`;
-  raw = raw.replace(/^http:\/\//i, 'https://'); // the API is TLS-only
-
-  let origin = `https://${STEADFAST_DEFAULT_HOST}`;
-  if (raw) {
-    try {
-      const parsed = new URL(raw);
-      if (parsed.hostname) origin = `${parsed.protocol}//${parsed.host}`;
-      // A full endpoint URL keeps its own path when the caller asked for that
-      // same endpoint (single booking URL configured); otherwise the path is
-      // rebuilt from the standard base.
-      const rawPath = parsed.pathname.replace(/\/+$/, '');
-      if (rawPath && /\/create_order$/i.test(rawPath) && /create_order$/i.test(suffix)) {
-        return `${origin}${rawPath}`;
-      }
-    } catch {
-      // Unparseable override — fall back to the official host.
-    }
-  }
-  return `${origin}${suffix}`;
-}
-
-/** True when the configured override still points at a retired Steadfast host. */
-function steadfastHostIsLegacy(): boolean {
-  const raw = String(process.env.STEADFAST_API_URL || '').trim().toLowerCase();
-  if (!raw) return false;
-  const host = raw.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
-  return STEADFAST_LEGACY_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  return `${STEADFAST_API_BASE_URL}/${String(path || '').replace(/^\/+/, '')}`;
 }
 
 app.post('/api/courier/steadfast', (req, res) =>
@@ -15828,15 +15800,7 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
           error: 'The Super Admin has not configured Steadfast API keys in Logistics → Courier Settings.',
         });
       }
-      // Official production endpoint. An admin can still override the host with
-      // STEADFAST_API_URL (e.g. a proxy or sandbox), but the value is normalised
-      // so a bare host or the retired portal.steadfast.com.bd cannot cause an
-      // ENOTFOUND failure again.
-      if (steadfastHostIsLegacy()) {
-        console.warn(
-          '[Courier] STEADFAST_API_URL points at a retired Steadfast host. Using https://portal.packzy.com/api/v1/create_order instead.'
-        );
-      }
+      // Official production endpoint — frozen, see steadfastApiUrl above.
       requestUrl = steadfastApiUrl('/create_order');
       requestHeaders = { 'Content-Type': 'application/json', 'Api-Key': defaults.apiKey, 'Secret-Key': defaults.secretKey };
       requestBody = JSON.stringify({
