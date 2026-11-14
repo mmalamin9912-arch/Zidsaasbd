@@ -86,7 +86,7 @@ function normalizeLine(raw: any): BasketLine | null {
    * or an `images[]` array, and the value may be a relative storage path —
    * rendering that as-is is what broke the checkout thumbnails.
    */
-  const image = resolveProductImage(source);
+  const image = resolveProductImage(source) || resolveProductImage(raw);
   const product = {
     ...source,
     id: String(id),
@@ -96,7 +96,7 @@ function normalizeLine(raw: any): BasketLine | null {
     image_url: image,
     imageUrl: image,
     thumbnail: image,
-    images: image ? [image] : (Array.isArray(source.images) ? source.images : []),
+    images: image ? [image, ...(Array.isArray(source.images) ? source.images.filter((x: any) => x !== image) : [])] : (Array.isArray(source.images) ? source.images : []),
     vendor_id: vendorId,
     vendor_name: String(source.vendor_name ?? source.vendorName ?? source.store_name ?? raw.vendorName ?? ''),
     vendor_slug: String(source.vendor_slug ?? source.vendorSlug ?? source.store_slug ?? raw.vendorSlug ?? ''),
@@ -168,10 +168,9 @@ function readBasket(): BasketLine[] {
 function compactBasketLines(lines: BasketLine[]): any[] {
   return lines.map((line) => {
     const p: any = line?.product || {};
-    const image = resolveProductImage(p);
-    // Never persist heavy base64/data-URL images or large descriptions in
-    // localStorage — they are what push the cart past the ~5MB quota.
-    const safeImage = image.startsWith('data:') ? '' : image;
+    const validImage = resolveProductImage(p) || resolveProductImage(line);
+    // Explicitly persist full, valid image URLs; only strip oversized data-URIs (> 500KB)
+    const safeImage = (validImage.startsWith('data:') && validImage.length > 500000) ? '' : validImage;
     return {
       productId: String(p.id ?? p.productId ?? p.product_id ?? ''),
       title: String(p.title ?? p.name ?? p.productName ?? 'Item'),
@@ -184,6 +183,7 @@ function compactBasketLines(lines: BasketLine[]): any[] {
       image_url: safeImage,
       imageUrl: safeImage,
       thumbnail: safeImage,
+      images: safeImage ? [safeImage] : [],
     };
   });
 }
@@ -370,6 +370,77 @@ export function useMarketplaceBasket() {
     return () => window.clearInterval(id);
   }, [lines.length, syncFromStorage]);
 
+  const fetchedMissingIdsRef = useRef<Set<string>>(new Set());
+
+  // Automatically fetch fresh product information from database if cart lines lack images
+  useEffect(() => {
+    if (typeof window === 'undefined' || lines.length === 0) return;
+    const missing = lines.filter((l) => {
+      const p = l?.product as any;
+      const img = resolveProductImage(p) || resolveProductImage(l);
+      return !img;
+    });
+
+    if (missing.length === 0) return;
+
+    const ids = Array.from(
+      new Set(
+        missing
+          .map((l) => String(l.product?.id || (l as any)?.productId || ''))
+          .filter(Boolean)
+      )
+    ).filter((id) => !fetchedMissingIdsRef.current.has(id));
+
+    if (ids.length === 0) return;
+    ids.forEach((id) => fetchedMissingIdsRef.current.add(id));
+
+    fetch(`/api/products?ids=${encodeURIComponent(ids.join(','))}`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((dbProducts: any[]) => {
+        if (!Array.isArray(dbProducts) || dbProducts.length === 0) return;
+        const map = new Map<string, any>();
+        for (const p of dbProducts) {
+          const key = String(p?.id ?? p?._id ?? p?.productId ?? '');
+          if (key) map.set(key, p);
+        }
+
+        let changed = false;
+        const currentLines = linesRef.current;
+        const updated = currentLines.map((l) => {
+          const id = String(l.product?.id || (l as any)?.productId || '');
+          const fresh = map.get(id);
+          if (!fresh) return l;
+          const freshImg = resolveProductImage(fresh);
+          if (!freshImg) return l;
+          changed = true;
+          return {
+            ...l,
+            product: {
+              ...l.product,
+              image: freshImg,
+              imageUrl: freshImg,
+              image_url: freshImg,
+              thumbnail: freshImg,
+              images: [
+                freshImg,
+                ...(Array.isArray(fresh.images)
+                  ? fresh.images.filter((x: any) => x !== freshImg)
+                  : []),
+              ],
+            },
+          };
+        });
+
+        if (changed) {
+          writeBasket(updated);
+          commit(updated);
+        }
+      })
+      .catch(() => {
+        // Silently tolerate network hiccups
+      });
+  }, [lines, commit]);
+
   const add = useCallback((product: MarketplaceProduct, quantity = 1) => {
     /*
      * ACCUMULATE, NEVER OVERWRITE.
@@ -393,12 +464,39 @@ export function useMarketplaceBasket() {
       // slug-only product matches its own card-added twin.
       vendorId: vendorKeyOf(product),
     };
+
+    // Explicitly resolve and save the full valid image URL at the moment the item is added
+    const validImage = resolveProductImage(product);
+    const enrichedProduct: MarketplaceProduct = {
+      ...product,
+      image: validImage || product.image || '',
+      imageUrl: validImage || (product as any).imageUrl || '',
+      image_url: validImage || (product as any).image_url || '',
+      thumbnail: validImage || (product as any).thumbnail || '',
+      images: validImage
+        ? [
+            validImage,
+            ...(Array.isArray(product.images)
+              ? product.images.filter((x: any) => x !== validImage)
+              : []),
+          ]
+        : (product.images || []),
+    };
+
     const existing = current.find((line) => sameLine(line, target));
     const next = existing
       ? current.map((line) => (sameLine(line, target)
-        ? { ...line, quantity: Number(line.quantity || 1) + qty }
+        ? {
+            ...line,
+            quantity: Number(line.quantity || 1) + qty,
+            product: {
+              ...line.product,
+              ...enrichedProduct,
+              image: validImage || line.product.image || enrichedProduct.image,
+            },
+          }
         : line))
-      : [...current, { product, quantity: qty }];
+      : [...current, { product: enrichedProduct, quantity: qty }];
     writeBasket(next);
     commit(next);
   }, [commit]);

@@ -22,6 +22,7 @@ import { resolveActiveStoreSlug } from '../lib/activeStore';
 import { fetchStoreByRef, storeIdFromRecord } from '../lib/storeApi';
 import { LanguageToggle } from './LanguageToggle';
 import SafeImage from './SafeImage';
+import CheckoutThumbnail from './CheckoutThumbnail';
 import { useStorefrontTracking } from '../hooks/useStorefrontTracking';
 import { resolveMessengerHref } from './MessengerChatWidget';
 import ContactStoreOwnerWidget from './ContactStoreOwnerWidget';
@@ -2997,23 +2998,33 @@ The render below must not guess. A merchant may paste
   };
 
   const handleAddToCart = (product: Product, variant = 'Default') => {
+    const validImage = resolveAnyProductImage(product);
+    const enrichedProduct: Product = {
+      ...product,
+      image: validImage || product.image,
+      imageUrl: validImage || (product as any).imageUrl,
+      thumbnail: validImage || (product as any).thumbnail,
+      images: validImage
+        ? [validImage, ...(Array.isArray(product.images) ? product.images.filter((x: any) => x !== validImage) : [])]
+        : (product.images || []),
+    };
     setCart(prev => {
       const next = prev || [];
-      const vendor = vendorOfProduct(product);
+      const vendor = vendorOfProduct(enrichedProduct);
       // Two vendors can sell the same product id, so identity is
       // (vendor, product, variant) — never the product id alone.
       const existing = next.find(item =>
-        item.product.id === product.id && item.variant === variant && item.vendorId === vendor.vendorId
+        item.product.id === enrichedProduct.id && item.variant === variant && item.vendorId === vendor.vendorId
       );
       if (existing) {
         return next.map(item =>
-          item.product.id === product.id && item.variant === variant && item.vendorId === vendor.vendorId
+          item.product.id === enrichedProduct.id && item.variant === variant && item.vendorId === vendor.vendorId
             ? { ...item, quantity: clampQty(item.quantity + 1) }
             : item
         );
       }
       // A freshly added line starts at the minimum order quantity.
-      return [...next, { product, quantity: clampQty(1), variant, vendorId: vendor.vendorId, vendorName: vendor.vendorName }];
+      return [...next, { product: enrichedProduct, quantity: clampQty(1), variant, vendorId: vendor.vendorId, vendorName: vendor.vendorName }];
     });
     setIsCartOpen(true);
   };
@@ -5682,7 +5693,7 @@ The render below must not guess. A merchant may paste
                     {cart.length > 0 ? (
                       cart.map((item, idx) => (
                         <div key={idx} className="flex items-center gap-3 py-2">
-                          <SafeImage src={resolveAnyProductImage(item)} alt={item.product.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" />
+                          <CheckoutThumbnail product={item.product} line={item} alt={item.product.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" width={40} height={40} />
                           <div className="flex-1 min-w-0">
                             <h4 className="font-semibold text-xs text-slate-100 truncate leading-tight">{item.product.title}</h4>
                             <div className="text-[10px] text-slate-400">Qty: {item.quantity}</div>
@@ -5697,7 +5708,7 @@ The render below must not guess. A merchant may paste
                       ))
                     ) : selectedProduct ? (
                       <div className="flex items-center gap-3 py-2">
-                        <SafeImage src={selectedProduct.image} alt={selectedProduct.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" />
+                        <CheckoutThumbnail product={selectedProduct} alt={selectedProduct.title} className="w-10 h-10 object-cover rounded-lg border border-slate-800 shrink-0" width={40} height={40} />
                         <div className="flex-1 min-w-0">
                           <h4 className="font-semibold text-xs text-slate-100 truncate leading-tight">{selectedProduct.title}</h4>
                         </div>

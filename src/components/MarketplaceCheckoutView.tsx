@@ -1,10 +1,10 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, Truck, Wallet, CreditCard, Banknote, ShieldCheck,
   Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail, Copy, Check,
   AlertCircle, ArrowRight,
 } from 'lucide-react';
-import SafeImage from './SafeImage';
+import CheckoutThumbnail from './CheckoutThumbnail';
 import type { AdminPaymentGatewayConfig } from '../types';
 import { useCart } from './CartProvider';
 import { resolveProductImage } from '../utils/imageFallback';
@@ -50,39 +50,6 @@ const THEME = {
 } as const;
 
 const bdt = (v: number) => `৳${Math.round(Number(v) || 0).toLocaleString('en-US')}`;
-
-/** One dev-time log per item, so the console is not flooded on every render. */
-const loggedImageItems = new Set<string>();
-
-function productImageOf(p: any, line?: any): string {
-  /*
-   * ONE resolver for the whole app.
-   *
-   * The rules (flat keys → `images[]` → nested `product.images[0]`) live in
-   * `resolveProductImage`, which `normalizeOrderItems` also uses. Keeping two
-   * copies is what let the checkout show thumbnails while order history showed
-   * none for the very same line.
-   *
-   * The PRODUCT is authoritative; the basket line is only the fallback, because
-   * a line persisted in localStorage can carry a stale/blank image while the
-   * live product still has one.
-   */
-  const image = resolveProductImage(p) || resolveProductImage(line) || '';
-  const itemKey = String(p?.id || p?.productId || p?.product_id || line?.productId || '');
-  if (import.meta.env.DEV && itemKey && !loggedImageItems.has(itemKey)) {
-    loggedImageItems.add(itemKey);
-    console.debug('[MarketplaceCheckout] resolved cart item image', { itemKey, image, pImage: p?.image, pImageUrl: p?.imageUrl, pImage_raw: p?.image_url, lineProductImage: line?.product?.image, lineProductImageUrl: line?.product?.imageUrl, lineProductImage_raw: line?.product?.image_url });
-  }
-  /*
-   * Return '' when the line has no photo — do NOT bake `PLACEHOLDER_IMAGE` in.
-   *
-   * `SafeImage` already renders the placeholder for an empty source, and a
-   * real '/placeholder.svg' here made "no photo" indistinguishable from "a
-   * photo" (the same reason `normalizeOrderItems` keeps `image` empty). The
-   * caller passes the result straight to the `<img>` src.
-   */
-  return image || resolveProductImage(line) || '';
-}
 
 /** All 64 districts — a courier needs the real one, not a header shortcut. */
 const DISTRICTS = [
@@ -652,7 +619,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
           variant: String(p.variant || 'Standard'),
           quantity: Number(line.quantity || 1),
           unitPriceBDT: Number(p.priceBDT) || 0,
-          image: productImageOf(p, line),
+          image: resolveProductImage(p) || resolveProductImage(line),
           // ── the routing keys ──
           vendor_id: vendorId,
           vendor_name: vendorName,
@@ -1254,9 +1221,9 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                         const p = line.product as any;
                         return (
                           <div key={`${vendor.vendorId}-${p.id}`} className="mb-2 flex gap-2.5 last:mb-0">
-                          <SafeImage
-                            item={p || line}
-                            src={productImageOf(p, line)}
+                          <CheckoutThumbnail
+                            product={p}
+                            line={line}
                             alt={p.title || p.name || 'Item'}
                             width={80}
                             height={80}

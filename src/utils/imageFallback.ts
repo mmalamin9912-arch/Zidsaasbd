@@ -57,7 +57,7 @@ export function getStorageBase(): string {
   }
 
   const trimmed = String(raw || '').trim();
-  return trimmed ? trimmed.replace(/\/+$/, '') : '';
+  return trimmed ? trimmed.replace(/\/+$/, '') : 'https://lhpxqlmnifzmfeemfwmo.supabase.co';
 }
 
 export const STORAGE_BASE = getStorageBase();

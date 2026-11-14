@@ -5715,6 +5715,54 @@ function normalizeMongoProduct(p: any): any {
 app.get('/api/products', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
+    // ── Direct ID query: fetch one or more products by ID across all stores ──
+    const idParam = (req.query.id as string ||
+      req.query.ids as string ||
+      req.query.product_id as string ||
+      req.query.productId as string ||
+      '').trim();
+
+    if (idParam) {
+      const idList = idParam.split(',').map((s) => s.trim()).filter(Boolean);
+      if (idList.length > 0) {
+        const mongoUri = readMongoUri();
+        let productDb: any = null;
+        if (mongoUri || readMongoUri(SECONDARY_DB_ROLE)) {
+          productDb = await getMongoDb(DB_NAME, SECONDARY_DB_ROLE).catch(() => null);
+          if (!productDb) productDb = await getMongoDb(DB_NAME, 'primary').catch(() => null);
+        }
+        if (productDb) {
+          const idQuery: any = {
+            $or: [
+              { id: { $in: idList } },
+              { product_id: { $in: idList } },
+              { productId: { $in: idList } },
+            ]
+          };
+          for (const idVal of idList) {
+            if (/^[0-9a-fA-F]{24}$/.test(idVal)) {
+              try { idQuery.$or.push({ _id: new mongoose.Types.ObjectId(idVal) }); } catch {}
+            }
+          }
+          const mongoProds = await (productDb.collection('products') as any)
+            .find(idQuery)
+            .toArray()
+            .catch(() => []);
+          if (Array.isArray(mongoProds) && mongoProds.length > 0) {
+            return res.status(200).json(mongoProds.map(normalizeMongoProduct));
+          }
+        }
+        // Local file/memory fallback if DB had nothing
+        const payload = await readStorePayload();
+        const allLocal = Array.isArray(payload?.products) ? payload.products : [];
+        const matched = allLocal.filter((p: any) => idList.includes(String(p?.id ?? p?._id ?? p?.productId ?? '')));
+        if (matched.length > 0) {
+          return res.status(200).json(matched.map(normalizeMongoProduct));
+        }
+        return res.status(200).json([]);
+      }
+    }
+
     // Accept store_slug, storeSlug, store_id, store_code, or store domain
     // (domain / store_domain / custom_domain query params).
     const rawSlug = (req.query.store_slug as string ||
@@ -6241,6 +6289,41 @@ const handleProductUpsert = async (req: any, res: any) => {
 
 // Upsert semantics — registered for both verbs so a client PUT (structured
 // payload, CORS preflight exercised) lands on exactly the same code path.
+app.get('/api/products/:id', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!id) return res.status(404).json({ error: 'Product not found' });
+    const mongoUri = readMongoUri();
+    let productDb: any = null;
+    if (mongoUri || readMongoUri(SECONDARY_DB_ROLE)) {
+      productDb = await getMongoDb(DB_NAME, SECONDARY_DB_ROLE).catch(() => null);
+      if (!productDb) productDb = await getMongoDb(DB_NAME, 'primary').catch(() => null);
+    }
+    if (productDb) {
+      const idQuery: any = {
+        $or: [
+          { id },
+          { product_id: id },
+          { productId: id },
+        ]
+      };
+      if (/^[0-9a-fA-F]{24}$/.test(id)) {
+        try { idQuery.$or.push({ _id: new mongoose.Types.ObjectId(id) }); } catch {}
+      }
+      const doc = await (productDb.collection('products') as any).findOne(idQuery).catch(() => null);
+      if (doc) return res.status(200).json(normalizeMongoProduct(doc));
+    }
+    const payload = await readStorePayload();
+    const allLocal = Array.isArray(payload?.products) ? payload.products : [];
+    const matched = allLocal.find((p: any) => String(p?.id ?? p?._id ?? p?.productId ?? '') === id);
+    if (matched) return res.status(200).json(normalizeMongoProduct(matched));
+    return res.status(404).json({ error: 'Product not found' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Error fetching product' });
+  }
+});
+
 app.post('/api/products', handleProductUpsert);
 app.put('/api/products', handleProductUpsert);
 
