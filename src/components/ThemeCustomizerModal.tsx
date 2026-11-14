@@ -9,6 +9,7 @@ import { resolveThemeComponentLayout } from './themes';
 import { readZidStoreData, writeZidStoreData } from '../lib/storeData';
 import { readAndDownscaleImage, LOGO_MAX_EDGE, MAX_IMAGE_EDGE } from '../utils/imageUtils';
 import SafeImage from './SafeImage';
+import { toRenderableImageUrl } from '../utils/imageFallback';
 import { getSupabaseClient, safeUpsertRow } from '../lib/supabase';
 import {
   getDefaultGalleryImages,
@@ -352,11 +353,21 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     apply: (dataUrl: string) => void,
     maxEdge: number = MAX_IMAGE_EDGE
   ) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
+    const target = e.target;
+    const file = target.files?.[0];
+    // Clear the input IMMEDIATELY so a rapid double-select can't pick up the
+    // same file twice and so the selected file isn't held open across the
+    // async decode. We keep the `file` reference (not the input) for the read.
+    target.value = '';
     if (!file) return;
     const dataUrl = await readAndDownscaleImage(file, maxEdge);
-    if (dataUrl) apply(dataUrl);
+    // Normalise the data URL so `SafeImage`/the `background-image` CSS always
+    // receive a valid, in-origin-compatible value. `toRenderableImageUrl`
+    // explicitly treats `data:` URIs as absolute and returns them unchanged,
+    // so this is a no-op for a well-formed data URL but guards against any
+    // stray whitespace/empty result from the FileReader / canvas path.
+    const normalized = dataUrl ? toRenderableImageUrl(dataUrl) : '';
+    if (normalized) apply(normalized);
   };
 
   const handleGalleryImageUpload = async (e: React.ChangeEvent<HTMLInputElement>, mode: 'add' | 'update', index?: number) => {
@@ -2452,7 +2463,10 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                               type="file"
                               accept="image/*"
                               className="hidden"
-                              onChange={(e) => pickImage(e, setCountdownBgImage)}
+                              onChange={(e) => {
+                                pickImage(e, setCountdownBgImage);
+                                markDirty();
+                              }}
                             />
                           </label>
                         </div>
@@ -3605,7 +3619,10 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 type="file"
                                 accept="image/*"
                                 className="hidden"
-                                onChange={(e) => pickImage(e, setCategoriesBgImage)}
+                                onChange={(e) => {
+                                  pickImage(e, setCategoriesBgImage);
+                                  markDirty();
+                                }}
                               />
                             </label>
                           </div>
