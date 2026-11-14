@@ -17457,9 +17457,12 @@ app.post('/api/courier/webhook/steadfast', async (req: any, res: any) => {
     const consignmentId = String(
       payload.consignment_id ||
       payload.consignmentId ||
+      payload.consignment_number ||
       payload.tracking_code ||
       payload.trackingCode ||
       body.consignment_id ||
+      body.consignmentId ||
+      body.consignmentNumber ||
       req.query.consignment_id ||
       req.query.tracking_code ||
       ''
@@ -17469,12 +17472,19 @@ app.post('/api/courier/webhook/steadfast', async (req: any, res: any) => {
     const merchantOrderId = String(
       payload.invoice ||
       payload.invoice_id ||
-      payload.merchant_order_id ||
+      payload.invoiceId ||
       payload.order_number ||
       payload.orderNumber ||
+      payload.order_id ||
+      payload.orderId ||
       body.invoice ||
+      body.merchant_order_id ||
+      body.order_id ||
+      body.orderId ||
+      body.orderNumber ||
       req.query.invoice ||
       req.query.order_number ||
+      req.query.orderId ||
       ''
     ).trim();
 
@@ -17483,8 +17493,13 @@ app.post('/api/courier/webhook/steadfast', async (req: any, res: any) => {
       payload.status ||
       payload.tracking_message ||
       payload.message ||
+      payload.order_status ||
+      payload.order_status_slug ||
+      payload.event ||
       body.delivery_status ||
       body.status ||
+      body.order_status ||
+      body.event ||
       req.query.status ||
       ''
     ).trim();
