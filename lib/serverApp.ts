@@ -2203,7 +2203,26 @@ app.post(['/api/auth/reset-password', '/api/auth/merchant/reset-password'], asyn
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
-  res.json({ status: 'ok', provider: 'Supabase Data Layer' });
+  // `?courier_creds=1` prints the masked courier credential snapshot to the
+  // SERVER log (never in the response body) so a Render/Vercel deployment can
+  // be checked for injected env vars without redeploying.
+  const wantCourierCreds = String(req.query?.courier_creds || '') === '1';
+  if (wantCourierCreds) {
+    logCourierEnvSnapshot('health');
+  }
+  const courierCreds = wantCourierCreds
+    ? Object.fromEntries(
+        COURIER_CREDENTIAL_ENV_KEYS.map((key) => {
+          const value = readCourierEnv(key);
+          return [key, value ? { present: true, length: value.length, preview: `${value.slice(0, 4)}…${value.slice(-4)}` } : { present: false }];
+        })
+      )
+    : undefined;
+  res.json({
+    status: 'ok',
+    provider: 'Supabase Data Layer',
+    ...(courierCreds ? { courier_creds: courierCreds, courier_creds_note: 'Masked preview only. The full values are never exposed over HTTP.' } : {}),
+  });
 });
 
 // GET /api/admin/analytics — platform-wide aggregation for the Super Admin
@@ -15290,6 +15309,12 @@ async function dispatchWithCentralFallback(input: {
           continue;
         }
         console.log(`[Courier] central dispatch → steadfast (packzy)`);
+        console.log(
+          `[Courier][creds] central fallback → steadfast | ` +
+            `${describeCredential('STEADFAST_API_KEY', cfg.apiKey, cfg.source)} | ` +
+            `${describeCredential('STEADFAST_SECRET_KEY', cfg.secretKey, cfg.source)} | ` +
+            `headers: Api-Key, Secret-Key`
+        );
         const dispatched = await courierRequest('Steadfast Courier', steadfastApiUrl('/create_order'), {
           method: 'POST',
           headers: {
@@ -15307,6 +15332,13 @@ async function dispatchWithCentralFallback(input: {
           }),
         });
         if (!dispatched.ok) {
+          if (dispatched.response?.status === 401 || dispatched.response?.status === 403) {
+            console.error('[Courier] central fallback UNAUTHORIZED:', {
+              courier: 'steadfast',
+              status: dispatched.response?.status,
+              credentials: courierCredentialSnapshot('steadfast', cfg),
+            });
+          }
           attempts.push({ courier: 'steadfast', ok: false, code: 'dispatch_failed', error: dispatched.message });
           continue;
         }
@@ -15804,13 +15836,29 @@ const STEADFAST_PROVIDER: CourierProvider = {
   key: 'steadfast',
   codePrefix: 'STF',
   buildRequest: (order, merchantConfig) => {
-    const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
-    const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
+    // Store's own account first, platform env second. Env values go through
+    // readCourierEnv so a pasted key carrying a BOM / quotes / trailing newline
+    // is normalised before it reaches the `Api-Key` header (the classic 401).
+    const ownApiKey = String(merchantConfig.steadfast_api_key ?? '').trim();
+    const ownSecret = String(merchantConfig.steadfast_secret_key ?? '').trim();
+    const apiKey = ownApiKey || readCourierEnv('STEADFAST_API_KEY');
+    const secretKey = ownSecret || readCourierEnv('STEADFAST_SECRET_KEY');
     if (!apiKey || !secretKey) {
       return {
         configError:
           'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Steadfast.',
       };
+    }
+    console.log(
+      `[Courier][creds] merchant dispatch → steadfast | ` +
+        `${describeCredential('STEADFAST_API_KEY', apiKey, ownApiKey ? 'merchant_config' : 'env')} | ` +
+        `${describeCredential('STEADFAST_SECRET_KEY', secretKey, ownSecret ? 'merchant_config' : 'env')} | ` +
+        `headers: Api-Key, Secret-Key`
+    );
+    for (const anomaly of credentialAnomalies('STEADFAST_API_KEY', apiKey).concat(
+      credentialAnomalies('STEADFAST_SECRET_KEY', secretKey)
+    )) {
+      console.warn(`[Courier][creds] ${anomaly}`);
     }
     return {
       url: steadfastApiUrl('/create_order'),
@@ -15854,8 +15902,15 @@ const handleSteadfastFraudCheck = async (req: any, res: any) => {
 
     const cleanPhone = rawPhone.replace(/[^0-9]/g, '');
     const merchantConfig = req.body?.merchantConfig || {};
-    const apiKey = merchantConfig.steadfast_api_key || req.query?.api_key || process.env.STEADFAST_API_KEY || '';
-    const secretKey = merchantConfig.steadfast_secret_key || req.query?.secret_key || process.env.STEADFAST_SECRET_KEY || '';
+    const apiKey = String(merchantConfig.steadfast_api_key ?? '').trim() || req.query?.api_key || readCourierEnv('STEADFAST_API_KEY');
+    const secretKey = String(merchantConfig.steadfast_secret_key ?? '').trim() || req.query?.secret_key || readCourierEnv('STEADFAST_SECRET_KEY');
+    if (apiKey && secretKey) {
+      console.log(
+        `[Courier][creds] fraud-check → steadfast | ` +
+          `${describeCredential('STEADFAST_API_KEY', apiKey)} | ` +
+          `${describeCredential('STEADFAST_SECRET_KEY', secretKey)} | headers: Api-Key, Secret-Key`
+      );
+    }
 
     let externalData: any = null;
 
@@ -16158,27 +16213,147 @@ const COURIER_KEY_BY_NAME: Record<string, string> = {
  * Never throws — every failure is a shaped 200 so a dashboard button can show
  * the reason instead of a network error.
  * ──────────────────────────────────────────────────────────────────────────── */
+/* ────────────────────────────────────────────────────────────────────────────
+ * COURIER CREDENTIAL DIAGNOSTICS (HTTP 401 "credential mismatch")
+ *
+ * A 401 from Steadfast almost never means the keys are wrong — it means the
+ * bytes the server SENT are not the bytes the courier portal holds. Render /
+ * Vercel copy an env var verbatim, so a value pasted from the dashboard often
+ * arrives with a BOM, wrapping quotes, or a trailing newline, and the courier
+ * answers `invalid api key or secret key`.
+ *
+ * Everything below exists to make that visible from the SERVER LOG instead of
+ * by guesswork:
+ *   • readCourierEnv      — reads the var and strips BOM / quotes / whitespace.
+ *   • describeCredential  — masked fingerprint: source, length, first/last 4.
+ *   • credentialAnomalies — warns when the shape is obviously wrong (embedded
+ *                           whitespace, placeholder text, truncated key).
+ *
+ * The full secret is never printed: only length and the outer 4 characters,
+ * which is enough to line the log up against the courier portal.
+ * ──────────────────────────────────────────────────────────────────────────── */
+const COURIER_CREDENTIAL_ENV_KEYS = [
+  'STEADFAST_API_KEY',
+  'STEADFAST_SECRET_KEY',
+  'PATHAO_CLIENT_ID',
+  'PATHAO_CLIENT_SECRET',
+  'PATHAO_USERNAME',
+  'PATHAO_PASSWORD',
+  'PATHAO_STORE_ID',
+  'REDX_API_KEY',
+  'REDX_SECRET_KEY',
+  'PAPERFLY_API_KEY',
+  'PAPERFLY_SECRET_KEY',
+] as const;
+
+/**
+ * Read a courier credential from the environment, tolerating what a copy/paste
+ * from a web portal leaves behind: a BOM, wrapping quotes, and stray
+ * whitespace (including a trailing newline in a `.env` file).
+ */
+function readCourierEnv(name: string): string {
+  return String(process.env[name] ?? '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .replace(/^["'`]+/, '')
+    .replace(/["'`]+$/, '')
+    .trim();
+}
+
+/** Masked fingerprint of one credential — safe for server logs. */
+function describeCredential(name: string, value: any, source = 'env'): string {
+  const raw = String(value ?? '');
+  if (!raw) return `${name}=<missing> (source: ${source})`;
+  const body = raw.length <= 8 ? `${raw.slice(0, 2)}…` : `${raw.slice(0, 4)}…${raw.slice(-4)}`;
+  return `${name}=${body} (source: ${source}, length: ${raw.length})`;
+}
+
+/**
+ * Shape warnings for one credential: things that pass a non-empty check but
+ * still produce a 401 (embedded spaces, placeholder text, a key that looks
+ * truncated). Returns a list of human-readable notes, empty when the value
+ * looks clean.
+ */
+function credentialAnomalies(name: string, value: any): string[] {
+  const raw = String(value ?? '');
+  if (!raw) return [`${name} is empty`];
+  const notes: string[] = [];
+  if (/\s/.test(raw)) notes.push(`${name} contains whitespace`);
+  if (/[<>]|\{\{|\}\}|your[-_ ]?api[-_ ]?key|xxxx|\bapi[_-]?key\b/i.test(raw)) {
+    notes.push(`${name} looks like a placeholder, not a real key`);
+  }
+  if (raw.length < 16) notes.push(`${name} is only ${raw.length} chars — likely truncated`);
+  return notes;
+}
+
+/** Masked per-provider credential snapshot used by dispatch error logs. */
+function courierCredentialSnapshot(
+  courierKey: string,
+  cfg: Record<string, any> | null | undefined
+): Record<string, string> {
+  const c = cfg || {};
+  const source = String(c.source || 'env');
+  if (courierKey === 'pathao') {
+    return {
+      source,
+      clientId: describeCredential('PATHAO_CLIENT_ID', c.clientId, source),
+      clientSecret: describeCredential('PATHAO_CLIENT_SECRET', c.clientSecret, source),
+      username: describeCredential('PATHAO_USERNAME', c.username, source),
+      password: describeCredential('PATHAO_PASSWORD', c.password, source),
+      storeId: String(c.storeId ? `${c.storeId}` : '<missing>'),
+    };
+  }
+  const apiEnv = courierKey === 'redx' ? 'REDX_API_KEY' : courierKey === 'paperfly' ? 'PAPERFLY_API_KEY' : 'STEADFAST_API_KEY';
+  const secretEnv = courierKey === 'redx' ? 'REDX_SECRET_KEY' : courierKey === 'paperfly' ? 'PAPERFLY_SECRET_KEY' : 'STEADFAST_SECRET_KEY';
+  return {
+    source,
+    apiKey: describeCredential(apiEnv, c.apiKey, source),
+    secretKey: describeCredential(secretEnv, c.secretKey, source),
+    storeId: String(c.storeId ? `${c.storeId}` : '<missing>'),
+  };
+}
+
+/**
+ * One boot-time line listing every courier env var the server can see. Render's
+ * log is the only place to confirm a var was actually injected, so this runs on
+ * module load (and is re-printed on demand by `/api/health?courier_creds=1`).
+ */
+function logCourierEnvSnapshot(tag = 'boot'): void {
+  const seen = COURIER_CREDENTIAL_ENV_KEYS.filter((k) => readCourierEnv(k)).map((k) => describeCredential(k, readCourierEnv(k)));
+  const missing = COURIER_CREDENTIAL_ENV_KEYS.filter((k) => !readCourierEnv(k));
+  console.log(`[Courier][creds] ${tag} present: ${seen.length ? seen.join(' | ') : '<none>'}`);
+  if (missing.length) {
+    console.warn(`[Courier][creds] ${tag} missing env vars: ${missing.join(', ')}`);
+  }
+  for (const key of COURIER_CREDENTIAL_ENV_KEYS) {
+    const anomalies = credentialAnomalies(key, readCourierEnv(key));
+    if (anomalies.length) console.warn(`[Courier][creds] ${tag} ${anomalies.join('; ')}`);
+  }
+}
+
+logCourierEnvSnapshot('boot');
+
 const ADMIN_COURIER_DEFAULTS = {
   steadfast: {
-    apiKey: process.env.STEADFAST_API_KEY || '',
-    secretKey: process.env.STEADFAST_SECRET_KEY || '',
+    apiKey: readCourierEnv('STEADFAST_API_KEY'),
+    secretKey: readCourierEnv('STEADFAST_SECRET_KEY'),
   },
   pathao: {
-    clientId: process.env.PATHAO_CLIENT_ID || '',
-    clientSecret: process.env.PATHAO_CLIENT_SECRET || '',
+    clientId: readCourierEnv('PATHAO_CLIENT_ID'),
+    clientSecret: readCourierEnv('PATHAO_CLIENT_SECRET'),
     // Pathao merchant-dashboard (password grant) credentials — used by
     // ensurePathaoToken when present; client_credentials otherwise.
-    username: process.env.PATHAO_USERNAME || '',
-    password: process.env.PATHAO_PASSWORD || '',
-    storeId: process.env.PATHAO_STORE_ID || '',
+    username: readCourierEnv('PATHAO_USERNAME'),
+    password: readCourierEnv('PATHAO_PASSWORD'),
+    storeId: readCourierEnv('PATHAO_STORE_ID'),
   },
   redx: {
-    apiKey: process.env.REDX_API_KEY || '',
-    secretKey: process.env.REDX_SECRET_KEY || '',
+    apiKey: readCourierEnv('REDX_API_KEY'),
+    secretKey: readCourierEnv('REDX_SECRET_KEY'),
   },
   paperfly: {
-    apiKey: process.env.PAPERFLY_API_KEY || '',
-    secretKey: process.env.PAPERFLY_SECRET_KEY || '',
+    apiKey: readCourierEnv('PAPERFLY_API_KEY'),
+    secretKey: readCourierEnv('PAPERFLY_SECRET_KEY'),
   },
 };
 
@@ -16211,9 +16386,17 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
   };
   for (const key of ['steadfast', 'pathao', 'redx', 'paperfly']) {
     const isChosen = key === out.provider;
+    // Dashboard value first (mask-tolerant), env second. The WINNER is
+    // recorded as `source` so a 401 log can say whether the request was sent
+    // with the platform-config keys or the Render env keys — the two most
+    // common causes of "the credentials are definitely correct".
+    const savedApiKey = pick(isChosen ? central.apiKey || central.apiKeyId : '', '');
+    const savedSecret = pick(isChosen ? central.apiSecret ?? central.secretKey : '', '');
+    const apiKey = savedApiKey || env[key]?.apiKey || '';
+    const secretKey = savedSecret || env[key]?.secretKey || env[key]?.clientSecret || '';
     out[key] = {
-      apiKey: pick(isChosen ? central.apiKey : '', env[key]?.apiKey || ''),
-      secretKey: pick(isChosen ? central.apiSecret : '', env[key]?.secretKey || env[key]?.clientSecret || ''),
+      apiKey,
+      secretKey,
       clientId: pick(isChosen ? central.apiKey : '', env[key]?.clientId || ''),
       clientSecret: pick(isChosen ? central.apiSecret : '', env[key]?.clientSecret || ''),
       // Pathao password-grant credentials come from their OWN env vars, NOT
@@ -16223,7 +16406,21 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
       username: pick(isChosen ? central.pathaoUsername || central.username : '', env[key]?.username || ''),
       password: pick(isChosen ? central.pathaoPassword || central.password : '', env[key]?.password || ''),
       storeId: pick(central.storeId, env[key]?.storeId || ''),
+      source: savedApiKey || savedSecret ? 'platform_config' : 'env',
     };
+  }
+
+  // Masked credential snapshot — printed on every resolve so the Render log
+  // shows exactly which keys a dispatch is about to send.
+  const chosen = out[out.provider] || out.steadfast;
+  console.log(
+    `[Courier][creds] resolved provider=${out.provider} enabled=${out.enabled} | ` +
+      `${describeCredential('api_key', chosen.apiKey || chosen.clientId, chosen.source)} | ` +
+      `${describeCredential('secret_key', chosen.secretKey || chosen.clientSecret, chosen.source)}`
+  );
+  for (const key of COURIER_CREDENTIAL_ENV_KEYS) {
+    const anomalies = credentialAnomalies(key, readCourierEnv(key));
+    if (anomalies.length) console.warn(`[Courier][creds] env ${anomalies.join('; ')}`);
   }
   return out;
 }
@@ -16777,6 +16974,9 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       }
       // Official production endpoint — frozen, see steadfastApiUrl above.
       requestUrl = steadfastApiUrl('/create_order');
+      // Exact header names Steadfast's API expects: `Api-Key` and `Secret-Key`
+      // (NOT api_key / X-Api-Key / Authorization). Logged here so a 401 can be
+      // read as either "wrong keys" or "wrong header names" at a glance.
       requestHeaders = { 'Content-Type': 'application/json', 'Api-Key': defaults.apiKey, 'Secret-Key': defaults.secretKey };
       requestBody = JSON.stringify({
         invoice,
@@ -16843,12 +17043,45 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
     // error code to the server console, so the merchant gets an actionable
     // message instead of a generic one.
     console.log(`[Courier] central dispatch → ${courierKey} ${requestUrl}`);
+    console.log(
+      `[Courier][creds] sending to ${courierKey} | headers: ${Object.keys(requestHeaders).join(', ')} | ` +
+        courierCredentialSnapshot(courierKey, defaults).apiKey +
+        ` | ${courierCredentialSnapshot(courierKey, defaults).secretKey}`
+    );
     const dispatched = await courierRequest(courierKey.toUpperCase(), requestUrl, {
       method: 'POST',
       headers: requestHeaders,
       body: requestBody,
     });
     if (!dispatched.ok) {
+      // 401/403 is a CREDENTIAL problem, not a network one. Log the exact keys
+      // (masked), their source, and the header names so the Render log answers
+      // "did the env var reach the process?" without a redeploy round-trip.
+      const httpStatus = dispatched.response?.status;
+      if (httpStatus === 401 || httpStatus === 403) {
+        console.error('[Courier] central dispatch UNAUTHORIZED:', {
+          courier: courierKey,
+          url: requestUrl,
+          status: httpStatus,
+          provider_response: dispatched.data ?? null,
+          headers_sent: Object.keys(requestHeaders),
+          credentials: courierCredentialSnapshot(courierKey, defaults),
+          env_present: COURIER_CREDENTIAL_ENV_KEYS.filter((k) => readCourierEnv(k)).join(', ') || '<none>',
+        });
+        const apiKeyEnv = courierKey === 'redx' ? 'REDX_API_KEY' : courierKey === 'paperfly' ? 'PAPERFLY_API_KEY' : courierKey === 'pathao' ? 'PATHAO_CLIENT_ID' : 'STEADFAST_API_KEY';
+        const secretEnv = courierKey === 'redx' ? 'REDX_SECRET_KEY' : courierKey === 'paperfly' ? 'PAPERFLY_SECRET_KEY' : courierKey === 'pathao' ? 'PATHAO_CLIENT_SECRET' : 'STEADFAST_SECRET_KEY';
+        const anomalies = credentialAnomalies(apiKeyEnv, defaults?.apiKey || defaults?.clientId)
+          .concat(credentialAnomalies(secretEnv, defaults?.secretKey || defaults?.clientSecret));
+        for (const anomaly of anomalies) console.warn(`[Courier][creds] ${anomaly}`);
+        return res.status(200).json({
+          ok: false,
+          code: 'unauthorized',
+          error:
+            `${courierKey === 'steadfast' ? 'Steadfast' : courierKey} rejected the API credentials (HTTP ${httpStatus}). ` +
+            'Re-copy the Api-Key / Secret-Key pair from the courier portal into Super Admin → Logistics → Courier Settings (or the STEADFAST_API_KEY / STEADFAST_SECRET_KEY env vars) — the server log shows the exact key fingerprint and source it sent.',
+          provider_response: dispatched.data ?? null,
+        });
+      }
       console.error('[Courier] central dispatch failed:', {
         courier: courierKey,
         url: requestUrl,
