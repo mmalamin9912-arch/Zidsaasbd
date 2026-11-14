@@ -65,6 +65,12 @@ export interface CourierCredentialEntry {
 
 export interface CourierConfig {
   selectedCourierId: string;
+  /** Primary courier for "Send to Courier". Falls back to `selectedCourierId`. */
+  primaryCourierId?: string;
+  /** Courier used automatically when the primary fails. '' = none configured. */
+  fallbackCourierId?: string;
+  /** Master switch for automatic primary → fallback switching. */
+  autoFallback?: boolean;
   perCourier: Record<string, CourierCredentialEntry>;
   updatedAt?: string;
 }

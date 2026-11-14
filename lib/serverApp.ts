@@ -12569,6 +12569,12 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
 }
 
 /**
+ * Couriers the dispatch layer can book through (see COURIER_KEY_BY_NAME).
+ * Order matters: it is the preference used when a store has no saved primary.
+ */
+const COURIER_ROUTABLE_KEYS = ['steadfast', 'pathao', 'redx', 'paperfly'];
+
+/**
  * Sanitise the courier integration block edited in Logistics → Courier API.
  *
  * `perCourier` holds the credentials entered in the "Setup" modal, keyed by
@@ -12603,8 +12609,38 @@ function normalizeCourierConfig(raw: any, fallback: Record<string, any> = {}) {
     };
   }
 
+  /*
+   * ROUTING — primary courier + optional automatic fallback.
+   *
+   * Only couriers the dispatch layer can actually call are accepted, so a typo
+   * or a stale courier id cannot silently disable auto-switching. The fallback
+   * may never equal the primary: retrying the provider that just failed wastes
+   * the merchant's time and tells them nothing new.
+   *
+   * `autoFallback` defaults OFF. Switching couriers is a billing/contract
+   * decision (each courier charges differently), so it is explicit opt-in —
+   * never something a config migration turns on for a merchant.
+   */
+  const routable = Object.keys(perCourier).filter((id) => COURIER_ROUTABLE_KEYS.includes(id));
+  const rawPrimary = cfgStr(src.primaryCourierId ?? src.selectedCourierId, fallback.primaryCourierId || fallback.selectedCourierId || '')
+    .trim().toLowerCase();
+  const rawSecondary = cfgStr(src.fallbackCourierId ?? src.secondaryCourierId, fallback.fallbackCourierId || '')
+    .trim().toLowerCase();
+  const primaryCourierId = COURIER_ROUTABLE_KEYS.includes(rawPrimary)
+    ? rawPrimary
+    : (routable[0] || 'steadfast');
+  const fallbackCourierId = COURIER_ROUTABLE_KEYS.includes(rawSecondary) && rawSecondary !== primaryCourierId
+    ? rawSecondary
+    : '';
+
   return {
-    selectedCourierId: cfgStr(src.selectedCourierId, fallback.selectedCourierId || 'steadfast'),
+    selectedCourierId: primaryCourierId,
+    // Primary / secondary dispatch routing — see the Courier Fallback section
+    // in the dispatch layer (sendWithCourierFallback).
+    primaryCourierId,
+    fallbackCourierId,
+    autoFallback: fallbackCourierId
+      ? cfgBool(src.autoFallback, fallback.autoFallback) : false,
     perCourier,
     updatedAt: new Date().toISOString(),
   };
@@ -14647,31 +14683,585 @@ async function ensurePathaoToken(
  * `buildRequest` is called only after the credentials check passes, and returns
  * either the request to send or a configuration error to report verbatim.
  */
-async function handleCourierBooking(
-  req: any,
-  res: any,
-  provider: {
-    /** Human label used in messages ('Steadfast', 'Pathao', …). */
-    name: string;
-    /** Stored/known key for this provider, e.g. `steadfast`. */
-    key: string;
-    /** Prefix for a locally generated tracking code when the provider omits one. */
-    codePrefix: string;
-    buildRequest: (
-      order: Record<string, any>,
-      merchantConfig: Record<string, any>,
-      auth: Record<string, string>
-    ) => { url: string; init: RequestInit; payload: Record<string, any> } | { configError: string };
-    /**
-     * Optional pre-flight credential step (Pathao's OAuth exchange). Return a
-     * `configError` to abort with configuration guidance, or `auth` values to
-     * hand to `buildRequest`.
-     */
-    resolveAuth?: (
-      merchantConfig: Record<string, any>
-    ) => Promise<{ auth?: Record<string, string>; configError?: string }>;
+/**
+ * One bookable courier.
+ *
+ * Declared as a named type (rather than an inline parameter type) because the
+ * provider definitions are shared: the per-courier routes use one, and the
+ * fallback dispatcher below needs to reach them by key.
+ */
+type CourierProvider = {
+  /** Human label used in messages ('Steadfast', 'Pathao', …). */
+  name: string;
+  /** Stored/known key for this provider, e.g. `steadfast`. */
+  key: string;
+  /** Prefix for a locally generated tracking code when the provider omits one. */
+  codePrefix: string;
+  buildRequest: (
+    order: Record<string, any>,
+    merchantConfig: Record<string, any>,
+    auth: Record<string, string>
+  ) => { url: string; init: RequestInit; payload: Record<string, any> } | { configError: string };
+  /**
+   * Optional pre-flight credential step (Pathao's OAuth exchange). Return a
+   * `configError` to abort with configuration guidance, or `auth` values to
+   * hand to `buildRequest`.
+   */
+  resolveAuth?: (
+    merchantConfig: Record<string, any>
+  ) => Promise<{ auth?: Record<string, string>; configError?: string }>;
+};
+
+/**
+ * The outcome of ONE booking attempt against ONE courier.
+ *
+ * Kept as a value (never thrown) so the fallback dispatcher can decide what to
+ * do next without exception control flow, and so every attempt can be reported
+ * back to the merchant in `attempts`.
+ */
+type CourierAttempt =
+  | { ok: true; data: any; tracking: string; url: string }
+  | {
+      /** Literal `false` so `ok` is a real discriminant for narrowing. */
+      ok: false;
+      /** Machine-readable reason; drives the fallback decision below. */
+      code: 'no_order' | 'missing_credentials' | 'provider_unreachable' | 'booking_rejected';
+      message: string;
+      /** True when no parcel was booked, so trying the other courier is safe. */
+      retryable: boolean;
+      httpStatus?: number;
+      providerResponse?: any;
+      url?: string;
+    };
+
+/**
+ * Attempt ONE booking with ONE courier. NEVER throws.
+ *
+ * WHY `retryable` MATTERS — this is the safety rule of auto-switching.
+ * A fallback must only run when the parcel was definitely NOT booked, otherwise
+ * the customer gets two parcels and the merchant pays twice. So:
+ *
+ *   no_order / missing_credentials  → nothing was sent; safe to fall back
+ *                                      (the other courier has its own keys).
+ *   provider_unreachable (DNS, TLS,  → the request never reached the provider
+ *   ECONNREFUSED, timeout)             or timed out; safe to fall back.
+ *   HTTP 429 / 5xx / 401 / 403 /     → the provider refused or is degraded and
+ *   404                                no booking was created; safe to fall back.
+ *   booking_rejected                → the provider ANSWERED with a rejection.
+ *                                      A 4xx validation error is a payload
+ *                                      problem the other courier would reject
+ *                                      too, but it is still unbooked, so this
+ *                                      is retried with the reason preserved.
+ *   unknown/ambiguous body on a     → NOT retried: the provider may have booked
+ *   2xx                                the parcel before returning a malformed
+ *                                      body, so a second booking is unsafe.
+ */
+async function attemptCourierBooking(
+  provider: CourierProvider,
+  order: Record<string, any>,
+  merchantConfig: Record<string, any>,
+): Promise<CourierAttempt> {
+  if (!order || Object.keys(order).length === 0) {
+    return {
+      ok: false,
+      code: 'no_order',
+      message: 'No order was supplied to the courier booking request.',
+      retryable: false, // identical payload on the fallback — fix the request first
+    };
   }
+
+  // ── 1. Credentials / auth. Checked BEFORE fetch() so a missing key can never
+  //       surface as a raw transport error.
+  let auth: Record<string, string> = {};
+  if (provider.resolveAuth) {
+    const resolved = await provider.resolveAuth(merchantConfig);
+    if (resolved.configError) {
+      return {
+        ok: false,
+        code: 'missing_credentials',
+        message: resolved.configError,
+        retryable: true,
+      };
+    }
+    auth = resolved.auth || {};
+  }
+
+  const built = provider.buildRequest(order, merchantConfig, auth);
+  if ('configError' in built) {
+    return {
+      ok: false,
+      code: 'missing_credentials',
+      message: built.configError,
+      retryable: true,
+    };
+  }
+
+  // ── 2. Dispatch.
+  const call = await courierRequest(provider.name, built.url, built.init);
+  if (!call.ok) {
+    return {
+      ok: false,
+      code: 'provider_unreachable',
+      message: call.message || `${provider.name} could not be reached.`,
+      retryable: true,
+      httpStatus: call.response?.status,
+      providerResponse: call.data,
+      url: built.url,
+    };
+  }
+
+  const data = call.data || {};
+  const tracking = extractTrackingCode(data);
+
+  if (!isBookingAccepted(data, tracking)) {
+    return {
+      ok: false,
+      code: 'booking_rejected',
+      message: describeProviderFailure(data, `${provider.name} rejected the booking.`),
+      /*
+       * Retry ONLY when the provider definitively refused.
+       *
+       * A non-2xx answer means no parcel exists, so the fallback is safe. A 2xx
+       * whose body we cannot understand is AMBIGUOUS — the parcel may already be
+       * booked — so it is never retried, or the customer would get two parcels.
+       */
+      retryable: Boolean(call.response && call.response.ok === false),
+      httpStatus: call.response?.status,
+      providerResponse: data,
+      url: built.url,
+    };
+  }
+
+  return { ok: true, data, tracking, url: built.url };
+}
+
+/**
+ * Persist a successful booking and build the response body.
+ *
+ * Shared by the single-courier routes and the fallback dispatcher so the
+ * tracking code is stored by exactly one code path — the thing that made the
+ * badge disappear on the next poll when it was React-only.
+ */
+async function persistCourierBooking(
+  provider: CourierProvider,
+  order: Record<string, any>,
+  attempt: Extract<CourierAttempt, { ok: true }>,
+  storeRef: Record<string, any>,
 ) {
+  // A provider that accepts without echoing an id still needs SOMETHING for the
+  // tracking column — generate a deterministic placeholder from the booking so
+  // the badge is renderable and idempotent across retries.
+  const trackingCode =
+    attempt.tracking ||
+    `${provider.codePrefix}-${String(order.invoice_id || order.id || Date.now()).replace(/[^a-zA-Z0-9]/g, '').slice(-6)}`;
+
+  let orderUpdate: any = null;
+  let persisted = false;
+  try {
+    const result = await recordCourierDispatch(
+      String(order.invoice_id || order.id || order.order_number || '').trim(),
+      { name: provider.name, key: provider.key },
+      trackingCode,
+      attempt.data,
+      storeRef
+    );
+    persisted = Boolean(result?.ok);
+    orderUpdate = result?.order ? normalizeOrderRow(result.order) : null;
+    if (!persisted) {
+      console.warn(`[Courier] ${provider.name} dispatch could not be persisted:`, result?.error);
+    }
+  } catch (err: any) {
+    console.warn(`[Courier] ${provider.name} dispatch persistence error:`, err?.message || err);
+  }
+
+  return {
+    provider: provider.key,
+    courier_name: provider.name,
+    tracking_code: trackingCode,
+    consignment: attempt.data.consignment || attempt.data.consignment_id ? attempt.data.consignment || attempt.data : attempt.data,
+    persisted,
+    order: orderUpdate,
+    // The booking itself succeeded; surface persistence problems as a warning
+    // rather than a failure so the merchant does not re-book a real parcel.
+    warning: persisted
+      ? undefined
+      : 'The parcel was booked, but the tracking code could not be saved to this order. Re-open the dashboard to confirm.',
+  };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * COURIER FALLBACK / AUTO-SWITCHING
+ *
+ * A courier outage must not strand a merchant's parcels. When dispatch to the
+ * PRIMARY courier fails for a reason that guarantees nothing was booked, the
+ * SAME order is retried immediately on the SECONDARY courier, and the response
+ * says which one actually took it.
+ *
+ * ROUTING (most specific wins):
+ *   1. the explicit request (`courier` / `fallbackCourier` in the body),
+ *   2. the store's saved Logistics → Courier API settings
+ *      (`courierConfig.primaryCourierId` / `fallbackCourierId` / `autoFallback`),
+ *   3. Steadfast as primary, Pathao as the fallback.
+ *
+ * The second attempt is SKIPPED when no fallback is configured, when
+ * auto-switching is switched off, when the caller passes `disableFallback`, or
+ * when the first failure means a second booking would be UNSAFE (see
+ * `attemptCourierBooking` — the parcel may already exist).
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Default chain when a store has never configured one. */
+const DEFAULT_PRIMARY_COURIER = 'steadfast';
+const DEFAULT_FALLBACK_COURIER = 'pathao';
+
+/**
+ * Every provider the dispatcher can book through, keyed by its canonical id.
+ *
+ * Built lazily rather than as a top-level object literal: the provider
+ * definitions live further down the file (they sit beside the routes that use
+ * them, next to the Steadfast base URL), and a `const` initialised there cannot
+ * be read during module evaluation up here.
+ */
+function courierProviderByKey(key: string): CourierProvider | undefined {
+  const providers: Record<string, CourierProvider> = {
+    steadfast: STEADFAST_PROVIDER,
+    pathao: PATHAO_PROVIDER,
+  };
+  return providers[key];
+}
+
+/**
+ * Map whatever the caller/UI called a courier onto its canonical key.
+ *
+ * Accepts the key itself ('pathao'), the display name ('Pathao Courier') or any
+ * casing/punctuation variant, so a dashboard that echoes `courierName` back —
+ * and the generic `/api/courier/send` route, which only ever sees a NAME — both
+ * resolve to the same provider.
+ */
+function normalizeCourierKey(raw: unknown): string {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (!text) return '';
+  const squashed = text.replace(/[^a-z0-9]/g, '');
+  /*
+   * The name → key table lives with the generic dispatch route further down.
+   * It is read at CALL time (not module-evaluation time), so the declaration
+   * order is safe — but `typeof` keeps it safe even if this helper were ever
+   * invoked during module init.
+   */
+  const table = typeof COURIER_KEY_BY_NAME === 'undefined' ? undefined : COURIER_KEY_BY_NAME;
+  return table?.[squashed] || squashed;
+}
+
+type CourierRouting = {
+  primary: string;
+  secondary: string;
+  /** True when a second attempt will be made if the primary fails. */
+  autoFallback: boolean;
+  /** Where the decision came from, for logs and the response body. */
+  source: 'request' | 'store-config' | 'default';
+};
+
+/**
+ * Work out which courier to try first and which to fall back to.
+ *
+ * Never throws: an unreadable store config degrades to the defaults, so a
+ * broken settings document cannot block dispatch entirely.
+ */
+async function resolveCourierRouting(
+  storeSlug: string,
+  options: {
+    requestedPrimary?: unknown;
+    requestedSecondary?: unknown;
+    autoFallback?: boolean;
+    disableFallback?: boolean;
+  },
+): Promise<CourierRouting> {
+  const requestedPrimary = normalizeCourierKey(options.requestedPrimary);
+  const requestedSecondary = normalizeCourierKey(options.requestedSecondary);
+
+  let saved: Record<string, any> | null = null;
+  if (storeSlug) {
+    try {
+      saved = (await readStoreConfig('courier', storeSlug)) as Record<string, any> | null;
+    } catch (err: any) {
+      console.warn('[Courier] routing config read warning:', err?.message || err);
+    }
+  }
+
+  const savedPrimary = normalizeCourierKey(saved?.primaryCourierId || saved?.selectedCourierId);
+  const savedSecondary = normalizeCourierKey(saved?.fallbackCourierId);
+
+  const primary = requestedPrimary || savedPrimary || DEFAULT_PRIMARY_COURIER;
+  const source: CourierRouting['source'] = requestedPrimary
+    ? 'request'
+    : savedPrimary
+    ? 'store-config'
+    : 'default';
+
+  // An explicit request pairs with an explicit fallback; otherwise the store's
+  // configured secondary applies. A fallback identical to the primary is
+  // meaningless, so it is dropped rather than retried against the same provider.
+  let secondary = requestedSecondary || savedSecondary || DEFAULT_FALLBACK_COURIER;
+  if (secondary === primary) secondary = '';
+
+  /*
+   * AUTO-SWITCHING IS OPT-IN FOR A CONFIGURED STORE.
+   *
+   * The built-in default chain (Steadfast → Pathao) exists so a brand-new store
+   * still gets the protection. But once a store has EXPLICITLY saved its
+   * routing, its own `autoFallback` flag decides — a merchant who turned
+   * auto-switching off must not have it silently re-enabled by a default.
+   */
+  const hasExplicitFlag = typeof options.autoFallback === 'boolean';
+  const savedFlag = typeof saved?.autoFallback === 'boolean' ? saved.autoFallback : undefined;
+  const autoFallback =
+    options.disableFallback === true
+      ? false
+      : hasExplicitFlag
+      ? (options.autoFallback as boolean)
+      : savedFlag !== undefined
+      ? savedFlag
+      : source === 'default' && !savedPrimary;
+
+  return {
+    primary,
+    secondary: autoFallback ? secondary : '',
+    autoFallback,
+    source,
+  };
+}
+
+/** Human label for a courier key, for logs/messages. */
+function courierLabel(key: string): string {
+  return courierProviderByKey(key)?.name || key || 'the courier';
+}
+
+/**
+ * Dispatch one order with automatic primary → fallback switching.
+ *
+ * Contract (never throws, never returns a 5xx-shaped failure):
+ *   success: true                       — one courier accepted the parcel
+ *   courier_used / courier_name         — WHICH courier took it
+ *   fallback_used: true                 — the primary failed and this saved it
+ *   attempts: [{courier, ok, code, …}]  — every attempt, in order, for the UI
+ *   success: false + errors             — both failed; each reason is preserved
+ *
+ * Every failure is logged with the courier, the reason code and the HTTP status
+ * so an operator can see in Render's log exactly why the switch happened.
+ */
+async function sendWithCourierFallback(input: {
+  order: Record<string, any>;
+  merchantConfig: Record<string, any>;
+  storeSlug: string;
+  storeRef: Record<string, any>;
+  requestedPrimary?: unknown;
+  requestedSecondary?: unknown;
+  autoFallback?: boolean;
+  disableFallback?: boolean;
+}): Promise<Record<string, any>> {
+  const routing = await resolveCourierRouting(input.storeSlug, {
+    requestedPrimary: input.requestedPrimary,
+    requestedSecondary: input.requestedSecondary,
+    autoFallback: input.autoFallback,
+    disableFallback: input.disableFallback,
+  });
+
+  const attempts: Array<Record<string, any>> = [];
+  const chain = [routing.primary, routing.secondary].filter(Boolean);
+
+  for (let index = 0; index < chain.length; index += 1) {
+    const key = chain[index];
+    const provider = courierProviderByKey(key);
+
+    // A courier this dispatcher cannot book through (e.g. RedX was saved as
+    // the primary) is a configuration problem, not an outage: record it and
+    // move on to the next link rather than failing the whole dispatch.
+    if (!provider) {
+      attempts.push({
+        courier: key,
+        ok: false,
+        code: 'unsupported_courier',
+        error: `${courierLabel(key)} cannot be used for automatic dispatch. Choose Steadfast or Pathao.`,
+      });
+      continue;
+    }
+
+    const outcome: CourierAttempt = await attemptCourierBooking(provider, input.order, input.merchantConfig);
+
+    if (outcome.ok === true) {
+      const persisted = await persistCourierBooking(provider, input.order, outcome, input.storeRef);
+      attempts.push({ courier: key, courier_name: provider.name, ok: true });
+
+      const fallbackUsed = index > 0;
+      if (fallbackUsed) {
+        console.warn(
+          `[Courier] FALLBACK USED — ${courierLabel(routing.primary)} failed, ${provider.name} booked the parcel.`,
+          { order: input.order.invoice_id || input.order.id, store: input.storeSlug, attempts },
+        );
+      } else {
+        console.log(`[Courier] ${provider.name} booked the parcel.`, {
+          order: input.order.invoice_id || input.order.id,
+          store: input.storeSlug,
+          autoFallback: routing.autoFallback,
+        });
+      }
+
+      return {
+        success: true,
+        ...persisted,
+        // Explicit routing facts for the dashboard toast: which courier took the
+        // parcel, and whether the configured primary had to be bypassed.
+        courier_used: key,
+        primary_courier: routing.primary,
+        fallback_courier: routing.secondary || null,
+        fallback_used: fallbackUsed,
+        auto_fallback: routing.autoFallback,
+        routing_source: routing.source,
+        attempts,
+        ...(fallbackUsed
+          ? {
+              warning:
+                `${courierLabel(routing.primary)} could not take this parcel (${attempts[0]?.error || 'unavailable'}). ` +
+                `It was booked with ${provider.name} instead` +
+                `${persisted.warning ? `. Note: ${persisted.warning}` : ''}.`,
+            }
+          : {}),
+      };
+    }
+
+    // Past this point the union is narrowed to the failure shape.
+    const failed: Extract<CourierAttempt, { ok: false }> = outcome;
+    const failure = {
+      courier: key,
+      courier_name: provider.name,
+      ok: false,
+      code: failed.code,
+      error: failed.message,
+      http_status: failed.httpStatus ?? null,
+      retryable: failed.retryable,
+    };
+    attempts.push(failure);
+
+    // Logged for EVERY failed attempt, whether or not a fallback follows —
+    // this is the line an operator greps for after a courier outage.
+    console.error(
+      `[Courier] ${provider.name} dispatch FAILED${routing.secondary ? ' — considering fallback' : ''}:`,
+      {
+        order: input.order.invoice_id || input.order.id,
+        store: input.storeSlug,
+        code: failed.code,
+        http_status: failed.httpStatus ?? null,
+        retryable: failed.retryable,
+        error: failed.message,
+      },
+    );
+
+    // Stop: a non-retryable failure means the parcel MAY ALREADY EXIST, so a
+    // second booking would bill the merchant twice.
+    if (!failed.retryable) {
+      console.warn(
+        `[Courier] not retrying on ${courierLabel(routing.secondary || '') || 'a fallback'} — ` +
+          `${provider.name} gave an ambiguous response; the parcel may already be booked.`,
+      );
+      break;
+    }
+  }
+
+  const primaryFailure = attempts[0];
+  const secondaryFailure = attempts[1];
+  const triedBoth = attempts.length > 1;
+
+  const summary = triedBoth
+    ? `Both couriers failed. ${primaryFailure?.courier_name || routing.primary}: ${primaryFailure?.error || 'failed'}. ` +
+      `${secondaryFailure?.courier_name || routing.secondary}: ${secondaryFailure?.error || 'failed'}.`
+    : `Dispatch failed. ${primaryFailure?.courier_name || routing.primary}: ${primaryFailure?.error || 'failed'}.`;
+
+  return {
+    success: false,
+    code: 'all_couriers_failed',
+    error: summary,
+    message: summary,
+    courier_used: null,
+    primary_courier: routing.primary,
+    fallback_courier: routing.secondary || null,
+    fallback_used: false,
+    auto_fallback: routing.autoFallback,
+    routing_source: routing.source,
+    attempts,
+    // Kept for callers that read the older single-courier shape.
+    errors: attempts.map(({ courier, error, code }) => ({ courier, error, code })),
+    ...(routing.autoFallback && !routing.secondary
+      ? { hint: 'No fallback courier is configured for this store, so only the primary was tried.' }
+      : {}),
+  };
+}
+
+/**
+ * GET /api/courier/routing-config?store_slug=…
+ *
+ * Read the store's primary/fallback routing WITHOUT dispatching anything, so the
+ * dashboard can label its courier picker honestly ("Steadfast → auto Pathao").
+ * Falls back to the defaults when nothing is saved yet.
+ */
+app.get('/api/courier/routing-config', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const storeRef = cleanStoreRef(
+      req.query.store_slug || req.query.storeSlug || req.query.storeId || req.query.slug || '',
+    );
+    const routing = await resolveCourierRouting(storeRef, {});
+    return res.status(200).json({ ok: true, store_slug: storeRef || null, routing });
+  } catch (err: any) {
+    console.error('[Courier] GET /api/courier/routing-config error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not read the courier routing.' });
+  }
+});
+
+/**
+ * POST /api/courier/booking — dispatch with automatic courier fallback.
+ *
+ * Body: {
+ *   order, merchantConfig?, store_slug?,
+ *   courier?: string,            // requested primary (name or key) — overrides config
+ *   fallbackCourier?: string,    // requested secondary — overrides config
+ *   autoFallback?: boolean,      // override the saved auto-switch flag
+ *   disableFallback?: boolean,   // force a single attempt
+ * }
+ *
+ * Behaviour is documented on `sendWithCourierFallback` below. Always answers
+ * 200 with a shaped body (`success` discriminates), matching every other
+ * courier route so the dashboard can render the reason instead of a network
+ * error.
+ */
+app.post('/api/courier/booking', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = req.body || {};
+    const result = await sendWithCourierFallback({
+      order: body.order || {},
+      merchantConfig: body.merchantConfig || {},
+      storeSlug: cleanStoreRef(body.store_slug || body.storeSlug || body.order?.store_slug || body.order?.storeSlug || ''),
+      storeRef: {
+        store_slug: body.store_slug || body.storeSlug || body.order?.store_slug || body.order?.storeSlug,
+        store_id: body.store_id || body.order?.store_id,
+        merchant_id: body.merchant_id || body.merchantId || body.order?.merchant_id || body.order?.merchantId,
+      },
+      requestedPrimary: body.courier || body.primaryCourier || body.order?.courier_name || body.order?.courierName,
+      requestedSecondary: body.fallbackCourier || body.secondaryCourier,
+      autoFallback: typeof body.autoFallback === 'boolean' ? body.autoFallback : undefined,
+      disableFallback: body.disableFallback === true,
+    });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error('[Courier] POST /api/courier/booking error:', err);
+    return res.status(200).json({
+      success: false,
+      code: 'dispatch_failed',
+      error: err?.message || 'The courier dispatch could not be completed.',
+    });
+  }
+});
+
+async function handleCourierBooking(req: any, res: any, provider: CourierProvider) {
   res.setHeader('Content-Type', 'application/json');
 
   const body = req.body || {};
@@ -14684,108 +15274,20 @@ async function handleCourierBooking(
     merchant_id: body.merchant_id || body.merchantId || order.merchant_id || order.merchantId,
   };
 
-  if (!order || Object.keys(order).length === 0) {
+  const attempt: CourierAttempt = await attemptCourierBooking(provider, order, merchantConfig);
+  if (attempt.ok === false) {
     return res.status(200).json({
       success: false,
-      code: 'no_order',
-      error: 'No order was supplied to the courier booking request.',
-      message: 'No order was supplied to the courier booking request.',
+      code: attempt.code,
+      ...(attempt.code === 'booking_rejected' ? { provider: provider.key } : {}),
+      error: attempt.message,
+      message: attempt.message,
+      ...(attempt.providerResponse !== undefined ? { provider_response: attempt.providerResponse } : {}),
     });
   }
 
-  // ── 1. Credentials / auth. Checked BEFORE fetch() so a missing key can never
-  //       surface as a raw transport error.
-  let auth: Record<string, string> = {};
-  if (provider.resolveAuth) {
-    const resolved = await provider.resolveAuth(merchantConfig);
-    if (resolved.configError) {
-      return res.status(200).json({
-        success: false,
-        code: 'missing_credentials',
-        error: resolved.configError,
-        message: resolved.configError,
-      });
-    }
-    auth = resolved.auth || {};
-  }
-
-  const built = provider.buildRequest(order, merchantConfig, auth);
-  if ('configError' in built) {
-    return res.status(200).json({
-      success: false,
-      code: 'missing_credentials',
-      error: built.configError,
-      message: built.configError,
-    });
-  }
-
-  // ── 2. Dispatch.
-  const call = await courierRequest(provider.name, built.url, built.init);
-  if (!call.ok) {
-    return res.status(200).json({
-      success: false,
-      code: 'provider_unreachable',
-      error: call.message,
-      message: call.message,
-    });
-  }
-
-  const data = call.data || {};
-  const tracking = extractTrackingCode(data);
-
-  if (!isBookingAccepted(data, tracking)) {
-    const reason = describeProviderFailure(data, `${provider.name} rejected the booking.`);
-    return res.status(200).json({
-      success: false,
-      code: 'booking_rejected',
-      provider: provider.key,
-      error: reason,
-      message: reason,
-      provider_response: data,
-    });
-  }
-
-  // A provider that accepts without echoing an id still needs SOMETHING for the
-  // tracking column — generate a deterministic placeholder from the booking so
-  // the badge is renderable and idempotent across retries.
-  const trackingCode =
-    tracking ||
-    `${provider.codePrefix}-${String(order.invoice_id || order.id || Date.now()).replace(/[^a-zA-Z0-9]/g, '').slice(-6)}`;
-
-  // ── 3. Persist BEFORE responding, so the tracking code is never React-only.
-  let orderUpdate: any = null;
-  let persisted = false;
-  try {
-    const result = await recordCourierDispatch(
-      String(order.invoice_id || order.id || order.order_number || '').trim(),
-      { name: provider.name, key: provider.key },
-      trackingCode,
-      data,
-      storeRef
-    );
-    persisted = Boolean(result?.ok);
-    orderUpdate = result?.order ? normalizeOrderRow(result.order) : null;
-    if (!persisted) {
-      console.warn(`[Courier] ${provider.name} dispatch could not be persisted:`, result?.error);
-    }
-  } catch (err: any) {
-    console.warn(`[Courier] ${provider.name} dispatch persistence error:`, err?.message || err);
-  }
-
-  return res.status(200).json({
-    success: true,
-    provider: provider.key,
-    courier_name: provider.name,
-    tracking_code: trackingCode,
-    consignment: data.consignment || data.consignment_id ? data.consignment || data : data,
-    persisted,
-    order: orderUpdate,
-    // The booking itself succeeded; surface persistence problems as a warning
-    // rather than a failure so the merchant does not re-book a real parcel.
-    warning: persisted
-      ? undefined
-      : 'The parcel was booked, but the tracking code could not be saved to this order. Re-open the dashboard to confirm.',
-  });
+  const persisted = await persistCourierBooking(provider, order, attempt, storeRef);
+  return res.status(200).json({ success: true, ...persisted });
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -14813,81 +15315,62 @@ function steadfastApiUrl(path: string): string {
   return `${STEADFAST_API_BASE_URL}/${String(path || '').replace(/^\/+/, '')}`;
 }
 
-app.post('/api/courier/steadfast', (req, res) =>
-  handleCourierBooking(req, res, {
-    name: 'Steadfast Courier',
-    key: 'steadfast',
-    codePrefix: 'STF',
-    buildRequest: (order, merchantConfig) => {
-      const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
-      const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
-      if (!apiKey || !secretKey) {
-        return {
-          configError:
-            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Steadfast.',
-        };
-      }
+/*
+ * SHARED PROVIDER DEFINITIONS.
+ *
+ * These used to be written inline at each route, which is why Steadfast alone
+ * existed twice (the `/route` alias was a verbatim copy). The fallback
+ * dispatcher needs to reach a provider BY KEY, so each one is defined once here
+ * and referenced by both its route and `COURIER_PROVIDERS` below.
+ *
+ * `buildRequest` reads credentials from the merchant's own config first and the
+ * platform env second, so a store with its own courier account never spends the
+ * platform key — and a fallback courier that the store has not configured fails
+ * as `missing_credentials` instead of silently using someone else's account.
+ */
+const STEADFAST_PROVIDER: CourierProvider = {
+  name: 'Steadfast Courier',
+  key: 'steadfast',
+  codePrefix: 'STF',
+  buildRequest: (order, merchantConfig) => {
+    const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
+    const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
+    if (!apiKey || !secretKey) {
       return {
-        url: steadfastApiUrl('/create_order'),
-        init: {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Api-Key': apiKey,
-            'Secret-Key': secretKey,
-          },
-          body: JSON.stringify({
-            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-            recipient_name: order.customer_name || order.name || 'Customer',
-            recipient_phone: order.customer_phone || order.phone || '',
-            recipient_address: order.shipping_address || order.address || '',
-            cod_amount: order.cod_amount ?? order.total ?? 0,
-            note: order.customer_note || order.note || 'Handle with care',
-          }),
-        },
-        payload: {},
+        configError:
+          'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Steadfast.',
       };
-    },
-  })
+    }
+    return {
+      url: steadfastApiUrl('/create_order'),
+      init: {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Api-Key': apiKey,
+          'Secret-Key': secretKey,
+        },
+        body: JSON.stringify({
+          invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+          recipient_name: order.customer_name || order.name || 'Customer',
+          recipient_phone: order.customer_phone || order.phone || '',
+          recipient_address: order.shipping_address || order.address || '',
+          cod_amount: order.cod_amount ?? order.total ?? 0,
+          note: order.customer_note || order.note || 'Handle with care',
+        }),
+      },
+      payload: {},
+    };
+  },
+};
+
+app.post('/api/courier/steadfast', (req, res) =>
+  handleCourierBooking(req, res, STEADFAST_PROVIDER)
 );
 
 // Back-compat alias for the `/route` suffix used by an earlier client build.
 app.post('/api/courier/steadfast/route', (req, res) =>
-  handleCourierBooking(req, res, {
-    name: 'Steadfast Courier',
-    key: 'steadfast',
-    codePrefix: 'STF',
-    buildRequest: (order, merchantConfig) => {
-      const apiKey = merchantConfig.steadfast_api_key || process.env.STEADFAST_API_KEY || '';
-      const secretKey = merchantConfig.steadfast_secret_key || process.env.STEADFAST_SECRET_KEY || '';
-      if (!apiKey || !secretKey) {
-        return {
-          configError:
-            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Steadfast.',
-        };
-      }
-      return {
-        url: steadfastApiUrl('/create_order'),
-        init: {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Api-Key': apiKey,
-            'Secret-Key': secretKey,
-          },
-          body: JSON.stringify({
-            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-            recipient_name: order.customer_name || order.name || 'Customer',
-            recipient_phone: order.customer_phone || order.phone || '',
-            recipient_address: order.shipping_address || order.address || '',
-            cod_amount: order.cod_amount ?? order.total ?? 0,
-            note: order.customer_note || order.note || 'Handle with care',
-          }),
-        },
-        payload: {},
-      };
-    },
-  })
+  handleCourierBooking(req, res, STEADFAST_PROVIDER)
 );
 
 // Steadfast Courier Customer Fraud & Delivery History Check API
@@ -15009,57 +15492,59 @@ app.post('/api/courier/steadfast/fraud-check/route', handleSteadfastFraudCheck);
 // Pathao is unreachable for the token we must NOT proceed to POST a parcel with
 // an empty Authorization header, because Pathao answers 401 and the merchant
 // sees a misleading "unauthorized" instead of a connectivity problem.
-app.post('/api/courier/pathao', (req, res) =>
-  handleCourierBooking(req, res, {
-    name: 'Pathao Courier',
-    key: 'pathao',
-    codePrefix: 'PAD',
-    resolveAuth: async (merchantConfig) => {
-      const clientId = merchantConfig.pathao_client_id || process.env.PATHAO_CLIENT_ID || '';
-      const clientSecret = merchantConfig.pathao_client_secret || process.env.PATHAO_CLIENT_SECRET || '';
-      if (!clientId || !clientSecret) {
-        return {
-          configError:
-            'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Pathao.',
-        };
-      }
-      const token = await ensurePathaoToken(clientId, clientSecret);
-      if (!token.token) {
-        return { configError: token.error || 'Pathao authentication failed.' };
-      }
-      return { auth: { bearer: String(token.token) } };
-    },
-    buildRequest: (order, merchantConfig, auth) => {
-      const storeId = merchantConfig.pathao_store_id || process.env.PATHAO_STORE_ID || '';
-      if (!storeId) {
-        return {
-          configError:
-            'A Pathao Store ID is required. Add it in Store Settings → Courier Integration.',
-        };
-      }
+const PATHAO_PROVIDER: CourierProvider = {
+  name: 'Pathao Courier',
+  key: 'pathao',
+  codePrefix: 'PAD',
+  resolveAuth: async (merchantConfig) => {
+    const clientId = merchantConfig.pathao_client_id || process.env.PATHAO_CLIENT_ID || '';
+    const clientSecret = merchantConfig.pathao_client_secret || process.env.PATHAO_CLIENT_SECRET || '';
+    if (!clientId || !clientSecret) {
       return {
-        url: 'https://api.pathao.com/v1/parcel',
-        init: {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${auth.bearer || ''}`,
-          },
-          body: JSON.stringify({
-            store_id: storeId,
-            recipient_name: order.customer_name || order.name || 'Customer',
-            recipient_phone: order.customer_phone || order.phone || '',
-            recipient_address: order.shipping_address || order.address || '',
-            recipient_city: order.customer_city || 'Dhaka',
-            cod_amount: order.cod_amount ?? order.total ?? 0,
-            note: order.customer_note || order.note || 'Handle with care',
-            invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
-          }),
-        },
-        payload: {},
+        configError:
+          'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Pathao.',
       };
-    },
-  })
+    }
+    const token = await ensurePathaoToken(clientId, clientSecret);
+    if (!token.token) {
+      return { configError: token.error || 'Pathao authentication failed.' };
+    }
+    return { auth: { bearer: String(token.token) } };
+  },
+  buildRequest: (order, merchantConfig, auth) => {
+    const storeId = merchantConfig.pathao_store_id || process.env.PATHAO_STORE_ID || '';
+    if (!storeId) {
+      return {
+        configError:
+          'A Pathao Store ID is required. Add it in Store Settings → Courier Integration.',
+      };
+    }
+    return {
+      url: 'https://api.pathao.com/v1/parcel',
+      init: {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${auth.bearer || ''}`,
+        },
+        body: JSON.stringify({
+          store_id: storeId,
+          recipient_name: order.customer_name || order.name || 'Customer',
+          recipient_phone: order.customer_phone || order.phone || '',
+          recipient_address: order.shipping_address || order.address || '',
+          recipient_city: order.customer_city || 'Dhaka',
+          cod_amount: order.cod_amount ?? order.total ?? 0,
+          note: order.customer_note || order.note || 'Handle with care',
+          invoice: order.invoice_id || order.id || `INV-${Date.now()}`,
+        }),
+      },
+      payload: {},
+    };
+  },
+};
+
+app.post('/api/courier/pathao', (req, res) =>
+  handleCourierBooking(req, res, PATHAO_PROVIDER)
 );
 
 // RedX Logistics 1-Click Booking API
@@ -15959,40 +16444,75 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
   }
 });
 
+/*
+ * POST /api/courier/send — the "Send to Courier" endpoint.
+ *
+ * This is the entry point the dashboard's per-order button historically used
+ * when it only knew the courier NAME. It now runs the FULL fallback chain
+ * in-process instead of re-dispatching over HTTP to a per-provider route:
+ *
+ *   primary courier  → fails (error / timeout / 401 / API down) → logged
+ *                    → secondary courier → succeeds → response says which one
+ *
+ * The old implementation called back out to `/api/courier/<key>` over the
+ * network, which added a round-trip, broke behind a proxy that rewrites the
+ * host, and could only ever try ONE courier.
+ */
 app.post('/api/courier/send', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
-  const rawName = String(
-    req.body?.courier || req.body?.courierName || req.body?.order?.courier_name || ''
-  );
-  const key = COURIER_KEY_BY_NAME[rawName.toLowerCase().replace(/[^a-z0-9]/g, '')];
-
-  if (!key) {
-    return res.status(200).json({
-      success: false,
-      code: 'unknown_courier',
-      error: rawName
-        ? `"${rawName}" is not a supported courier. Choose Steadfast, Pathao, RedX or Paperfly.`
-        : 'Select a courier before sending this order.',
-    });
-  }
-
-  // Re-dispatch through the provider route so credential handling, timeouts and
-  // persistence live in exactly one implementation.
-  const forwarded = { ...(req.body || {}) };
   try {
-    const response = await fetch(`${req.protocol}://${req.get('host')}/api/courier/${key}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(forwarded),
+    const body = req.body || {};
+    const rawName = String(
+      body.courier || body.courierName || body.order?.courier_name || body.order?.courierName || ''
+    ).trim();
+
+    /*
+     * An EXPLICIT courier wins and is treated as the primary. Only a caller that
+     * named no courier at all falls through to the store's saved routing.
+     */
+    const requestedPrimary = rawName ? normalizeCourierKey(rawName) : '';
+    if (rawName && !requestedPrimary) {
+      return res.status(200).json({
+        success: false,
+        code: 'unknown_courier',
+        error: `"${rawName}" is not a supported courier. Choose Steadfast, Pathao, RedX or Paperfly.`,
+      });
+    }
+
+    const order: Record<string, any> = body.order || {};
+    if (!order || Object.keys(order).length === 0) {
+      return res.status(200).json({
+        success: false,
+        code: 'no_order',
+        error: 'No order was supplied to the courier booking request.',
+        message: 'No order was supplied to the courier booking request.',
+      });
+    }
+
+    const result = await sendWithCourierFallback({
+      order,
+      merchantConfig: body.merchantConfig || {},
+      storeSlug: cleanStoreRef(
+        body.store_slug || body.storeSlug || order.store_slug || order.storeSlug || '',
+      ),
+      storeRef: {
+        store_slug: body.store_slug || body.storeSlug || order.store_slug || order.storeSlug,
+        store_id: body.store_id || order.store_id,
+        merchant_id: body.merchant_id || body.merchantId || order.merchant_id || order.merchantId,
+      },
+      requestedPrimary,
+      requestedSecondary: body.fallbackCourier || body.secondaryCourier,
+      autoFallback: typeof body.autoFallback === 'boolean' ? body.autoFallback : undefined,
+      disableFallback: body.disableFallback === true,
     });
-    const data = await readJson(response);
-    return res.status(200).json(data);
+
+    return res.status(200).json(result);
   } catch (err: any) {
-    console.error('[Courier] /api/courier/send dispatch error:', err?.message || err);
+    console.error('[Courier] /api/courier/send dispatch error:', err);
     return res.status(200).json({
       success: false,
       code: 'dispatch_failed',
-      error: 'The courier dispatch could not be completed. Please try again.',
+      error: err?.message || 'The courier dispatch could not be completed. Please try again.',
     });
   }
 });

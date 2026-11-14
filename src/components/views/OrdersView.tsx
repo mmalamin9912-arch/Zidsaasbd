@@ -885,10 +885,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       const sandboxCourierId =
         (courierKey || 'steadfast').split(' ')[0].toLowerCase();
       let sandboxActive = false;
+      // The store's saved auto-switch preference. `undefined` means "not loaded",
+      // which leaves the decision entirely to the server's routing config.
+      let agentAutoFallback: boolean | undefined;
       try {
         const cfg = await loadCourierConfig(storeSlug);
         const entry = cfg?.perCourier?.[sandboxCourierId];
         sandboxActive = entry?.sandboxMode === true;
+        if (typeof (cfg as any)?.autoFallback === 'boolean') {
+          agentAutoFallback = (cfg as any).autoFallback;
+        }
       } catch (sandboxErr: any) {
         console.warn('Sandbox config lookup failed:', sandboxErr?.message || sandboxErr);
       }
@@ -912,20 +918,37 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         return;
       }
 
-      const res = await fetch(courierEndpoint, {
+      /*
+       * DISPATCH WITH AUTOMATIC FALLBACK.
+       *
+       * `/api/courier/send` runs the primary → secondary chain server-side: if
+       * the selected courier errors, times out or is down, the backend retries
+       * the SAME order on the store's fallback courier and tells us which one
+       * took it (`courier_used` / `fallback_used`).
+       *
+       * The selected courier is sent as an explicit primary, so the merchant's
+       * choice still wins — the fallback is only a rescue attempt.
+       */
+      const res = await fetch('/api/courier/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
+          courier: courierName,
+          // `undefined` lets the server apply the store's saved routing (and its
+          // auto-switch flag) rather than the UI second-guessing it.
+          autoFallback: typeof agentAutoFallback === 'boolean' ? agentAutoFallback : undefined,
           order: {
             invoice_id: ord.orderNumber || ord.id,
             customer_name: ord.customerName,
             customer_phone: ord.customerPhone,
             shipping_address: `${ord.address || ''}, ${ord.customerCity || ''}`,
-            cod_amount: ord.totalBDT || 0,
             customer_note: (ord as any).customerNote || (ord as any).notes || 'Handle with care',
-            ...ord
+            ...ord,
+            // Set AFTER the spread so the order's own COD total cannot be
+            // replaced by a stale `codAmount` on the stored row.
+            cod_amount: ord.totalBDT || 0,
           },
           merchantId: merchantId,
           storeSlug: storeSlug,
@@ -950,22 +973,52 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           ? 'Please configure Courier API keys in Store Settings.'
           : '');
 
+      /*
+       * WHICH COURIER ACTUALLY TOOK IT.
+       *
+       * With fallback enabled the response may come back from a courier the
+       * merchant did not select. Every success/failure notice below therefore
+       * names the courier that really handled the parcel, never the one that was
+       * merely picked in the modal.
+       */
+      const bookedCourierName = String(data.courier_name || courierName);
+      const fallbackUsed = data.fallback_used === true;
+      const bookedCourierLabel = fallbackUsed
+        ? `${bookedCourierName} (fallback)`
+        : bookedCourierName;
+
       if (!res.ok || !data.success) {
+        /*
+         * Both couriers were tried and both failed. `data.attempts` carries the
+         * per-courier reason, so the merchant sees WHY each one refused instead
+         * of a single opaque message.
+         */
+        const attempts: Array<{ courier_name?: string; courier?: string; error?: string }> =
+          Array.isArray(data.attempts) ? data.attempts : [];
+        const attemptDetail = attempts
+          .filter((a) => a && a.error)
+          .map((a) => `${a.courier_name || a.courier || 'Courier'}: ${a.error}`)
+          .join(' ');
+
         const reason =
           failureMessage ||
+          attemptDetail ||
           (res.status === 401 || res.status === 403
             ? `Please configure Courier API keys in Store Settings. (${courierName} rejected the credentials.)`
             : res.status >= 500
             ? `The courier service could not be reached (HTTP ${res.status}). Please try again in a moment.`
             : `Booking failed (HTTP ${res.status}). Please try again.`);
-        console.warn(`Courier booking failed [${courierName}]:`, data.code || res.status, reason);
-        toast.error('Booking failed', { description: reason });
+        console.warn(`Courier booking failed [${courierName}]:`, data.code || res.status, reason, attempts);
+        toast.error(
+          attempts.length > 1 ? 'All couriers failed' : 'Booking failed',
+          { description: reason },
+        );
         return;
       }
 
       const trackingCode =
         data.tracking_code ||
-        `${courierName.split(' ')[0].substring(0, 2).toUpperCase()}-${Math.floor(100000 + Math.random() * 900000)}`;
+        `${bookedCourierName.split(' ')[0].substring(0, 2).toUpperCase()}-${Math.floor(100000 + Math.random() * 900000)}`;
 
       // Prefer the document the server just persisted; fall back to a local
       // patch only when the server could not read the row back.
@@ -978,16 +1031,29 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               ...o,
               status: 'In delivery' as const,
               fulfillmentStatus: 'In Transit' as const,
-              courierName: courierName,
+              // The courier that ACTUALLY booked the parcel — after a fallback
+              // this differs from the one selected in the modal, and the order
+              // badge must not claim the wrong carrier.
+              courierName: bookedCourierName,
               trackingCode: trackingCode,
             }
           : o)));
       }
 
-      if (data.warning) {
-        toast.success(`Booked via ${courierName}`, { description: `Tracking ID: ${trackingCode}. ${data.warning}` });
+      if (fallbackUsed) {
+        // The selected courier failed; the fallback rescued the parcel. Say so
+        // loudly — the merchant needs to know why the courier on the order is
+        // not the one they picked.
+        toast.warning(`Booked via ${bookedCourierLabel}`, {
+          description:
+            `Tracking ID: ${trackingCode}. ` +
+            `${data.primary_courier || 'The primary courier'} was unavailable, so the order was automatically booked with ${bookedCourierName}.` +
+            `${data.warning ? ` ${data.warning}` : ''}`,
+        });
+      } else if (data.warning) {
+        toast.success(`Booked via ${bookedCourierName}`, { description: `Tracking ID: ${trackingCode}. ${data.warning}` });
       } else {
-        toast.success(`Booked successfully via ${courierName}!`, { description: `Tracking ID: ${trackingCode}` });
+        toast.success(`Booked successfully via ${bookedCourierName}!`, { description: `Tracking ID: ${trackingCode}` });
       }
     } catch (error: any) {
       // Reached only when the request never completed (offline, DNS, CORS).

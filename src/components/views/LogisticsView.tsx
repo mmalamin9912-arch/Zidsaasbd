@@ -39,6 +39,19 @@ import {
   X
 } from 'lucide-react';
 
+/** Couriers the backend can auto-dispatch through (see lib/serverApp.ts). */
+const ROUTABLE_COURIERS: Array<{ id: string; name: string }> = [
+  { id: 'steadfast', name: 'Steadfast Courier' },
+  { id: 'pathao', name: 'Pathao Courier' },
+  { id: 'redx', name: 'RedX Logistics' },
+  { id: 'paperfly', name: 'Paperfly' },
+];
+
+/** Display name for a courier id, e.g. 'pathao' → 'Pathao Courier'. */
+function courierLabel(id: string): string {
+  return ROUTABLE_COURIERS.find((c) => c.id === id)?.name || id || 'the courier';
+}
+
 interface LogisticsViewProps {
   merchant: MerchantProfile;
   couriers: CourierService[];
@@ -96,6 +109,20 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
   const [apiForm, setApiForm] = useState(currentCourier?.apiCredentials || {});
   const [pickupAddr, setPickupAddr] = useState(currentCourier?.pickupAddress || '');
   const [autoSync, setAutoSync] = useState(currentCourier?.autoSyncOrders || false);
+
+  /*
+   * COURIER FALLBACK ROUTING.
+   *
+   * `primary` is the courier "Send to Courier" tries first; `fallback` is the
+   * one the SERVER switches to automatically when the primary errors, times out
+   * or is down. Both are persisted on the store's courier config, so the
+   * decision survives a reload and applies to every dispatch — not just the one
+   * made in this browser session.
+   */
+  const [primaryCourier, setPrimaryCourier] = useState<string>('steadfast');
+  const [fallbackCourier, setFallbackCourier] = useState<string>('pathao');
+  const [autoFallback, setAutoFallback] = useState(true);
+  const [routingLoaded, setRoutingLoaded] = useState(false);
 
   const handleSelectCourier = (id: string) => {
     const isAutomated = ['steadfast', 'pathao', 'redx'].includes(id);
@@ -187,7 +214,18 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
       // Reflect the persisted connection state on the courier cards so a key
       // saved in a previous session still reads as "connected".
       const stored = await loadCourierConfig(merchant?.storeSlug);
-      if (!active || !stored?.perCourier) return;
+      if (!active || !stored) return;
+
+      // Restore the saved primary → fallback routing. `autoFallback` is only
+      // applied when the store actually has a saved boolean, so a store that
+      // never configured routing keeps the UI default rather than being forced
+      // off by an absent field.
+      setPrimaryCourier(stored.primaryCourierId || stored.selectedCourierId || 'steadfast');
+      setFallbackCourier(stored.fallbackCourierId || '');
+      if (typeof stored.autoFallback === 'boolean') setAutoFallback(stored.autoFallback);
+      setRoutingLoaded(true);
+
+      if (!stored.perCourier) return;
       setCourierList((prev) =>
         prev.map((c) => {
           const entry = stored.perCourier[c.id];
@@ -205,6 +243,37 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
 
     return () => { active = false; };
   }, [merchant?.storeSlug, merchant?.baseCity]);
+
+  /**
+   * Persist the primary → fallback routing.
+   *
+   * Sends the routing fields ALONE, plus the existing selection: the server's
+   * `normalizeCourierConfig` merges per-courier credentials forward, so saving
+   * routing here never wipes a credential saved by the Setup modal.
+   */
+  const handleSaveRouting = async () => {
+    setIsSavingCourier(true);
+    const saved = await saveCourierConfig(merchant?.storeSlug, {
+      selectedCourierId: primaryCourier,
+      primaryCourierId: primaryCourier,
+      fallbackCourierId: fallbackCourier === primaryCourier ? '' : fallbackCourier,
+      autoFallback,
+    });
+    setIsSavingCourier(false);
+
+    if (!saved) {
+      toast.error('Courier routing could not be saved.', {
+        description: 'Check the connection and try again.',
+      });
+      return;
+    }
+
+    toast.success('Courier routing saved', {
+      description: autoFallback && fallbackCourier
+        ? `Orders try ${courierLabel(primaryCourier)} first, then switch to ${courierLabel(fallbackCourier)} automatically if it fails.`
+        : `All dispatches use ${courierLabel(primaryCourier)}.`,
+    });
+  };
 
   const handleSaveShippingSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -333,6 +402,96 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
           <span className="text-xs text-slate-300 font-semibold bg-[#181B26] px-3 py-1.5 rounded-xl border border-[#2E3548]">
             Active Couriers: <strong className="text-[#00D68F]">{courierList.filter((c) => c.isConnected).length} / {courierList.length}</strong>
           </span>
+        </div>
+      </div>
+
+      {/* ── COURIER FALLBACK ROUTING ────────────────────────────────────────
+       * Which courier "Send to Courier" tries first, and whether the backend
+       * should automatically switch to a backup when the first one fails.
+       */}
+      <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-5">
+        <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-bold text-white flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-[#00D68F]" />
+              Courier Fallback Routing
+            </h2>
+            <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+              Orders are booked with your <strong className="text-slate-200">primary</strong> courier first. If it
+              errors, times out or is unreachable, the backend automatically retries the same order with your
+              <strong className="text-slate-200"> fallback</strong> courier — so a courier outage never blocks a
+              shipment.
+            </p>
+          </div>
+
+          <label className="flex items-center gap-2 cursor-pointer shrink-0 bg-[#181B26] px-3 py-2 rounded-xl border border-[#2E3548]">
+            <input
+              type="checkbox"
+              checked={autoFallback}
+              onChange={(e) => setAutoFallback(e.target.checked)}
+              className="w-4 h-4 accent-[#00D68F]"
+            />
+            <span className="text-xs font-semibold text-slate-200">Auto-switch on failure</span>
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Primary courier</label>
+            <select
+              value={primaryCourier}
+              onChange={(e) => {
+                const next = e.target.value;
+                setPrimaryCourier(next);
+                // The fallback can never be the same courier as the primary.
+                if (fallbackCourier === next) setFallbackCourier('');
+              }}
+              className="mt-1 w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00D68F]"
+            >
+              {ROUTABLE_COURIERS.map((c) => (
+                <option key={c.id} value={c.id} disabled={c.id === fallbackCourier}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              Fallback courier {autoFallback ? '' : '(disabled)'}
+            </label>
+            <select
+              value={fallbackCourier}
+              disabled={!autoFallback}
+              onChange={(e) => setFallbackCourier(e.target.value)}
+              className="mt-1 w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00D68F] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <option value="">None — primary only</option>
+              {ROUTABLE_COURIERS.filter((c) => c.id !== primaryCourier).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-4">
+          <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
+            <Info className="w-3.5 h-3.5 shrink-0" />
+            {autoFallback && fallbackCourier
+              ? `Routing: ${courierLabel(primaryCourier)} → ${courierLabel(fallbackCourier)} on failure.`
+              : `Routing: ${courierLabel(primaryCourier)} only. If it is down, dispatch fails and you will see the reason.`}
+          </p>
+          <button
+            type="button"
+            onClick={handleSaveRouting}
+            disabled={isSavingCourier || !routingLoaded}
+            className="self-end sm:self-auto inline-flex items-center gap-1.5 bg-[#00D68F] hover:bg-[#00c281] disabled:opacity-60 text-[#0B0F19] text-xs font-bold px-4 py-2 rounded-xl transition-colors"
+          >
+            <Check className="w-3.5 h-3.5" />
+            Save routing
+          </button>
         </div>
       </div>
 
