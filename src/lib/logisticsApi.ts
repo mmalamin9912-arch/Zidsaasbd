@@ -71,6 +71,10 @@ export interface CourierConfig {
   fallbackCourierId?: string;
   /** Master switch for automatic primary → fallback switching. */
   autoFallback?: boolean;
+  /** 'own' = dispatch with this store's own credentials; 'central' = route through the platform courier account. */
+  dispatchMode?: 'own' | 'central';
+  /** When own-mode dispatch fails, rescue the parcel via the platform's central courier account. */
+  fallbackToCentral?: boolean;
   perCourier: Record<string, CourierCredentialEntry>;
   updatedAt?: string;
 }

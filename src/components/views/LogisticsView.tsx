@@ -124,6 +124,17 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
   const [autoFallback, setAutoFallback] = useState(true);
   const [routingLoaded, setRoutingLoaded] = useState(false);
 
+  /*
+   * DUAL MODE — "Use Own Courier" vs "Use Platform Central Courier".
+   *
+   * 'own' keeps the per-courier credentials below; 'central' routes EVERY
+   * dispatch through the Super Admin's marketplace courier account. When own
+   * mode is on, `fallbackToCentral` lets the platform account rescue a parcel
+   * both of the merchant's own couriers could not book.
+   */
+  const [dispatchMode, setDispatchMode] = useState<'own' | 'central'>('own');
+  const [fallbackToCentral, setFallbackToCentral] = useState(false);
+
   const handleSelectCourier = (id: string) => {
     const isAutomated = ['steadfast', 'pathao', 'redx'].includes(id);
 
@@ -223,6 +234,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
       setPrimaryCourier(stored.primaryCourierId || stored.selectedCourierId || 'steadfast');
       setFallbackCourier(stored.fallbackCourierId || '');
       if (typeof stored.autoFallback === 'boolean') setAutoFallback(stored.autoFallback);
+      if (stored.dispatchMode === 'central' || stored.dispatchMode === 'own') setDispatchMode(stored.dispatchMode);
+      if (typeof stored.fallbackToCentral === 'boolean') setFallbackToCentral(stored.fallbackToCentral);
       setRoutingLoaded(true);
 
       if (!stored.perCourier) return;
@@ -258,6 +271,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
       primaryCourierId: primaryCourier,
       fallbackCourierId: fallbackCourier === primaryCourier ? '' : fallbackCourier,
       autoFallback,
+      dispatchMode,
+      fallbackToCentral: dispatchMode === 'own' ? fallbackToCentral : false,
     });
     setIsSavingCourier(false);
 
@@ -269,9 +284,11 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     }
 
     toast.success('Courier routing saved', {
-      description: autoFallback && fallbackCourier
-        ? `Orders try ${courierLabel(primaryCourier)} first, then switch to ${courierLabel(fallbackCourier)} automatically if it fails.`
-        : `All dispatches use ${courierLabel(primaryCourier)}.`,
+      description: dispatchMode === 'central'
+        ? 'All orders will be dispatched through the platform\'s central courier account.'
+        : autoFallback && fallbackCourier
+          ? `Orders try ${courierLabel(primaryCourier)} first, then switch to ${courierLabel(fallbackCourier)} automatically if it fails.`
+          : `All dispatches use ${courierLabel(primaryCourier)}.`,
     });
   };
 
@@ -436,7 +453,38 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
-          <div>
+          {/* ── DUAL MODE TOGGLE ── whose courier account books the parcel. */}
+          <div className="sm:col-span-2">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Courier account</label>
+            <div className="mt-1 grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setDispatchMode('own')}
+                className={`text-left px-3 py-2.5 rounded-xl border text-sm transition-colors ${
+                  dispatchMode === 'own'
+                    ? 'border-[#00D68F] bg-[#00D68F]/10 text-white'
+                    : 'border-[#2E3548] bg-[#181B26] text-slate-300 hover:border-slate-500'
+                }`}
+              >
+                <span className="block font-bold">Use Own Courier</span>
+                <span className="block text-[11px] text-slate-400 mt-0.5">Book with the Steadfast / Pathao keys you configure below.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDispatchMode('central')}
+                className={`text-left px-3 py-2.5 rounded-xl border text-sm transition-colors ${
+                  dispatchMode === 'central'
+                    ? 'border-[#00D68F] bg-[#00D68F]/10 text-white'
+                    : 'border-[#2E3548] bg-[#181B26] text-slate-300 hover:border-slate-500'
+                }`}
+              >
+                <span className="block font-bold">Use Platform Central Courier</span>
+                <span className="block text-[11px] text-slate-400 mt-0.5">Every order is booked through the platform's central courier account.</span>
+              </button>
+            </div>
+          </div>
+
+          <div className={dispatchMode === 'central' ? 'sm:col-span-2 opacity-50' : ''}>
             <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Primary courier</label>
             <select
               value={primaryCourier}
@@ -456,13 +504,13 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
             </select>
           </div>
 
-          <div>
+          <div className={dispatchMode === 'central' ? 'sm:col-span-2 opacity-50' : ''}>
             <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
               Fallback courier {autoFallback ? '' : '(disabled)'}
             </label>
             <select
               value={fallbackCourier}
-              disabled={!autoFallback}
+              disabled={!autoFallback || dispatchMode === 'central'}
               onChange={(e) => setFallbackCourier(e.target.value)}
               className="mt-1 w-full bg-[#181B26] border border-[#2E3548] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#00D68F] disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -476,12 +524,31 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
           </div>
         </div>
 
+        {/* Fallback-to-central rescue — meaningful only when booking on own keys. */}
+        {dispatchMode === 'own' && (
+          <label className="mt-4 flex items-start gap-2 cursor-pointer bg-[#181B26] px-3 py-2.5 rounded-xl border border-[#2E3548]">
+            <input
+              type="checkbox"
+              checked={fallbackToCentral}
+              onChange={(e) => setFallbackToCentral(e.target.checked)}
+              className="mt-0.5 w-4 h-4 accent-[#00D68F] shrink-0"
+            />
+            <span className="text-xs text-slate-300">
+              <strong className="text-slate-100">Rescue failed orders with the platform courier.</strong>{' '}
+              If both of your own couriers fail (bad keys, outage, timeout), the platform's central courier account
+              books the parcel so the shipment is never lost.
+            </span>
+          </label>
+        )}
+
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-4">
           <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
             <Info className="w-3.5 h-3.5 shrink-0" />
-            {autoFallback && fallbackCourier
-              ? `Routing: ${courierLabel(primaryCourier)} → ${courierLabel(fallbackCourier)} on failure.`
-              : `Routing: ${courierLabel(primaryCourier)} only. If it is down, dispatch fails and you will see the reason.`}
+            {dispatchMode === 'central'
+              ? 'Routing: the platform\'s central courier account books every order (Steadfast → Pathao on the platform keys).'
+              : autoFallback && fallbackCourier
+                ? `Routing: ${courierLabel(primaryCourier)} → ${courierLabel(fallbackCourier)} on failure${fallbackToCentral ? ' → platform central courier as last resort' : ''}.`
+                : `Routing: ${courierLabel(primaryCourier)} only. If it is down, dispatch fails and you will see the reason.`}
           </p>
           <button
             type="button"

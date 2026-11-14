@@ -12716,6 +12716,29 @@ function normalizeCourierConfig(raw: any, fallback: Record<string, any> = {}) {
     ? rawSecondary
     : '';
 
+  /*
+   * DUAL MODE — whose courier account books the parcel?
+   *
+   *   'own'     — the merchant's own Steadfast/Pathao credentials (perCourier).
+   *   'central' — every dispatch goes through the Super Admin's platform
+   *               courier account (/api/admin/marketplace-courier backend).
+   *
+   * Anything that is not explicitly 'central' resolves to 'own', so a store
+   * that has never seen this toggle keeps its existing behaviour.
+   */
+  const rawMode = cfgStr(src.dispatchMode ?? src.courierMode, fallback.dispatchMode || '').trim().toLowerCase();
+  const dispatchMode: 'own' | 'central' = rawMode === 'central' ? 'central' : 'own';
+
+  /*
+   * `fallbackToCentral` only matters in 'own' mode: when BOTH of the merchant's
+   * own couriers fail (or are unconfigured), hand the parcel to the platform's
+   * central courier account so an outage never blocks a shipment. Explicit
+   * opt-in for the same billing reason as autoFallback.
+   */
+  const fallbackToCentral = dispatchMode === 'own'
+    ? cfgBool(src.fallbackToCentral ?? src.useCentralFallback, fallback.fallbackToCentral)
+    : false;
+
   return {
     selectedCourierId: primaryCourierId,
     // Primary / secondary dispatch routing — see the Courier Fallback section
@@ -12724,6 +12747,10 @@ function normalizeCourierConfig(raw: any, fallback: Record<string, any> = {}) {
     fallbackCourierId,
     autoFallback: fallbackCourierId
       ? cfgBool(src.autoFallback, fallback.autoFallback) : false,
+    // Whose courier account books the parcel, and whether the platform's
+    // central account may rescue a failed own-account dispatch.
+    dispatchMode,
+    fallbackToCentral,
     perCourier,
     updatedAt: new Date().toISOString(),
   };
@@ -14724,29 +14751,97 @@ async function courierRequest(
  * POSTing a parcel with an empty Authorization header and surfacing a
  * misleading 401.
  */
-const pathaoTokenCache: { token: string; expiresAt: number } = { token: '', expiresAt: 0 };
+const pathaoTokenCache: { token: string; expiresAt: number; key: string } = { token: '', expiresAt: 0, key: '' };
 
+/** Sandbox host (Pathao test merchants) — always paired with sandbox creds. */
+const PATHAO_BASE_SANDBOX = 'https://courier-api-sandbox.pathao.com';
+/** Production host for live Pathao merchant credentials. */
+const PATHAO_BASE_PRODUCTION = 'https://api-hermes.pathao.com';
+
+/**
+ * True when these are Pathao SANDBOX credentials.
+ *
+ * Pathao issues test merchants ids with the "sandbox" prefix, and many
+ * operators paste both a sandbox and a live credential pair. Booking sandbox
+ * credentials against the production host answers 401, which is indistinguish
+ * from a real auth failure — so we detect and route them to the sandbox host
+ * instead.
+ */
+function pathaoCredsAreSandbox(clientId: string, clientSecret: string, username?: string, password?: string): boolean {
+  const haystack = `${clientId} ${clientSecret} ${username || ''} ${password || ''}`.toLowerCase();
+  return /sandbox|test[-_]?mode|uat/.test(haystack);
+}
+
+/** The Pathao API origin these credentials must be used against. */
+function pathaoBaseUrl(clientId: string, clientSecret: string, username?: string, password?: string): string {
+  return pathaoCredsAreSandbox(clientId, clientSecret, username, password)
+    ? PATHAO_BASE_SANDBOX
+    : PATHAO_BASE_PRODUCTION;
+}
+
+/**
+ * Exchange Pathao credentials for a bearer token.
+ *
+ * Pathao Merchant API v1 (the "Aladdin" API on api-hermes.pathao.com /
+ * courier-api-sandbox.pathao.com) accepts BOTH grant types:
+ *
+ *   • client_credentials — client_id + client_secret only.
+ *   • password           — client_id + client_secret + username + password
+ *                          (what the Pathao merchant dashboard issues).
+ *
+ * When a username/password pair is supplied the password grant is used, because
+ * some Pathao merchant accounts are issued ONLY that shape and client_credentials
+ * answers 401 for them.
+ *
+ * Never throws: a failed exchange returns `{ token: '', error }` so the route can
+ * report the real cause (unreachable provider / bad credentials) instead of
+ * POSTing a parcel with an empty Authorization header and surfacing a
+ * misleading 401.
+ */
 async function ensurePathaoToken(
   clientId: string,
-  clientSecret: string
+  clientSecret: string,
+  username?: string,
+  password?: string,
 ): Promise<{ token: string; error?: string }> {
   const now = Date.now();
-  // 60s of slack so a cached token cannot expire mid-flight.
-  if (pathaoTokenCache.token && pathaoTokenCache.expiresAt - 60_000 > now) {
+  const sandbox = pathaoCredsAreSandbox(clientId, clientSecret, username, password);
+  const baseUrl = pathaoBaseUrl(clientId, clientSecret, username, password);
+  const cacheKey = `${clientId}::${clientSecret}::${username || ''}::${sandbox ? 'sbx' : 'live'}`;
+
+  // 60s of slack so a cached token cannot expire mid-flight. Cached per
+  // credential pair — the previous single-slot cache let a live and a sandbox
+  // account overwrite each other and book against the wrong environment.
+  if (pathaoTokenCache.token && pathaoTokenCache.key === cacheKey && pathaoTokenCache.expiresAt - 60_000 > now) {
     return { token: pathaoTokenCache.token };
   }
 
-  const result = await courierRequest('Pathao Courier', 'https://api.pathao.com/v1/oauth/token', {
+  /*
+   * The password grant (username + password) is what Pathao's own merchant
+   * dashboard issues; client_credentials is the fallback for API-only pairs.
+   */
+  const usePasswordGrant = Boolean(username && password);
+  const form = usePasswordGrant
+    ? `client_id=${encodeURIComponent(clientId)}` +
+      `&client_secret=${encodeURIComponent(clientSecret)}` +
+      `&username=${encodeURIComponent(username as string)}` +
+      `&password=${encodeURIComponent(password as string)}` +
+      '&grant_type=password'
+    : `client_id=${encodeURIComponent(clientId)}` +
+      `&client_secret=${encodeURIComponent(clientSecret)}` +
+      '&grant_type=client_credentials';
+
+  const result = await courierRequest('Pathao Courier', `${baseUrl}/aladdin/api/v1/issue-token`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials`,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: form,
   });
 
   if (!result.ok) {
     return { token: '', error: result.message || 'Pathao authentication failed.' };
   }
 
-  const token = result.data?.access_token || '';
+  const token = result.data?.access_token || result.data?.token || '';
   if (!token) {
     return {
       token: '',
@@ -14755,6 +14850,7 @@ async function ensurePathaoToken(
   }
 
   const ttlSeconds = Number(result.data?.expires_in) || 3600;
+  pathaoTokenCache.key = cacheKey;
   pathaoTokenCache.token = String(token);
   pathaoTokenCache.expiresAt = now + ttlSeconds * 1000;
   return { token: pathaoTokenCache.token };
@@ -15039,6 +15135,16 @@ type CourierRouting = {
   secondary: string;
   /** True when a second attempt will be made if the primary fails. */
   autoFallback: boolean;
+  /**
+   * Dispatch account selector — 'own' books through the store's credentials,
+   * 'central' through the platform's. Persisted via Logistics → Courier API.
+   */
+  mode: 'own' | 'central';
+  /**
+   * When BOTH own-account attempts fail, hand the parcel to the platform's
+   * central courier account. Only meaningful in 'own' mode.
+   */
+  fallbackToCentral: boolean;
   /** Where the decision came from, for logs and the response body. */
   source: 'request' | 'store-config' | 'default';
 };
@@ -15056,6 +15162,8 @@ async function resolveCourierRouting(
     requestedSecondary?: unknown;
     autoFallback?: boolean;
     disableFallback?: boolean;
+    dispatchMode?: 'own' | 'central';
+    fallbackToCentral?: boolean;
   },
 ): Promise<CourierRouting> {
   const requestedPrimary = normalizeCourierKey(options.requestedPrimary);
@@ -15105,10 +15213,37 @@ async function resolveCourierRouting(
       ? savedFlag
       : source === 'default' && !savedPrimary;
 
+  /*
+   * DUAL MODE — whose credentials book the parcel?
+   *
+   * An explicit request value wins (so the UI can flip the store's mode for one
+   * dispatch), then the store's saved setting. Anything unrecognised resolves
+   * to 'own', preserving existing behaviour for stores that never touched this
+   * toggle.
+   */
+  const rawMode = String(
+    options.dispatchMode ?? saved?.dispatchMode ?? saved?.courierMode ?? '',
+  ).trim().toLowerCase();
+  const mode: 'own' | 'central' = rawMode === 'central' ? 'central' : 'own';
+
+  /*
+   * FALLBACK-TO-CENTRAL only applies in 'own' mode. A store may explicitly
+   * allow the platform's courier account to rescue a failed own-account
+   * dispatch (or rescue "never configured any keys at all" — a missing-credential
+   * failure is retryable and reaches the central link like any other).
+   */
+  const ownModeFallbackRequested =
+    typeof options.fallbackToCentral === 'boolean'
+      ? options.fallbackToCentral
+      : saved?.fallbackToCentral === true || saved?.useCentralFallback === true;
+  const fallbackToCentral = mode === 'own' && ownModeFallbackRequested === true;
+
   return {
     primary,
-    secondary: autoFallback ? secondary : '',
+    secondary: autoFallback && mode === 'own' ? secondary : '',
     autoFallback,
+    mode,
+    fallbackToCentral,
     source,
   };
 }
@@ -15118,8 +15253,171 @@ function courierLabel(key: string): string {
   return courierProviderByKey(key)?.name || key || 'the courier';
 }
 
-/**
- * Dispatch one order with automatic primary → fallback switching.
+/* ────────────────────────────────────────────────────────────────────────────
+ * CENTRAL MARKETPLACE COURIER DISPATCH (platform account)
+ *
+ * The admin's OWN dispatch chain — the platform Steadfast keys first, then the
+ * platform Pathao pair — used both by `/api/admin/marketplace-courier` and by
+ * the merchant-side central fallback link. Sandbox/live Pathao host selection
+ * happens inside ensurePathaoToken / pathaoBaseUrl from the credential shape.
+ * Never throws; returns the same envelope as sendWithCourierFallback.
+ * ──────────────────────────────────────────────────────────────────────────── */
+async function dispatchWithCentralFallback(input: {
+  order: Record<string, any>;
+  storeRef: Record<string, any>;
+  courierRef?: Record<string, any>;
+}): Promise<Record<string, any>> {
+  const attempts: Array<Record<string, any>> = [];
+  const central = await resolveCentralCourierConfig();
+  const order = input.order;
+  const customerName = String(order.customer_name || order.name || 'Customer');
+  const customerPhone = String(order.customer_phone || order.phone || '');
+  const shippingAddress = String(order.shipping_address || order.address || '');
+  const codAmount = Number(order.cod_amount ?? order.total ?? 0) || 0;
+  const note = String(order.customer_note || order.note || 'Handle with care');
+  const invoice = String(order.invoice_id || order.id || order.order_number || `INV-${Date.now()}`);
+
+  const chain: Array<'steadfast' | 'pathao'> = ['steadfast', 'pathao'];
+  for (let index = 0; index < chain.length; index += 1) {
+    const key = chain[index];
+    const isFallback = index > 0;
+
+    try {
+      if (key === 'steadfast') {
+        const cfg = central.steadfast || {};
+        if (!cfg.apiKey || !cfg.secretKey) {
+          attempts.push({ courier: 'steadfast', ok: false, code: 'missing_credentials', error: 'Central Steadfast API keys are not configured.' });
+          continue;
+        }
+        console.log(`[Courier] central dispatch → steadfast (packzy)`);
+        const dispatched = await courierRequest('Steadfast Courier', steadfastApiUrl('/create_order'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Api-Key': String(cfg.apiKey),
+            'Secret-Key': String(cfg.secretKey),
+          },
+          body: JSON.stringify({
+            invoice,
+            recipient_name: customerName,
+            recipient_phone: customerPhone,
+            recipient_address: shippingAddress,
+            cod_amount: codAmount,
+            note,
+          }),
+        });
+        if (!dispatched.ok) {
+          attempts.push({ courier: 'steadfast', ok: false, code: 'dispatch_failed', error: dispatched.message });
+          continue;
+        }
+        const tracking = extractTrackingCode(dispatched.data ?? {});
+        if (!isBookingAccepted(dispatched.data ?? {}, tracking)) {
+          attempts.push({ courier: 'steadfast', ok: false, code: 'rejected', error: describeProviderFailure(dispatched.data ?? {}, 'Steadfast rejected this booking.') });
+          continue;
+        }
+        const persisted = await persistCourierBooking(
+          { name: 'Steadfast Courier', key: 'steadfast', codePrefix: 'STD', resolveAuth: async () => ({}), buildRequest: () => ({ url: '', init: {}, payload: {} }) },
+          order,
+          { ok: true, data: dispatched.data ?? {}, tracking, url: steadfastApiUrl('/create_order') },
+          input.storeRef,
+        );
+        return {
+          success: true,
+          ok: true,
+          courier_used: 'steadfast',
+          courier_name: 'Steadfast Courier',
+          tracking_code: persisted.tracking_code,
+          consignment: persisted.consignment,
+          persisted: persisted.persisted,
+          order: persisted.order,
+          fallback_used: isFallback,
+          attempts,
+          warning: persisted.warning,
+          mode: 'central',
+        };
+      }
+
+      // ── Central Pathao link. ──
+      const cfg = central.pathao || {};
+      if (!cfg.clientId || !cfg.clientSecret) {
+        attempts.push({ courier: 'pathao', ok: false, code: 'missing_credentials', error: 'Central Pathao API keys are not configured.' });
+        continue;
+      }
+      const token = await ensurePathaoToken(String(cfg.clientId), String(cfg.clientSecret), String(cfg.username || ''), String(cfg.password || ''));
+      if (!token.token) {
+        attempts.push({ courier: 'pathao', ok: false, code: 'auth_failed', error: token.error || 'Central Pathao authentication failed.' });
+        continue;
+      }
+      const storeId = String(cfg.storeId || '');
+      if (!storeId) {
+        attempts.push({ courier: 'pathao', ok: false, code: 'missing_store_id', error: 'Central Pathao Store ID is not configured.' });
+        continue;
+      }
+      const baseUrl = pathaoBaseUrl(String(cfg.clientId), String(cfg.clientSecret), String(cfg.username || ''), String(cfg.password || ''));
+      console.log(`[Courier] central dispatch → pathao ${baseUrl}`);
+      const dispatched = await courierRequest('Pathao Courier', `${baseUrl}/aladdin/api/v1/parcel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token.token}` },
+        body: JSON.stringify({
+          store_id: storeId,
+          recipient_name: customerName,
+          recipient_phone: customerPhone,
+          recipient_address: shippingAddress,
+          recipient_city: order.customer_city || 'Dhaka',
+          cod_amount: codAmount,
+          note,
+          invoice,
+        }),
+      });
+      if (!dispatched.ok) {
+        attempts.push({ courier: 'pathao', ok: false, code: 'dispatch_failed', error: dispatched.message });
+        continue;
+      }
+      const tracking = extractTrackingCode(dispatched.data ?? {});
+      if (!isBookingAccepted(dispatched.data ?? {}, tracking)) {
+        attempts.push({ courier: 'pathao', ok: false, code: 'rejected', error: describeProviderFailure(dispatched.data ?? {}, 'Pathao rejected this booking.') });
+        continue;
+      }
+      const persisted = await persistCourierBooking(
+        { name: 'Pathao Courier', key: 'pathao', codePrefix: 'PAD', resolveAuth: async () => ({}), buildRequest: () => ({ url: '', init: {}, payload: {} }) },
+        order,
+        { ok: true, data: dispatched.data ?? {}, tracking, url: `${baseUrl}/aladdin/api/v1/parcel` },
+        input.storeRef,
+      );
+      return {
+        success: true,
+        ok: true,
+        courier_used: 'pathao',
+        courier_name: 'Pathao Courier',
+        tracking_code: persisted.tracking_code,
+        consignment: persisted.consignment,
+        persisted: persisted.persisted,
+        order: persisted.order,
+        fallback_used: isFallback,
+        attempts,
+        warning: persisted.warning,
+        mode: 'central',
+      };
+    } catch (err: any) {
+      attempts.push({ courier: key, ok: false, code: 'unexpected_error', error: String(err?.message || err) });
+    }
+  }
+
+  console.error('[Courier] central dispatch failed on every provider:', { order: invoice, attempts });
+  return {
+    success: false,
+    ok: false,
+    code: attempts[0]?.code || 'dispatch_failed',
+    error: attempts.map((a) => `${a.courier}: ${a.error || a.code}`).join(' | ') || 'Both central couriers failed.',
+    courier_used: null,
+    fallback_used: false,
+    attempts,
+    mode: 'central',
+  };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * COURIER FALLBACK / AUTO-SWITCHING (merchant side)
  *
  * Contract (never throws, never returns a 5xx-shaped failure):
  *   success: true                       — one courier accepted the parcel
@@ -15140,19 +15438,103 @@ async function sendWithCourierFallback(input: {
   requestedSecondary?: unknown;
   autoFallback?: boolean;
   disableFallback?: boolean;
+  /** Own credentials vs the platform's central courier account. */
+  dispatchMode?: 'own' | 'central';
+  /** Let the platform's central account rescue a failed own-mode dispatch. */
+  fallbackToCentral?: boolean;
 }): Promise<Record<string, any>> {
   const routing = await resolveCourierRouting(input.storeSlug, {
     requestedPrimary: input.requestedPrimary,
     requestedSecondary: input.requestedSecondary,
     autoFallback: input.autoFallback,
     disableFallback: input.disableFallback,
+    dispatchMode: input.dispatchMode,
+    fallbackToCentral: input.fallbackToCentral,
   });
 
   const attempts: Array<Record<string, any>> = [];
-  const chain = [routing.primary, routing.secondary].filter(Boolean);
+
+  /*
+   * CENTRAL MODE: the merchant opted to route every dispatch through the
+   * platform's courier account. Nothing here touches their own credentials —
+   * the whole request is delegated to the admin backend's own chain
+   * (dispatchWithCentralFallback), which books Steadfast then Pathao from the
+   * SUPER ADMIN's keys and persists through recordCourierDispatch.
+   */
+  if (routing.mode === 'central') {
+    console.log(`[Courier] central-mode dispatch requested for store ${input.storeSlug || '(unknown)'} — delegating to the platform courier account.`);
+    const central = await dispatchWithCentralFallback({
+      order: input.order,
+      storeRef: input.storeRef,
+      courierRef: {
+        store_slug: input.storeRef.store_slug,
+      },
+    });
+    return {
+      ...(central.success
+        ? central
+        : { ...central, warning: undefined }),
+      // Normalised onto the same envelope shape the own-mode paths return.
+      mode: 'central',
+      routing_source: routing.source,
+      courier_used: central.courier_used || null,
+      fallback_used: central.fallback_used === true,
+      attempts: central.attempts || [],
+    };
+  }
+
+  /*
+   * OWN MODE: the store's own chain, plus — when the merchant enabled it — the
+   * platform's central courier account as the LAST link. The central link uses
+   * the same builder the admin backend uses, so its bookings are indistinguishable
+   * from a marketplace dispatch in the audit trail.
+   */
+  const ownChain = [routing.primary, routing.secondary].filter(Boolean);
+  // 'central' is never a courier key — it is appended as a sentinel the loop
+  // below resolves to the platform's provider set.
+  const chain: string[] = routing.fallbackToCentral ? [...ownChain, 'central'] : ownChain;
 
   for (let index = 0; index < chain.length; index += 1) {
     const key = chain[index];
+
+    // ── The central-account rescue link. ──
+    // Reached when every own-account attempt failed with a retryable reason
+    // (bad keys, courier outage, timeout) — or when the merchant never saved
+    // any keys at all, which surfaces as missing_credentials and is retryable.
+    if (key === 'central') {
+      const central = await dispatchWithCentralFallback({
+        order: input.order,
+        storeRef: input.storeRef,
+        courierRef: { store_slug: input.storeRef.store_slug },
+      });
+      if (central.success) {
+        attempts.push({ courier: central.courier_used, courier_name: central.courier_name, ok: true });
+        console.warn(
+          `[Courier] CENTRAL FALLBACK USED — the store's own couriers failed, the platform account booked the parcel.`,
+          { order: input.order.invoice_id || input.order.id, store: input.storeSlug, attempts },
+        );
+        return {
+          ...central,
+          mode: 'own→central',
+          routing_source: routing.source,
+          fallback_used: true,
+          attempts,
+          warning:
+            `Your own courier account(s) could not take this parcel, so it was booked through the platform's central courier account (${central.courier_name}).` +
+            `${central.warning ? ` Note: ${central.warning}` : ''}`,
+        };
+      }
+      attempts.push({
+        courier: central.courier_used || 'central',
+        courier_name: 'Platform Central Courier',
+        ok: false,
+        code: central.code || 'dispatch_failed',
+        error: central.error || 'The platform central courier also failed.',
+      });
+      // Fall through to the all-failed summary below — every link failed.
+      break;
+    }
+
     const provider = courierProviderByKey(key);
 
     // A courier this dispatcher cannot book through (e.g. RedX was saved as
@@ -15332,6 +15714,12 @@ app.post('/api/courier/booking', async (req, res) => {
       requestedSecondary: body.fallbackCourier || body.secondaryCourier,
       autoFallback: typeof body.autoFallback === 'boolean' ? body.autoFallback : undefined,
       disableFallback: body.disableFallback === true,
+      dispatchMode: body.dispatchMode ?? body.courierMode ?? body.mode,
+      fallbackToCentral: typeof body.fallbackToCentral === 'boolean'
+        ? body.fallbackToCentral
+        : typeof body.useCentralFallback === 'boolean'
+          ? body.useCentralFallback
+          : undefined,
     });
     return res.status(200).json(result);
   } catch (err: any) {
@@ -15582,13 +15970,15 @@ const PATHAO_PROVIDER: CourierProvider = {
   resolveAuth: async (merchantConfig) => {
     const clientId = merchantConfig.pathao_client_id || process.env.PATHAO_CLIENT_ID || '';
     const clientSecret = merchantConfig.pathao_client_secret || process.env.PATHAO_CLIENT_SECRET || '';
+    const username = merchantConfig.pathao_username || process.env.PATHAO_USERNAME || '';
+    const password = merchantConfig.pathao_password || process.env.PATHAO_PASSWORD || '';
     if (!clientId || !clientSecret) {
       return {
         configError:
           'Please configure Courier API keys in Store Settings → Courier Integration before sending orders to Pathao.',
       };
     }
-    const token = await ensurePathaoToken(clientId, clientSecret);
+    const token = await ensurePathaoToken(clientId, clientSecret, username, password);
     if (!token.token) {
       return { configError: token.error || 'Pathao authentication failed.' };
     }
@@ -15603,7 +15993,14 @@ const PATHAO_PROVIDER: CourierProvider = {
       };
     }
     return {
-      url: 'https://api.pathao.com/v1/parcel',
+      // Sandbox credentials MUST hit the sandbox host — the production host
+      // answers 401 for them, which reads like a broken key.
+      url: `${pathaoBaseUrl(
+        merchantConfig.pathao_client_id || process.env.PATHAO_CLIENT_ID || '',
+        merchantConfig.pathao_client_secret || process.env.PATHAO_CLIENT_SECRET || '',
+        merchantConfig.pathao_username || process.env.PATHAO_USERNAME || '',
+        merchantConfig.pathao_password || process.env.PATHAO_PASSWORD || '',
+      )}/aladdin/api/v1/parcel`,
       init: {
         method: 'POST',
         headers: {
@@ -15769,6 +16166,10 @@ const ADMIN_COURIER_DEFAULTS = {
   pathao: {
     clientId: process.env.PATHAO_CLIENT_ID || '',
     clientSecret: process.env.PATHAO_CLIENT_SECRET || '',
+    // Pathao merchant-dashboard (password grant) credentials — used by
+    // ensurePathaoToken when present; client_credentials otherwise.
+    username: process.env.PATHAO_USERNAME || '',
+    password: process.env.PATHAO_PASSWORD || '',
     storeId: process.env.PATHAO_STORE_ID || '',
   },
   redx: {
@@ -15815,6 +16216,12 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
       secretKey: pick(isChosen ? central.apiSecret : '', env[key]?.secretKey || env[key]?.clientSecret || ''),
       clientId: pick(isChosen ? central.apiKey : '', env[key]?.clientId || ''),
       clientSecret: pick(isChosen ? central.apiSecret : '', env[key]?.clientSecret || ''),
+      // Pathao password-grant credentials come from their OWN env vars, NOT
+      // from apiKey/apiSecret — the old merge copied the Steadfast-shaped
+      // fields into the Pathao pair and made the sandbox/live resolver read
+      // the wrong values.
+      username: pick(isChosen ? central.pathaoUsername || central.username : '', env[key]?.username || ''),
+      password: pick(isChosen ? central.pathaoPassword || central.password : '', env[key]?.password || ''),
       storeId: pick(central.storeId, env[key]?.storeId || ''),
     };
   }
@@ -16387,11 +16794,11 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
           error: 'The Super Admin has not configured Pathao API keys in Logistics → Courier Settings.',
         });
       }
-      const token = await ensurePathaoToken(defaults.clientId, defaults.clientSecret);
+      const token = await ensurePathaoToken(defaults.clientId, defaults.clientSecret, defaults.username, defaults.password);
       if (!token.token) {
         return res.status(200).json({ ok: false, code: 'auth_failed', error: token.error || 'Pathao authentication failed.' });
       }
-      requestUrl = 'https://api.pathao.com/v1/parcel';
+      requestUrl = `${pathaoBaseUrl(defaults.clientId, defaults.clientSecret, defaults.username, defaults.password)}/aladdin/api/v1/parcel`;
       requestHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token.token}` };
       requestBody = JSON.stringify({
         store_id: defaults.storeId,
@@ -16587,6 +16994,12 @@ app.post('/api/courier/send', async (req, res) => {
       requestedSecondary: body.fallbackCourier || body.secondaryCourier,
       autoFallback: typeof body.autoFallback === 'boolean' ? body.autoFallback : undefined,
       disableFallback: body.disableFallback === true,
+      dispatchMode: body.dispatchMode ?? body.courierMode ?? body.mode,
+      fallbackToCentral: typeof body.fallbackToCentral === 'boolean'
+        ? body.fallbackToCentral
+        : typeof body.useCentralFallback === 'boolean'
+          ? body.useCentralFallback
+          : undefined,
     });
 
     return res.status(200).json(result);
