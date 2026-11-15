@@ -3102,43 +3102,37 @@ The render below must not guess. A merchant may paste
       phone: custPhone,
     });
 
-    // Wallet payments are only verifiable with the sender number + TrxID, so
-    // neither can be empty. `required` on the inputs covers normal submits;
-    // this guard covers Enter-key submits and autofill oddities.
-    if (['bkash', 'nagad', 'rocket'].includes(payMethod)) {
+    // ── Wallet validation (bKash / Nagad / Rocket) ─────────────────────────
+    // The TrxID is only demanded when a MOBILE WALLET is the explicitly
+    // selected method. COD never reaches this branch, so a COD order can never
+    // be blocked by a wallet rule.
+    if (payMethod === 'bkash' || payMethod === 'nagad' || payMethod === 'rocket') {
       const sender = custSenderPhone.replace(/\D/g, '');
       const trx = custTxId.trim();
-      if (sender.length < 11 || !trx) {
-        console.log('[Checkout] Wallet validation failed', {
-          payMethod,
-          senderLength: sender.length,
-          hasTrx: Boolean(trx),
-        });
-        setPayValidationError(
-          !trx
-            ? 'Please enter the Transaction ID (TrxID) from your payment confirmation.'
-            : 'Please enter a valid 11-digit sender mobile number.',
-        );
+      if (!trx) {
+        console.log('[Checkout] Wallet validation failed: missing TrxID', { payMethod });
+        setPayValidationError('Please enter the Transaction ID (TrxID) from your payment confirmation.');
+        return;
+      }
+      if (sender && sender.length < 11) {
+        console.log('[Checkout] Wallet validation failed: bad sender number', { payMethod, sender });
+        setPayValidationError('Please enter a valid 11-digit sender mobile number.');
         return;
       }
       setPayValidationError('');
       console.log('[Checkout] Wallet validation passed', { payMethod, sender });
     }
 
-    // COD with an advance charge is only verifiable with the TrxID of the
-    // advance transfer. `required` on the input covers normal submits; this
-    // guard covers Enter-key submits and autofill oddities — and it is driven
-    // by the SAME `requiresAdvanceFee` flag that renders the panel, so the
-    // rule can never disagree with what the customer is shown.
-    if (payMethod === 'cod' && requiresAdvanceFee && !custTxId.trim()) {
-      console.log('[Checkout] COD advance validation failed: missing TrxID', {
-        requiresAdvanceFee,
-        custTxIdLength: custTxId.trim().length,
-      });
-      setPayValidationError(
-        `Please send the ৳${totalAdvancePayable.toLocaleString()} advance and enter the bKash/Nagad Transaction ID (TrxID).`,
-      );
-      return;
+    // ── COD: NO transaction-ID validation, ever ─────────────────────────────
+    // Cash on Delivery is verified by the courier in cash at the door, not by
+    // a TrxID. Even when the merchant charges an advance, a missing TrxID can
+    // never block the order from reaching the server — the merchant can
+    // reconcile the advance manually in the dashboard. So when `payMethod` is
+    // 'cod' the submit flows STRAIGHT into the POST /api/orders request below
+    // with no payment-side validation at all.
+    if (payMethod === 'cod') {
+      setPayValidationError('');
+      console.log('[Checkout] COD selected — transaction ID check bypassed, proceeding to POST /api/orders');
     }
 
     // Enforce per-line quantity limits (Settings -> Orders and products
@@ -5682,11 +5676,13 @@ The render below must not guess. A merchant may paste
                       <label htmlFor="checkout-advance-trx-id" className="block mb-1 font-bold text-xs text-slate-300">
                         Advance Payment Transaction ID (TrxID) *
                       </label>
+                      {/* NO `required`: a COD order must never be blocked by a
+                          missing advance TrxID — the merchant reconciles the
+                          advance manually, so the field is informational. */}
                       <input
                         id="checkout-advance-trx-id"
                         type="text"
-                        required
-                        placeholder="e.g. BK8X991029"
+                        placeholder="e.g. BK8X991029 (optional)"
                         value={custTxId}
                         onChange={(e) => setCustTxId(e.target.value.toUpperCase().replace(/\s+/g, ''))}
                         className="w-full border border-amber-500/50 rounded-xl px-3.5 py-2.5 font-mono text-xs uppercase bg-slate-900 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-400 font-bold"
@@ -5725,6 +5721,19 @@ The render below must not guess. A merchant may paste
                     aria-live="polite"
                     aria-disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
                     disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
+                    onClick={() => {
+                      // Fires on EVERY click, before any validation — so a
+                      // click that ends up doing nothing is always traceable
+                      // in the console.
+                      console.log('[Checkout] Confirm Order button clicked', {
+                        payMethod,
+                        isPlacingOrder,
+                        minOrderShortfall,
+                        qtyLimitBreached,
+                        disabled: isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached,
+                        cartItemCount: (cart || []).length,
+                      });
+                    }}
                     className="w-full py-3.5 bg-[var(--primary-accent)] text-slate-950 font-black rounded-xl text-sm hover:bg-[var(--primary-accent)]/90 disabled:opacity-70 disabled:cursor-not-allowed transition cursor-pointer shadow-lg flex items-center justify-center gap-2"
                   >
                     {isPlacingOrder ? (
