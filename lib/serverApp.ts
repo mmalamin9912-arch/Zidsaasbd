@@ -19999,12 +19999,66 @@ app.post('/api/orders', async (req, res) => {
       }
     }
 
-    const arr: any[] = Array.isArray(req.body)
-      ? req.body
-      : Array.isArray((req.body as any)?.orders)
-        ? (req.body as any).orders
-        : req.body && typeof req.body === 'object'
-          ? [req.body]
+    /*
+     * BODY TOLERANCE.
+     *
+     * `express.json()` normally hands over a parsed object, but a serverless
+     * runtime (Vercel) pre-parses the body and an upstream proxy may hand the
+     * raw text through unchanged. A string body used to fall through every
+     * branch below and reach `arr.length === 0`, i.e. HTTP 400
+     * "No order payload was supplied." for a checkout that had in fact sent a
+     * perfectly valid order. Parse it here so the route sees the array the
+     * shopper's browser actually produced.
+     */
+    let rawBody: any = req.body;
+    if (typeof rawBody === 'string' || Buffer.isBuffer(rawBody)) {
+      try {
+        rawBody = JSON.parse(String(rawBody));
+      } catch {
+        console.error('[Server] POST /api/orders body was not valid JSON:', String(rawBody).slice(0, 200));
+        return res.status(400).json({
+          ok: false,
+          success: false,
+          synced: 0,
+          error: 'The request body was not valid JSON.',
+          code: 'INVALID_JSON',
+        });
+      }
+    }
+    const bodyObj: Record<string, any> = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)
+      ? rawBody
+      : {};
+
+    /*
+     * STORE ATTRIBUTION FROM THE QUERY STRING.
+     *
+     * `/api/orders?storeSlug=<slug>` is how the storefront checkout names its
+     * vendor. It used to be ignored entirely — only body fields were read — so
+     * a client that sent the slug ONLY as a query parameter (or a proxy that
+     * stripped it from the body) had its order written under the fallback
+     * `marketplace` bucket, invisible to the merchant's dashboard.
+     */
+    const query = (req.query || {}) as Record<string, any>;
+    const queryStoreRefs = [
+      query.storeSlug,
+      query.store_slug,
+      query.storeslug,
+      query.merchantSlug,
+      query.merchant_slug,
+      query.slug,
+    ]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+    if (queryStoreRefs.length > 0) {
+      console.log('[Server] POST /api/orders store ref(s) from query:', queryStoreRefs);
+    }
+
+    const arr: any[] = Array.isArray(rawBody)
+      ? rawBody
+      : Array.isArray(bodyObj.orders)
+        ? bodyObj.orders
+        : rawBody && typeof rawBody === 'object'
+          ? [bodyObj]
           : [];
 
     /*
@@ -20056,8 +20110,10 @@ app.post('/api/orders', async (req, res) => {
         continue;
       }
 
-      // Collect EVERY store reference the client sent
+      // Collect EVERY store reference the client sent — query string first, so
+      // the checkout's own vendor wins over a stale id in the body.
       const refs = [
+        ...queryStoreRefs,
         order.storeId, order.store_id,
         order.storeCode, order.store_code,
         order.merchantId, order.merchant_id,
@@ -20083,6 +20139,7 @@ app.post('/api/orders', async (req, res) => {
         order.merchant_storeSlug ||
         order.storeSlug ||
         order.store_slug ||
+        queryStoreRefs[0] ||
         ''
       )
         .split(':')[0]
@@ -20157,6 +20214,27 @@ app.post('/api/orders', async (req, res) => {
           merchantRefs[1] ||
           slug
       ).trim();
+
+      /*
+       * ONE LINE PER ORDER: WHICH STORE THE WRITE IS ATTRIBUTED TO.
+       *
+       * This is the first thing to read when an order "is missing from the
+       * merchant dashboard" — it names the slug the row was written under, the
+       * reference that won, and whether the query string contributed. `slug`
+       * here is exactly what `buildOrderRecord` stamps into `store_slug` /
+       * `merchant_store_slug`.
+       */
+      console.log('[Server] POST /api/orders store attribution:', {
+        index,
+        order_number: normalizedOrderNumber(order) || String(order.order_number || order.orderNumber || order.id || '(generated)'),
+        store_slug: slug,
+        store_id: storeId,
+        merchant_id: merchantId,
+        store_code: identity.storeCode || null,
+        source_slug: explicitSlug || null,
+        query_refs: queryStoreRefs,
+        body_refs: refs.filter((r) => !queryStoreRefs.includes(r)),
+      });
 
       const rawSource = String(order.source ?? order.orderSource ?? order.order_source ?? '').trim();
       const isManual = Boolean(

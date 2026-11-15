@@ -393,12 +393,23 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
   // immediately without remounting or refreshing the page.
   const { t, setLanguage, lang } = useLanguage();
   const isBn = lang === 'bn';
+  // Extract the store slug directly from the URL pathname as a robust fallback
+  // (e.g., /e/mystore or /store/mystore → mystore). This guarantees the order
+  // payload always carries the correct vendor store identifier even when the
+  // prop/session-derived slug is empty.
+  const slugFromPath = (() => {
+    if (typeof window === 'undefined') return '';
+    const path = window.location.pathname || '';
+    const match = path.match(/^\/(?:store|e)\/([^/]+)/);
+    return match ? match[1].toLowerCase() : '';
+  })();
+
   // Effective store slug for cache keys — resolved from prop or the active merchant session.
   // Memoized so the data-load effects below don't re-run on every render (which would
   // otherwise start a new 3s poll + Supabase fetch cascade each time setLiveStoreData fires).
   const effectiveStoreSlug = useMemo(
-    () => resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug),
-    [storeSlug, (merchant as any)?.storeSlug]
+    () => resolveActiveStoreSlug(storeSlug || (merchant as any)?.storeSlug || slugFromPath),
+    [storeSlug, (merchant as any)?.storeSlug, slugFromPath]
   );
   const [liveStoreData, setLiveStoreData] = useState<ZidStoreData>(() => readZidStoreData(storeSlug));
   // Online Store modules (brand / navigation / pages / blog / FAQ / SEO) served
@@ -3366,13 +3377,32 @@ The render below must not guess. A merchant may paste
     );
     const isMultiVendor = distinctVendors.size > 1;
 
+    /*
+     * The vendor store identifier this order belongs to.
+     *
+     * Resolved from EVERY source the storefront has, in order of authority:
+     * the prop/active-session slug, the merchant document, then the URL
+     * pathname (`/e/<slug>` or `/store/<slug>`). `resolveActiveStoreSlug`
+     * already falls back to 'bd', but a checkout payload with an EMPTY slug is
+     * what made the backend attribute the order to `marketplace` and the
+     * merchant's dashboard show 0 — so the fallback is asserted here too.
+     */
+    const checkoutStoreSlug =
+      String(
+        effectiveStoreSlug ||
+          storeSlug ||
+          (merchant as any)?.storeSlug ||
+          slugFromPath ||
+          ''
+      ).trim() || 'bd';
+
     const orderPayload = {
       ...newOrder,
       storeId,
       store_id: storeId,
-      storeSlug: effectiveStoreSlug,
-      store_slug: effectiveStoreSlug,
-      merchantId: (newOrder as any).merchantId || (merchant as any)?.id || storeId || effectiveStoreSlug,
+      storeSlug: checkoutStoreSlug,
+      store_slug: checkoutStoreSlug,
+      merchantId: (newOrder as any).merchantId || (merchant as any)?.id || storeId || checkoutStoreSlug,
       storeCode: resolvedStoreCode || (merchant as any)?.storeCode || '',
       store_code: resolvedStoreCode || (merchant as any)?.store_code || '',
       // `vendor_count` is recorded on the master so the dashboard can show the
@@ -3390,14 +3420,29 @@ The render below must not guess. A merchant may paste
     console.log('[Checkout] POST /api/orders starting', {
       orderNumber: orderNum,
       idempotencyKey,
-      storeSlug: effectiveStoreSlug,
+      storeSlug: checkoutStoreSlug,
       payMethod,
       totalBDT: newOrder.totalBDT,
       itemCount: newOrder.items?.length,
     });
     let apiRes: Response;
     try {
-      apiRes = await fetch(`${window.location.origin}/api/orders`, {
+      const slugParam = encodeURIComponent(checkoutStoreSlug);
+      /*
+       * RELATIVE URL, NOT `${window.location.origin}/api/orders`.
+       *
+       * `window.location.origin` is the literal string "null" for an opaque
+       * origin (a sandboxed preview iframe, a `file://` document), so the old
+       * template produced `null/api/orders`, which the SPA catch-all answered
+       * with index.html — an HTML 404 body that `res.json()` could not parse and
+       * that the shopper saw as a failed checkout. A root-relative URL always
+       * resolves against the document's own origin and hits the real route.
+       *
+       * The slug travels BOTH as a query parameter and inside the body so the
+       * backend can attribute the order even if one of the two is stripped by a
+       * proxy.
+       */
+      apiRes = await fetch(`/api/orders?storeSlug=${slugParam}&store_slug=${slugParam}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify([orderPayload]),
@@ -3413,12 +3458,27 @@ The render below must not guess. A merchant may paste
 
     const apiData = await apiRes.json().catch(() => null);
     if (!apiRes.ok || apiData?.ok === false) {
+      /*
+       * A 404 means the POST never reached the API route — the SPA catch-all
+       * served index.html instead. That happens when the storefront is mounted
+       * on an origin whose /api/* is not routed to the backend (a preview
+       * domain, a static mirror, or a proxy that only forwards GET). Say so
+       * plainly instead of showing the HTML body as the error.
+       */
+      const isRouteMissing = apiRes.status === 404 || (apiRes.status === 405 && !apiData);
+      const message = isRouteMissing
+        ? 'The order API is not reachable from this storefront URL (/api/orders returned 404). Open the storefront on its published domain and try again.'
+        : apiData?.error || apiData?.message || `The order could not be saved (HTTP ${apiRes.status}).`;
       console.log('[Checkout] POST /api/orders API error', {
         orderNumber: orderNum,
+        url: `/api/orders?storeSlug=${checkoutStoreSlug}`,
+        storeSlug: checkoutStoreSlug,
         status: apiRes.status,
-        error: apiData?.error || apiData?.message,
+        route_missing: isRouteMissing,
+        error: message,
+        payload_preview: JSON.stringify(orderPayload).slice(0, 500),
       });
-      setCheckoutError(apiData?.error || apiData?.message || `The order could not be saved (HTTP ${apiRes.status}).`);
+      setCheckoutError(message);
       return;
     }
 
