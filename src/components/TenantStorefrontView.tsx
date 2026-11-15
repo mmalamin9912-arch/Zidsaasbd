@@ -2141,7 +2141,18 @@ The render below must not guess. A merchant may paste
    */
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (placingOrderRef.current) return;
+    console.log('[Checkout] Confirm Order button clicked', {
+      payMethod,
+      custName,
+      custPhone,
+      custDistrict,
+      custCityArea,
+      cartItemCount: (cart || []).length,
+    });
+    if (placingOrderRef.current) {
+      console.log('[Checkout] Submit blocked: order already in flight');
+      return;
+    }
     placingOrderRef.current = true;
     setIsPlacingOrder(true);
     try {
@@ -3065,22 +3076,31 @@ The render below must not guess. A merchant may paste
     // catches Enter-key submits, autofill oddities, and programmatic calls so
     // an incomplete payload is never POSTed to the API.
     if (!custDistrict) {
+      console.log('[Checkout] Validation failed: missing district');
       setCheckoutError('Please select your District / জেলা.');
       return;
     }
     if (!custCityArea.trim()) {
+      console.log('[Checkout] Validation failed: missing city/area');
       setCheckoutError('Please enter your City / Area / Thana.');
       return;
     }
     if (!custAddress.trim()) {
+      console.log('[Checkout] Validation failed: missing address');
       setCheckoutError('Please enter your Detailed Address.');
       return;
     }
     if (!custPhone.trim()) {
+      console.log('[Checkout] Validation failed: missing phone');
       setCheckoutError('Please enter your Phone Number.');
       return;
     }
     setCheckoutError(null);
+    console.log('[Checkout] All required fields present', {
+      district: custDistrict,
+      cityArea: custCityArea,
+      phone: custPhone,
+    });
 
     // Wallet payments are only verifiable with the sender number + TrxID, so
     // neither can be empty. `required` on the inputs covers normal submits;
@@ -3089,6 +3109,11 @@ The render below must not guess. A merchant may paste
       const sender = custSenderPhone.replace(/\D/g, '');
       const trx = custTxId.trim();
       if (sender.length < 11 || !trx) {
+        console.log('[Checkout] Wallet validation failed', {
+          payMethod,
+          senderLength: sender.length,
+          hasTrx: Boolean(trx),
+        });
         setPayValidationError(
           !trx
             ? 'Please enter the Transaction ID (TrxID) from your payment confirmation.'
@@ -3097,6 +3122,7 @@ The render below must not guess. A merchant may paste
         return;
       }
       setPayValidationError('');
+      console.log('[Checkout] Wallet validation passed', { payMethod, sender });
     }
 
     // COD with an advance charge is only verifiable with the TrxID of the
@@ -3105,6 +3131,10 @@ The render below must not guess. A merchant may paste
     // by the SAME `requiresAdvanceFee` flag that renders the panel, so the
     // rule can never disagree with what the customer is shown.
     if (payMethod === 'cod' && requiresAdvanceFee && !custTxId.trim()) {
+      console.log('[Checkout] COD advance validation failed: missing TrxID', {
+        requiresAdvanceFee,
+        custTxIdLength: custTxId.trim().length,
+      });
       setPayValidationError(
         `Please send the ৳${totalAdvancePayable.toLocaleString()} advance and enter the bKash/Nagad Transaction ID (TrxID).`,
       );
@@ -3354,6 +3384,14 @@ The render below must not guess. A merchant may paste
 
     // Save order to backend API (MongoDB-backed). On failure we surface the
     // exact server message in the UI and NEVER paint a fake success screen.
+    console.log('[Checkout] POST /api/orders starting', {
+      orderNumber: orderNum,
+      idempotencyKey,
+      storeSlug: effectiveStoreSlug,
+      payMethod,
+      totalBDT: newOrder.totalBDT,
+      itemCount: newOrder.items?.length,
+    });
     let apiRes: Response;
     try {
       apiRes = await fetch(`${window.location.origin}/api/orders`, {
@@ -3362,15 +3400,30 @@ The render below must not guess. A merchant may paste
         body: JSON.stringify([orderPayload]),
       });
     } catch (err: any) {
+      console.log('[Checkout] POST /api/orders network error', {
+        orderNumber: orderNum,
+        error: err?.message || err,
+      });
       setCheckoutError(err?.message || 'The order could not be submitted. Please check your connection and try again.');
       return;
     }
 
     const apiData = await apiRes.json().catch(() => null);
     if (!apiRes.ok || apiData?.ok === false) {
+      console.log('[Checkout] POST /api/orders API error', {
+        orderNumber: orderNum,
+        status: apiRes.status,
+        error: apiData?.error || apiData?.message,
+      });
       setCheckoutError(apiData?.error || apiData?.message || `The order could not be saved (HTTP ${apiRes.status}).`);
       return;
     }
+
+    console.log('[Checkout] POST /api/orders success', {
+      orderNumber: orderNum,
+      status: apiRes.status,
+      response: apiData,
+    });
 
     // Only now — after a confirmed successful insert — proceed to the success screen.
     setConfirmedOrderNum(orderNum);
