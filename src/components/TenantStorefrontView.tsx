@@ -2111,13 +2111,6 @@ The render below must not guess. A merchant may paste
   // exact message instead of the button silently doing nothing (or showing a
   // fake success screen).
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
-  // True from the moment "Confirm Order" is pressed until the database write
-  // settles. Drives the spinner AND prevents a double-submit (a second click
-  // could otherwise create two orders before React re-renders).
-  const [isPlacingOrder, setIsPlacingOrder] = useState(false);
-  // Synchronous re-entry guard: `setIsPlacingOrder` is async, so two clicks in
-  // the same tick would both pass an `isPlacingOrder` check.
-  const placingOrderRef = React.useRef(false);
   // Idempotency key for the CURRENT checkout attempt. Created once when the
   // shopper first confirms and reused by every retry (a failed request, a
   // second click after an error, a StrictMode double effect), so the server and
@@ -2167,26 +2160,10 @@ The render below must not guess. A merchant may paste
     setPayValidationError('');
   }, [payMethod]);
 
-  /**
-   * "Confirm Order" entry point: owns the button's loading lifecycle.
-   *
-   * The ref is the real double-submit guard (state updates are async, so two
-   * clicks in one tick would both pass an `isPlacingOrder` test); the state
-   * only drives the spinner. `finally` always releases both, so a validation
-   * abort or a thrown error can never leave the button stuck on "Processing…".
-   *
-   * ORDER OF OPERATIONS IS DELIBERATE:
-   *   1. `setIsPlacingOrder(true)` is called BEFORE any await, so the very
-   *      next render already shows the spinner and a disabled button.
-   *   2. We then yield one macrotask BEFORE the POST. Without that yield the
-   *      state update and the order-building work land in the same task, and
-   *      React may never get a chance to paint the spinner — the click would
-   *      appear to "do nothing" until the response came back.
-   *   3. `placeOrder()` performs the fetch to `/api/orders`.
-   *   4. `finally` clears the flag, so EVERY exit path (validation abort,
-   *      network error, HTTP error, success) restores the button.
-   */
-  const handleCheckoutSubmit = async (e: React.FormEvent) => {
+  /** Direct Confirm Order handler — no refs, no loading state, no async
+   *  wrappers that can leave the button stuck. Delegates directly to
+   *  placeOrder(), which executes the POST to /api/orders. */
+  const handleConfirmOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     console.log('[Checkout] Confirm Order button clicked', {
       payMethod,
@@ -2196,31 +2173,7 @@ The render below must not guess. A merchant may paste
       custCityArea,
       cartItemCount: (cart || []).length,
     });
-    if (placingOrderRef.current) {
-      console.log('[Checkout] Submit blocked: order already in flight');
-      return;
-    }
-
-    // Turn the loading state on FIRST, before any awaited work.
-    placingOrderRef.current = true;
-    setIsPlacingOrder(true);
-    console.log('[Checkout] Loading state ON — spinner + disabled button');
-
-    try {
-      // Yield to the browser so the spinner is actually painted before the
-      // synchronous order-building + store lookup runs.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await placeOrder();
-    } catch (err: any) {
-      // `placeOrder` handles its own API errors, but an unexpected throw must
-      // never leave the shopper staring at an endless spinner.
-      console.error('[Checkout] Unexpected submit error:', err?.message || err);
-      setCheckoutError(err?.message || 'Something went wrong while placing your order. Please try again.');
-    } finally {
-      placingOrderRef.current = false;
-      setIsPlacingOrder(false);
-      console.log('[Checkout] Loading state OFF');
-    }
+    await placeOrder();
   };
 
   const selectedMobileMethod = (enabledMobileMethods || []).find((method) => method.provider === payMethod);
@@ -3124,10 +3077,6 @@ The render below must not guess. A merchant may paste
   };
 
   const placeOrder = async () => {
-    // A second entry while the first request is still in flight must never
-    // create a second order — the ref is synchronous, unlike the state flag.
-    if (placingOrderRef.current) return;
-
     // Enforce the merchant's minimum order rule (Settings -> Checkout).
     if (minOrderShortfall > 0) return;
 
@@ -5815,60 +5764,35 @@ The render below must not guess. A merchant may paste
                   <button
                     // `type="button"` + a direct onClick — this never submits
                     // a form, never reloads the page and never routes through
-                    // native validation. `handleCheckoutSubmit` IS the entire
+                    // native validation. `handleConfirmOrder` IS the entire
                     // submit path.
                     type="button"
                     data-testid="checkout-submit"
-                    aria-busy={isPlacingOrder}
                     aria-live="polite"
-                    aria-disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
-                    disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
-                    onClick={(e) => {
-                      // One handler, one click path. The log fires on EVERY
-                      // click (before validation) so a click that does nothing
-                      // is always visible in the console.
-                      console.log('[Checkout] Confirm Order button clicked', {
-                        payMethod,
-                        isPlacingOrder,
-                        minOrderShortfall,
-                        qtyLimitBreached,
-                        cartItemCount: (cart || []).length,
-                      });
-                      void handleCheckoutSubmit(e);
-                    }}
+                    aria-disabled={minOrderShortfall > 0 || qtyLimitBreached}
+                    disabled={minOrderShortfall > 0 || qtyLimitBreached}
+                    onClick={handleConfirmOrder}
                     className="w-full py-3.5 bg-[var(--primary-accent)] text-slate-950 font-black rounded-xl text-sm hover:bg-[var(--primary-accent)]/90 disabled:opacity-70 disabled:cursor-not-allowed transition cursor-pointer shadow-lg flex items-center justify-center gap-2"
                   >
-                    {isPlacingOrder ? (
-                      <>
-                        {/* Animated spinner — the button is already disabled above,
-                            and `placingOrderRef` blocks a second submit even if
-                            the click somehow lands before this render. */}
-                        <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-                        <span data-testid="checkout-submit-loading">
-                          {isBn ? 'কনফার্ম হচ্ছে…' : 'Processing Order...'}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        {/* Every branch recomputes when the delivery zone changes:
-                              • wallet  → the goods + the SELECTED zone's fee + VAT +
-                                the wallet cash-out %, i.e. exactly `totalAmount`.
-                              • COD+advance → the upfront delivery fee (+ cash-out on
-                                that fee only) and the remaining cash balance, both of
-                                which move with the zone. No cash-out on the product
-                                balance.
-                              • COD    → the full payable for the selected zone. */}
-                        <span>
-                          {`${isBn ? 'অর্ডার নিশ্চিত করুন' : 'Confirm Order'} • ৳${
-                            payMethod === 'cod' && requiresAdvanceFee
-                              ? `${totalAdvancePayable.toLocaleString()} Upfront (৳${remainingCodBalance.toLocaleString()} COD)`
-                              : isWalletPaymentSelected
-                                ? totalAmount.toLocaleString()
-                                : baseTotalAmount.toLocaleString()
-                          }`}
-                        </span>
-                      </>
-                    )}
+                    <>
+                      {/* Every branch recomputes when the delivery zone changes:
+                            • wallet  → the goods + the SELECTED zone's fee + VAT +
+                              the wallet cash-out %, i.e. exactly `totalAmount`.
+                            • COD+advance → the upfront delivery fee (+ cash-out on
+                              that fee only) and the remaining cash balance, both of
+                              which move with the zone. No cash-out on the product
+                              balance.
+                            • COD    → the full payable for the selected zone. */}
+                      <span>
+                        {`${isBn ? 'অর্ডার নিশ্চিত করুন' : 'Confirm Order'} • ৳${
+                          payMethod === 'cod' && requiresAdvanceFee
+                            ? `${totalAdvancePayable.toLocaleString()} Upfront (৳${remainingCodBalance.toLocaleString()} COD)`
+                            : isWalletPaymentSelected
+                              ? totalAmount.toLocaleString()
+                              : baseTotalAmount.toLocaleString()
+                        }`}
+                      </span>
+                    </>
                   </button>
                 </div>
                 </div>
