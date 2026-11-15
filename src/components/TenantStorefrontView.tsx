@@ -2071,6 +2071,10 @@ The render below must not guess. A merchant may paste
   const [custTxId, setCustTxId] = useState('');
   const [custSenderPhone, setCustSenderPhone] = useState('');
   const [payValidationError, setPayValidationError] = useState('');
+  // Surface API failures from the order submission so the shopper sees an
+  // exact message instead of the button silently doing nothing (or showing a
+  // fake success screen).
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
   // True from the moment "Confirm Order" is pressed until the database write
   // settles. Drives the spinner AND prevents a double-submit (a second click
   // could otherwise create two orders before React re-renders).
@@ -3056,6 +3060,28 @@ The render below must not guess. A merchant may paste
     // Enforce the merchant's minimum order rule (Settings -> Checkout).
     if (minOrderShortfall > 0) return;
 
+    // ── Required-field validation ─────────────────────────────────────────
+    // HTML5 `required` on the inputs covers normal submits, but this guard
+    // catches Enter-key submits, autofill oddities, and programmatic calls so
+    // an incomplete payload is never POSTed to the API.
+    if (!custDistrict) {
+      setCheckoutError('Please select your District / জেলা.');
+      return;
+    }
+    if (!custCityArea.trim()) {
+      setCheckoutError('Please enter your City / Area / Thana.');
+      return;
+    }
+    if (!custAddress.trim()) {
+      setCheckoutError('Please enter your Detailed Address.');
+      return;
+    }
+    if (!custPhone.trim()) {
+      setCheckoutError('Please enter your Phone Number.');
+      return;
+    }
+    setCheckoutError(null);
+
     // Wallet payments are only verifiable with the sender number + TrxID, so
     // neither can be empty. `required` on the inputs covers normal submits;
     // this guard covers Enter-key submits and autofill oddities.
@@ -3326,19 +3352,27 @@ The render below must not guess. A merchant may paste
       idempotency_key: idempotencyKey,
     };
 
-    // Save order to backend API (MongoDB-backed). Non-blocking: log failures
-    // but NEVER alert or return early.
+    // Save order to backend API (MongoDB-backed). On failure we surface the
+    // exact server message in the UI and NEVER paint a fake success screen.
+    let apiRes: Response;
     try {
-      await fetch(`${window.location.origin}/api/orders`, {
+      apiRes = await fetch(`${window.location.origin}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify([orderPayload]),
-      }).catch(err => console.warn('[Checkout] Order API warning:', err));
-    } catch (e) {
-      console.warn('[Checkout] Order API warning:', e);
+      });
+    } catch (err: any) {
+      setCheckoutError(err?.message || 'The order could not be submitted. Please check your connection and try again.');
+      return;
     }
 
-    // Only now — after a successful insert — proceed to the success screen.
+    const apiData = await apiRes.json().catch(() => null);
+    if (!apiRes.ok || apiData?.ok === false) {
+      setCheckoutError(apiData?.error || apiData?.message || `The order could not be saved (HTTP ${apiRes.status}).`);
+      return;
+    }
+
+    // Only now — after a confirmed successful insert — proceed to the success screen.
     setConfirmedOrderNum(orderNum);
     onPlaceOrder(newOrder);
     setCheckoutStep('success');
@@ -5622,6 +5656,14 @@ The render below must not guess. A merchant may paste
                   </div>
                 )}
 
+                {checkoutError && (
+                  <div
+                    data-testid="checkout-error"
+                    className="rounded-xl px-3.5 py-2.5 bg-red-500/10 border-red-500/30 text-red-300 text-xs font-medium mb-3"
+                  >
+                    {checkoutError}
+                  </div>
+                )}
                 <div className="pt-2">
                   <button
                     type="submit"
