@@ -5,8 +5,10 @@ interface SplashLoaderProps {
   visible?: boolean;
 }
 
-// Fade the overlay out ~2.5s after the app signals it is ready.
-const MINIMUM_DISPLAY_TIME = 2500;
+// Keep the overlay visible ~6.5s after the app signals it is ready, giving
+// Render's cold-started server ample time to wake up before the overlay fades.
+// Total time until fully hidden ≈ MINIMUM_DISPLAY_TIME + EXIT_DURATION (~7s).
+const MINIMUM_DISPLAY_TIME = 6500;
 const EXIT_DURATION = 500;
 
 type CharSpec = { letter: string; color: string; className: string };
@@ -115,6 +117,24 @@ export const SplashLoader: React.FC<SplashLoaderProps> = ({ visible = true }) =>
     const timer = window.setTimeout(() => setMounted(false), EXIT_DURATION);
     return () => window.clearTimeout(timer);
   }, [exiting]);
+
+  // Wake the Render service in the background while the splash is visible so the
+  // server is fully awake by the time the overlay fades out. Runs in parallel
+  // with the display timer — it does not gate the fade-out. Best-effort: a
+  // failed or slow warm-up never blocks the app from becoming usable.
+  React.useEffect(() => {
+    const controller = new AbortController();
+    const hangGuard = setTimeout(() => controller.abort(), 8000);
+
+    fetch('/api/health', { signal: controller.signal, cache: 'no-store' }).catch(() => {
+      // Intentionally ignored — warm-up is opportunistic, not required.
+    });
+
+    return () => {
+      clearTimeout(hangGuard);
+      controller.abort();
+    };
+  }, []);
 
   if (!mounted) return null;
 
