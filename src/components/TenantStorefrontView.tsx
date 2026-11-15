@@ -5061,7 +5061,19 @@ The render below must not guess. A merchant may paste
                 <ArrowLeft className="w-3.5 h-3.5" /> Return to Catalog
               </button>
 
-              <form onSubmit={handleCheckoutSubmit} className="grid lg:grid-cols-2 gap-8 items-start space-y-6">
+              {/* PLAIN <div>, NOT a <form>.
+                  The checkout used to be a <form onSubmit={handleCheckoutSubmit}>,
+                  which handed control to the browser: any input carrying
+                  `required` (TrxID, sender number, district, address…) made the
+                  browser block the submit event entirely and show a native
+                  "Please fill out this field" bubble. Our handler never ran,
+                  nothing was logged, and the button appeared dead.
+
+                  Rendering a container instead means the Confirm Order button
+                  is a pure click target: every validation now lives in
+                  `placeOrder()` where we render our own inline errors, so
+                  nothing can silently prevent the order from being placed. */}
+              <div className="grid lg:grid-cols-2 gap-8 items-start space-y-6">
                 <div className="lg:col-span-8 space-y-6">
                   <div className="bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-800/80 p-6 shadow-2xl text-slate-100 space-y-5">
                     <div className="flex items-center gap-2 mb-2">
@@ -5739,24 +5751,28 @@ The render below must not guess. A merchant may paste
                 )}
                 <div className="pt-2">
                   <button
-                    type="submit"
+                    // `type="button"` + a direct onClick — this never submits
+                    // a form, never reloads the page and never routes through
+                    // native validation. `handleCheckoutSubmit` IS the entire
+                    // submit path.
+                    type="button"
                     data-testid="checkout-submit"
                     aria-busy={isPlacingOrder}
                     aria-live="polite"
                     aria-disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
                     disabled={isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached}
-                    onClick={() => {
-                      // Fires on EVERY click, before any validation — so a
-                      // click that ends up doing nothing is always traceable
-                      // in the console.
+                    onClick={(e) => {
+                      // One handler, one click path. The log fires on EVERY
+                      // click (before validation) so a click that does nothing
+                      // is always visible in the console.
                       console.log('[Checkout] Confirm Order button clicked', {
                         payMethod,
                         isPlacingOrder,
                         minOrderShortfall,
                         qtyLimitBreached,
-                        disabled: isPlacingOrder || minOrderShortfall > 0 || qtyLimitBreached,
                         cartItemCount: (cart || []).length,
                       });
+                      void handleCheckoutSubmit(e);
                     }}
                     className="w-full py-3.5 bg-[var(--primary-accent)] text-slate-950 font-black rounded-xl text-sm hover:bg-[var(--primary-accent)]/90 disabled:opacity-70 disabled:cursor-not-allowed transition cursor-pointer shadow-lg flex items-center justify-center gap-2"
                   >
@@ -5891,7 +5907,7 @@ The render below must not guess. A merchant may paste
                   </div>
                 </div>
               </div>
-            </form>
+            </div>
           </div>
         </div>
         )}
