@@ -2138,6 +2138,17 @@ The render below must not guess. A merchant may paste
    * clicks in one tick would both pass an `isPlacingOrder` test); the state
    * only drives the spinner. `finally` always releases both, so a validation
    * abort or a thrown error can never leave the button stuck on "Processing…".
+   *
+   * ORDER OF OPERATIONS IS DELIBERATE:
+   *   1. `setIsPlacingOrder(true)` is called BEFORE any await, so the very
+   *      next render already shows the spinner and a disabled button.
+   *   2. We then yield one macrotask BEFORE the POST. Without that yield the
+   *      state update and the order-building work land in the same task, and
+   *      React may never get a chance to paint the spinner — the click would
+   *      appear to "do nothing" until the response came back.
+   *   3. `placeOrder()` performs the fetch to `/api/orders`.
+   *   4. `finally` clears the flag, so EVERY exit path (validation abort,
+   *      network error, HTTP error, success) restores the button.
    */
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2153,13 +2164,26 @@ The render below must not guess. A merchant may paste
       console.log('[Checkout] Submit blocked: order already in flight');
       return;
     }
+
+    // Turn the loading state on FIRST, before any awaited work.
     placingOrderRef.current = true;
     setIsPlacingOrder(true);
+    console.log('[Checkout] Loading state ON — spinner + disabled button');
+
     try {
+      // Yield to the browser so the spinner is actually painted before the
+      // synchronous order-building + store lookup runs.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       await placeOrder();
+    } catch (err: any) {
+      // `placeOrder` handles its own API errors, but an unexpected throw must
+      // never leave the shopper staring at an endless spinner.
+      console.error('[Checkout] Unexpected submit error:', err?.message || err);
+      setCheckoutError(err?.message || 'Something went wrong while placing your order. Please try again.');
     } finally {
       placingOrderRef.current = false;
       setIsPlacingOrder(false);
+      console.log('[Checkout] Loading state OFF');
     }
   };
 
@@ -5743,7 +5767,7 @@ The render below must not guess. A merchant may paste
                             the click somehow lands before this render. */}
                         <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
                         <span data-testid="checkout-submit-loading">
-                          {isBn ? 'প্রসেসিং হচ্ছে…' : 'Processing Order...'}
+                          {isBn ? 'কনফার্ম হচ্ছে…' : 'Processing Order...'}
                         </span>
                       </>
                     ) : (
