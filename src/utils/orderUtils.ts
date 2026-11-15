@@ -276,18 +276,30 @@ export function isManualOrder(ord: any): boolean {
 /**
  * Does this order come from the cross-vendor MARKETPLACE (not a single store)?
  *
- * The write path stamps BOTH `marketplace_order: true` and
+ * The write path stamps BOTH `marketplace_order` and
  * `order_source_channel: 'marketplace'` (see buildOrderRecord in serverApp.ts);
  * every known spelling is accepted here because the dashboard orders can come
  * from Mongo (snake_case), Supabase rows or the in-memory cache (camelCase).
  * Marketplace orders route their courier booking through the CENTRAL ADMIN
  * courier API rather than the merchant's own credentials.
+ *
+ * A STORE-LINK order is the opposite and is checked FIRST: it is a merchant's
+ * own storefront / manual / POS order, settled directly with that merchant. The
+ * server writes `order_source_channel: 'store_link'` for those, and the check
+ * must win over `marketplace_order` — a storefront WALLET order used to be
+ * stamped `marketplace_order: true` purely because its payment method was not
+ * COD, which pulled it into the marketplace tab, routed its parcel through the
+ * admin's courier account and locked its payment status away from the merchant.
  */
 export function isMarketplaceOrder(ord: any): boolean {
   if (!ord) return false;
+  const channel = String(ord.order_source_channel ?? ord.orderSourceChannel ?? ord.channel ?? '')
+    .trim()
+    .toLowerCase();
+  if (channel === 'store_link' || channel === 'storelink' || channel === 'store') return false;
+  if (channel === 'marketplace') return true;
   if (ord.marketplace_order === true || ord.marketplaceOrder === true) return true;
   if (String(ord.marketplace_order ?? ord.marketplaceOrder ?? '') === 'true') return true;
-  if (String(ord.order_source_channel ?? ord.orderSourceChannel ?? '').trim().toLowerCase() === 'marketplace') return true;
   if (Array.isArray(ord.vendor_slugs ?? ord.vendorSlugs) && (ord.vendor_slugs ?? ord.vendorSlugs).length > 1) return true;
   return false;
 }

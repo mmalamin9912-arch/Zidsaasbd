@@ -3409,6 +3409,16 @@ The render below must not guess. A merchant may paste
       // split; `split_by_vendor` is the server's instruction to fan out.
       vendor_count: distinctVendors.size,
       split_by_vendor: isMultiVendor,
+      /*
+       * CHANNEL: this checkout IS the merchant's own storefront link, so the
+       * order must be tagged STORE_LINK — never the marketplace default the
+       * write path applies when it cannot tell where a request came from. The
+       * server re-derives the channel from the origin (storeSlug / store_slug)
+       * and only falls back to this value, but sending it makes the intent
+       * explicit and survives a proxy that drops the query string.
+       */
+      order_source_channel: 'store_link',
+      order_channel: 'STORE_LINK',
       // Server-side idempotency: every retry of this attempt carries the same
       // key, so only the first request can create the order.
       idempotencyKey,

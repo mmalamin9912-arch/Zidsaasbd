@@ -18284,6 +18284,11 @@ function buildOrderFilterClauses(query: {
   payment_status?: unknown;
   paymentStatus?: unknown;
   search?: unknown;
+  /** 'marketplace' | 'store_link' — see resolveOrderChannel above. */
+  channel?: unknown;
+  order_source_channel?: unknown;
+  orderSourceChannel?: unknown;
+  source_type?: unknown;
 }): Record<string, any> | null {
   const clauses: Record<string, any>[] = [];
 
@@ -18387,6 +18392,35 @@ function buildOrderFilterClauses(query: {
         });
       }
     }
+
+  // ── channel: MARKETPLACE vs STORE_LINK ────────────────────────────────────
+  // `?channel=store_link|marketplace` isolates the two shops server-side:
+  // marketplace rows are settled and dispatched by the platform, store-link rows
+  // belong to the merchant whose `store_slug` they carry. Every spelling the
+  // write path can produce is matched, plus the legacy `marketplace_order` flag.
+  const rawChannel = normalizeOrderChannel(
+    query.channel ?? query.order_source_channel ?? query.orderSourceChannel ?? query.source_type
+  );
+  if (rawChannel === 'store_link') {
+    clauses.push({
+      $or: [
+        { order_source_channel: 'store_link' },
+        { orderSourceChannel: 'store_link' },
+        { order_channel: 'STORE_LINK' },
+        { channel: 'STORE_LINK' },
+      ],
+    });
+  } else if (rawChannel === 'marketplace') {
+    clauses.push({
+      $or: [
+        { order_source_channel: 'marketplace' },
+        { orderSourceChannel: 'marketplace' },
+        { order_channel: 'MARKETPLACE' },
+        { channel: 'MARKETPLACE' },
+        { marketplace_order: true },
+      ],
+    });
+  }
 
   if (clauses.length === 0) return null;
   // Multiple clauses must AND together.
@@ -18725,6 +18759,11 @@ app.get('/api/orders', async (req, res) => {
       status: req.query.status ?? req.query.order_status,
       payment_status: req.query.payment_status ?? req.query.paymentStatus,
       search: req.query.search ?? req.query.q,
+      channel:
+        req.query.channel ??
+        req.query.order_source_channel ??
+        req.query.orderSourceChannel ??
+        req.query.source_type,
     });
 
     const limitRaw = Number(req.query.limit);
@@ -18873,6 +18912,11 @@ app.get('/api/orders/:storeRef', async (req, res) => {
       status: req.query.status ?? req.query.order_status,
       payment_status: req.query.payment_status ?? req.query.paymentStatus,
       search: req.query.search ?? req.query.q,
+      channel:
+        req.query.channel ??
+        req.query.order_source_channel ??
+        req.query.orderSourceChannel ??
+        req.query.source_type,
     });
     let query: any = storeQuery;
     if (filterClauses) {
@@ -19319,6 +19363,74 @@ async function releaseOrderIdempotency(db: any, key: string): Promise<void> {
   await db.collection(ORDER_IDEMPOTENCY_COLLECTION).deleteOne({ _id: key }).catch(() => undefined);
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * ORDER CHANNEL — WHERE AN ORDER ACTUALLY CAME FROM
+ *
+ * Two shops share one database:
+ *
+ *   MARKETPLACE  the cross-vendor marketplace (MarketplaceCheckoutView). The
+ *                customer pays the PLATFORM's wallet/TrxID, the Super Admin
+ *                verifies it, and the parcel is booked through the platform's
+ *                central courier account.
+ *
+ *   STORE_LINK   a merchant's OWN storefront (TenantStorefrontView, served at
+ *                /e/<slug> or /store/<slug>), a manual/POS entry, or WhatsApp.
+ *                The merchant is paid directly, owns the payment status, and
+ *                dispatches with their own courier credentials.
+ *
+ * Every order written before this existed was stamped
+ * `order_source_channel: 'marketplace'` as a DEFAULT, so a storefront order was
+ * indistinguishable from a marketplace one: it appeared under the wrong tab,
+ * its courier booking went through the admin's account, and the merchant could
+ * not change its payment status. The channel is therefore derived here from the
+ * request's origin and stored explicitly on every record.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Canonical channel value from any spelling a caller might send. */
+function normalizeOrderChannel(value: any): string {
+  const key = String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (!key) return '';
+  if (key === 'marketplace' || key === 'market' || key === 'marketplaceorder' || key === 'central' || key === 'platform') {
+    return 'marketplace';
+  }
+  if (
+    key === 'storelink' || key === 'store' || key === 'storefront' || key === 'storeorder' ||
+    key === 'link' || key === 'customstore' || key === 'website'
+  ) {
+    return 'store_link';
+  }
+  return '';
+}
+
+/**
+ * Decide the channel for ONE incoming order.
+ *
+ * 1. An explicit `order_source_channel` / `channel` from the caller wins — the
+ *    marketplace checkout sends `marketplace` and must never be re-labelled.
+ * 2. A split / multi-vendor basket is BY DEFINITION the marketplace.
+ * 3. A request that named a store (query `storeSlug`, body `store_slug`, a
+ *    resolved store identity) is that merchant's own STORE_LINK order.
+ * 4. Anything else falls back to `marketplace` — the legacy behaviour — so an
+ *    unidentified writer never loses an order.
+ */
+function resolveOrderChannel(input: {
+  order: Record<string, any>;
+  hasStoreRef: boolean;
+  isSplit: boolean;
+}): string {
+  const explicit = normalizeOrderChannel(
+    input.order?.order_source_channel ??
+      input.order?.orderSourceChannel ??
+      input.order?.channel ??
+      input.order?.source_channel ??
+      input.order?.sourceChannel
+  );
+  if (explicit) return explicit;
+  if (input.isSplit) return 'marketplace';
+  if (input.hasStoreRef) return 'store_link';
+  return 'marketplace';
+}
+
 /**
  * Build the persisted `orders` document from a checkout / dashboard payload.
  *
@@ -19330,9 +19442,30 @@ async function releaseOrderIdempotency(db: any, key: string): Promise<void> {
  */
 function buildOrderRecord(
   order: Record<string, any>,
-  ctx: { storeId: string; merchantId: string; slug: string; storeCode?: string; source: string; isManual: boolean }
+  ctx: {
+    storeId: string;
+    merchantId: string;
+    slug: string;
+    storeCode?: string;
+    source: string;
+    isManual: boolean;
+    /** 'marketplace' | 'store_link' — see resolveOrderChannel above. */
+    channel?: string;
+  }
 ): Record<string, any> {
   const { storeId, merchantId, slug, storeCode, source, isManual } = ctx;
+  /*
+   * The channel is SERVER-DERIVED (`ctx.channel`, resolved from the request's
+   * origin) and only falls back to a client-supplied value for callers that
+   * bypass POST /api/orders. A client must not be able to relabel a marketplace
+   * order as a store order — that would hand it the merchant's payment-ownership
+   * and courier-routing rules.
+   */
+  const channel =
+    normalizeOrderChannel(ctx.channel) ||
+    normalizeOrderChannel(order.order_source_channel || order.orderSourceChannel) ||
+    'marketplace';
+  const isMarketplaceChannel = channel === 'marketplace';
   const rawPhone = String(order.customerPhone || order.customer_phone || '').trim();
   const digits = phoneDigits(rawPhone);
   const orderNum = String(order.orderNumber || order.order_number || order.id || `ORD-${Date.now()}`).replace(/^#/, '');
@@ -19464,8 +19597,26 @@ function buildOrderRecord(
     order_status: normalizedStatus,
     source,
     order_source: source,
-    order_source_channel: order.order_source_channel || order.orderSourceChannel || 'marketplace',
-    marketplace_order: Boolean(order.marketplace_order || order.marketplaceOrder || (paymentStatus !== 'Unpaid' && paymentStatus !== 'COD')),
+    /*
+     * CHANNEL TAGS. Three spellings of the same fact so no reader can miss it:
+     *   order_source_channel — canonical lowercase, consumed by
+     *                          orderUtils.isMarketplaceOrder() in the dashboard;
+     *   order_channel        — the uppercase STORE_LINK / MARKETPLACE tag;
+     *   channel              — short alias used by newer readers.
+     * A store-link order carries its own `store_slug` as the channel's identity,
+     * so a merchant's orders are isolated by that slug everywhere.
+     */
+    order_source_channel: channel,
+    order_channel: isMarketplaceChannel ? 'MARKETPLACE' : 'STORE_LINK',
+    channel: isMarketplaceChannel ? 'MARKETPLACE' : 'STORE_LINK',
+    /*
+     * `marketplace_order` must agree with the channel. Deriving it from the
+     * payment method alone marked a storefront wallet order as a marketplace
+     * order, which routed its parcel through the admin's courier account and
+     * locked its payment status away from the merchant who owns the sale.
+     */
+    marketplace_order: isMarketplaceChannel &&
+      Boolean(order.marketplace_order || order.marketplaceOrder || (paymentStatus !== 'Unpaid' && paymentStatus !== 'COD')),
     /*
      * VENDOR ATTRIBUTION ON THE MASTER.
      *
@@ -19796,6 +19947,9 @@ async function persistVendorChildren(masterOrder: Record<string, any>, masterRec
       storeCode: vendorStoreDoc?.store_code || ref.code,
       source: String(masterRecord.source || 'Store'),
       isManual: Boolean(masterRecord.is_manual),
+      // A child inherits the MASTER's channel: the split is a marketplace
+      // basket, so every vendor's row is a marketplace order too.
+      channel: normalizeOrderChannel(masterRecord.order_source_channel) || 'marketplace',
     });
     Object.assign(childRecord, {
       order_type: 'child',
@@ -20248,6 +20402,31 @@ app.post('/api/orders', async (req, res) => {
       const source = isManual ? (rawSource || 'Manual') : (rawSource || 'Store');
 
       /*
+       * ── CHANNEL: MARKETPLACE vs STORE_LINK ────────────────────────────
+       *
+       * Resolved from where the request ORIGINATED, not from what the client
+       * claims in a status column: a caller that named a store (query
+       * `storeSlug`, body `store_slug`, or a resolved store identity) is that
+       * merchant's own storefront, while a split/multi-vendor basket and the
+       * marketplace checkout are the platform's.
+       */
+      const orderChannel = resolveOrderChannel({
+        order,
+        hasStoreRef: Boolean(queryStoreRefs.length || explicitSlug || identity.storeSlug || identity.storeId),
+        isSplit:
+          order.split_by_vendor === true ||
+          order.splitByVendor === true ||
+          order.marketplace_order === true ||
+          order.marketplaceOrder === true,
+      });
+      console.log('[Server] POST /api/orders channel:', {
+        order_number: normalizedOrderNumber(order) || String(order.order_number || order.orderNumber || '(generated)'),
+        channel: orderChannel,
+        store_slug: slug,
+        store_owned: orderChannel === 'store_link',
+      });
+
+      /*
        * ── IDEMPOTENCY CLAIM (durable, atomic) ──────────────────────────
        *
        * One checkout attempt has one key. The claim is inserted into MongoDB
@@ -20306,7 +20485,15 @@ app.post('/api/orders', async (req, res) => {
       });
       const orderForPersist = { ...order, items: linesWithVendor };
 
-      const masterRecord = buildOrderRecord(orderForPersist, { storeId, merchantId, slug, storeCode: identity.storeCode, source, isManual });
+      const masterRecord = buildOrderRecord(orderForPersist, {
+        storeId,
+        merchantId,
+        slug,
+        storeCode: identity.storeCode,
+        source,
+        isManual,
+        channel: orderChannel,
+      });
 
       // ── Prepare multi-vendor split if requested or if order contains vendor items ──
       let preparedChildren: any[] = [];
