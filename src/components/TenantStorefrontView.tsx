@@ -1278,6 +1278,42 @@ The render below must not guess. A merchant may paste
     : (resolvedTheme.heroBackgrounds.length > 0
         ? resolvedTheme.heroBackgrounds
         : (resolvedTheme.heroImage ? [resolvedTheme.heroImage] : []));
+  // ── Deferred third-party video embed ────────────────────────────────────
+  //
+  // A YouTube/Vimeo <iframe> is the heaviest third party this page can load:
+  // the player JS, the poster images and (for a monetised channel) the ad
+  // requests all fire the moment the element is parsed — even if the section
+  // is far below the fold. While those are in flight the browser's per-origin
+  // connection pool is saturated, which is what makes the Confirm Order click
+  // and the /api/orders POST feel laggy or appear to hang.
+  //
+  // So the embed does NOT mount on first paint. It mounts only when:
+  //   • the section is scrolled near the viewport (IntersectionObserver), or
+  //   • the shopper taps "Load video".
+  // Until then the section renders a static placeholder that costs zero
+  // network requests. A 200px rootMargin means it starts loading just before
+  // it becomes visible, so it still feels instant.
+  const [videoDeferred, setVideoDeferred] = useState(false);
+  const videoSectionRef = React.useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (videoDeferred) return;
+    const node = videoSectionRef.current;
+    if (!node) return;
+    // No IntersectionObserver (very old browser) → reveal via the button only.
+    if (typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVideoDeferred(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '200px 0px' },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [videoDeferred, hasVideoSource, resolvedTheme.showVideo]);
+
   const [activeHeroIndex, setActiveHeroIndex] = useState(0);
   useEffect(() => {
     if (!resolvedTheme.showHeroBanner || heroImageList.length <= 1) return;
@@ -4761,22 +4797,48 @@ The render below must not guess. A merchant may paste
                     {resolvedTheme.videoTitle}
                   </h2>
                 )}
-                <div className="rounded-2xl overflow-hidden border border-slate-800/80 aspect-video bg-slate-950">
+                <div
+                  ref={videoSectionRef}
+                  className="rounded-2xl overflow-hidden border border-slate-800/80 aspect-video bg-slate-950"
+                >
                   {resolvedTheme.videoFileUrl ? (
+                    // Direct file (Supabase storage / blob): progressive download,
+                    // so preload=none keeps it off the network until play.
                     <video
                       src={resolvedTheme.videoFileUrl}
                       className="w-full h-full object-cover"
                       controls
+                      preload="none"
                       autoPlay={resolvedTheme.videoAutoplay}
                       muted={resolvedTheme.videoAutoplay || resolvedTheme.videoMuted}
                       loop
                       playsInline
                     />
+                  ) : !videoDeferred ? (
+                    // Zero-request placeholder; the iframe mounts from the
+                    // IntersectionObserver above (or the button below).
+                    <button
+                      type="button"
+                      onClick={() => setVideoDeferred(true)}
+                      className="group w-full h-full flex flex-col items-center justify-center gap-2 bg-slate-900 text-slate-300 cursor-pointer transition hover:bg-slate-800"
+                      aria-label={resolvedTheme.videoTitle || 'Load video'}
+                    >
+                      <span className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-400 text-slate-950 transition group-hover:scale-105">
+                        <Play className="w-5 h-5 fill-slate-950" />
+                      </span>
+                      <span className="text-[11px] font-bold uppercase tracking-wider">
+                        {isBn ? 'ভিডিও লোড করুন' : 'Load video'}
+                      </span>
+                    </button>
                   ) : (
                     <iframe
                       src={`${videoEmbedUrl}${videoEmbedUrl.includes('?') ? '&' : '?'}autoplay=${resolvedTheme.videoAutoplay ? 1 : 0}&mute=${(resolvedTheme.videoAutoplay || resolvedTheme.videoMuted) ? 1 : 0}`}
                       className="w-full h-full"
                       title={resolvedTheme.videoTitle || 'Store Video'}
+                      // Native lazy-load: the browser defers the subresources
+                      // until the frame is near the viewport.
+                      loading="lazy"
+                      referrerPolicy="strict-origin-when-cross-origin"
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                       allowFullScreen
                     />
