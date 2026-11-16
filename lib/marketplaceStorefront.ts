@@ -449,10 +449,21 @@ export async function saveMarketplaceCategory(input: any): Promise<{ ok: boolean
   );
   if (clash) return { ok: false, error: `“${name}” already exists in the list.` };
 
+  // `created_at` is the original creation timestamp and must never be overwritten
+  // by an update (a re-save with a stale/missing value would reset it). Strip it
+  // from the incoming payload so the existing record's value is the only source.
+  const {
+    created_at: _ca,
+    createdAt: _ca2,
+    updated_at: _ua,
+    updatedAt: _ua2,
+    ...cleanInput
+  } = input || {};
+
   const merged = normalizeCategory(
     {
       ...(existingIndex >= 0 ? categories[existingIndex] : {}),
-      ...input,
+      ...cleanInput,
       name,
       id: rawId || makeId('cat'),
     },
