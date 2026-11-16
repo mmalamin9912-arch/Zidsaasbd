@@ -681,37 +681,52 @@ export const MarketplaceStudioPanel: React.FC = () => {
                 ))}
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
-                <div>
-                  <label className={LABEL}>Hero image (optional)</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        e.target.value = '';
-                        if (!file) return;
-                        const dataUrl = await readAndDownscaleImage(file, 1600);
-                        if (dataUrl) setEditingBanner({ ...editingBanner, image: dataUrl });
-                      }}
-                      className="w-full text-[11px] text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-[#2E3548] file:text-white hover:file:bg-[#3A435E] cursor-pointer"
-                    />
-                    {editingBanner.image && (
-                      <button
-                        type="button"
-                        onClick={() => setEditingBanner({ ...editingBanner, image: undefined })}
-                        className={BTN_DANGER}
-                        title="Remove image"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                  <p className="mt-1 text-[10px] text-slate-500">
-                    Images are downscaled to 1600px before saving. Without one, the gradient is used.
-                  </p>
-                </div>
+<div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+  <div>
+    <label className={LABEL}>Hero image (optional)</label>
+    {editingBanner.image && (
+      <div className="mb-2 overflow-hidden rounded-lg border border-[#2E3548] bg-[#131620]">
+        <SafeImage
+          src={editingBanner.image}
+          alt="Hero image preview"
+          className="h-32 w-full object-cover"
+        />
+      </div>
+    )}
+    <div className="flex items-center gap-2">
+      <input
+        type="file"
+        accept="image/*"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          if (!file) return;
+          const dataUrl = await readAndDownscaleImage(file, 1600);
+          // Functional update: `editingBanner` captured by this async closure
+          // is the value from the render in which the input was created, so a
+          // plain spread would clobber any field the user edited while the
+          // file was being downscaled (and could drop the image entirely).
+          if (dataUrl) {
+            setEditingBanner((prev) => (prev ? { ...prev, image: dataUrl } : prev));
+          }
+        }}
+        className="w-full text-[11px] text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-[#2E3548] file:text-white hover:file:bg-[#3A435E] cursor-pointer"
+      />
+      {editingBanner.image && (
+        <button
+          type="button"
+          onClick={() => setEditingBanner((prev) => (prev ? { ...prev, image: undefined } : prev))}
+          className={BTN_DANGER}
+          title="Remove image"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+    <p className="mt-1 text-[10px] text-slate-500">
+      Images are downscaled to 1600px before saving. Without one, the gradient is used.
+    </p>
+  </div>
                 <div>
                   <label className={LABEL}>Kicker colour</label>
                   <select
