@@ -123,6 +123,12 @@ export function resolveMerchantSubscription(
   const subscriptionExpiry = isPaid ? expires_at.split('T')[0] : null;
   const trialEndsAt = !isPaid ? (merged.trial_ends_at || merged.trialEndsAt || expires_at) : undefined;
   const trialDaysRemaining = !isPaid ? (merged.trial_days_remaining ?? merged.trialDaysRemaining ?? 30) : 0;
+  // Canonical plan expiry / account status written by admin actions (extends,
+  // plan changes, suspend/unsuspend). Falls back to derived values so older
+  // records still render a sensible state.
+  const planExpiry = merged.planExpiry || merged.plan_expiry || subscriptionExpiry || null;
+  const isLockedFromMerch = merged.isLocked || merged.is_locked;
+  const accountStatus = merged.accountStatus || merged.account_status || (isLockedFromMerch ? 'suspended' : (isPaid ? 'active' : (trialDaysRemaining > 0 ? 'trial' : 'expired')));
 
   // ── Theme config: map BOTH spellings + force-purge old demo data ──────────
   // MongoDB/Supabase records carry `theme_config` (snake) while the theme
@@ -167,7 +173,9 @@ export function resolveMerchantSubscription(
     selectedPlanDays: durationDays,
     trialDaysRemaining,
     trialEndsAt,
-    isLocked: false
+    planExpiry,
+    accountStatus,
+    isLocked: accountStatus === 'suspended'
   };
 }
 

@@ -758,6 +758,37 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     });
   }
 
+  // ── STORE SUSPENSION GATE ──
+  // When the Super Admin suspends the store (`accountStatus === 'suspended'`,
+  // `isLocked === true`, or `status === 'suspended'` on the MongoDB record),
+  // the public storefront must show a "Store Temporarily Unavailable" notice
+  // instead of allowing orders. This is skipped in preview mode so the admin
+  // can still preview the storefront from the editor.
+  const storeAcctStatus =
+    (storefrontMerchant as any)?.accountStatus ||
+    (storefrontMerchant as any)?.account_status ||
+    (storefrontMerchant as any)?.status;
+  const storeIsLocked =
+    (storefrontMerchant as any)?.isLocked === true ||
+    (storefrontMerchant as any)?.is_locked === true;
+  const storeSuspended =
+    !previewMode &&
+    (String(storeAcctStatus || '').toLowerCase() === 'suspended' || storeIsLocked);
+  if (storeSuspended) {
+    return (
+      <div className="min-h-screen w-full font-sans bg-[#181B26] text-slate-200 flex items-center justify-center p-6">
+        <div className="w-full max-w-md text-center border border-[#3A435E] rounded-2xl p-8 bg-[#202533] shadow-2xl">
+          <Lock className="w-12 h-12 mx-auto text-red-500 mb-4" />
+          <h2 className="text-xl font-bold text-white mb-2">Store Temporarily Unavailable</h2>
+          <p className="text-slate-400 text-sm mb-6 leading-relaxed">
+            This store has been temporarily suspended by the administrator. Customers cannot place orders at this time.
+          </p>
+          <p className="text-xs text-slate-500 mb-8">Please check back later or contact the store owner for updates.</p>
+        </div>
+      </div>
+    );
+  }
+
   // Store balance comes ONLY from the database-backed merchant record.
   // No hardcoded 0.00 default is rendered — the value shown is whatever the
   // stores table / merchant profile actually contains.

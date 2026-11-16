@@ -1320,7 +1320,9 @@ function sanitizeServerMerchant(m: any) {
     expiresAt: expires_at,
     subscriptionExpiry: isPaid ? expires_at.split('T')[0] : null,
     trialDaysRemaining: isPaid ? 0 : (m.trialDaysRemaining ?? 30),
-    isLocked: false
+    planExpiry: m.planExpiry || m.plan_expiry || (isPaid ? expires_at.split('T')[0] : null),
+    accountStatus: m.accountStatus || m.account_status || (m.isLocked === true ? 'suspended' : (isPaid ? 'active' : (m.trialDaysRemaining ?? 30) > 0 ? 'trial' : 'expired')),
+    isLocked: m.accountStatus === 'suspended' || m.account_status === 'suspended' || m.isLocked === true || m.is_locked === true
   });
 }
 

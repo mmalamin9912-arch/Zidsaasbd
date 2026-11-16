@@ -363,7 +363,23 @@ export const Header: React.FC<HeaderProps> = ({
     return Boolean(subPlan && subPlan !== 'free_trial' && subPlan !== 'trial');
   }, [dbReportsActive, merchant, supabaseSub]);
 
-  // 1. Connect to Supabase: Fetch active merchant's real subscription record directly from Supabase & Listen to Realtime changes
+  // Canonical plan expiry written by admin actions (extends, plan changes,
+  // suspend/unsuspend). Falls back to the previously computed activePlanExpiry,
+  // then to the days-left countdown so older records still render a badge.
+  const planExpiry = (merchant as any)?.planExpiry || (merchant as any)?.plan_expiry || null;
+
+  // Canonical account status read straight from the MongoDB-backed merchant
+  // profile (`accountStatus` / `account_status` written by admin actions).
+  // Falls back to derived state so older records still render sensibly.
+  const accountStatus = useMemo(() => {
+    const stored = (merchant as any)?.accountStatus || (merchant as any)?.account_status;
+    if (stored) return String(stored).toLowerCase();
+    if (merchant?.isLocked) return 'suspended';
+    return isPaid ? 'active' : 'expired';
+  }, [merchant?.accountStatus, merchant?.account_status, merchant?.isLocked, isPaid]);
+
+  const isSuspended = accountStatus === 'suspended' || merchant?.isLocked === true;
+  const isExpired = accountStatus === 'expired';
   useEffect(() => {
     let isMounted = true;
     if (!supabase || !merchant) return;

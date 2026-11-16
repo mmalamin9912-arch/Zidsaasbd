@@ -112,7 +112,7 @@ import {
   fetchMerchantSubscriptionFromSupabase,
   syncMerchantSubscription
 } from './lib/subscriptionService';
-import { Menu, ShieldAlert, Clock, ArrowUpRight, Sparkles, Loader2 } from 'lucide-react';
+import { Lock, Menu, ShieldAlert, Clock, ArrowUpRight, Sparkles, Loader2 } from 'lucide-react';
 
 /**
  * Reserved first-path-segments that are application routes, not store refs.
@@ -2725,6 +2725,41 @@ onPlaceOrder={async (newOrder) => {
           // entry. The platform config cannot answer that for one store.
           merchant={merchant}
         />
+
+        {/* ── ACCOUNT LOCK SCREEN ──
+            When the account is suspended by the Super Admin or the subscription
+            has expired, block every dashboard action and show a clear lock
+            screen. The status is read directly from the MongoDB-backed merchant
+            profile (`accountStatus` / `planExpiry`) so an admin suspend or
+            expiry takes effect on the very next dashboard load. */}
+        {(() => {
+          const acctStatus = (merchant as any)?.accountStatus || (merchant as any)?.account_status;
+          const locked = acctStatus === 'suspended' || merchant?.isLocked === true;
+          const expired = acctStatus === 'expired' || (!locked && !merchant?.subscriptionPlan && merchant?.planExpiry && new Date(merchant.planExpiry).getTime() < Date.now());
+          if (!locked && !expired) return null;
+          const expiryText = (merchant as any)?.planExpiry || (merchant as any)?.plan_expiry || '';
+          return (
+            <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#181B26] text-slate-200 p-6">
+              <div className="w-full max-w-md text-center border border-[#3A435E] rounded-2xl p-8 bg-[#202533] shadow-2xl">
+                <Lock className="w-12 h-12 mx-auto text-red-500 mb-4" />
+                <h2 className="text-xl font-bold text-white mb-2">
+                  {locked ? 'Account Suspended' : 'Subscription Expired'}
+                </h2>
+                <p className="text-slate-400 text-sm mb-6 leading-relaxed">
+                  {locked
+                    ? 'Your store has been suspended by the platform administrator. Dashboard actions are blocked until your account is reinstated.'
+                    : `Your subscription expired${expiryText ? ` on ${expiryText}` : ''}. Please contact the Super Admin to renew your plan.`}
+                </p>
+                {expiryText && (
+                  <p className="text-xs font-mono text-slate-500 mb-6">Plan expiry: {expiryText}</p>
+                )}
+                <p className="text-xs text-slate-500 mb-8">
+                  If you believe this is a mistake, please contact platform support.
+                </p>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">

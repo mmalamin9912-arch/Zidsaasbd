@@ -30,6 +30,8 @@ export interface AdminMerchant {
   phone: string;
   subscriptionPlan: string;
   subscriptionExpiry: string | null;
+  planExpiry: string | null;
+  accountStatus: string | null;
   planStartedAt: string | null;
   expiresAt: string | null;
   durationDays: number;
@@ -203,6 +205,8 @@ export function normalizeMerchant(record: Record<string, any>): AdminMerchant {
     trialEndsAt,
     isLocked,
     status,
+    planExpiry: pick(record, ['planExpiry', 'plan_expiry']) || subscriptionExpiry || null,
+    accountStatus: pick(record, ['accountStatus', 'account_status']) || status,
     totalSalesBDT: toNumber(pick(record, ['totalSalesBDT', 'total_sales_bdt']), 0),
     onboardingProgress: toNumber(pick(record, ['onboardingProgress', 'onboarding_progress']), 0),
     createdAt: toIso(pick(record, ['created_at', 'createdAt', 'registered_at'])),
@@ -453,7 +457,7 @@ export async function listAdminMerchants(opts: { status?: string; search?: strin
 
   const raw: Record<string, any>[] = [];
 
-  for (const collectionName of ['stores', 'merchants']) {
+  for (const collectionName of ['stores', 'users', 'merchants']) {
     try {
       const rows = await db.collection(collectionName).find({}).limit(5000).toArray();
       for (const row of rows) raw.push(row);
@@ -619,7 +623,7 @@ export async function applyMerchantAction(
 
   if (action === 'delete') {
     let deleted = 0;
-    for (const collectionName of ['stores', 'merchants']) {
+    for (const collectionName of ['stores', 'users', 'merchants']) {
       try {
         const res = await db.collection(collectionName).deleteOne(filter);
         deleted += res?.deletedCount || 0;
@@ -637,6 +641,12 @@ export async function applyMerchantAction(
   const now = Date.now();
   const set: Record<string, any> = { updated_at: new Date().toISOString() };
 
+  // planExpiry is the canonical expiry the dashboard header reads to render the
+  // merchant's subscription badge. accountStatus is the canonical lock state
+  // the dashboard/storefront read to gate access.
+  let planExpiry: string | null = null;
+  let accountStatus: string = 'active';
+
   if (action === 'extend_trial') {
     const days = Math.max(1, toNumber(payload.days, 7));
     // Extend from the later of (now, current trialEndsAt) so extensions stack.
@@ -653,6 +663,8 @@ export async function applyMerchantAction(
     set.expires_at = newEndsAt;
     set.subscription_expiry = newEndsAt.split('T')[0];
     set.trialDaysRemaining = -1; // sentinel: normalizeMerchant recomputes from trialEndsAt
+    planExpiry = newEndsAt.split('T')[0];
+    accountStatus = 'trial';
   } else if (action === 'change_plan') {
     const plan = String(payload.plan || 'free_trial').toLowerCase();
     const isTrial = plan === 'free_trial' || plan === 'trial';
@@ -672,6 +684,8 @@ export async function applyMerchantAction(
       set.trialEndsAt = trialEnd;
       set.trial_ends_at = trialEnd;
       set.subscription_expiry = null;
+      planExpiry = null;
+      accountStatus = 'trial';
     } else {
       set.expires_at = expiresAt;
       set.expiresAt = expiresAt;
@@ -679,19 +693,28 @@ export async function applyMerchantAction(
       set.trialEndsAt = null;
       set.trial_ends_at = null;
       set.trialDaysRemaining = 0;
+      planExpiry = expiresAt ? expiresAt.split('T')[0] : null;
+      accountStatus = 'active';
     }
   } else if (action === 'suspend' || action === 'unsuspend') {
     set.isLocked = action === 'suspend';
     set.is_locked = action === 'suspend';
     set.status = action === 'suspend' ? 'suspended' : 'active';
+    planExpiry = null;
+    accountStatus = action === 'suspend' ? 'suspended' : 'active';
   } else {
     return { ok: false, error: `Unknown action: ${action}` };
   }
 
-  // Update ALL identity matches in both collections so the record is consistent
-  // regardless of which store alias the caller used.
+  set.planExpiry = planExpiry;
+  set.accountStatus = accountStatus;
+
+  // Update ALL identity matches in the primary MongoDB collections so the
+  // record is consistent regardless of which store alias the caller used.
+  // Writes land on `stores` and `users` (the authoritative account collections)
+  // plus `merchants` (legacy mirror) so no account is missed.
   let matched = 0;
-  for (const collectionName of ['stores', 'merchants']) {
+  for (const collectionName of ['stores', 'users', 'merchants']) {
     try {
       const res = await db.collection(collectionName).updateMany(filter, { $set: set });
       matched += res?.matchedCount || 0;
@@ -716,7 +739,7 @@ export async function applyMerchantAction(
 /** Find a single merchant document (across both collections). */
 async function findMerchantRecord(db: any, ref: string): Promise<Record<string, any> | null> {
   const filter = merchantIdentityFilter(ref);
-  for (const collectionName of ['stores', 'merchants']) {
+  for (const collectionName of ['stores', 'users', 'merchants']) {
     try {
       const doc = await db.collection(collectionName).findOne(filter);
       if (doc) return doc;

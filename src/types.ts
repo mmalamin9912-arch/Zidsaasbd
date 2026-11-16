@@ -228,6 +228,10 @@ export interface MerchantProfile {
   subscriptionEndDate?: string;
   subscriptionPlan?: SubscriptionPlanId;
   subscriptionExpiry?: string;
+  /** Canonical plan expiry date (YYYY-MM-DD) written by admin actions. */
+  planExpiry?: string;
+  /** Canonical account lock state: 'active' | 'trial' | 'suspended' | 'expired'. */
+  accountStatus?: string;
   isLocked?: boolean;
   onboardingProgress?: number; // percentage
   logoUrl?: string;
