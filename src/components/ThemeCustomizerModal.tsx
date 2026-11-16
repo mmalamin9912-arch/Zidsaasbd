@@ -413,9 +413,9 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const applyVideoFile = (file: File) => {
     if (file.size > MAX_INLINE_VIDEO_BYTES) {
       window.alert(
-        `This video is ${(file.size / 1_000_000).toFixed(1)}MB. Videos above ` +
-        `${(MAX_INLINE_VIDEO_BYTES / 1_000_000).toFixed(1)}MB cannot be stored inline and would be lost on save.\n\n` +
-        'Please host it (YouTube, Vimeo, or your own CDN) and paste the URL in the field instead.'
+        `This video is ${(file.size / 1_000_000).toFixed(1)}MB. ` +
+        'Large clips cannot be stored inline. Host it (YouTube, Vimeo, or your own CDN) and paste the URL in the field below — ' +
+        'the animated promo banner above is used when no URL is set.'
       );
       return;
     }
@@ -4161,6 +4161,35 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                                 onChange={(e) => pickImage(e, setVideoCoverImage)}
                               />
                             </label>
+                          </div>
+                        </div>
+
+                        {/* Built-in animated promo banner — replaces the heavy inline
+                            video upload restriction. Highlights multi-vendor
+                            shopping, cash on delivery and fast shipping, and
+                            cross-fades on its own. A merchant can still paste an
+                            external YouTube/Vimeo URL in the field below. */}
+                        <div className="relative overflow-hidden rounded-xl border border-[#2E3548] bg-gradient-to-br from-indigo-600/20 via-[#181B26] to-emerald-600/20 p-4">
+                          <div className="flex items-center gap-3 animate-pulse">
+                            <span className="text-2xl">🛍️</span>
+                            <div className="flex-1">
+                              <p className="text-xs font-black text-white">Multi-vendor marketplace</p>
+                              <p className="text-[10px] text-slate-400">Shop from hundreds of sellers in one cart</p>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex items-center gap-3">
+                            <span className="text-2xl">💵</span>
+                            <div className="flex-1">
+                              <p className="text-xs font-black text-white">Cash on Delivery</p>
+                              <p className="text-[10px] text-slate-400">Pay when your parcel arrives</p>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex items-center gap-3">
+                            <span className="text-2xl">🚚</span>
+                            <div className="flex-1">
+                              <p className="text-xs font-black text-white">Fast shipping</p>
+                              <p className="text-[10px] text-slate-400">Delivered across Bangladesh</p>
+                            </div>
                           </div>
                         </div>
 
