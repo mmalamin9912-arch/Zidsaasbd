@@ -1963,11 +1963,16 @@ if (m.storeSlug) {
     toast.warning('Theme purchase request rejected.');
   };
 
-  const handleExtendTrial = async (storeName: string, days: number) => {
+  const handleExtendTrial = async (storeSlug: string, days: number) => {
+    // Resolve the merchant by SLUG (the stable identity the backend uses), not
+    // by storeName — storeName can be empty on rows that were imported without a
+    // display name, which is exactly why these actions silently did nothing.
+    const targetMerchant = allMerchants.find((m) => m?.storeSlug === storeSlug);
+    const storeName = targetMerchant?.storeName || storeSlug;
     let updatedEndsAtIso = '';
     let updatedRemaining = 0;
     const updatedMerchants = allMerchants.map(m => {
-      if (m?.storeName === storeName) {
+      if (m?.storeSlug === storeSlug) {
         const currentEndsAt = m.trialEndsAt ? new Date(m.trialEndsAt) : new Date();
         const newEndsAt = new Date(currentEndsAt.getTime() + days * 24 * 60 * 60 * 1000);
         updatedEndsAtIso = newEndsAt.toISOString();
@@ -1995,7 +2000,7 @@ if (m.storeSlug) {
 
     // Persist the trial extension to the backend so it survives refresh and is
     // immediately honoured on the merchant's dashboard / storefront access rules.
-    const extendStoreSlug = allMerchants.find(m => m?.storeName === storeName)?.storeSlug;
+    const extendStoreSlug = storeSlug; // already the canonical backend ref
     if (extendStoreSlug) {
       await patchAdminMerchant(extendStoreSlug, 'extend_trial', { days });
     }
@@ -2030,10 +2035,12 @@ onUpdateMerchant(updatedCurrent);
     toast.success(`Successfully extended trial for "${storeName}" by ${days} days.`);
   };
 
-  const handleToggleLockMerchant = async (storeName: string) => {
+  const handleToggleLockMerchant = async (storeSlug: string) => {
+    const targetMerchant = allMerchants.find((m) => m?.storeSlug === storeSlug);
+    const storeName = targetMerchant?.storeName || storeSlug;
     let nextLockedState = false;
     const updatedMerchants = allMerchants.map(m => {
-      if (m?.storeName === storeName) {
+      if (m?.storeSlug === storeSlug) {
         nextLockedState = !m?.isLocked;
         const updatedM = {
           ...m,
@@ -2057,7 +2064,7 @@ onUpdateMerchant(updatedCurrent);
 
     // Persist suspend/unsuspend so the merchant's dashboard and storefront
     // access rules are updated immediately (isLocked flips the gateway lock).
-    const toggleStoreSlug = allMerchants.find(m => m?.storeName === storeName)?.storeSlug;
+    const toggleStoreSlug = storeSlug; // canonical backend ref
     if (toggleStoreSlug) {
       await patchAdminMerchant(toggleStoreSlug, nextLockedState ? 'suspend' : 'unsuspend', {});
     }
@@ -3568,7 +3575,7 @@ onUpdateMerchant(updatedCurrent);
                           <UserCog className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleToggleLockMerchant(m?.storeName || '')}
+                          onClick={() => handleToggleLockMerchant(m?.storeSlug || '')}
                           className={`p-2 rounded-lg transition-all border cursor-pointer inline-flex items-center justify-center ${
                             m?.isLocked
                               ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white border-emerald-500/20'
@@ -3586,14 +3593,14 @@ onUpdateMerchant(updatedCurrent);
                           <Trash2 className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleExtendTrial(m?.storeName || '', 7)}
+                          onClick={() => handleExtendTrial(m?.storeSlug || '', 7)}
                           className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold transition border border-[#3A435E] cursor-pointer text-[10px]"
                           title="Extend Trial by 7 Days"
                         >
                           +7d
                         </button>
                         <button
-                          onClick={() => handleExtendTrial(m?.storeName || '', 30)}
+                          onClick={() => handleExtendTrial(m?.storeSlug || '', 30)}
                           className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold transition border border-[#3A435E] cursor-pointer text-[10px]"
                           title="Extend Trial by 30 Days"
                         >
