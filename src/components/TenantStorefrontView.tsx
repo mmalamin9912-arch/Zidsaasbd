@@ -4866,6 +4866,33 @@ The render below must not guess. A merchant may paste
               </section>
               )}
 
+              {resolvedTheme.showVideo && !hasVideoSource && (
+              <div className="rounded-2xl overflow-hidden border border-slate-800/80 bg-gradient-to-br from-slate-900 via-[#181B26] to-slate-950 p-4">
+                {/* Built-in animated promo showcase — fallback when no video URL is set */}
+                <div className="flex items-center gap-3 animate-pulse">
+                  <span className="text-2xl">🛍️</span>
+                  <div className="flex-1">
+                    <p className="text-xs font-black text-slate-100">Multi-vendor marketplace</p>
+                    <p className="text-[10px] text-slate-400">Shop from hundreds of sellers in one cart</p>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-center gap-3 animate-pulse" style={{ animationDelay: '200ms' }}>
+                  <span className="text-2xl">💵</span>
+                  <div className="flex-1">
+                    <p className="text-xs font-black text-slate-100">Cash on Delivery</p>
+                    <p className="text-[10px] text-slate-400">Pay when your parcel arrives</p>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-center gap-3 animate-pulse" style={{ animationDelay: '400ms' }}>
+                  <span className="text-2xl">🚚</span>
+                  <div className="flex-1">
+                    <p className="text-xs font-black text-slate-100">Fast shipping</p>
+                    <p className="text-[10px] text-slate-400">Delivered across Bangladesh</p>
+                  </div>
+                </div>
+              </div>
+              )}
+
               {/* FAQ Section — merchant-authored Q&A from MongoDB (`faqs`).
                   Rendered only when the merchant actually saved entries. */}
               {storeModules.faqs.length > 0 && (
