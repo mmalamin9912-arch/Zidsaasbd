@@ -43,6 +43,13 @@ export const DEFAULT_GALLERY_IMAGE_URLS: string[] = [
   'https://lh3.googleusercontent.com/d/192997_2.webp',
   'https://lh3.googleusercontent.com/d/192995.jpg',
   'https://lh3.googleusercontent.com/d/192994_2.webp',
+  // Default promotional product images for hero banners and gallery
+  // These professional-quality placeholders render when merchants haven't
+  // uploaded custom images yet, ensuring the storefront always has visual content
+  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Perfume',
+  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Elegant+User+with+Perfume',
+  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Lip+Makeup',
+  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Eye+Makeup+Brush',
 ];
 
 /**
