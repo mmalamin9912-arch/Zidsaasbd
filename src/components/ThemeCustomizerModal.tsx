@@ -14,6 +14,7 @@ import { getSupabaseClient, safeUpsertRow } from '../lib/supabase';
 import {
   getDefaultGalleryImages,
   sanitizeGalleryImages,
+  DEFAULT_GALLERY_IMAGE_URLS,
 } from '../../lib/galleryDefaults';
 import { sanitizeImagePayload } from '../../lib/imagePayload';
 import {
@@ -236,14 +237,14 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
             subtitle: merchant?.heroSubtitle || 'Shop our premium organic food, traditional boutique, and authentic gadgets.',
             ctaText: merchant?.themeConfig?.heroCtaText || 'Shop Now',
             ctaLink: '#',
-            image: merchant?.heroImage || 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=1600&q=80'
+            image: merchant?.heroImage || DEFAULT_GALLERY_IMAGE_URLS[0]
           }
         ]
   );
   const [heroTitle, setHeroTitle] = useState(merchant?.heroTitle || (merchant?.themeConfig?.slides?.[0]?.title ?? 'Eid Ul Adha Special Collection 2026'));
   const [heroSubtitle, setHeroSubtitle] = useState(merchant?.heroSubtitle || (merchant?.themeConfig?.slides?.[0]?.subtitle ?? 'Shop our premium organic food, traditional boutique, and authentic gadgets.'));
   const [heroCtaText, setHeroCtaText] = useState(merchant?.themeConfig?.heroCtaText ?? (merchant?.themeConfig?.slides?.[0]?.ctaText ?? 'Shop Now'));
-  const [heroImage, setHeroImage] = useState(merchant?.heroImage || (merchant?.themeConfig?.slides?.[0]?.image ?? 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=1600&q=80'));
+  const [heroImage, setHeroImage] = useState(merchant?.heroImage || (merchant?.themeConfig?.slides?.[0]?.image ?? DEFAULT_GALLERY_IMAGE_URLS[0]));
   // Merchant-managed list of WELCOME SECTION background photos — the canonical
   // array the storefront rotates through every 4s behind the "Welcome to Our
   // Store" hero. Add / replace / remove from the Image Carousel panel below.

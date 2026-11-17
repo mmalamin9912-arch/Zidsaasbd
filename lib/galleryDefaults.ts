@@ -6,7 +6,7 @@
  * ---------------------------------------------------------------------------
  * Older demo seeds filled `themeConfig.galleryImages` with `images.unsplash.com`
  * URLs. Those rows were persisted into MongoDB / Supabase / localStorage and
- * kept resurfacing after every reload, overriding the 7 official e-commerce
+ * kept resurfacing after every reload, overriding the official e-commerce
  * showcase images the theme editor ships with.
  *
  * This module is deliberately dependency-free and isomorphic so BOTH the
@@ -32,24 +32,20 @@ export interface GalleryImageEntry {
 }
 
 /**
- * The 7 official e-commerce showcase images, served directly from Google's
- * image CDN so they load with no build-time asset bundling.
+ * The 4 official default promotional images, bundled as LOCAL static assets in
+ * `public/images/defaults/` so they are same-origin and can never 404, be
+ * rate-limited, or need a build-time import.
+ *
+ * These replaced the previous `lh3.googleusercontent.com/d/...` rows (which
+ * returned HTTP 400 and rendered as broken tiles) and the `via.placeholder.com`
+ * text-only cards. Merchants can override every entry from the Theme Editor
+ * (Page Content → Gallery); their own list always wins when non-empty.
  */
 export const DEFAULT_GALLERY_IMAGE_URLS: string[] = [
-  'https://lh3.googleusercontent.com/d/193007_2.jpg',
-  'https://lh3.googleusercontent.com/d/192999_2.jpg',
-  'https://lh3.googleusercontent.com/d/193000_2.webp',
-  'https://lh3.googleusercontent.com/d/192998_2.png',
-  'https://lh3.googleusercontent.com/d/192997_2.webp',
-  'https://lh3.googleusercontent.com/d/192995.jpg',
-  'https://lh3.googleusercontent.com/d/192994_2.webp',
-  // Default promotional product images for hero banners and gallery
-  // These professional-quality placeholders render when merchants haven't
-  // uploaded custom images yet, ensuring the storefront always has visual content
-  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Perfume',
-  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Elegant+User+with+Perfume',
-  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Lip+Makeup',
-  'https://via.placeholder.com/1200x630/1f2937/ffffff?text=Eye+Makeup+Brush',
+  '/images/defaults/perfume.jpg',
+  '/images/defaults/perfume-model.jpg',
+  '/images/defaults/lip-makeup.jpg',
+  '/images/defaults/eye-brush.jpg',
 ];
 
 /**
@@ -63,7 +59,7 @@ export const DEFAULT_GALLERY_IMAGES: GalleryImageEntry[] = DEFAULT_GALLERY_IMAGE
   (url) => ({ url, caption: '', link: '' })
 );
 
-/** Fresh copy of the 7 official default gallery rows. */
+/** Fresh copy of the official default gallery rows. */
 export function getDefaultGalleryImages(): GalleryImageEntry[] {
   return DEFAULT_GALLERY_IMAGES.map((img) => ({ ...img }));
 }
@@ -92,10 +88,10 @@ function normalizeEntry(raw: unknown): GalleryImageEntry | null {
  *
  * Behaviour:
  *   - Not an array (missing / corrupt value) → a copy of `fallback`
- *     (the 7 official defaults unless the caller asks for something else).
+ *     (the official defaults unless the caller asks for something else).
  *   - Array WITHOUT Unsplash rows → the list itself (re-cloned, blank rows
  *     dropped), so merchant edits and deletions round-trip untouched.
- *   - Array WITH Unsplash rows → those rows are stripped and the 7 official
+ *   - Array WITH Unsplash rows → those rows are stripped and the official
  *     defaults are merged in (de-duplicated by URL), keeping any custom rows
  *     the merchant added alongside the old demo assets.
  *

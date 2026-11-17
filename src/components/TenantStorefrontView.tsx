@@ -191,7 +191,7 @@ import { LuxuryBoutiqueHeader } from './StorefrontHeaders';
 import { LuxuryBoutique } from './themes/LuxuryBoutique';
 import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
 // Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts).
-import { sanitizeGalleryImages } from '../../lib/galleryDefaults';
+import { sanitizeGalleryImages, DEFAULT_GALLERY_IMAGE_URLS } from '../../lib/galleryDefaults';
 
 interface TenantStorefrontViewProps {
   storeSlug: string;
@@ -909,11 +909,12 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     countdownOverlayOpacity: typeof merchantThemeConfig.countdownOverlayOpacity === 'number' ? merchantThemeConfig.countdownOverlayOpacity : 60,
     showGallery: merchantThemeConfig.showGallery !== false,
     galleryHeading: (typeof merchantThemeConfig.galleryHeading === 'string' && merchantThemeConfig.galleryHeading) || 'Gallery',
-    // `[]` fallback keeps the old behaviour (no saved gallery → section hidden),
-    // while any saved list is passed through the Unsplash purge: legacy demo rows
-    // are stripped and replaced with the 7 official showcase images, and the
-    // merchant's own additions/deletions render exactly as published.
-    galleryImages: sanitizeGalleryImages(merchantThemeConfig.galleryImages, []),
+    // Any saved list is passed through the Unsplash purge (legacy demo rows are
+    // stripped), and the merchant's own additions/deletions render exactly as
+    // published. An EMPTY/missing list falls back to the official defaults so a
+    // brand-new store shows the 4 bundled promotional images instead of hiding
+    // the section (or rendering "No image available").
+    galleryImages: sanitizeGalleryImages(merchantThemeConfig.galleryImages),
     showSocialBlock: merchantThemeConfig.showSocialBlock !== false,
     socialTagline: (typeof merchantThemeConfig.socialTagline === 'string' && merchantThemeConfig.socialTagline) || 'Follow us for daily updates',
     // ── Social links: PROFILE URL first, theme-config handle second. ─────────
@@ -4361,7 +4362,7 @@ The render below must not guess. A merchant may paste
                 ))
               ) : (
                 <SafeImage
-                  src={heroImageList[0] || activeHeroSlide?.image || resolvedTheme.heroImage || "https://images.unsplash.com/photo-1445205170230-053b83016050?auto=format&fit=crop&w=800&q=80"}
+                  src={heroImageList[0] || activeHeroSlide?.image || resolvedTheme.heroImage || DEFAULT_GALLERY_IMAGE_URLS[0]}
                   alt="Hero Banner"
                   className="w-full h-full object-cover opacity-50 scale-105 transition-transform duration-700 hover:scale-100"
                 />
