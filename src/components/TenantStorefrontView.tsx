@@ -957,6 +957,8 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     footerAboutText: (typeof merchantThemeConfig.footerAboutText === 'string' && merchantThemeConfig.footerAboutText) || '',
     footerLinksTitle: (typeof merchantThemeConfig.footerLinksTitle === 'string' && merchantThemeConfig.footerLinksTitle) || 'Quick Links',
     footerLinks: Array.isArray(merchantThemeConfig.footerLinks) ? (merchantThemeConfig.footerLinks as string[]) : [],
+    // Google Customer Reviews badge
+    footerGoogleReviewsMerchantId: typeof merchantThemeConfig.footerGoogleReviewsMerchantId === 'string' ? merchantThemeConfig.footerGoogleReviewsMerchantId : '',
     // ── Contact details: PROFILE first, theme config second. ────────────────
     //
     // The storefront footer renders `resolvedTheme.contactPhone` / `.dhakaAddress`.
@@ -6035,6 +6037,17 @@ The render below must not guess. A merchant may paste
 
             <h3 className="text-2xl font-black text-slate-900 tracking-tight mb-2">Order Placed Successfully!</h3>
 
+            {/* Google Customer Reviews Opt-in */}
+            <div className="mt-4 text-center">
+              <script async src="https://reviews.google.com/reviews/widget.js?merchantId=5895566028">
+              </script>
+              <div class="gcse-badge-reviews"
+                   data-theme="classic"
+                   data-text-color="#000000"
+                   data-badge-background-color="#ffffff">
+              </div>
+            </div>
+
             <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-3 mb-6">
               {/* Invoice header text comes from Settings -> Invoices. */}
               {storefrontMerchant.invoiceConfig?.title && (
@@ -6923,6 +6936,12 @@ The render below must not guess. A merchant may paste
             {resolvedTheme.footerLogoText || (storefrontMerchant.storeName === 'My Zid Store' ? 'SlateBD' : storefrontMerchant.storeName || 'SlateBD')}
           </h4>
           <p className="text-[11px] leading-relaxed text-slate-400 max-w-xs mx-auto">
+              {resolvedTheme.footerGoogleReviewsMerchantId && (
+                <div className="mt-4 text-center">
+                  <script async src="https://reviews.google.com/reviews/widget.js?merchantId={resolvedTheme.footerGoogleReviewsMerchantId}"></script>
+                  <div className="gcse-badge-reviews" data-theme="classic" data-text-color="#000000" data-badge-background-color="#ffffff"></div>
+                </div>
+              )}
             {resolvedTheme.footerAboutText || "Bangladesh’s Premier Online Fashion & Lifestyle Destination. Powered by ZID SAAS BD Engine."}
           </p>
           {(() => {
