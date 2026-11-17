@@ -112,7 +112,7 @@ import {
   fetchMerchantSubscriptionFromSupabase,
   syncMerchantSubscription
 } from './lib/subscriptionService';
-import { Lock, Menu, ShieldAlert, Clock, ArrowUpRight, Sparkles, Loader2, LogOut, CreditCard, MessageCircle } from 'lucide-react';
+import { Lock, Menu, ShieldAlert, Clock, ArrowUpRight, Sparkles, Loader2, LogOut, CreditCard, MessageCircle, Mail, Phone, X } from 'lucide-react';
 import { resolveSubscriptionLock } from './utils/subscriptionLock';
 
 /**
@@ -1823,6 +1823,7 @@ export default function App() {
 
   // Modal States
   const [isSubscriptionModalOpen, setIsSubscriptionModalOpen] = useState(false);
+  const [isLockedSupportOpen, setIsLockedSupportOpen] = useState(false);
   const [isStorefrontPreviewOpen, setIsStorefrontPreviewOpen] = useState(false);
   const [isAdminLoginModalOpen, setIsAdminLoginModalOpen] = useState(false);
 
@@ -2655,8 +2656,20 @@ onPlaceOrder={async (newOrder) => {
   }
 
   // ── HARD BLOCK: no dashboard, no data, no bypass ─────────────────────────
+  //
+  // IMPORTANT: this branch returns BEFORE the dashboard render tree, so any
+  // modal that lives further down in that tree is never mounted. That is
+  // exactly why "Purchase a New Plan" did nothing: it called
+  // setIsSubscriptionModalOpen(true) while <SubscriptionModal> sat below this
+  // return. The modals the lock screen needs are therefore rendered HERE.
   if (isHardLocked) {
+    const supportEmail = String(platformSettings?.supportEmail || '').trim();
+    const supportPhone = String(platformSettings?.supportPhone || '').trim();
+    const supportWhatsApp = String(platformSettings?.whatsappNumber || '').trim();
+    const hasAnySupportChannel = Boolean(supportEmail || supportPhone || supportWhatsApp);
+
     return (
+      <>
       <div className="min-h-screen flex items-center justify-center bg-[#181B26] text-slate-200 p-4 font-sans selection:bg-[#D4AF37] selection:text-slate-950">
         <div className="w-full max-w-md border border-[#3A435E] rounded-2xl p-8 bg-[#202533] shadow-2xl text-center">
           <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5 ${subscriptionLock.reason === 'suspended' ? 'bg-red-500/10' : 'bg-amber-500/10'}`}>
@@ -2697,31 +2710,25 @@ onPlaceOrder={async (newOrder) => {
 
           <div className="space-y-2.5">
             <button
+              type="button"
               onClick={() => setIsSubscriptionModalOpen(true)}
-              className="w-full inline-flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-sm py-3.5 rounded-xl transition-all shadow-lg shadow-amber-600/20"
+              className="w-full inline-flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-sm py-3.5 rounded-xl transition-all shadow-lg shadow-amber-600/20 cursor-pointer"
             >
               <CreditCard className="w-4 h-4" />
               Purchase a New Plan
             </button>
             <button
-              onClick={() => {
-                // Contact the admin. Reuses the platform's support channel so
-                // no new integration is required.
-                const subject = encodeURIComponent(
-                  subscriptionLock.reason === 'suspended'
-                    ? 'Request to reinstate my store access'
-                    : 'Request to renew my subscription plan'
-                );
-                window.location.href = `mailto:support@zidmarketbd.com?subject=${subject}`;
-              }}
-              className="w-full inline-flex items-center justify-center gap-2 bg-[#282E3F] hover:bg-[#32394E] text-slate-200 font-bold text-sm py-3.5 rounded-xl transition-all border border-[#3A435E]"
+              type="button"
+              onClick={() => setIsLockedSupportOpen(true)}
+              className="w-full inline-flex items-center justify-center gap-2 bg-[#282E3F] hover:bg-[#32394E] text-slate-200 font-bold text-sm py-3.5 rounded-xl transition-all border border-[#3A435E] cursor-pointer"
             >
               <MessageCircle className="w-4 h-4" />
               Contact Admin
             </button>
             <button
+              type="button"
               onClick={handleLogout}
-              className="w-full inline-flex items-center justify-center gap-2 text-slate-500 hover:text-slate-300 font-medium text-xs py-2 transition-colors"
+              className="w-full inline-flex items-center justify-center gap-2 text-slate-500 hover:text-slate-300 font-medium text-xs py-2 transition-colors cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
               Sign out
@@ -2729,6 +2736,101 @@ onPlaceOrder={async (newOrder) => {
           </div>
         </div>
       </div>
+
+      {/* ── Contact Admin (lock screen) ──
+          Uses the SAME platform support config the sidebar's Support panel
+          reads, so the numbers are whatever the Super Admin actually set.
+          Rendered here (not in the dashboard tree) so it can open while locked. */}
+      {isLockedSupportOpen && (
+        <div
+          className="fixed inset-0 z-[10000] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setIsLockedSupportOpen(false)}
+        >
+          <div
+            className="relative bg-[#181B26] border border-[#2E3548] rounded-2xl shadow-2xl w-full max-w-md"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-5 border-b border-[#2E3548]">
+              <div className="flex items-center gap-2.5">
+                <MessageCircle className="w-5 h-5 text-[#E6C587]" />
+                <h3 className="text-sm font-bold text-white">Contact Admin</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsLockedSupportOpen(false)}
+                className="text-slate-400 hover:text-white p-1 cursor-pointer"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-3 text-sm">
+              <p className="text-slate-400 text-xs mb-1">
+                {subscriptionLock.reason === 'suspended'
+                  ? 'Ask the platform administrator to reinstate your store access.'
+                  : 'Ask the platform administrator to renew or upgrade your plan.'}
+              </p>
+              {supportWhatsApp && (
+                <a
+                  href={`https://wa.me/${supportWhatsApp.replace(/[^0-9]/g, '')}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-3 p-3 bg-[#202533] border border-[#2E3548] rounded-xl text-slate-200 hover:border-emerald-500/40 transition"
+                >
+                  <MessageCircle className="w-4 h-4 text-emerald-400" />
+                  <span className="font-medium">{supportWhatsApp}</span>
+                  <span className="ml-auto text-[10px] uppercase tracking-wider text-slate-500">WhatsApp</span>
+                </a>
+              )}
+              {supportPhone && (
+                <a
+                  href={`tel:${supportPhone}`}
+                  className="flex items-center gap-3 p-3 bg-[#202533] border border-[#2E3548] rounded-xl text-slate-200 hover:border-[#D4AF37]/40 transition"
+                >
+                  <Phone className="w-4 h-4 text-[#E6C587]" />
+                  <span className="font-medium">{supportPhone}</span>
+                  <span className="ml-auto text-[10px] uppercase tracking-wider text-slate-500">Call</span>
+                </a>
+              )}
+              {supportEmail && (
+                <a
+                  href={`mailto:${supportEmail}?subject=${encodeURIComponent(
+                    subscriptionLock.reason === 'suspended'
+                      ? 'Request to reinstate my store access'
+                      : 'Request to renew my subscription plan'
+                  )}`}
+                  className="flex items-center gap-3 p-3 bg-[#202533] border border-[#2E3548] rounded-xl text-slate-200 hover:border-[#D4AF37]/40 transition"
+                >
+                  <Mail className="w-4 h-4 text-[#E6C587]" />
+                  <span className="font-medium break-all">{supportEmail}</span>
+                  <span className="ml-auto text-[10px] uppercase tracking-wider text-slate-500">Email</span>
+                </a>
+              )}
+              {!hasAnySupportChannel && (
+                <p className="text-slate-400 text-xs">
+                  Support contact details have not been configured by the platform administrator yet.
+                  Please use the email address you registered with to reach the platform team.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Plans / checkout (lock screen) ──
+          Mounted in THIS branch so "Purchase a New Plan" has something to open.
+          Submitting a plan creates a pending request the Super Admin approves. */}
+      <SubscriptionModal
+        isOpen={isSubscriptionModalOpen}
+        onClose={() => setIsSubscriptionModalOpen(false)}
+        merchant={merchant}
+        pendingRequests={pendingRequests}
+        onConfirmSubscription={handleConfirmSubscription}
+        adminPaymentConfig={adminPaymentConfig}
+        initialPlanId={localStorage.getItem('zid_intended_plan') || undefined}
+        plans={platformPlans}
+      />
+      </>
     );
   }
 
