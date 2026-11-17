@@ -325,7 +325,12 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   // 7. Video
   const [showVideo, setShowVideo] = useState(merchant?.themeConfig?.showVideo ?? true);
   const [videoTitle, setVideoTitle] = useState(merchant?.themeConfig?.videoTitle ?? '');
-  const [videoUrl, setVideoUrl] = useState(merchant?.themeConfig?.videoUrl ?? 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  // Default promo video: a Bengali-language e-commerce ad film for a fashion
+  // collection ("আকর্ষণীয় থ্রি-পিস কালেকশনের বিজ্ঞাপন"). Replaces the previous
+  // music-video seed (Rick Astley – "Never Gonna Give You Up"), which was
+  // inappropriate for a storefront. Verified embeddable via YouTube oEmbed.
+  // Merchants paste their own product/promo link in the Video panel.
+  const [videoUrl, setVideoUrl] = useState(merchant?.themeConfig?.videoUrl ?? 'https://www.youtube.com/watch?v=IkEKf3z_UBA');
   const [videoCoverImage, setVideoCoverImage] = useState(merchant?.themeConfig?.videoCoverImage ?? '');
   const [videoFileUrl, setVideoFileUrl] = useState(merchant?.themeConfig?.videoFileUrl ?? '');
   const [videoAutoplay, setVideoAutoplay] = useState(merchant?.themeConfig?.videoAutoplay ?? false);

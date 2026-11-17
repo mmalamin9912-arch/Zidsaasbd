@@ -24,6 +24,7 @@ import mongoose from 'mongoose';
 import { getMongoUri, describeMongoError, DB_NAME } from './db.js';
 import { getSupabaseServerConfig, querySupabaseTable } from './hybridDb.js';
 import { postgrestWrite } from './supabaseSchema.js';
+import { seedThemeConfigWithDefaults } from './galleryDefaults.js';
 import type { DataSource } from './hybridDb.js';
 
 /**
@@ -397,6 +398,11 @@ export async function authenticateMerchant(input: {
     is_locked: false,
     isLocked: false,
     status: 'active',
+    // Seed the official default gallery so a brand-new storefront renders the
+    // 4 bundled promo images immediately instead of "No image available".
+    // A merchant's own gallery, once uploaded, always wins from then on.
+    theme_config: seedThemeConfigWithDefaults(null),
+    themeConfig: seedThemeConfigWithDefaults(null),
     created_at: nowIso,
     createdAt: nowIso,
     updated_at: nowIso,

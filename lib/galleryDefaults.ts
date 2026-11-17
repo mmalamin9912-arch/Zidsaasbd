@@ -126,9 +126,33 @@ export function sanitizeGalleryImages(
 }
 
 /**
+ * Seed a NEW store's theme config with the official default gallery.
+ *
+ * Only for store-creation paths: it writes `galleryImages` when the key is
+ * missing or empty so a brand-new storefront renders the 4 bundled promo
+ * images immediately instead of "No image available". A merchant's own
+ * non-empty list is never touched.
+ */
+export function seedThemeConfigWithDefaults(cfg: unknown): Record<string, any> {
+  const out: Record<string, any> = cfg && typeof cfg === 'object' && !Array.isArray(cfg)
+    ? { ...(cfg as Record<string, any>) }
+    : {};
+  const current = out.galleryImages;
+  const isEmpty = !Array.isArray(current)
+    || !current.some((row) => row && typeof (row as any).url === 'string' && (row as any).url.trim() !== '');
+  if (isEmpty) out.galleryImages = getDefaultGalleryImages();
+  return out;
+}
+
+/**
  * Sanitise a whole `themeConfig` / `theme_config` object: returns a shallow
  * copy with `galleryImages` purged (when the key is present), or `null` when
  * the input is not a usable object.
+ *
+ * NOTE: an ABSENT `galleryImages` key is left absent on purpose. Seeding
+ * defaults on READ would override a merchant who deliberately emptied the
+ * gallery, so defaults are only seeded at store creation
+ * (`seedThemeConfigWithDefaults`) and rendered as a UI fallback.
  */
 export function sanitizeStoredThemeConfig(cfg: unknown): Record<string, any> | null {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return null;
@@ -158,6 +182,7 @@ export default {
   DEFAULT_GALLERY_IMAGE_URLS,
   DEFAULT_GALLERY_IMAGES,
   getDefaultGalleryImages,
+  seedThemeConfigWithDefaults,
   isUnsplashGalleryUrl,
   sanitizeGalleryImages,
   sanitizeStoredThemeConfig,
