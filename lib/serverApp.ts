@@ -8444,6 +8444,25 @@ app.post('/api/subscription/approve', async (req, res) => {
       trialEndsAt: null,
       is_locked: false,
       isLocked: false,
+
+      // ── LOCK-STATE CLEARING (the post-approval "still locked" bug) ───────
+      // The shared gate (src/utils/subscriptionLock.ts) locks on
+      // `accountStatus` and reads the expiry from planExpiry/expiryDate.
+      // Approval previously wrote NONE of those, so a store that had been
+      // flipped to `accountStatus: 'expired'` stayed locked FOREVER even
+      // though the paid window was extended. Every spelling the gate and the
+      // dashboard consult is written here so approval is authoritative.
+      accountStatus: 'active',
+      account_status: 'active',
+      planExpiry: expiryDate,
+      plan_expiry: expiryDate,
+      expiryDate: expiryDate,
+      expiry_date: expiryDate,
+      // Explicitly clear the suspended/expired markers, in case a previous
+      // admin action left them set on the same document.
+      suspended_at: null,
+      suspendedAt: null,
+      suspended_reason: null,
       payment_approved_at: startDate.toISOString(),
       updated_at: startDate.toISOString(),
     };
@@ -8486,6 +8505,26 @@ app.post('/api/subscription/approve', async (req, res) => {
       } catch (err: any) {
         console.warn('[Server] subscription approve stores write failed:', err?.message || err);
         mongoError = err?.message || 'The store document could not be updated.';
+      }
+
+      // ── 1b. The account document.
+      // Admin actions (lib/adminMerchants.ts) write the lock state to BOTH
+      // `stores` and `users`, and the login/session lookup can resolve either.
+      // Approving only `stores` therefore left `users.accountStatus` reading
+      // 'expired' — one of the two documents the gate may see. Keep them in
+      // lockstep so approval cannot be half-applied.
+      if (storeOr.length > 0) {
+        try {
+          const userResult = await db
+            .collection('users')
+            .updateMany({ $or: storeOr }, { $set: activationFields });
+          if (userResult.matchedCount > 0) {
+            mongoSources.push(`users:${userResult.modifiedCount}/${userResult.matchedCount}`);
+          }
+        } catch (err: any) {
+          // A missing `users` collection is normal on some deployments.
+          console.warn('[Server] subscription approve users write warning:', err?.message || err);
+        }
       }
 
       // ── 2. Mark the request row itself approved, so the portal's list is

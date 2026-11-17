@@ -669,13 +669,59 @@ export default function App() {
   // re-enables access until the record is renewed by an admin action.
   //
   // `manuallyUnlockedRef` deliberately does not exist — a "dismiss" affordance
-  // here would defeat the point of enforcement.
   const subscriptionLock = resolveSubscriptionLock(merchant as any, now.getTime());
   const isHardLocked = subscriptionLock.isLocked;
   // Note: `isTrialExpired` (trial arithmetic on a client-computed day count) is
   // intentionally NOT part of the hard gate. A trial with an UNSET ends-at date
   // yields 0 days remaining on a freshly-created store, which would lock brand
   // new merchants out. Definite past dates are handled by the shared rule.
+
+  // ── REFRESH SUBSCRIPTION STATE FROM THE SERVER ─────────────────────────
+  // WHY: `validateSessionWithServer()` ran exactly ONCE, during route
+  // resolution. After the Super Admin approved a payment (extending expiry to
+  // 2026-12-17) the merchant's already-open dashboard kept the OLD merchant
+  // object in memory, so the hard-lock gate kept rendering "Subscription
+  // Expired" until a full reload. This re-reads the authoritative record from
+  // the API — the session payload is re-evaluated server-side on every call
+  // (GET /api/auth/session → authenticateMerchant), never trusted from cache.
+  const refreshSubscriptionState = React.useCallback(async () => {
+    try {
+      const serverCheck = await validateSessionWithServer();
+      if (serverCheck?.merchant) {
+        const resolved = resolveMerchantSubscription(serverCheck.merchant);
+        setMerchant(resolved);
+        // Keep the stored session in step so the next cold load agrees.
+        try {
+          setStoredSession({
+            email: resolved.email,
+            loggedInAt: new Date().toISOString(),
+            userProfile: resolved,
+          });
+        } catch {}
+        return true;
+      }
+    } catch (err) {
+      console.warn('[App] Subscription revalidation warning:', err);
+    }
+    return false;
+  }, []);
+
+  // Auto-revalidate when the merchant comes BACK to the tab/window. This is
+  // the "click Open Dashboard / switch back after paying" path: approval is
+  // reflected without requiring a hard refresh. Skipped while unauthenticated.
+  React.useEffect(() => {
+    if (!isAuthenticated) return;
+    const onFocus = () => { void refreshSubscriptionState(); };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshSubscriptionState();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [isAuthenticated, refreshSubscriptionState]);
 
   const prevSlugRef = React.useRef<string>(merchant?.storeSlug || '');
   // Stable identity key for the data-load effect. We only want to re-fetch when
@@ -1824,6 +1870,7 @@ export default function App() {
   // Modal States
   const [isSubscriptionModalOpen, setIsSubscriptionModalOpen] = useState(false);
   const [isLockedSupportOpen, setIsLockedSupportOpen] = useState(false);
+  const [isCheckingPaymentStatus, setIsCheckingPaymentStatus] = useState(false);
   const [isStorefrontPreviewOpen, setIsStorefrontPreviewOpen] = useState(false);
   const [isAdminLoginModalOpen, setIsAdminLoginModalOpen] = useState(false);
 
@@ -1933,6 +1980,36 @@ export default function App() {
       }
     } catch (dbErr) {
       console.warn('[App] payment accounts hydrate skipped:', dbErr);
+    }
+  };
+
+  // Manual "I already paid" check used by the lock screen. Re-reads the
+  // authoritative record and reports the outcome honestly: if the approval has
+  // not landed yet we say so instead of silently staying locked.
+  const handleCheckPaymentStatus = async () => {
+    if (isCheckingPaymentStatus) return;
+    setIsCheckingPaymentStatus(true);
+    try {
+      const ok = await refreshSubscriptionState();
+      if (!ok) {
+        toast.error('Could not reach the server. Check your connection and try again.');
+        return;
+      }
+      // `merchant` updates asynchronously; re-read the server value directly so
+      // this decision never races React state.
+      const serverCheck = await validateSessionWithServer();
+      const resolved = serverCheck?.merchant
+        ? resolveMerchantSubscription(serverCheck.merchant)
+        : null;
+      if (resolved && !resolveSubscriptionLock(resolved as any).isLocked) {
+        toast.success('Payment approved — your store is unlocked.');
+      } else {
+        toast.info('Your payment is still pending approval.', {
+          description: 'Approval can take a few minutes. Refresh again once you receive the confirmation email.',
+        });
+      }
+    } finally {
+      setIsCheckingPaymentStatus(false);
     }
   };
 
@@ -2724,6 +2801,18 @@ onPlaceOrder={async (newOrder) => {
             >
               <MessageCircle className="w-4 h-4" />
               Contact Admin
+            </button>
+            {/* "I already paid" — re-reads the authoritative record from the API
+                so an approval made moments ago unlocks without a hard reload. */}
+            <button
+              type="button"
+              onClick={handleCheckPaymentStatus}
+              disabled={isCheckingPaymentStatus}
+              className="w-full inline-flex items-center justify-center gap-2 bg-[#282E3F] hover:bg-[#32394E] text-slate-200 font-bold text-sm py-3.5 rounded-xl transition-all border border-[#3A435E] cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+            >
+              {isCheckingPaymentStatus
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Checking…</>
+                : <><ArrowUpRight className="w-4 h-4" /> I've Already Paid — Refresh Status</>}
             </button>
             <button
               type="button"
