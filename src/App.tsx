@@ -112,7 +112,8 @@ import {
   fetchMerchantSubscriptionFromSupabase,
   syncMerchantSubscription
 } from './lib/subscriptionService';
-import { Lock, Menu, ShieldAlert, Clock, ArrowUpRight, Sparkles, Loader2 } from 'lucide-react';
+import { Lock, Menu, ShieldAlert, Clock, ArrowUpRight, Sparkles, Loader2, LogOut, CreditCard, MessageCircle } from 'lucide-react';
+import { resolveSubscriptionLock } from './utils/subscriptionLock';
 
 /**
  * Reserved first-path-segments that are application routes, not store refs.
@@ -659,6 +660,22 @@ export default function App() {
   // Shown ONLY for a strict trial account: no DB-confirmed ACTIVE plan and no
   // paid plan id. Never alongside an active paid plan.
   const isTrialActive = !isPaidPlan && trialDaysRemaining > 0;
+
+  // ── HARD SUBSCRIPTION LOCK ──────────────────────────────────────────────
+  // Single shared rule (src/utils/subscriptionLock.ts): suspension, a definite
+  // past expiry on ANY plan, or an admin-written 'expired' status. This gate
+  // UNMOUNTS the dashboard entirely (early return below) so there is no
+  // scrollable/clickable DOM underneath the overlay and no bypass: nothing
+  // re-enables access until the record is renewed by an admin action.
+  //
+  // `manuallyUnlockedRef` deliberately does not exist — a "dismiss" affordance
+  // here would defeat the point of enforcement.
+  const subscriptionLock = resolveSubscriptionLock(merchant as any, now.getTime());
+  const isHardLocked = subscriptionLock.isLocked;
+  // Note: `isTrialExpired` (trial arithmetic on a client-computed day count) is
+  // intentionally NOT part of the hard gate. A trial with an UNSET ends-at date
+  // yields 0 days remaining on a freshly-created store, which would lock brand
+  // new merchants out. Definite past dates are handled by the shared rule.
 
   const prevSlugRef = React.useRef<string>(merchant?.storeSlug || '');
   // Stable identity key for the data-load effect. We only want to re-fetch when
@@ -2637,6 +2654,84 @@ onPlaceOrder={async (newOrder) => {
     );
   }
 
+  // ── HARD BLOCK: no dashboard, no data, no bypass ─────────────────────────
+  if (isHardLocked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#181B26] text-slate-200 p-4 font-sans selection:bg-[#D4AF37] selection:text-slate-950">
+        <div className="w-full max-w-md border border-[#3A435E] rounded-2xl p-8 bg-[#202533] shadow-2xl text-center">
+          <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5 ${subscriptionLock.reason === 'suspended' ? 'bg-red-500/10' : 'bg-amber-500/10'}`}>
+            {subscriptionLock.reason === 'suspended'
+              ? <Lock className="w-8 h-8 text-red-500" />
+              : <ShieldAlert className="w-8 h-8 text-amber-400" />}
+          </div>
+
+          <h1 className="text-xl font-black text-white mb-2">
+            {subscriptionLock.reason === 'suspended' ? 'Account Temporarily Locked' : 'Subscription Expired'}
+          </h1>
+
+          <p className="text-slate-400 text-sm leading-relaxed mb-4">
+            {subscriptionLock.reason === 'suspended'
+              ? 'Your account is temporarily locked. Your store dashboard and storefront operations are blocked until an administrator reinstates your account.'
+              : 'Your subscription plan has expired. Your store dashboard and storefront operations are blocked until you purchase a new plan.'}
+          </p>
+
+          {subscriptionLock.expiryText && (
+            <p className="text-xs font-mono text-slate-500 mb-4">
+              Plan expiry: {subscriptionLock.expiryText}
+              {typeof subscriptionLock.daysOverdue === 'number' && subscriptionLock.daysOverdue > 0
+                ? ` (${subscriptionLock.daysOverdue} day${subscriptionLock.daysOverdue === 1 ? '' : 's'} ago)`
+                : ''}
+            </p>
+          )}
+
+          <div className="space-y-2.5 mb-5 text-left">
+            <div className="flex items-start gap-2.5 text-xs text-slate-400">
+              <span className="mt-0.5 text-red-400">✕</span>
+              <span>Dashboard, products, orders and settings are blocked.</span>
+            </div>
+            <div className="flex items-start gap-2.5 text-xs text-slate-400">
+              <span className="mt-0.5 text-red-400">✕</span>
+              <span>Your public storefront will not accept new orders.</span>
+            </div>
+          </div>
+
+          <div className="space-y-2.5">
+            <button
+              onClick={() => setIsSubscriptionModalOpen(true)}
+              className="w-full inline-flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-sm py-3.5 rounded-xl transition-all shadow-lg shadow-amber-600/20"
+            >
+              <CreditCard className="w-4 h-4" />
+              Purchase a New Plan
+            </button>
+            <button
+              onClick={() => {
+                // Contact the admin. Reuses the platform's support channel so
+                // no new integration is required.
+                const subject = encodeURIComponent(
+                  subscriptionLock.reason === 'suspended'
+                    ? 'Request to reinstate my store access'
+                    : 'Request to renew my subscription plan'
+                );
+                window.location.href = `mailto:support@zidmarketbd.com?subject=${subject}`;
+              }}
+              className="w-full inline-flex items-center justify-center gap-2 bg-[#282E3F] hover:bg-[#32394E] text-slate-200 font-bold text-sm py-3.5 rounded-xl transition-all border border-[#3A435E]"
+            >
+              <MessageCircle className="w-4 h-4" />
+              Contact Admin
+            </button>
+            <button
+              onClick={handleLogout}
+              className="w-full inline-flex items-center justify-center gap-2 text-slate-500 hover:text-slate-300 font-medium text-xs py-2 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`min-h-screen flex flex-col font-sans selection:bg-[#D4AF37] selection:text-slate-950 transition-colors duration-200 ${isDarkMode ? 'bg-[#141721] text-slate-100' : 'bg-[#F4F6F9] text-slate-900'
       }`}>
@@ -2726,40 +2821,11 @@ onPlaceOrder={async (newOrder) => {
           merchant={merchant}
         />
 
-        {/* ── ACCOUNT LOCK SCREEN ──
-            When the account is suspended by the Super Admin or the subscription
-            has expired, block every dashboard action and show a clear lock
-            screen. The status is read directly from the MongoDB-backed merchant
-            profile (`accountStatus` / `planExpiry`) so an admin suspend or
-            expiry takes effect on the very next dashboard load. */}
-        {(() => {
-          const acctStatus = (merchant as any)?.accountStatus || (merchant as any)?.account_status;
-          const locked = acctStatus === 'suspended' || merchant?.isLocked === true;
-          const expired = acctStatus === 'expired' || (!locked && !merchant?.subscriptionPlan && merchant?.planExpiry && new Date(merchant.planExpiry).getTime() < Date.now());
-          if (!locked && !expired) return null;
-          const expiryText = (merchant as any)?.planExpiry || (merchant as any)?.plan_expiry || '';
-          return (
-            <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#181B26] text-slate-200 p-6">
-              <div className="w-full max-w-md text-center border border-[#3A435E] rounded-2xl p-8 bg-[#202533] shadow-2xl">
-                <Lock className="w-12 h-12 mx-auto text-red-500 mb-4" />
-                <h2 className="text-xl font-bold text-white mb-2">
-                  {locked ? 'Account Suspended' : 'Subscription Expired'}
-                </h2>
-                <p className="text-slate-400 text-sm mb-6 leading-relaxed">
-                  {locked
-                    ? 'Your store has been suspended by the platform administrator. Dashboard actions are blocked until your account is reinstated.'
-                    : `Your subscription expired${expiryText ? ` on ${expiryText}` : ''}. Please contact the Super Admin to renew your plan.`}
-                </p>
-                {expiryText && (
-                  <p className="text-xs font-mono text-slate-500 mb-6">Plan expiry: {expiryText}</p>
-                )}
-                <p className="text-xs text-slate-500 mb-8">
-                  If you believe this is a mistake, please contact platform support.
-                </p>
-              </div>
-            </div>
-          );
-        })()}
+        {/* Account locking is enforced by the HARD early-return gate at the top
+            of this component (see `isHardLocked`), which unmounts the whole
+            dashboard rather than painting an overlay on top of live controls.
+            The former in-tree overlay was removed: it left the dashboard
+            interactive underneath and used its own (narrower) expiry rule. */}
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">

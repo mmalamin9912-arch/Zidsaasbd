@@ -1318,10 +1318,18 @@ function sanitizeServerMerchant(m: any) {
     expires_at,
     planStartedAt: plan_started_at,
     expiresAt: expires_at,
-    subscriptionExpiry: isPaid ? expires_at.split('T')[0] : null,
+    subscriptionExpiry: isPaid ? (m.subscriptionExpiry || m.subscription_expiry || expires_at.split('T')[0]) : null,
     trialDaysRemaining: isPaid ? 0 : (m.trialDaysRemaining ?? 30),
-    planExpiry: m.planExpiry || m.plan_expiry || (isPaid ? expires_at.split('T')[0] : null),
+    // The admin action writes planExpiry AND expiryDate/expiry_date; accept all
+    // spellings so an extension performed in the admin panel is what the
+    // merchant dashboard shows on the very next read (previously only the
+    // planExpiry spelling was consulted here).
+    planExpiry:
+      m.planExpiry || m.plan_expiry || m.expiryDate || m.expiry_date ||
+      (isPaid ? expires_at.split('T')[0] : (m.trialEndsAt || m.trial_ends_at || null)),
     accountStatus: m.accountStatus || m.account_status || (m.isLocked === true ? 'suspended' : (isPaid ? 'active' : (m.trialDaysRemaining ?? 30) > 0 ? 'trial' : 'expired')),
+    // Suspension must win over any stale expiry flag, and is_locked must be
+    // honoured alongside isLocked (the admin action writes BOTH).
     isLocked: m.accountStatus === 'suspended' || m.account_status === 'suspended' || m.isLocked === true || m.is_locked === true
   });
 }

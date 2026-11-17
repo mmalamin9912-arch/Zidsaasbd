@@ -192,6 +192,8 @@ import { LuxuryBoutique } from './themes/LuxuryBoutique';
 import { SupermarketTechMockup, ElegantFashionMockup } from './ThemeMockups';
 // Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts).
 import { sanitizeGalleryImages, DEFAULT_GALLERY_IMAGE_URLS } from '../../lib/galleryDefaults';
+// One shared "is this store locked out?" rule for dashboard + storefront.
+import { resolveSubscriptionLock } from '../utils/subscriptionLock';
 
 interface TenantStorefrontViewProps {
   storeSlug: string;
@@ -758,30 +760,27 @@ export const TenantStorefrontView: React.FC<TenantStorefrontViewProps> = ({
     });
   }
 
-  // ── STORE SUSPENSION GATE ──
-  // When the Super Admin suspends the store (`accountStatus === 'suspended'`,
-  // `isLocked === true`, or `status === 'suspended'` on the MongoDB record),
-  // the public storefront must show a "Store Temporarily Unavailable" notice
-  // instead of allowing orders. This is skipped in preview mode so the admin
-  // can still preview the storefront from the editor.
-  const storeAcctStatus =
-    (storefrontMerchant as any)?.accountStatus ||
-    (storefrontMerchant as any)?.account_status ||
-    (storefrontMerchant as any)?.status;
-  const storeIsLocked =
-    (storefrontMerchant as any)?.isLocked === true ||
-    (storefrontMerchant as any)?.is_locked === true;
-  const storeSuspended =
-    !previewMode &&
-    (String(storeAcctStatus || '').toLowerCase() === 'suspended' || storeIsLocked);
+  // ── STORE SUSPENSION / EXPIRY GATE ──
+  // When the Super Admin suspends the store, OR the subscription/trial plan has
+  // expired, the public storefront must show an "Unavailable" notice instead of
+  // allowing orders. Both cases share ONE rule (src/utils/subscriptionLock.ts) so
+  // the storefront can never disagree with the merchant dashboard gate.
+  // Skipped in preview mode so the admin can still preview from the editor.
+  const storeLock = resolveSubscriptionLock(storefrontMerchant as any);
+  const storeSuspended = !previewMode && storeLock.isLocked;
   if (storeSuspended) {
+    const suspended = storeLock.reason === 'suspended';
     return (
       <div className="min-h-screen w-full font-sans bg-[#181B26] text-slate-200 flex items-center justify-center p-6">
         <div className="w-full max-w-md text-center border border-[#3A435E] rounded-2xl p-8 bg-[#202533] shadow-2xl">
-          <Lock className="w-12 h-12 mx-auto text-red-500 mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">Store Temporarily Unavailable</h2>
+          <Lock className={`w-12 h-12 mx-auto mb-4 ${suspended ? 'text-red-500' : 'text-amber-400'}`} />
+          <h2 className="text-xl font-bold text-white mb-2">
+            {suspended ? 'Store Temporarily Unavailable' : 'Store Temporarily Closed'}
+          </h2>
           <p className="text-slate-400 text-sm mb-6 leading-relaxed">
-            This store has been temporarily suspended by the administrator. Customers cannot place orders at this time.
+            {suspended
+              ? 'This store has been temporarily suspended by the administrator. Customers cannot place orders at this time.'
+              : 'This store is temporarily unavailable while the owner renews their subscription plan. Orders cannot be placed at this time.'}
           </p>
           <p className="text-xs text-slate-500 mb-8">Please check back later or contact the store owner for updates.</p>
         </div>

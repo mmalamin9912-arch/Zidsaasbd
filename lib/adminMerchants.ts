@@ -709,6 +709,25 @@ export async function applyMerchantAction(
   set.planExpiry = planExpiry;
   set.accountStatus = accountStatus;
 
+  // ── Keep the `expiryDate` / `expiry_date` spellings in sync ──────────────
+  // Other readers in this codebase resolve the subscription end date from
+  // `expiryDate` / `expiry_date` (see the plan-approval path and
+  // lib/subscriptionStore.ts). The admin actions historically wrote only
+  // `planExpiry` + `expires_at`, so a trial extension or plan change could be
+  // invisible to those readers and the merchant dashboard kept showing the old
+  // (expired) date. Writing all spellings keeps one canonical value.
+  //
+  // `planExpiry` is already a `YYYY-MM-DD` string (or null for a suspension).
+  set.expiryDate = planExpiry;
+  set.expiry_date = planExpiry;
+
+  // Suspension has no meaningful expiry; clear the date spellings so nothing
+  // downstream reads a stale date and decides the store is still valid.
+  if (action === 'suspend') {
+    set.expiryDate = null;
+    set.expiry_date = null;
+  }
+
   // Update ALL identity matches in the primary MongoDB collections so the
   // record is consistent regardless of which store alias the caller used.
   // Writes land on `stores` and `users` (the authoritative account collections)

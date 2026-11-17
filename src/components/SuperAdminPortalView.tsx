@@ -72,7 +72,8 @@ import {
   Store,
   FolderTree,
   Truck,
-  Image
+  Image,
+  Loader2
 } from 'lucide-react';
 import { MerchantProfile, SubscriptionRequest, AdminPaymentGatewayConfig, AdminCustomGateway, ThemePurchaseRequest, SubscriptionPlanId, PlatformSettings, PlatformAnnouncement, SubscriptionPlan, PlatformTheme, SupportTicket, TicketMessage, PlatformAddon, AuditLog, PlatformSecuritySettings, BroadcastMessage, PlatformAutomationSettings, AdminTeamMember, AdminRolePermission, PlanFeatureFlags, Order } from '../types';
 import { calculateSubscriptionExpiry, getPlanDurationInDays, calculateRemainingDays, getPlanDisplayName } from '../utils/subscriptionUtils';
@@ -126,6 +127,42 @@ export async function deleteAdminMerchant(
   return safeAdminMerchantFetch(`/api/admin/merchants/${encodeURIComponent(ref)}`, {
     method: 'DELETE',
   });
+}
+
+/**
+ * Resolve the reference to send to the backend for a merchant row.
+ *
+ * WHY THIS EXISTS
+ * ---------------------------------------------------------------------------
+ * The action buttons used to pass `m?.storeSlug || ''` (or, worse,
+ * `m?.storeName`). Two failure modes followed:
+ *   1. Rows imported from the DB can have an EMPTY `storeSlug`, so the handler
+ *      received `''`, the `if (slug)` guard skipped the API call entirely, and
+ *      the button only changed local React state — the change vanished on
+ *      refresh. That is the "buttons do nothing" bug.
+ *   2. `storeName` is a mutable DISPLAY field, so a rename broke the match.
+ *
+ * The backend's `merchantIdentityFilter` matches on id / store_id / storeId /
+ * store_slug / storeSlug / store_code / storeCode / _id, so any stable identity
+ * works. Prefer the immutable ones, in the same order the slug editor uses.
+ */
+export function merchantActionRef(merchant: any): string {
+  if (!merchant) return '';
+  const candidates = [
+    merchant.storeCode,
+    merchant.store_code,
+    merchant.storeId,
+    merchant.store_id,
+    merchant.id,
+    merchant.storeSlug,
+    merchant.store_slug,
+    merchant.email,
+  ];
+  for (const value of candidates) {
+    const text = String(value ?? '').trim();
+    if (text) return text;
+  }
+  return '';
 }
 import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 import { normalizeMerchantSlug, validateMerchantSlug, updateMerchantSlug } from '../lib/adminMerchantsApi';
@@ -1379,6 +1416,24 @@ const newPlan: SubscriptionPlan = {
   const [isLoadingMerchants, setIsLoadingMerchants] = useState(false);
   const [merchantsError, setMerchantsError] = useState<string | null>(null);
 
+  // In-flight admin actions, keyed like `extend:<ref>` / `lock:<ref>`.
+  // Prevents a double-click from firing two overlapping writes for one store
+  // (a double "+7d" must not add 14 days) and lets the buttons render a
+  // disabled/busy state.
+  const [pendingMerchantActions, setPendingMerchantActions] = useState<Record<string, boolean>>({});
+  const isMerchantActionPending = useCallback(
+    (key: string) => pendingMerchantActions[key] === true,
+    [pendingMerchantActions]
+  );
+  const markMerchantActionPending = useCallback((key: string, pending: boolean) => {
+    setPendingMerchantActions((prev) => {
+      if (pending) return { ...prev, [key]: true };
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
   const fetchMerchants = useCallback(async () => {
     setIsLoadingMerchants(true);
     setMerchantsError(null);
@@ -1963,24 +2018,52 @@ if (m.storeSlug) {
     toast.warning('Theme purchase request rejected.');
   };
 
-  const handleExtendTrial = async (storeSlug: string, days: number) => {
+  const handleExtendTrial = async (storeSlugOrRef: string, days: number) => {
     // Resolve the merchant by SLUG (the stable identity the backend uses), not
     // by storeName — storeName can be empty on rows that were imported without a
     // display name, which is exactly why these actions silently did nothing.
-    const targetMerchant = allMerchants.find((m) => m?.storeSlug === storeSlug);
-    const storeName = targetMerchant?.storeName || storeSlug;
-    let updatedEndsAtIso = '';
-    let updatedRemaining = 0;
-    const updatedMerchants = allMerchants.map(m => {
-      if (m?.storeSlug === storeSlug) {
-        const currentEndsAt = m.trialEndsAt ? new Date(m.trialEndsAt) : new Date();
-        const newEndsAt = new Date(currentEndsAt.getTime() + days * 24 * 60 * 60 * 1000);
-        updatedEndsAtIso = newEndsAt.toISOString();
-        updatedRemaining = (m?.trialDaysRemaining ?? 30) + days;
-        const updatedM = {
+    const targetMerchant = allMerchants.find((m) => m?.storeSlug === storeSlugOrRef)
+      || allMerchants.find((m) => merchantActionRef(m) === storeSlugOrRef);
+    const storeName = targetMerchant?.storeName || storeSlugOrRef;
+
+    // The reference ACTUALLY sent to the backend: a stable identity, never the
+    // display name and never an empty string.
+    const ref = merchantActionRef(targetMerchant) || String(storeSlugOrRef || '').trim();
+    if (!ref) {
+      toast.error('Cannot extend this store: it has no usable reference (code/id/slug).');
+      return;
+    }
+
+    if (isMerchantActionPending(`extend:${ref}`)) return;
+    markMerchantActionPending(`extend:${ref}`, true);
+    try {
+      // Persist FIRST. If the backend write fails we must NOT show a success
+      // toast, because the merchant's dashboard would then disagree with what
+      // the admin just saw.
+      const result = await patchAdminMerchant(ref, 'extend_trial', { days });
+      if (!result.ok) {
+        toast.error(`Trial extension failed: ${result.error || 'backend rejected the request'}`, {
+          description: 'No changes were saved. Check the MongoDB connection and try again.',
+        });
+        return;
+      }
+
+      const updatedMerchant = (result.data as any)?.merchant;
+      const updatedEndsAtIso = String(
+        updatedMerchant?.trialEndsAt || updatedMerchant?.expiresAt || ''
+      );
+
+      // Mirror the SERVER's values into local state (not our own arithmetic),
+      // so the table shows exactly what MongoDB now holds.
+      const updatedMerchants = allMerchants.map((m) => {
+        if (m?.storeSlug !== storeSlugOrRef && merchantActionRef(m) !== ref) return m;
+        const updatedM: any = {
           ...m,
-          trialDaysRemaining: updatedRemaining,
-          trialEndsAt: updatedEndsAtIso
+          trialDaysRemaining: updatedMerchant?.trialDaysRemaining ?? ((m?.trialDaysRemaining ?? 30) + days),
+          trialEndsAt: updatedEndsAtIso || (m as any)?.trialEndsAt,
+          planExpiry: updatedMerchant?.planExpiry ?? (updatedEndsAtIso ? updatedEndsAtIso.split('T')[0] : (m as any)?.planExpiry),
+          isLocked: updatedMerchant?.isLocked ?? false,
+          accountStatus: updatedMerchant?.accountStatus ?? 'trial',
         };
         if (m.storeSlug) {
           try {
@@ -1994,123 +2077,165 @@ if (m.storeSlug) {
           } catch (err) {}
         }
         return updatedM;
-      }
-      return m;
-    });
-
-    // Persist the trial extension to the backend so it survives refresh and is
-    // immediately honoured on the merchant's dashboard / storefront access rules.
-    const extendStoreSlug = storeSlug; // already the canonical backend ref
-    if (extendStoreSlug) {
-      await patchAdminMerchant(extendStoreSlug, 'extend_trial', { days });
-    }
-
-    onUpdateAllMerchants(updatedMerchants);
-    try {
-      safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
-    } catch (e) {}
-
-    if (storeName === currentMerchant?.storeName) {
-      const updatedCurrent = {
-        ...currentMerchant,
-        trialDaysRemaining: updatedRemaining,
-        trialEndsAt: updatedEndsAtIso
-      };
-onUpdateMerchant(updatedCurrent);
-      try {
-        const savedSession = safeGetItem('zid_auth_session');
-        if (savedSession) {
-          const parsed = typeof savedSession === 'string' ? JSON.parse(savedSession) : savedSession;
-          parsed.userProfile = updatedCurrent;
-          safeSetItem('zid_auth_session', parsed);
-        }
-        const savedStore = safeGetItem('ZID_MERCHANT_STORE_DATA');
-        if (savedStore) {
-          const parsed = typeof savedStore === 'string' ? JSON.parse(savedStore) : savedStore;
-          parsed.merchant = updatedCurrent;
-          safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
-        }
-      } catch (e) {}
-    }
-    toast.success(`Successfully extended trial for "${storeName}" by ${days} days.`);
-  };
-
-  const handleToggleLockMerchant = async (storeSlug: string) => {
-    const targetMerchant = allMerchants.find((m) => m?.storeSlug === storeSlug);
-    const storeName = targetMerchant?.storeName || storeSlug;
-    let nextLockedState = false;
-    const updatedMerchants = allMerchants.map(m => {
-      if (m?.storeSlug === storeSlug) {
-        nextLockedState = !m?.isLocked;
-        const updatedM = {
-          ...m,
-          isLocked: nextLockedState
-        };
-        if (m.storeSlug) {
-          try {
-            const key = `ZID_MERCHANT_STORE_DATA_${m.storeSlug}`;
-            const existing = localStorage.getItem(key);
-            if (existing) {
-              const parsed = JSON.parse(existing);
-              parsed.merchant = updatedM;
-              safeSetItem(key, parsed);
-            }
-          } catch (err) {}
-        }
-        return updatedM;
-      }
-      return m;
-    });
-
-    // Persist suspend/unsuspend so the merchant's dashboard and storefront
-    // access rules are updated immediately (isLocked flips the gateway lock).
-    const toggleStoreSlug = storeSlug; // canonical backend ref
-    if (toggleStoreSlug) {
-      await patchAdminMerchant(toggleStoreSlug, nextLockedState ? 'suspend' : 'unsuspend', {});
-    }
-
-    onUpdateAllMerchants(updatedMerchants);
-    try {
-      safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
-    } catch (e) {}
-
-    if (storeName === currentMerchant?.storeName) {
-      const updatedCurrent = {
-        ...currentMerchant,
-        isLocked: nextLockedState
-      };
-      onUpdateMerchant(updatedCurrent);
-      try {
-        const savedSession = localStorage.getItem('zid_auth_session');
-        if (savedSession) {
-          const parsed = JSON.parse(savedSession);
-          parsed.userProfile = updatedCurrent;
-          safeSetItem('zid_auth_session', parsed);
-        }
-        const savedStore = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
-        if (savedStore) {
-          const parsed = JSON.parse(savedStore);
-          parsed.merchant = updatedCurrent;
-          safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
-        }
-      } catch (e) {}
-    }
-  };
-
-  const handleDeleteMerchant = (storeSlug: string, storeName: string) => {
-    if (window.confirm(`WARNING: Are you sure you want to permanently delete the merchant "${storeName}"? This action cannot be undone.`)) {
-      // Delete first so a network failure never leaves the UI in a partially-deleted state.
-      void deleteAdminMerchant(storeSlug).catch((err) => {
-        toast.error(`Delete failed: ${err?.message || 'unknown error'}`);
       });
-      const updatedMerchants = allMerchants.filter(m => m?.storeSlug !== storeSlug);
+
       onUpdateAllMerchants(updatedMerchants);
       try {
         safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
-        localStorage.removeItem(`ZID_MERCHANT_STORE_DATA_${storeSlug}`);
+      } catch (e) {}
+
+      if (storeName === currentMerchant?.storeName) {
+        const updatedCurrent = {
+          ...currentMerchant,
+          trialDaysRemaining: updatedMerchant?.trialDaysRemaining ?? (((currentMerchant as any)?.trialDaysRemaining ?? 0) + days),
+          trialEndsAt: updatedEndsAtIso || (currentMerchant as any)?.trialEndsAt,
+          isLocked: updatedMerchant?.isLocked ?? false,
+        };
+        onUpdateMerchant(updatedCurrent);
+        try {
+          const savedSession = safeGetItem('zid_auth_session');
+          if (savedSession) {
+            const parsed = typeof savedSession === 'string' ? JSON.parse(savedSession) : savedSession;
+            parsed.userProfile = updatedCurrent;
+            safeSetItem('zid_auth_session', parsed);
+          }
+          const savedStore = safeGetItem('ZID_MERCHANT_STORE_DATA');
+          if (savedStore) {
+            const parsed = typeof savedStore === 'string' ? JSON.parse(savedStore) : savedStore;
+            parsed.merchant = updatedCurrent;
+            safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
+          }
+        } catch (e) {}
+      }
+
+      // Re-pull from the API so the table reflects MongoDB (real-time).
+      setMerchantRefreshTrigger((n) => n + 1);
+      toast.success(`Successfully extended trial for "${storeName}" by ${days} days.`);
+    } finally {
+      markMerchantActionPending(`extend:${ref}`, false);
+    }
+  };
+
+  const handleToggleLockMerchant = async (storeSlugOrRef: string) => {
+    const targetMerchant = allMerchants.find((m) => m?.storeSlug === storeSlugOrRef)
+      || allMerchants.find((m) => merchantActionRef(m) === storeSlugOrRef);
+    const storeName = targetMerchant?.storeName || storeSlugOrRef;
+    const ref = merchantActionRef(targetMerchant) || String(storeSlugOrRef || '').trim();
+    if (!ref) {
+      toast.error('Cannot update this store: it has no usable reference (code/id/slug).');
+      return;
+    }
+    if (isMerchantActionPending(`lock:${ref}`)) return;
+    markMerchantActionPending(`lock:${ref}`, true);
+    try {
+      // Read the CURRENT state from the resolved record, not from a side effect
+      // inside a .map() (the old code assigned `nextLockedState` mid-map, which
+      // stayed `false` whenever no row matched).
+      const nextLockedState = !(targetMerchant?.isLocked === true);
+      const action = nextLockedState ? 'suspend' : 'unsuspend';
+
+      const result = await patchAdminMerchant(ref, action, {});
+      if (!result.ok) {
+        toast.error(`${nextLockedState ? 'Suspend' : 'Unsuspend'} failed: ${result.error || 'backend rejected the request'}`, {
+          description: 'No changes were saved. Check the MongoDB connection and try again.',
+        });
+        return;
+      }
+
+      const updatedMerchant = (result.data as any)?.merchant;
+      const lockedNow = updatedMerchant?.isLocked ?? nextLockedState;
+      const statusNow = updatedMerchant?.accountStatus ?? (lockedNow ? 'suspended' : 'active');
+
+      const updatedMerchants = allMerchants.map((m) => {
+        if (m?.storeSlug !== storeSlugOrRef && merchantActionRef(m) !== ref) return m;
+        const updatedM: any = { ...m, isLocked: lockedNow, accountStatus: statusNow };
+        if (m.storeSlug) {
+          try {
+            const key = `ZID_MERCHANT_STORE_DATA_${m.storeSlug}`;
+            const existing = localStorage.getItem(key);
+            if (existing) {
+              const parsed = JSON.parse(existing);
+              parsed.merchant = updatedM;
+              safeSetItem(key, parsed);
+            }
+          } catch (err) {}
+        }
+        return updatedM;
+      });
+
+      onUpdateAllMerchants(updatedMerchants);
+      try {
+        safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
+      } catch (e) {}
+
+      if (storeName === currentMerchant?.storeName) {
+        const updatedCurrent: any = { ...currentMerchant, isLocked: lockedNow, accountStatus: statusNow };
+        onUpdateMerchant(updatedCurrent);
+        try {
+          const savedSession = localStorage.getItem('zid_auth_session');
+          if (savedSession) {
+            const parsed = JSON.parse(savedSession);
+            parsed.userProfile = updatedCurrent;
+            safeSetItem('zid_auth_session', parsed);
+          }
+          const savedStore = localStorage.getItem('ZID_MERCHANT_STORE_DATA');
+          if (savedStore) {
+            const parsed = JSON.parse(savedStore);
+            parsed.merchant = updatedCurrent;
+            safeSetItem('ZID_MERCHANT_STORE_DATA', parsed);
+          }
+        } catch (e) {}
+      }
+
+      // Re-pull from the API so the table reflects MongoDB (real-time).
+      setMerchantRefreshTrigger((n) => n + 1);
+      toast.success(
+        lockedNow
+          ? `"${storeName}" has been suspended. Dashboard and storefront access are now blocked.`
+          : `"${storeName}" has been reinstated.`
+      );
+    } finally {
+      markMerchantActionPending(`lock:${ref}`, false);
+    }
+  };
+
+  const handleDeleteMerchant = async (storeSlugOrRef: string, storeName: string) => {
+    if (!window.confirm(`WARNING: Are you sure you want to permanently delete the merchant "${storeName}"? This action cannot be undone.`)) {
+      return;
+    }
+    const targetMerchant = allMerchants.find((m) => m?.storeSlug === storeSlugOrRef)
+      || allMerchants.find((m) => merchantActionRef(m) === storeSlugOrRef);
+    const ref = merchantActionRef(targetMerchant) || String(storeSlugOrRef || '').trim();
+    if (!ref) {
+      toast.error('Cannot delete this store: it has no usable reference (code/id/slug).');
+      return;
+    }
+    if (isMerchantActionPending(`delete:${ref}`)) return;
+    markMerchantActionPending(`delete:${ref}`, true);
+    try {
+      // AWAIT the delete and only mutate the list when the backend confirms it,
+      // so a failed request can never leave a phantom "deleted" row.
+      const result = await deleteAdminMerchant(ref);
+      if (!result.ok) {
+        toast.error(`Delete failed: ${result.error || 'backend rejected the request'}`, {
+          description: 'The store was not deleted.',
+        });
+        return;
+      }
+      const updatedMerchants = allMerchants.filter(
+        (m) => m?.storeSlug !== storeSlugOrRef && merchantActionRef(m) !== ref
+      );
+      onUpdateAllMerchants(updatedMerchants);
+      try {
+        safeSetItem('ZID_ALL_MERCHANTS_INDEX', { lastUpdated: Date.now(), count: updatedMerchants.length });
+        if (storeSlugOrRef) localStorage.removeItem(`ZID_MERCHANT_STORE_DATA_${storeSlugOrRef}`);
       } catch (e) {
         console.error('Failed to remove store data', e);
       }
+      setMerchantRefreshTrigger((n) => n + 1);
+      toast.success(`"${storeName}" has been deleted.`);
+    } finally {
+      markMerchantActionPending(`delete:${ref}`, false);
     }
   };
 
@@ -2199,9 +2324,22 @@ onUpdateMerchant(updatedCurrent);
     }
   };
 
-  const handleChangePlan = async (storeName: string) => {
-    const m = allMerchants.find(x => x?.storeName === storeName);
+  const handleChangePlan = async (storeSlugOrRef: string) => {
+    // Resolve by stable ref (the buttons pass `merchantActionRef(m)`), falling
+    // back to the legacy storeName match for any other caller.
+    const m = allMerchants.find(x => merchantActionRef(x) === storeSlugOrRef)
+      || allMerchants.find(x => (x as any)?.storeSlug === storeSlugOrRef)
+      || allMerchants.find(x => x?.storeName === storeSlugOrRef);
     if (!m) return;
+    const storeName = m.storeName;
+    const ref = merchantActionRef(m) || String(storeSlugOrRef || '').trim();
+    if (!ref) {
+      toast.error('Cannot change the plan: this store has no usable reference.');
+      return;
+    }
+    if (isMerchantActionPending(`plan:${ref}`)) return;
+    markMerchantActionPending(`plan:${ref}`, true);
+    try {
 
     // Cycle free_trial → Starter → Growth → free_trial. Built from the LIVE
     // catalogue in `displayOrder` so this can never hand a merchant a plan that
@@ -2219,7 +2357,7 @@ onUpdateMerchant(updatedCurrent);
     const newTrialDaysRemaining = isNowTrial ? 30 : 0;
 
     const updatedMerchants = allMerchants.map(x => {
-      if (x?.storeName === storeName) {
+      if (merchantActionRef(x) === ref || x?.storeName === storeName) {
         const updatedM = {
           ...x,
           subscriptionPlan: nextPlan,
@@ -2249,9 +2387,12 @@ onUpdateMerchant(updatedCurrent);
     });
 
     // Persist the plan change to the backend so it's immediately honoured on
-    // subscription expiry / storefront access rights.
-    if (m?.storeSlug) {
-      await patchAdminMerchant(m.storeSlug, 'change_plan', { plan: nextPlan });
+    // subscription expiry / storefront access rights. Abort on failure so the
+    // table never shows a plan that MongoDB did not accept.
+    const planResult = await patchAdminMerchant(ref, 'change_plan', { plan: nextPlan });
+    if (!planResult.ok) {
+      toast.error(`Plan change failed: ${planResult.error || 'backend rejected the request'}`);
+      return;
     }
 
     onUpdateAllMerchants(updatedMerchants);
@@ -2288,7 +2429,11 @@ onUpdateMerchant(updatedCurrent);
         }
       } catch (e) {}
     }
+    setMerchantRefreshTrigger((n) => n + 1);
     toast.success(`Changed plan for "${storeName}" to ${getPlanDisplayName(nextPlan)}`);
+    } finally {
+      markMerchantActionPending(`plan:${ref}`, false);
+    }
   };
 
   // Rows shown in the table. Prefer the API-backed list; if the API returned
@@ -3568,40 +3713,45 @@ onUpdateMerchant(updatedCurrent);
                           <LogInIcon className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleChangePlan(m?.storeName || '')}
+                          onClick={() => handleChangePlan(merchantActionRef(m))}
                           className="bg-amber-500/10 hover:bg-amber-500 text-amber-400 hover:text-white p-2 rounded-lg transition-all border border-amber-500/20 cursor-pointer inline-flex items-center justify-center"
                           title="Change Plan"
                         >
                           <UserCog className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleToggleLockMerchant(m?.storeSlug || '')}
-                          className={`p-2 rounded-lg transition-all border cursor-pointer inline-flex items-center justify-center ${
+                          onClick={() => handleToggleLockMerchant(merchantActionRef(m))}
+                          disabled={isMerchantActionPending(`lock:${merchantActionRef(m)}`)}
+                          className={`p-2 rounded-lg transition-all border cursor-pointer inline-flex items-center justify-center disabled:opacity-40 disabled:cursor-wait ${
                             m?.isLocked
                               ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500 hover:text-white border-emerald-500/20'
                               : 'bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white border-red-500/20'
                           }`}
                           title={m?.isLocked ? "Unsuspend Store" : "Suspend Store"}
                         >
-                          {m?.isLocked ? <Unlock className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
+                          {isMerchantActionPending(`lock:${merchantActionRef(m)}`)
+                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                            : m?.isLocked ? <Unlock className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
                         </button>
                         <button
-                          onClick={() => handleDeleteMerchant(m?.storeSlug || '', m?.storeName || '')}
+                          onClick={() => handleDeleteMerchant(merchantActionRef(m), m?.storeName || '')}
                           className="bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white p-2 rounded-lg transition-all border border-red-500/20 cursor-pointer inline-flex items-center justify-center"
                           title="Delete Merchant"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleExtendTrial(m?.storeSlug || '', 7)}
-                          className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold transition border border-[#3A435E] cursor-pointer text-[10px]"
+                          onClick={() => handleExtendTrial(merchantActionRef(m), 7)}
+                          disabled={isMerchantActionPending(`extend:${merchantActionRef(m)}`)}
+                          className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold transition border border-[#3A435E] cursor-pointer text-[10px] disabled:opacity-40 disabled:cursor-wait"
                           title="Extend Trial by 7 Days"
                         >
                           +7d
                         </button>
                         <button
-                          onClick={() => handleExtendTrial(m?.storeSlug || '', 30)}
-                          className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold transition border border-[#3A435E] cursor-pointer text-[10px]"
+                          onClick={() => handleExtendTrial(merchantActionRef(m), 30)}
+                          disabled={isMerchantActionPending(`extend:${merchantActionRef(m)}`)}
+                          className="bg-[#282E3F] hover:bg-[#32394E] text-slate-200 px-2.5 py-1.5 rounded-lg font-bold transition border border-[#3A435E] cursor-pointer text-[10px] disabled:opacity-40 disabled:cursor-wait"
                           title="Extend Trial by 30 Days"
                         >
                           +30d
