@@ -846,7 +846,19 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               : centralData.code === 'payment_unverified'
               ? 'The marketplace administrator has not verified this wallet payment yet. Dispatch unlocks once the payment is marked Paid.'
               : `Central courier booking failed (${centralData.code || centralRes.status}).`);
-          toast.error('Central courier booking failed', { description: reason });
+          /*
+           * TEMPORARY DIAGNOSTIC — WHICH KEY DID THE PLATFORM SEND?
+           *
+           * `key_source` (DB or ENV) and the last 4 characters of the Api-Key are
+           * appended so a 401 can be checked on screen: a tail that does not
+           * match the key saved in Logistics → Courier Settings means a stale
+           * credential is being transmitted.
+           */
+          const keyHint =
+            typeof centralData.key_source === 'string' && centralData.key_source
+              ? ` [key: ${centralData.key_source}${centralData.api_key_tail ? ` ••••${centralData.api_key_tail}` : ''}]`
+              : '';
+          toast.error('Central courier booking failed', { description: `${reason}${keyHint}` });
           return;
         }
 
@@ -993,12 +1005,38 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
          * per-courier reason, so the merchant sees WHY each one refused instead
          * of a single opaque message.
          */
-        const attempts: Array<{ courier_name?: string; courier?: string; error?: string }> =
-          Array.isArray(data.attempts) ? data.attempts : [];
+        const attempts: Array<{
+          courier_name?: string;
+          courier?: string;
+          error?: string;
+          key_source?: string;
+          api_key_tail?: string;
+        }> = Array.isArray(data.attempts) ? data.attempts : [];
         const attemptDetail = attempts
           .filter((a) => a && a.error)
           .map((a) => `${a.courier_name || a.courier || 'Courier'}: ${a.error}`)
           .join(' ');
+
+        /*
+         * TEMPORARY DIAGNOSTIC — WHICH KEY DID THE SERVER ACTUALLY SEND?
+         *
+         * Appended to the error toast so a credential problem can be confirmed
+         * on screen without reading function logs: the source (DB or ENV) and
+         * the last 4 characters of the Api-Key that was transmitted. If the tail
+         * here does not match the key just saved in the courier portal, the
+         * stale credential is on the way OUT, not on the way in.
+         */
+        const keySource =
+          (typeof data.key_source === 'string' && data.key_source) ||
+          attempts.find((a) => a && a.key_source)?.key_source ||
+          '';
+        const keyTail =
+          (typeof data.api_key_tail === 'string' && data.api_key_tail) ||
+          attempts.find((a) => a && a.api_key_tail)?.api_key_tail ||
+          '';
+        const keyHint = keySource || keyTail
+          ? ` [key: ${keySource || 'unknown'}${keyTail ? ` ••••${keyTail}` : ''}]`
+          : '';
 
         const reason =
           failureMessage ||
@@ -1011,7 +1049,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         console.warn(`Courier booking failed [${courierName}]:`, data.code || res.status, reason, attempts);
         toast.error(
           attempts.length > 1 ? 'All couriers failed' : 'Booking failed',
-          { description: reason },
+          { description: `${reason}${keyHint}` },
         );
         return;
       }

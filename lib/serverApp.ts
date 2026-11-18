@@ -15029,11 +15029,6 @@ type CourierProvider = {
   key: string;
   /** Prefix for a locally generated tracking code when the provider omits one. */
   codePrefix: string;
-  buildRequest: (
-    order: Record<string, any>,
-    merchantConfig: Record<string, any>,
-    auth: Record<string, string>
-  ) => { url: string; init: RequestInit; payload: Record<string, any> } | { configError: string };
   /**
    * Optional pre-flight credential step (Pathao's OAuth exchange). Return a
    * `configError` to abort with configuration guidance, or `auth` values to
@@ -15042,6 +15037,12 @@ type CourierProvider = {
   resolveAuth?: (
     merchantConfig: Record<string, any>
   ) => Promise<{ auth?: Record<string, string>; configError?: string }>;
+  buildRequest: (
+    order: Record<string, any>,
+    merchantConfig: Record<string, any>,
+    auth: Record<string, string>,
+    storeRef?: { store_slug?: string; store_id?: string; merchant_id?: string } | null,
+  ) => Promise<{ url: string; init: RequestInit; payload: Record<string, any> } | { configError: string }>;
 };
 
 /**
@@ -15092,6 +15093,7 @@ async function attemptCourierBooking(
   provider: CourierProvider,
   order: Record<string, any>,
   merchantConfig: Record<string, any>,
+  storeRef?: { store_slug?: string; store_id?: string; merchant_id?: string } | null,
 ): Promise<CourierAttempt> {
   if (!order || Object.keys(order).length === 0) {
     return {
@@ -15118,7 +15120,7 @@ async function attemptCourierBooking(
     auth = resolved.auth || {};
   }
 
-  const built = provider.buildRequest(order, merchantConfig, auth);
+  const built = await provider.buildRequest(order, merchantConfig, auth, storeRef ?? null);
   if ('configError' in built) {
     return {
       ok: false,
@@ -15439,7 +15441,15 @@ async function dispatchWithCentralFallback(input: {
       if (key === 'steadfast') {
         const cfg = central.steadfast || {};
         if (!cfg.apiKey || !cfg.secretKey) {
-          attempts.push({ courier: 'steadfast', ok: false, code: 'missing_credentials', error: 'Central Steadfast API keys are not configured.' });
+          attempts.push({
+            courier: 'steadfast',
+            ok: false,
+            code: 'missing_credentials',
+            error: 'Central Steadfast API keys are not configured.',
+            // Provenance is reported even when nothing was sent, so the UI can
+            // say WHY the request never left: no DB key and no env key.
+            key_source: 'NONE',
+          });
           continue;
         }
         console.log(`[Courier] central dispatch → steadfast (packzy)`);
@@ -15447,7 +15457,7 @@ async function dispatchWithCentralFallback(input: {
           `[Courier][creds] central fallback → steadfast | ` +
             `${describeCredential('STEADFAST_API_KEY', cfg.apiKey, cfg.source)} | ` +
             `${describeCredential('STEADFAST_SECRET_KEY', cfg.secretKey, cfg.source)} | ` +
-            `headers: Api-Key, Secret-Key`
+            `headers: Api-Key, Secret-Key | url: ${steadfastApiUrl('/create_order')}`
         );
         const dispatched = await courierRequest('Steadfast Courier', steadfastApiUrl('/create_order'), {
           method: 'POST',
@@ -15473,7 +15483,15 @@ async function dispatchWithCentralFallback(input: {
               credentials: courierCredentialSnapshot('steadfast', cfg),
             });
           }
-          attempts.push({ courier: 'steadfast', ok: false, code: 'dispatch_failed', error: dispatched.message });
+          attempts.push({
+            courier: 'steadfast',
+            ok: false,
+            code: 'dispatch_failed',
+            error: dispatched.message,
+            http_status: dispatched.response?.status ?? null,
+            key_source: cfg.source === 'platform_config' ? 'DB' : 'ENV',
+            api_key_tail: keyTail(cfg.apiKey),
+          });
           continue;
         }
         const tracking = extractTrackingCode(dispatched.data ?? {});
@@ -15482,7 +15500,7 @@ async function dispatchWithCentralFallback(input: {
           continue;
         }
         const persisted = await persistCourierBooking(
-          { name: 'Steadfast Courier', key: 'steadfast', codePrefix: 'STD', resolveAuth: async () => ({}), buildRequest: () => ({ url: '', init: {}, payload: {} }) },
+          { name: 'Steadfast Courier', key: 'steadfast', codePrefix: 'STD', resolveAuth: async () => ({}), buildRequest: async () => ({ url: '', init: {}, payload: {} }) },
           order,
           { ok: true, data: dispatched.data ?? {}, tracking, url: steadfastApiUrl('/create_order') },
           input.storeRef,
@@ -15545,7 +15563,7 @@ async function dispatchWithCentralFallback(input: {
         continue;
       }
       const persisted = await persistCourierBooking(
-        { name: 'Pathao Courier', key: 'pathao', codePrefix: 'PAD', resolveAuth: async () => ({}), buildRequest: () => ({ url: '', init: {}, payload: {} }) },
+        { name: 'Pathao Courier', key: 'pathao', codePrefix: 'PAD', resolveAuth: async () => ({}), buildRequest: async () => ({ url: '', init: {}, payload: {} }) },
         order,
         { ok: true, data: dispatched.data ?? {}, tracking, url: `${baseUrl}/aladdin/api/v1/parcel` },
         input.storeRef,
@@ -15916,7 +15934,7 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
     `[Courier] ${provider.name} booking requested for order ${orderId} (store ${storeRef.store_slug || '(unknown)'})`
   );
 
-  const attempt: CourierAttempt = await attemptCourierBooking(provider, order, merchantConfig);
+  const attempt: CourierAttempt = await attemptCourierBooking(provider, order, merchantConfig, storeRef);
   if (attempt.ok === false) {
     console.warn(
       `[Courier] ${provider.name} booking FAILED for order ${orderId}:`,
@@ -15964,31 +15982,106 @@ function steadfastApiUrl(path: string): string {
   return `${STEADFAST_API_BASE_URL}/${String(path || '').replace(/^\/+/, '')}`;
 }
 
-/*
- * SHARED PROVIDER DEFINITIONS.
+type SteadfastCredentialSource = 'DB' | 'ENV';
+
+/**
+ * Resolve the Steadfast key pair a booking will be sent with.
  *
- * These used to be written inline at each route, which is why Steadfast alone
- * existed twice (the `/route` alias was a verbatim copy). The fallback
- * dispatcher needs to reach a provider BY KEY, so each one is defined once here
- * and referenced by both its route and `COURIER_PROVIDERS` below.
+ * PRIORITY (this order is the whole fix):
+ *   1. The merchant's own keys, read from the MongoDB `stores` document.
+ *   2. The SUPER ADMIN's central courier keys, read from MongoDB
+ *      `platform_config` (adminPaymentConfig.centralCourier).
+ *   3. `STEADFAST_API_KEY` / `STEADFAST_SECRET_KEY` from the environment,
+ *      ONLY when the database holds no key at all.
  *
- * `buildRequest` reads credentials from the merchant's own config first and the
- * platform env second, so a store with its own courier account never spends the
- * platform key — and a fallback courier that the store has not configured fails
- * as `missing_credentials` instead of silently using someone else's account.
+ * The env vars used to be consulted first (whatever the request carried), so a
+ * stale `STEADFAST_API_KEY` in the host's dashboard silently outranked the key
+ * the operator had just saved — every booking answered 401 while the settings
+ * page happily showed the new key.
+ *
+ * Every value is `.trim()`-ed on the way out, and the returned `source` says
+ * DB or ENV so the caller can prove, on screen, which one was transmitted.
  */
+async function resolveSteadfastCredentials(
+  merchantConfig: Record<string, any>,
+  storeRef: { store_slug?: string; store_id?: string; merchant_id?: string } | null,
+): Promise<{ apiKey: string; secretKey: string; source: SteadfastCredentialSource | 'NONE' }> {
+  // ── 1. The merchant's own keys (MongoDB `stores`). ──
+  let storeDoc: Record<string, any> | null = null;
+  if (storeRef?.store_slug || storeRef?.store_id || storeRef?.merchant_id) {
+    const slug = String(storeRef.store_slug || '').trim();
+    const idish = String(storeRef.store_id || storeRef.merchant_id || '').trim();
+    if (slug || idish) {
+      const orClauses: Record<string, any>[] = [];
+      if (slug) {
+        orClauses.push({ store_slug: slug }, { storeSlug: slug }, { slug });
+      }
+      if (idish) {
+        orClauses.push({ id: idish }, { store_id: idish }, { storeId: idish });
+      }
+      if (orClauses.length > 0) {
+        try {
+          const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+          if (db) {
+            storeDoc = await db
+              .collection('stores')
+              .findOne({ $or: orClauses })
+              .catch(() => null);
+          }
+        } catch (err) {
+          console.warn('[Courier] resolveSteadfastCredentials DB fetch warning:', err?.message || err);
+        }
+      }
+    }
+  }
+
+  const fromStore = steadfastKeysFromStoreDoc(storeDoc);
+  if (fromStore.apiKey && fromStore.secretKey) {
+    return { ...fromStore, source: 'DB' };
+  }
+
+  /*
+   * 1b. The request's `merchantConfig` snapshot.
+   *
+   * The dispatcher already reads the same MongoDB document, but a caller that
+   * holds a freshly saved key in its own payload (the admin backend, a test
+   * console) must not be overridden by an empty store row. This is still a
+   * DATABASE value, not an environment one — the form was populated from
+   * MongoDB.
+   */
+  const fromPayload = steadfastKeysFromStoredCourier({
+    apiKey: merchantConfig?.steadfast_api_key || merchantConfig?.courierApiKey,
+    apiSecret: merchantConfig?.steadfast_secret_key || merchantConfig?.courierSecretToken,
+  });
+  if (fromPayload.apiKey && fromPayload.secretKey) {
+    return { ...fromPayload, source: 'DB' };
+  }
+
+  // ── 2. The Super Admin's central keys (MongoDB `platform_config`). ──
+  const central = await readStoredCentralCourier();
+  const fromCentral = steadfastKeysFromStoredCourier(central);
+  if (fromCentral.apiKey && fromCentral.secretKey) {
+    return { ...fromCentral, source: 'DB' };
+  }
+
+  // ── 3. Environment — ONLY when the database holds no key at all. ──
+  const envApiKey = readCourierEnv('STEADFAST_API_KEY');
+  const envSecretKey = readCourierEnv('STEADFAST_SECRET_KEY');
+  if (envApiKey || envSecretKey) {
+    return { apiKey: envApiKey.trim(), secretKey: envSecretKey.trim(), source: 'ENV' };
+  }
+
+  return { apiKey: '', secretKey: '', source: 'NONE' };
+}
+
 const STEADFAST_PROVIDER: CourierProvider = {
   name: 'Steadfast Courier',
   key: 'steadfast',
   codePrefix: 'STF',
-  buildRequest: (order, merchantConfig) => {
-    // Store's own account first, platform env second. Env values go through
-    // readCourierEnv so a pasted key carrying a BOM / quotes / trailing newline
-    // is normalised before it reaches the `Api-Key` header (the classic 401).
-    const ownApiKey = String(merchantConfig.steadfast_api_key ?? '').trim();
-    const ownSecret = String(merchantConfig.steadfast_secret_key ?? '').trim();
-    const apiKey = ownApiKey || readCourierEnv('STEADFAST_API_KEY');
-    const secretKey = ownSecret || readCourierEnv('STEADFAST_SECRET_KEY');
+  buildRequest: async (order, merchantConfig, auth, storeRef) => {
+    const resolved = await resolveSteadfastCredentials(merchantConfig, storeRef ?? null);
+    const { apiKey, secretKey, source } = resolved;
+
     if (!apiKey || !secretKey) {
       return {
         configError:
@@ -15997,9 +16090,9 @@ const STEADFAST_PROVIDER: CourierProvider = {
     }
     console.log(
       `[Courier][creds] merchant dispatch → steadfast | ` +
-        `${describeCredential('STEADFAST_API_KEY', apiKey, ownApiKey ? 'merchant_config' : 'env')} | ` +
-        `${describeCredential('STEADFAST_SECRET_KEY', secretKey, ownSecret ? 'merchant_config' : 'env')} | ` +
-        `headers: Api-Key, Secret-Key`
+        `${describeCredential('STEADFAST_API_KEY', apiKey, source)} | ` +
+        `${describeCredential('STEADFAST_SECRET_KEY', secretKey, source)} | ` +
+        `headers: Api-Key, Secret-Key | url: ${steadfastApiUrl('/create_order')}`
     );
     for (const anomaly of credentialAnomalies('STEADFAST_API_KEY', apiKey).concat(
       credentialAnomalies('STEADFAST_SECRET_KEY', secretKey)
@@ -16185,8 +16278,24 @@ const PATHAO_PROVIDER: CourierProvider = {
     }
     return { auth: { bearer: String(token.token) } };
   },
-  buildRequest: (order, merchantConfig, auth) => {
-    const storeId = merchantConfig.pathao_store_id || process.env.PATHAO_STORE_ID || '';
+  buildRequest: async (order, merchantConfig, auth, storeRef) => {
+    let storeId = String(merchantConfig.pathao_store_id || process.env.PATHAO_STORE_ID || '').trim();
+    if (!storeId && storeRef?.store_slug) {
+      try {
+        const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+        if (db) {
+          const storeDoc = await db
+            .collection('stores')
+            .findOne({ store_slug: String(storeRef.store_slug).trim().toLowerCase() })
+            .catch(() => null);
+          if (storeDoc) {
+            storeId = String(storeDoc.pathao_store_id || storeDoc.pathaoStoreId || '').trim();
+          }
+        }
+      } catch (err) {
+        console.warn('[Courier] resolvePathaoStoreId DB fetch warning:', err?.message || err);
+      }
+    }
     if (!storeId) {
       return {
         configError:
@@ -16234,7 +16343,7 @@ app.post('/api/courier/redx', (req, res) =>
     name: 'RedX Logistics',
     key: 'redx',
     codePrefix: 'RED',
-    buildRequest: (order, merchantConfig) => {
+    buildRequest: async (order, merchantConfig) => {
       const apiKey = merchantConfig.redx_api_key || merchantConfig.redx_key || process.env.REDX_API_KEY || '';
       const secretKey = merchantConfig.redx_secret_key || merchantConfig.redx_secret || process.env.REDX_SECRET_KEY || '';
       if (!apiKey || !secretKey) {
@@ -16275,7 +16384,7 @@ app.post('/api/courier/paperfly', (req, res) =>
     name: 'Paperfly',
     key: 'paperfly',
     codePrefix: 'PF',
-    buildRequest: (order, merchantConfig) => {
+    buildRequest: async (order, merchantConfig) => {
       const apiKey = merchantConfig.paperfly_api_key || merchantConfig.paperfly_key || process.env.PAPERFLY_API_KEY || '';
       const secretKey = merchantConfig.paperfly_secret_key || merchantConfig.paperfly_secret || process.env.PAPERFLY_SECRET_KEY || '';
       if (!apiKey || !secretKey) {
@@ -16415,6 +16524,120 @@ function describeCredential(name: string, value: any, source = 'env'): string {
 }
 
 /**
+ * Normalise a credential that came out of MongoDB.
+ *
+ * A key pasted into the Super Admin → Logistics form can carry a BOM, wrapping
+ * quotes, a trailing newline or stray spaces. Sent verbatim, Steadfast answers
+ * 401 even though the key is "correct" — so every stored value is trimmed here,
+ * at the single point where it leaves the database.
+ */
+function cleanCourierKey(value: any): string {
+  return String(value ?? '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .replace(/^["'`]+/, '')
+    .replace(/["'`]+$/, '')
+    .trim();
+}
+
+/**
+ * THE SOURCE OF TRUTH IS MONGODB — NOT THE SNAPSHOT THE BROWSER HOLDS.
+ *
+ * The Super Admin reads the platform config through `readPlatformConfig`, which
+ * merges the Supabase row OVER the Mongo document. That merge is right for the
+ * dashboard, but it is the WRONG input for a live courier call: a stale Supabase
+ * mirror (or the redacted copy cached in the admin's browser) can shadow the
+ * key the operator just rotated in MongoDB.
+ *
+ * This reads ONLY the Mongo `platform_config` document, returns the trimmed
+ * `adminPaymentConfig.centralCourier` block, or `null` when MongoDB holds no
+ * credentials at all — in which case the caller falls back to the env vars.
+ */
+async function readStoredCentralCourier(): Promise<Record<string, any> | null> {
+  try {
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) return null;
+    const doc: any = await db.collection('platform_config')
+      .findOne({ config_key: 'platform' })
+      .catch(() => null);
+    if (!doc) return null;
+
+    // The document stores the payload at the root AND under `payload` (see
+    // lib/platformConfig.ts); accept either placement.
+    const root = doc.adminPaymentConfig ? doc : (doc.payload || {});
+    const central = root?.adminPaymentConfig?.centralCourier;
+    return central && typeof central === 'object' ? central : null;
+  } catch (err: any) {
+    console.warn('[Courier] readStoredCentralCourier warning:', err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * Every spelling the Steadfast key pair has been stored under.
+ *
+ * The Super Admin form writes `centralCourier.apiKey` / `apiSecret`; the
+ * merchant Courier API panel writes `courierConfig.perCourier.steadfast`; the
+ * integrations panel writes `courierApiKey` / `courierSecretToken`. All three
+ * MUST be honoured, otherwise a key the operator saved in one screen is
+ * invisible to the dispatcher.
+ */
+function steadfastKeysFromStoredCourier(
+  central: Record<string, any> | null,
+  integrations?: Record<string, any> | null,
+): { apiKey: string; secretKey: string } {
+  const c = central || {};
+  const integrationsCfg = integrations || {};
+  const perCourier = integrationsCfg?.perCourier?.steadfast || {};
+  return {
+    apiKey: cleanCourierKey(
+      c.apiKey || c.apiKeyId || c.steadfast_api_key ||
+      perCourier.apiKey ||
+      integrationsCfg.courierApiKey,
+    ),
+    secretKey: cleanCourierKey(
+      c.apiSecret || c.secretKey || c.steadfast_secret_key ||
+      perCourier.secretKey ||
+      integrationsCfg.courierSecretToken,
+    ),
+  };
+}
+
+/**
+ * Which merchant store fields carry its OWN Steadfast pair.
+ *
+ * A merchant that saved keys in Logistics → Courier API keeps them in the
+ * `courierConfig` blob or the integrations blob — the flat `steadfast_api_key`
+ * column is a legacy spelling that is also accepted.
+ */
+function steadfastKeysFromStoreDoc(
+  storeDoc: Record<string, any> | null | undefined,
+): { apiKey: string; secretKey: string } {
+  const store = storeDoc || {};
+  const courierCfg = store.courierConfig || store.courier_config || {};
+  const perCourier = courierCfg?.perCourier?.steadfast || {};
+  const integrations = store.integrationsConfig || store.integrationConfig || {};
+  return {
+    apiKey: cleanCourierKey(
+      store.steadfast_api_key ||
+      perCourier.apiKey ||
+      integrations.courierApiKey,
+    ),
+    secretKey: cleanCourierKey(
+      store.steadfast_secret_key ||
+      perCourier.secretKey ||
+      integrations.courierSecretToken,
+    ),
+  };
+}
+
+/** The last 4 characters of a key, for the on-screen verification hint. */
+function keyTail(apiKey: unknown): string {
+  const value = String(apiKey ?? '');
+  return value ? value.slice(-4) : '';
+}
+
+/**
  * Shape warnings for one credential: things that pass a non-empty check but
  * still produce a 401 (embedded spaces, placeholder text, a key that looks
  * truncated). Returns a list of human-readable notes, empty when the value
@@ -16512,8 +16735,29 @@ const ADMIN_COURIER_DEFAULTS = {
  * fallback so a deployment that never opened the settings page still works.
  */
 async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
-  const saved = await readPlatformConfig().catch(() => null);
-  const central = (saved?.data as any)?.adminPaymentConfig?.centralCourier || {};
+  /*
+   * MONGO FIRST, THEN THE MERGED (SUPABASE-OVER-MONGO) READ.
+   *
+   * The merged document is what the dashboard renders, but Supabase wins every
+   * field in that merge while MongoDB is written last on save. When the two
+   * disagree — a rotated key, a failed Supabase mirror, a stale row — the merged
+   * read can hand a live dispatch a credential the operator already replaced,
+   * which is a 401 that no amount of re-saving fixes.
+   *
+   * So the freshly-written Mongo document is preferred, and only when it holds
+   * NO courier credentials at all does the merged read (Supabase + Mongo) take
+   * over. Env vars remain the final fallback below.
+   */
+  const storedCentral = await readStoredCentralCourier();
+  const storedHasCredentials = Boolean(storedCentral && (
+    cleanCourierKey(storedCentral.apiKey) || cleanCourierKey(storedCentral.apiSecret)
+  ));
+  const saved = storedHasCredentials
+    ? null
+    : await readPlatformConfig().catch(() => null);
+  const central = (storedHasCredentials
+    ? storedCentral
+    : (saved?.data as any)?.adminPaymentConfig?.centralCourier) || {};
   const provider = String(central.provider || '').toLowerCase().replace(/[^a-z]/g, '');
   const pick = (v: any, fb: string) => {
     const s = String(v ?? '').trim();
@@ -16538,8 +16782,8 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
     // common causes of "the credentials are definitely correct".
     const savedApiKey = pick(isChosen ? central.apiKey || central.apiKeyId : '', '');
     const savedSecret = pick(isChosen ? central.apiSecret ?? central.secretKey : '', '');
-    const apiKey = savedApiKey || env[key]?.apiKey || '';
-    const secretKey = savedSecret || env[key]?.secretKey || env[key]?.clientSecret || '';
+    const apiKey = cleanCourierKey(savedApiKey) || env[key]?.apiKey || '';
+    const secretKey = cleanCourierKey(savedSecret) || env[key]?.secretKey || env[key]?.clientSecret || '';
     out[key] = {
       apiKey,
       secretKey,
@@ -16552,6 +16796,8 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
       username: pick(isChosen ? central.pathaoUsername || central.username : '', env[key]?.username || ''),
       password: pick(isChosen ? central.pathaoPassword || central.password : '', env[key]?.password || ''),
       storeId: pick(central.storeId, env[key]?.storeId || ''),
+      // `source` names where the WINNING pair came from, so a 401 log (and the
+      // admin error toast) can say DB or ENV without guessing.
       source: savedApiKey || savedSecret ? 'platform_config' : 'env',
     };
   }
@@ -17116,6 +17362,7 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
           ok: false,
           code: 'missing_credentials',
           error: 'The Super Admin has not configured Steadfast API keys in Logistics → Courier Settings.',
+          key_source: 'NONE',
         });
       }
       // Official production endpoint — frozen, see steadfastApiUrl above.
@@ -17123,7 +17370,11 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       // Exact header names Steadfast's API expects: `Api-Key` and `Secret-Key`
       // (NOT api_key / X-Api-Key / Authorization). Logged here so a 401 can be
       // read as either "wrong keys" or "wrong header names" at a glance.
-      requestHeaders = { 'Content-Type': 'application/json', 'Api-Key': defaults.apiKey, 'Secret-Key': defaults.secretKey };
+      requestHeaders = {
+        'Content-Type': 'application/json',
+        'Api-Key': cleanCourierKey(defaults.apiKey),
+        'Secret-Key': cleanCourierKey(defaults.secretKey),
+      };
       requestBody = JSON.stringify({
         invoice,
         recipient_name: customerName,
@@ -17225,6 +17476,12 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
           error:
             `${courierKey === 'steadfast' ? 'Steadfast' : courierKey} rejected the API credentials (HTTP ${httpStatus}). ` +
             'Re-copy the Api-Key / Secret-Key pair from the courier portal into Super Admin → Logistics → Courier Settings (or the STEADFAST_API_KEY / STEADFAST_SECRET_KEY env vars) — the server log shows the exact key fingerprint and source it sent.',
+          // TRANSMITTED-KEY PROVENANCE. The UI appends this to the error toast:
+          // if the tail does not match the key just saved, the stale credential
+          // is on the way OUT (a stale env var or a second config row), not on
+          // the way in.
+          key_source: defaults.source === 'platform_config' ? 'DB' : 'ENV',
+          api_key_tail: keyTail(defaults.apiKey || defaults.clientId),
           provider_response: dispatched.data ?? null,
         });
       }
@@ -17281,6 +17538,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       courier: courierKey,
       tracking_code: trackingCode,
       persisted,
+      // Provenance of the credential that ACTUALLY booked the parcel, so the
+      // success toast can prove the freshly saved key is the one in use.
+      key_source: defaults.source === 'platform_config' ? 'DB' : 'ENV',
+      api_key_tail: keyTail(defaults.apiKey || defaults.clientId),
       pickup_address: pickupAddress || undefined,
       pickup_phone: pickupPhone || undefined,
       // Where the pickup came from: 'central' (admin config / env) or 'store'
