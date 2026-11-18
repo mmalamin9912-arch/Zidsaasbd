@@ -922,11 +922,16 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
       failures.push(e?.message || 'Store update request failed.');
     }
 
+    // Email-derived slug fallback used across the theme-settings, shared-store
+    // and Supabase writes below — every tenant gets a unique slug even when
+    // storeSlug/storeName are missing.
+    const emailSlug = (updatedMerchant.email || '').split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+
     // Dedicated theme-settings write: the full themeConfig JSON for this
     // store + theme. `/api/themes/settings` always answers JSON (never throws
     // a 5xx), so a failure here is reported, not swallowed.
     try {
-      const slugForSettings = (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
+      const slugForSettings = (updatedMerchant.storeSlug || updatedMerchant.storeName || emailSlug || 'store')
         .toLowerCase().replace(/[^a-z0-9]/g, '');
       // Same pre-trim as the store update above: the themeConfig embeds the
       // gallery's base64 photos, which is the payload that used to 413.
@@ -958,7 +963,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
     // Persist the published theme to the slug-scoped shared store so the live
     // storefront (and other tabs) pick it up instantly via storage/CustomEvent.
     try {
-      const slug = (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
+      const slug = (updatedMerchant.storeSlug || updatedMerchant.storeName || emailSlug || 'store')
         .toLowerCase().replace(/[^a-z0-9]/g, '');
       writeZidStoreData(
         { merchant: updatedMerchant, themeCustomization: themeConfig as Record<string, unknown> },
@@ -982,7 +987,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
         const saveResult = await safeUpsertRow(sbClient, 'stores', {
           email: updatedMerchant.email.trim().toLowerCase(),
           store_name: updatedMerchant.storeName,
-          store_slug: (updatedMerchant.storeSlug || updatedMerchant.storeName || 'my-store')
+          store_slug: (updatedMerchant.storeSlug || updatedMerchant.storeName || emailSlug || 'store')
             .toLowerCase().replace(/[^a-z0-9]/g, ''),
           theme_config: themeConfig,
           hero_title: heroTitle,
@@ -1221,7 +1226,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
   const liveMerchant: MerchantProfile = {
     ...(merchant || {
       storeName: 'My Store',
-      storeSlug: 'my-store',
+      storeSlug: 'store',
       logoUrl: '',
       heroTitle: '',
       heroSubtitle: '',
@@ -4571,7 +4576,7 @@ export const ThemeCustomizerModal: React.FC<ThemeCustomizerModalProps> = ({
                   </div>
                   <div className="bg-white border border-slate-300/80 rounded-lg px-3 py-1 text-[11px] font-mono text-slate-600 flex items-center gap-2 max-w-sm w-full mx-auto shadow-2xs">
                     <span className="text-emerald-600 font-bold text-[10px]">🔒 https://</span>
-                    <span className="truncate">{liveMerchant.storeSlug || 'my-store'}.zid.sa</span>
+                    <span className="truncate">{liveMerchant.storeSlug || 'store'}.zid.sa</span>
                   </div>
                   <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider hidden sm:block">
                     1280px Desktop

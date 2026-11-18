@@ -142,9 +142,10 @@ export function resolveMerchantSubscription(
   const themeConfig = sanitizeStoredThemeConfig(rawThemeConfig) ?? (initialMerchant as any).themeConfig;
 
   const storeName = merged.store_name || merged.storeName || initialMerchant.storeName;
-  const storeSlug = merged.store_slug || merged.storeSlug || (storeName ? storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : 'mystore');
-  const ownerName = merged.owner_name || merged.ownerName || merged.full_name || initialMerchant.ownerName;
   const email = (merged.email || initialMerchant.email || '').toLowerCase().trim();
+  const emailSlug = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+  const storeSlug = merged.store_slug || merged.storeSlug || (storeName ? storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : emailSlug || 'store');
+  const ownerName = merged.owner_name || merged.ownerName || merged.full_name || initialMerchant.ownerName;
   const phone = merged.phone || initialMerchant.phone;
   const logoUrl = merged.logo_url || merged.logoUrl || initialMerchant.logoUrl;
 

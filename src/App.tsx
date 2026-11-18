@@ -1914,8 +1914,11 @@ export default function App() {
       console.warn('Session register warning:', err);
     }
 
-    // Explicit Dashboard Navigation
-    const slug = userProfile.storeSlug || 'my-store';
+    // Explicit Dashboard Navigation — resolve slug dynamically from the
+    // merchant's profile; fall back to an email-derived slug so every tenant
+    // gets a unique route instead of a shared hardcoded one.
+    const emailSlug = (userProfile.email || '').split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+    const slug = userProfile.storeSlug || emailSlug || 'store';
     window.history.pushState({}, '', `/dashboard/${slug}`);
     setCurrentPath(`/dashboard/${slug}`);
     setActiveTab('dashboard');

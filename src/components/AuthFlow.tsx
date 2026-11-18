@@ -328,7 +328,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
             ownerName: session.user.user_metadata?.full_name || existingUser.ownerName || 'Merchant Owner',
             storeName: session.user.user_metadata?.store_name || existingUser.storeName || 'My Store',
             phone: existingUser.phone || '',
-            storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : 'mystore',
+            storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : cleanEmail.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '') || 'store',
             logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
           };
           finishLogin(userProfile);
@@ -1516,7 +1516,7 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           ownerName: data.user?.user_metadata?.full_name || existingUser.ownerName || 'Merchant Owner',
           storeName: data.user?.user_metadata?.store_name || existingUser.storeName || 'My Store',
           phone: existingUser.phone || '',
-          storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : 'mystore',
+          storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : existingUser.email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '') || 'store',
           logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
         };
 
@@ -1584,8 +1584,10 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const fullName = `${firstName.trim()} ${lastName.trim()}`;
     const formattedPhone = formatFullPhoneNumber(phone);
     const fullBusinessAddress = `${streetAddress.trim()}, ${cityUpazila.trim()}, ${district} - ${postCode.trim()}`;
-    const slug = storeName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'mystore';
     const cleanEmail = email.trim().toLowerCase();
+    const slug = storeName.toLowerCase().replace(/[^a-z0-9]/g, '')
+      || cleanEmail.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '')
+      || 'store';
     const cleanPassword = password.trim();
 
     inFlightRef.current = true;

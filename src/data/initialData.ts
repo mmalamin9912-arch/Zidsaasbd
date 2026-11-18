@@ -28,7 +28,7 @@ import {
 
 export const initialMerchant: MerchantProfile = {
   storeName: 'My Store',
-  storeSlug: 'mystore',
+  storeSlug: 'store',
   ownerName: 'Store Owner',
   email: '',
   phone: '',
