@@ -17753,6 +17753,40 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
  * network, which added a round-trip, broke behind a proxy that rewrites the
  * host, and could only ever try ONE courier.
  */
+/* Telegram courier send notification — fire regardless of courier API result */
+    (async () => {
+      try {
+        const tg = await resolveTelegramAlertConfig();
+        if (tg.token && tg.chatId) {
+          const order = await findOrder(req.body?.orderId);
+          if (order) {
+            const itemsStr = order.items
+              .map((it: any) => it.productName + ' × ' + it.quantity)
+              .join(', ');
+            const totalAmount = order.codAmountBDT || 0;
+            const message = '📦 Courier Send Notification\n\n' +
+              'Merchant/Store: ' + (req.body?.merchantPhone || '') + '\n' +
+              'Customer: ' + (order.customer?.name || '') + '\n' +
+              'Order ID: #' + (order.orderNumber || orderId) + '\n' +
+              'Products: ' + itemsStr + '\n' +
+              'COD/Total: ' + totalAmount + ' BDT\n' +
+              'API Status: ' + (order.courierBooked ? 'succeeded' : 'failed (manual entry needed)');
+
+            await fetch('https://api.telegram.org/bot' + tg.token + '/sendMessage', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: tg.chatId,
+                text: message,
+              }),
+            }).catch(() => {/* Telegram error does not block UI */});
+          }
+        }
+      } catch (tgErr) {
+        console.warn('[Courier] Telegram notification failed:', tgErr?.message || tgErr);
+      }
+    })();
+    /* End Telegram courier send notification */
 app.post('/api/courier/send', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
