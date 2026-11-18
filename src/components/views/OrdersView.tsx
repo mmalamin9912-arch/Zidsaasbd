@@ -846,6 +846,23 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               : centralData.code === 'payment_unverified'
               ? 'The marketplace administrator has not verified this wallet payment yet. Dispatch unlocks once the payment is marked Paid.'
               : `Central courier booking failed (${centralData.code || centralRes.status}).`);
+
+          /*
+           * Steadfast's EXACT rejection text, appended to the toast.
+           *
+           * `provider_body` is the verbatim body the courier API returned for a
+           * non-200 (e.g. `{"status":401,"message":"Invalid Api Key or Secret
+           * Key"}`), so the admin can read the real reason on screen instead of
+           * inferring it from a status code. Skipped when the message already
+           * embeds the body, so it is never printed twice.
+           */
+          const rawProviderBody = typeof centralData.provider_body === 'string'
+            ? centralData.provider_body.trim()
+            : '';
+          const providerHint = rawProviderBody && !String(reason).includes(rawProviderBody)
+            ? ` — ${dispatchCourier} says: ${rawProviderBody}`
+            : '';
+
           /*
            * TEMPORARY DIAGNOSTIC — WHICH KEY DID THE PLATFORM SEND?
            *
@@ -858,7 +875,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             typeof centralData.key_source === 'string' && centralData.key_source
               ? ` [key: ${centralData.key_source}${centralData.api_key_tail ? ` ••••${centralData.api_key_tail}` : ''}]`
               : '';
-          toast.error('Central courier booking failed', { description: `${reason}${keyHint}` });
+          toast.error('Central courier booking failed', {
+            description: `${reason}${providerHint}${keyHint}`,
+          });
           return;
         }
 
@@ -1011,6 +1030,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           error?: string;
           key_source?: string;
           api_key_tail?: string;
+          http_status?: number | null;
+          provider_body?: string;
         }> = Array.isArray(data.attempts) ? data.attempts : [];
         const attemptDetail = attempts
           .filter((a) => a && a.error)
@@ -1038,18 +1059,35 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           ? ` [key: ${keySource || 'unknown'}${keyTail ? ` ••••${keyTail}` : ''}]`
           : '';
 
+        /*
+         * THE COURIER'S OWN REJECTION TEXT.
+         *
+         * `provider_body` is the exact body Steadfast returned (e.g.
+         * `{"status":401,"message":"Invalid Api Key or Secret Key"}`). It is
+         * shown verbatim so the merchant can see Steadfast's precise reason
+         * instead of a paraphrase — the reason the error toast exists.
+         */
+        const providerBodies = attempts
+          .filter((a) => a && typeof a.provider_body === 'string' && a.provider_body.trim())
+          .map((a) => `${a.courier_name || a.courier || 'Courier'} says: ${a.provider_body!.trim()}`);
+        const topLevelBody = typeof data.provider_body === 'string' ? data.provider_body.trim() : '';
+        if (topLevelBody && !providerBodies.some((b) => b.includes(topLevelBody))) {
+          providerBodies.unshift(`${data.provider || courierName} says: ${topLevelBody}`);
+        }
+        const providerHint = providerBodies.length ? ` — ${providerBodies.join(' | ')}` : '';
+
         const reason =
           failureMessage ||
           attemptDetail ||
-          (res.status === 401 || res.status === 403
+          (res.status === 401 || res.status === 403 || data.http_status === 401 || data.http_status === 403
             ? `Please configure Courier API keys in Store Settings. (${courierName} rejected the credentials.)`
             : res.status >= 500
             ? `The courier service could not be reached (HTTP ${res.status}). Please try again in a moment.`
             : `Booking failed (HTTP ${res.status}). Please try again.`);
-        console.warn(`Courier booking failed [${courierName}]:`, data.code || res.status, reason, attempts);
+        console.warn(`Courier booking failed [${courierName}]:`, data.code || res.status, reason, providerHint, attempts);
         toast.error(
           attempts.length > 1 ? 'All couriers failed' : 'Booking failed',
-          { description: `${reason}${keyHint}` },
+          { description: `${reason}${providerHint}${keyHint}` },
         );
         return;
       }

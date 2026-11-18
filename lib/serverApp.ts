@@ -14659,9 +14659,10 @@ app.post('/api/store/test-webhook', async (req, res) => {
  *   • non-JSON or unexpected response body     → provider-response message
  *   • provider-side rejection                  → the provider's own reason
  *
- * `readJson` is used instead of `res.json()` because a crashed provider (or an
- * HTML gateway error page) makes `.json()` throw a SyntaxError that would
- * otherwise masquerade as a transport failure.
+ * `response.text()` + `JSON.parse` is used instead of `res.json()` because a
+ * crashed provider (or an HTML gateway error page) makes `.json()` throw a
+ * SyntaxError that would otherwise masquerade as a transport failure — and
+ * because the RAW text is what a 401 must quote back to the merchant.
  *
  * On success the booking is persisted before responding, so the tracking code
  * can never be held only in React state and lost on the next poll.
@@ -14716,17 +14717,70 @@ function isBookingAccepted(data: any, tracking: string): boolean {
 /**
  * Read a provider response body defensively.
  * A non-JSON body (HTML error page, empty 502 from a gateway) becomes
- * `{ __raw: '<first 300 chars>' }` so the caller can still report what happened
- * instead of throwing a parse error.
+ * `{ __raw: '<first 300 chars>', __body: '<full text>' }` so the caller can
+ * still report what happened instead of throwing a parse error.
+ *   `__raw`  — a short preview for the log line.
+ *   `__body` — the FULL body, kept only for error reporting. Truncating the real
+ *              reason out of a 401 is what made these failures undiagnosable.
+ * Both are INTERNAL: they are stripped before a payload is persisted or
+ * re-serialised (see `rawProviderResponse`).
+ *
+ * NOTE: `courierRequest` reads the body stream itself (so it can quote it
+ * verbatim in an error) and uses this same non-JSON fallback shape.
  */
-async function readJson(response: Response): Promise<any> {
-  const text = await response.text().catch(() => '');
-  if (!text) return {};
+
+/**
+ * The EXACT text a provider returned, for surfacing in an error message.
+ *
+ * Steadfast answers a 401 with a body such as
+ *   {"status":401,"message":"Invalid Api Key or Secret Key"}
+ * and the merchant needs that string verbatim — not a paraphrase like
+ * "Steadfast rejected the booking" — to know which credential is wrong.
+ *
+ * `capturedBody` is the raw text `courierRequest` read from the response; when
+ * it is absent (a caller holding only the parsed object) a compact JSON view is
+ * rebuilt. Capped so a huge HTML error page cannot flood the toast.
+ */
+function rawProviderResponse(data: any, capturedBody = ''): string {
+  const captured = String(capturedBody || '').trim();
+  if (captured) return captured.slice(0, 600);
+
+  if (!data) return '';
+  if (typeof data === 'string') return data.trim().slice(0, 600);
+  if (typeof data !== 'object') return String(data).slice(0, 600);
+
+  // Legacy parse path (no captured body): the non-JSON fallback object.
+  if (typeof data.__body === 'string' && data.__body.trim()) return data.__body.trim().slice(0, 600);
+
   try {
-    return JSON.parse(text);
-  } catch {
-    return { __raw: text.slice(0, 300), __status: response.status };
-  }
+    const { __raw, __status, __body, ...rest } = data as Record<string, any>;
+    const compact = JSON.stringify(rest);
+    if (compact && compact !== '{}') return compact.slice(0, 600);
+    if (typeof __raw === 'string' && __raw.trim()) return __raw.trim().slice(0, 600);
+  } catch { /* fall through */ }
+  return '';
+}
+
+/**
+ * Compose the message for a provider rejection, ALWAYS ending with the raw body
+ * when the provider sent one, so the toast shows Steadfast's own wording plus
+ * the HTTP status.
+ */
+function describeProviderRejection(
+  provider: string,
+  data: any,
+  httpStatus: number | undefined,
+  fallbackReason = '',
+  capturedBody = '',
+): string {
+  const parsedReason = describeProviderFailure(data, '');
+  const raw = rawProviderResponse(data, capturedBody);
+  const statusLabel = httpStatus ? `HTTP ${httpStatus}` : 'error';
+
+  const reason = parsedReason || fallbackReason || `${provider} rejected the booking (${statusLabel}).`;
+  // Already carries the body (or nothing more to add) — do not duplicate it.
+  if (!raw || reason.includes(raw)) return reason;
+  return `${reason} — ${provider} replied: ${raw}`;
 }
 
 /** Turn a provider payload into a sentence a merchant can act on. */
@@ -14823,7 +14877,7 @@ async function courierRequest(
   provider: string,
   url: string,
   init: RequestInit
-): Promise<{ ok: boolean; response?: Response; data?: any; message?: string }> {
+): Promise<{ ok: boolean; response?: Response; data?: any; message?: string; body?: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), COURIER_FETCH_TIMEOUT_MS);
 
@@ -14838,7 +14892,19 @@ async function courierRequest(
 
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
-    const data = await readJson(response);
+    // The body is read ONCE here: a Response stream can only be consumed a
+    // single time, so re-reading it for an error message would return ''. The
+    // raw text is returned as `body` for every caller that needs to quote the
+    // provider verbatim.
+    const capturedBody = await response.text().catch(() => '');
+    let data: any = {};
+    if (capturedBody.trim()) {
+      try {
+        data = JSON.parse(capturedBody);
+      } catch {
+        data = { __raw: capturedBody.slice(0, 300), __body: capturedBody, __status: response.status };
+      }
+    }
 
     // ── Incoming response trace ──
     const bodyPreview = JSON.stringify(data ?? null);
@@ -14852,12 +14918,17 @@ async function courierRequest(
         ok: false,
         response,
         data,
-        message:
-          describeProviderFailure(data, '') ||
-          `${provider} rejected the booking (HTTP ${response.status}).`,
+        body: capturedBody,
+        /*
+         * The message the merchant sees for ANY non-2xx — 401, 403, 422, 500.
+         * It now ends with Steadfast's OWN response body, so the toast says
+         * "Invalid Api Key or Secret Key" instead of a paraphrase, and the exact
+         * status is always named.
+         */
+        message: describeProviderRejection(provider, data, response.status, '', capturedBody),
       };
     }
-    return { ok: true, response, data };
+    return { ok: true, response, data, body: capturedBody };
   } catch (err: any) {
     const aborted = err?.name === 'AbortError';
     const hint = err?.cause?.code || err?.code || '';
@@ -15064,6 +15135,8 @@ type CourierAttempt =
       retryable: boolean;
       httpStatus?: number;
       providerResponse?: any;
+      /** The exact body text the provider returned (for the on-screen toast). */
+      providerBody?: string;
       url?: string;
     };
 
@@ -15140,6 +15213,9 @@ async function attemptCourierBooking(
       retryable: true,
       httpStatus: call.response?.status,
       providerResponse: call.data,
+      // A 401/403 also arrives here when the provider answers non-JSON (or with
+      // a body that reads like success). Carry it verbatim as well.
+      providerBody: rawProviderResponse(call.data),
       url: built.url,
     };
   }
@@ -15151,7 +15227,18 @@ async function attemptCourierBooking(
     return {
       ok: false,
       code: 'booking_rejected',
-      message: describeProviderFailure(data, `${provider.name} rejected the booking.`),
+      /*
+       * A providers that ANSWERS with a rejection is the most valuable case to
+       * report verbatim: Steadfast's "Invalid Api Key or Secret Key" (or its
+       * validation detail) is the only thing that tells the merchant what is
+       * actually wrong. `describeProviderRejection` appends the raw body.
+       */
+      message: describeProviderRejection(
+        provider.name,
+        data,
+        call.response?.status,
+        `${provider.name} rejected the booking.`,
+      ),
       /*
        * Retry ONLY when the provider definitively refused.
        *
@@ -15162,6 +15249,8 @@ async function attemptCourierBooking(
       retryable: Boolean(call.response && call.response.ok === false),
       httpStatus: call.response?.status,
       providerResponse: data,
+      // The verbatim body, forwarded to the client as `provider_body`.
+      providerBody: rawProviderResponse(data),
       url: built.url,
     };
   }
@@ -15489,6 +15578,7 @@ async function dispatchWithCentralFallback(input: {
             code: 'dispatch_failed',
             error: dispatched.message,
             http_status: dispatched.response?.status ?? null,
+            provider_body: rawProviderResponse(dispatched.data),
             key_source: cfg.source === 'platform_config' ? 'DB' : 'ENV',
             api_key_tail: keyTail(cfg.apiKey),
           });
@@ -15496,7 +15586,18 @@ async function dispatchWithCentralFallback(input: {
         }
         const tracking = extractTrackingCode(dispatched.data ?? {});
         if (!isBookingAccepted(dispatched.data ?? {}, tracking)) {
-          attempts.push({ courier: 'steadfast', ok: false, code: 'rejected', error: describeProviderFailure(dispatched.data ?? {}, 'Steadfast rejected this booking.') });
+          attempts.push({
+            courier: 'steadfast',
+            ok: false,
+            code: 'rejected',
+            error: describeProviderRejection(
+              'Steadfast',
+              dispatched.data ?? {},
+              dispatched.response?.status,
+              'Steadfast rejected this booking.',
+            ),
+            provider_body: rawProviderResponse(dispatched.data),
+          });
           continue;
         }
         const persisted = await persistCourierBooking(
@@ -15554,12 +15655,30 @@ async function dispatchWithCentralFallback(input: {
         }),
       });
       if (!dispatched.ok) {
-        attempts.push({ courier: 'pathao', ok: false, code: 'dispatch_failed', error: dispatched.message });
+        attempts.push({
+          courier: 'pathao',
+          ok: false,
+          code: 'dispatch_failed',
+          error: dispatched.message,
+          http_status: dispatched.response?.status ?? null,
+          provider_body: rawProviderResponse(dispatched.data),
+        });
         continue;
       }
       const tracking = extractTrackingCode(dispatched.data ?? {});
       if (!isBookingAccepted(dispatched.data ?? {}, tracking)) {
-        attempts.push({ courier: 'pathao', ok: false, code: 'rejected', error: describeProviderFailure(dispatched.data ?? {}, 'Pathao rejected this booking.') });
+        attempts.push({
+          courier: 'pathao',
+          ok: false,
+          code: 'rejected',
+          error: describeProviderRejection(
+            'Pathao',
+            dispatched.data ?? {},
+            dispatched.response?.status,
+            'Pathao rejected this booking.',
+          ),
+          provider_body: rawProviderResponse(dispatched.data),
+        });
         continue;
       }
       const persisted = await persistCourierBooking(
@@ -15592,7 +15711,13 @@ async function dispatchWithCentralFallback(input: {
     success: false,
     ok: false,
     code: attempts[0]?.code || 'dispatch_failed',
+    /*
+     * Each attempt's message already ends with the provider's raw body, so this
+     * aggregate carries Steadfast's (and Pathao's) own wording into the toast.
+     */
     error: attempts.map((a) => `${a.courier}: ${a.error || a.code}`).join(' | ') || 'Both central couriers failed.',
+    http_status: attempts[0]?.http_status ?? null,
+    provider_body: attempts[0]?.provider_body || '',
     courier_used: null,
     fallback_used: false,
     attempts,
@@ -15787,6 +15912,10 @@ async function sendWithCourierFallback(input: {
       error: failed.message,
       http_status: failed.httpStatus ?? null,
       retryable: failed.retryable,
+      // The EXACT body Steadfast (or any provider) returned, surfaced as its own
+      // field so the toast can show the provider's own wording even when the
+      // flattened message is long.
+      provider_body: failed.providerBody || '',
     };
     attempts.push(failure);
 
@@ -15946,6 +16075,10 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
       ...(attempt.code === 'booking_rejected' ? { provider: provider.key } : {}),
       error: attempt.message,
       message: attempt.message,
+      // The HTTP status and the provider's EXACT body, so the client can show
+      // Steadfast's own rejection reason rather than a paraphrase.
+      http_status: attempt.httpStatus ?? null,
+      provider_body: attempt.providerBody || rawProviderResponse(attempt.providerResponse),
       ...(attempt.providerResponse !== undefined ? { provider_response: attempt.providerResponse } : {}),
     });
   }
@@ -17470,11 +17603,21 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         const anomalies = credentialAnomalies(apiKeyEnv, defaults?.apiKey || defaults?.clientId)
           .concat(credentialAnomalies(secretEnv, defaults?.secretKey || defaults?.clientSecret));
         for (const anomaly of anomalies) console.warn(`[Courier][creds] ${anomaly}`);
+        const providerBody = rawProviderResponse(dispatched.data);
+        const steadfastReason = providerBody
+          ? `Steadfast says: ${providerBody}`
+          : 'Steadfast returned no response body.';
         return res.status(200).json({
           ok: false,
           code: 'unauthorized',
+          /*
+           * The 401 text now LEADS with Steadfast's own wording, because that is
+           * the only thing that says WHICH credential was rejected (invalid api
+           * key, invalid secret key, account suspended, IP not allowed …).
+           */
           error:
             `${courierKey === 'steadfast' ? 'Steadfast' : courierKey} rejected the API credentials (HTTP ${httpStatus}). ` +
+            `${steadfastReason} ` +
             'Re-copy the Api-Key / Secret-Key pair from the courier portal into Super Admin → Logistics → Courier Settings (or the STEADFAST_API_KEY / STEADFAST_SECRET_KEY env vars) — the server log shows the exact key fingerprint and source it sent.',
           // TRANSMITTED-KEY PROVENANCE. The UI appends this to the error toast:
           // if the tail does not match the key just saved, the stale credential
@@ -17482,6 +17625,8 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
           // the way in.
           key_source: defaults.source === 'platform_config' ? 'DB' : 'ENV',
           api_key_tail: keyTail(defaults.apiKey || defaults.clientId),
+          http_status: httpStatus,
+          provider_body: providerBody,
           provider_response: dispatched.data ?? null,
         });
       }
@@ -17493,16 +17638,36 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       return res.status(200).json({
         ok: false,
         code: 'dispatch_failed',
-        error: dispatched.message || `The ${courierKey} booking request could not be sent. Check the server's network access and try again.`,
+        error: (dispatched.message || `The ${courierKey} booking request could not be sent.`) +
+          (() => {
+            const body = rawProviderResponse(dispatched.data);
+            return body && !String(dispatched.message || '').includes(body)
+              ? ` — ${courierKey} replied: ${body}`
+              : '';
+          })(),
+        http_status: dispatched.response?.status ?? null,
+        provider_body: rawProviderResponse(dispatched.data),
       });
     }
     const providerData: any = dispatched.data ?? {};
     const tracking = extractTrackingCode(providerData);
     const accepted = isBookingAccepted(providerData, tracking);
     if (!accepted) {
-      const reason = describeProviderFailure(providerData, 'The central courier rejected this booking.');
+      const reason = describeProviderRejection(
+        courierKey === 'steadfast' ? 'Steadfast' : courierKey,
+        providerData,
+        dispatched.response?.status,
+        'The central courier rejected this booking.',
+      );
       console.warn('[Courier] central dispatch rejected by provider:', { courier: courierKey, status: dispatched.response?.status, reason });
-      return res.status(200).json({ ok: false, code: 'booking_rejected', error: reason, provider_response: providerData });
+      return res.status(200).json({
+        ok: false,
+        code: 'booking_rejected',
+        error: reason,
+        http_status: dispatched.response?.status ?? null,
+        provider_body: rawProviderResponse(providerData),
+        provider_response: providerData,
+      });
     }
 
     const trackingCode = tracking ||
