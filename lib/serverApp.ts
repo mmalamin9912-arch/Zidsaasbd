@@ -14759,10 +14759,65 @@ function describeProviderFailure(data: any, fallback: string): string {
 }
 
 /**
+ * Mask secret headers before they hit the server log. Only header names/lengths
+ * are safe to print; the values themselves (API keys, bearer tokens) never are.
+ */
+function maskRequestHeaders(headers: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers) return out;
+  const entries: [string, string][] =
+    headers instanceof Headers
+      ? Array.from(headers.entries())
+      : Array.isArray(headers)
+        ? (headers as [string, string][])
+        : Object.entries(headers as Record<string, string>);
+  for (const [name, value] of entries) {
+    const secret = /authorization|api-?key|secret-?key|token/i.test(String(name));
+    out[String(name)] = secret ? '<redacted>' : String(value ?? '');
+  }
+  return out;
+}
+
+/**
+ * Redact credential-like fields from a request body before it is logged.
+ * Handles both JSON bodies and application/x-www-form-urlencoded bodies
+ * (Pathao's token exchange posts client_id/client_secret/username/password).
+ */
+function redactBodyForLog(body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    const redacted: Record<string, any> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      redacted[key] = /secret|password|token|api-?key|client_secret/i.test(key)
+        ? '<redacted>'
+        : value;
+    }
+    return JSON.stringify(redacted);
+  } catch {
+    // Not JSON — assume form-encoded. Redact known secret parameter values.
+    return String(body)
+      .split('&')
+      .map((pair) => {
+        const [key, ...rest] = pair.split('=');
+        return /secret|password|token|api-?key|client_secret/i.test(key ?? '')
+          ? `${key}=<redacted>`
+          : pair;
+      })
+      .join('&');
+  }
+}
+
+/**
  * Execute one outbound provider call.
  *
  * Never throws: a transport failure, timeout or unparseable body is folded into
  * `{ ok: false, message }`.
+ *
+ * Every call is traced: the outgoing request (method, URL, masked headers, body
+ * preview) is logged before `fetch`, and the incoming response (status, ok/ERR,
+ * body preview) is logged after the body is read. This makes a failed courier
+ * booking diagnosable from the server log alone — exactly which provider was
+ * called, what was sent, and what the provider replied.
  */
 async function courierRequest(
   provider: string,
@@ -14771,9 +14826,26 @@ async function courierRequest(
 ): Promise<{ ok: boolean; response?: Response; data?: any; message?: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), COURIER_FETCH_TIMEOUT_MS);
+
+  // ── Outgoing request trace ──
+  const safeHeaders = maskRequestHeaders(init.headers);
+  const safeBody = typeof init.body === 'string' ? redactBodyForLog(init.body) : undefined;
+  console.log(
+    `[Courier][tx] ${provider} → ${init.method ?? 'GET'} ${url}`,
+    safeHeaders,
+    safeBody ? `body: ${safeBody.slice(0, 1200)}` : ''
+  );
+
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     const data = await readJson(response);
+
+    // ── Incoming response trace ──
+    const bodyPreview = JSON.stringify(data ?? null);
+    console.log(
+      `[Courier][rx] ${provider} ← ${response.status} ${response.ok ? 'OK' : 'ERR'} ${url}`,
+      `body: ${bodyPreview.slice(0, 1200)}`
+    );
 
     if (!response.ok) {
       return {
@@ -14789,13 +14861,16 @@ async function courierRequest(
   } catch (err: any) {
     const aborted = err?.name === 'AbortError';
     const hint = err?.cause?.code || err?.code || '';
+    console.error(
+      `[Courier][tx] ${provider} request failed: ${url}`,
+      { hint: hint || err?.message || err, code: err?.code, errno: err?.errno }
+    );
     if (aborted) {
       return {
         ok: false,
         message: `${provider} did not respond within ${Math.round(COURIER_FETCH_TIMEOUT_MS / 1000)} seconds. Please try again.`,
       };
     }
-    console.error(`[Courier] ${provider} request failed:`, hint || err?.message || err);
     return {
       ok: false,
       message: `Could not reach the ${provider} API${
@@ -14899,6 +14974,10 @@ async function ensurePathaoToken(
       `&client_secret=${encodeURIComponent(clientSecret)}` +
       '&grant_type=client_credentials';
 
+  console.log(
+    `[Courier][tx] Pathao Courier → POST ${baseUrl}/aladdin/api/v1/issue-token grant_type=${usePasswordGrant ? 'password' : 'client_credentials'} env=${sandbox ? 'sandbox' : 'production'}`
+  );
+
   const result = await courierRequest('Pathao Courier', `${baseUrl}/aladdin/api/v1/issue-token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
@@ -14906,6 +14985,9 @@ async function ensurePathaoToken(
   });
 
   if (!result.ok) {
+    console.warn(
+      `[Courier][rx] Pathao Courier ← token exchange FAILED: ${result.message || 'Pathao authentication failed.'}`
+    );
     return { token: '', error: result.message || 'Pathao authentication failed.' };
   }
 
@@ -14921,6 +15003,9 @@ async function ensurePathaoToken(
   pathaoTokenCache.key = cacheKey;
   pathaoTokenCache.token = String(token);
   pathaoTokenCache.expiresAt = now + ttlSeconds * 1000;
+  console.log(
+    `[Courier][rx] Pathao Courier ← token obtained (ttl ~${ttlSeconds}s, env=${sandbox ? 'sandbox' : 'production'})`
+  );
   return { token: pathaoTokenCache.token };
 }
 
@@ -15826,8 +15911,17 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
     merchant_id: body.merchant_id || body.merchantId || order.merchant_id || order.merchantId,
   };
 
+  const orderId = String(order.invoice_id || order.id || order.order_number || '(unknown)');
+  console.log(
+    `[Courier] ${provider.name} booking requested for order ${orderId} (store ${storeRef.store_slug || '(unknown)'})`
+  );
+
   const attempt: CourierAttempt = await attemptCourierBooking(provider, order, merchantConfig);
   if (attempt.ok === false) {
+    console.warn(
+      `[Courier] ${provider.name} booking FAILED for order ${orderId}:`,
+      { code: attempt.code, message: attempt.message, url: attempt.url, providerResponse: attempt.providerResponse }
+    );
     return res.status(200).json({
       success: false,
       code: attempt.code,
@@ -15839,6 +15933,9 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
   }
 
   const persisted = await persistCourierBooking(provider, order, attempt, storeRef);
+  console.log(
+    `[Courier] ${provider.name} booking OK for order ${orderId}: tracking=${persisted.tracking_code} persisted=${persisted.persisted}`
+  );
   return res.status(200).json({ success: true, ...persisted });
 }
 
