@@ -1445,6 +1445,9 @@ app.post('/api/auth/merchant/register', async (req, res) => {
       password: body.password,
       subscriptionPlan: body.subscriptionPlan || body.subscription_plan || 'free_trial',
       logoUrl: body.logoUrl || body.logo_url,
+      // Registration verification: pass the merchant's address so it is saved
+      // as the default pickup/store address during account creation.
+      address: body.address || body.pickup_address || body.pickupAddress || body.store_address || body.storeAddress || '',
     });
 
     if (!merchant) {
@@ -1530,6 +1533,22 @@ app.post('/api/auth/merchant/register', async (req, res) => {
         ownerName: merchant.ownerName,
         email: merchant.email,
         phone: merchant.phone,
+        // Registration verification: auto-saved phone/address variants
+        support_contact: merchant.support_contact || '',
+        supportContact: merchant.supportContact || '',
+        support_phone: merchant.support_phone || '',
+        supportPhone: merchant.supportPhone || '',
+        contactPhone: merchant.contactPhone || '',
+        contact_phone: merchant.contact_phone || '',
+        whatsappNumber: merchant.whatsappNumber || '',
+        whatsapp_number: merchant.whatsapp_number || '',
+        pickup_address: merchant.pickup_address || '',
+        pickupAddress: merchant.pickupAddress || '',
+        address: merchant.address || '',
+        store_address: merchant.store_address || '',
+        storeAddress: merchant.storeAddress || '',
+        shop_address: merchant.shop_address || '',
+        shopAddress: merchant.shopAddress || '',
         storeName_normalized: merchant.storeName,
         subscriptionPlan: merchant.subscriptionPlan,
         subscriptionExpiry: merchant.subscriptionExpiry,

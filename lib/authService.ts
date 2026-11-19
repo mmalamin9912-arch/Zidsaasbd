@@ -69,6 +69,23 @@ export interface AuthMerchantRecord {
   sources: DataSource[];
   /** true when the record was found (not a brand-new registration). */
   isExisting: boolean;
+  // Registration auto-fill fields: verified phone mirrored to support contact
+  // variants, and registration address mirrored to pickup/store address variants.
+  support_contact?: string;
+  supportContact?: string;
+  support_phone?: string;
+  supportPhone?: string;
+  contactPhone?: string;
+  contact_phone?: string;
+  whatsappNumber?: string;
+  whatsapp_number?: string;
+  pickup_address?: string;
+  pickupAddress?: string;
+  address?: string;
+  store_address?: string;
+  storeAddress?: string;
+  shop_address?: string;
+  shopAddress?: string;
 }
 
 /**
@@ -285,6 +302,22 @@ function normalizeSupabaseRecord(row: Record<string, any>): AuthMerchantRecord {
     createdAt: row?.created_at ? new Date(row.created_at).toISOString() : null,
     sources: ['supabase'],
     isExisting: true,
+    // Registration auto-fill fields: verified phone / address variants
+    support_contact: String(row?.support_contact || ''),
+    supportContact: String(row?.supportContact || ''),
+    support_phone: String(row?.support_phone || ''),
+    supportPhone: String(row?.supportPhone || ''),
+    contactPhone: String(row?.contactPhone || ''),
+    contact_phone: String(row?.contact_phone || ''),
+    whatsappNumber: String(row?.whatsappNumber || ''),
+    whatsapp_number: String(row?.whatsapp_number || ''),
+    pickup_address: String(row?.pickup_address || ''),
+    pickupAddress: String(row?.pickupAddress || ''),
+    address: String(row?.address || ''),
+    store_address: String(row?.store_address || ''),
+    storeAddress: String(row?.storeAddress || ''),
+    shop_address: String(row?.shop_address || ''),
+    shopAddress: String(row?.shopAddress || ''),
   };
 }
 
@@ -324,6 +357,7 @@ export async function authenticateMerchant(input: {
   password?: string;
   subscriptionPlan?: string;
   logoUrl?: string;
+  address?: string;  // registration verification address -> stored as pickup_address variants
 }): Promise<AuthMerchantRecord | null> {
   const email = String(input.email || '').trim().toLowerCase();
   if (!email || !email.includes('@')) return null;
@@ -378,6 +412,23 @@ export async function authenticateMerchant(input: {
     ownerName: input.ownerName || email.split('@')[0],
     email,
     phone: input.phone || '',
+    // Registration verification: phone also stored as support contact variants for compatibility
+    support_contact: input.phone || '',
+    supportContact: input.phone || '',
+    support_phone: input.phone || '',
+    supportPhone: input.phone || '',
+    contactPhone: input.phone || '',
+    contact_phone: input.phone || '',
+    whatsappNumber: input.phone || '',
+    whatsapp_number: input.phone || '',
+    // Registration verification: address stored as pickup_address variants (address used for store location)
+    address: input.address || '',
+    pickup_address: input.address || '',
+    pickupAddress: input.address || '',
+    store_address: input.address || '',
+    storeAddress: input.address || '',
+    shop_address: input.address || '',
+    shopAddress: input.address || '',
     password: input.password || '',
     subscription_plan: plan,
     subscriptionPlan: plan,
