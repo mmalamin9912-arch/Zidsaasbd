@@ -16069,6 +16069,30 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
       `[Courier] ${provider.name} booking FAILED for order ${orderId}:`,
       { code: attempt.code, message: attempt.message, url: attempt.url, providerResponse: attempt.providerResponse }
     );
+    /*
+     * ALERT THE ADMIN — a failed automated booking is exactly when a human has
+     * to step in and enter the parcel in the courier portal by hand, so the
+     * click is reported with the full parcel details and the reason.
+     *
+     * Fire-and-forget: the helper never throws and never delays the response.
+     * The store record fills in the merchant phone / pickup address, which this
+     * route's `merchantConfig` does not reliably carry.
+     */
+    void (async () => {
+      try {
+        const store = await loadStoreForCourierAlert(storeRef.store_slug);
+        await notifyAdminCourierDispatch({
+          status: attempt.code === 'missing_credentials' ? 'disabled' : 'failed',
+          courierName: provider.name,
+          errorMessage: attempt.message,
+          order,
+          store,
+          fallback: body,
+        });
+      } catch (alertErr: any) {
+        console.warn('[Courier][telegram] notification task error (ignored):', alertErr?.message || alertErr);
+      }
+    })();
     return res.status(200).json({
       success: false,
       code: attempt.code,
@@ -16087,7 +16111,45 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
   console.log(
     `[Courier] ${provider.name} booking OK for order ${orderId}: tracking=${persisted.tracking_code} persisted=${persisted.persisted}`
   );
+  // Success is reported too, so the admin sees every “Send to Courier” click —
+  // not only the ones that went wrong.
+  void (async () => {
+    try {
+      const store = await loadStoreForCourierAlert(storeRef.store_slug);
+      await notifyAdminCourierDispatch({
+        status: 'booked',
+        courierName: provider.name,
+        trackingCode: persisted.tracking_code,
+        order,
+        store,
+        fallback: body,
+      });
+    } catch (alertErr: any) {
+      console.warn('[Courier][telegram] notification task error (ignored):', alertErr?.message || alertErr);
+    }
+  })();
   return res.status(200).json({ success: true, ...persisted });
+}
+
+/**
+ * Load the merchant store record for a courier alert.
+ *
+ * Best-effort and NEVER throws: the alert is supplementary, so a database
+ * hiccup must simply yield a message with “—” in the store fields rather than
+ * affect the dispatch response.
+ */
+async function loadStoreForCourierAlert(storeSlug: unknown): Promise<Record<string, any> | null> {
+  const slug = cleanStoreRef(storeSlug);
+  if (!slug) return null;
+  try {
+    const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+    if (!db) return null;
+    return (await db.collection('stores').findOne({
+      $or: [{ store_slug: slug }, { storeSlug: slug }, { store_code: slug }],
+    }).catch(() => null)) as Record<string, any> | null;
+  } catch {
+    return null;
+  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -17139,8 +17201,20 @@ async function resolveTelegramAlertConfig(): Promise<{
   source: 'dashboard' | 'env' | 'none';
 }> {
   const envToken = normalizeTelegramToken(telegramEnv('TELEGRAM_BOT_TOKEN'));
-  // Accept the common misspelling of the chat id var as well.
-  const envChat = normalizeTelegramChatId(telegramEnv('TELEGRAM_CHAT_ID') || telegramEnv('TELEGRAM_CHATID'));
+  /*
+   * Chat-id env spellings, most specific first.
+   *
+   * `TELEGRAM_ADMIN_CHAT_ID` is how many deployments name the SUPER ADMIN's
+   * chat (as distinct from `TELEGRAM_CHAT_ID`, which an older build used for
+   * the same purpose). All of them are accepted so no deployment silently
+   * loses its alerts because it picked the other name; `TELEGRAM_CHATID` covers
+   * the common misspelling.
+   */
+  const envChat = normalizeTelegramChatId(
+    telegramEnv('TELEGRAM_ADMIN_CHAT_ID') ||
+    telegramEnv('TELEGRAM_CHAT_ID') ||
+    telegramEnv('TELEGRAM_CHATID'),
+  );
 
   let savedToken = '';
   let savedChat = '';
@@ -17165,7 +17239,7 @@ async function resolveTelegramAlertConfig(): Promise<{
     chatId: chatId || 'MISSING',
     env: {
       TELEGRAM_BOT_TOKEN: envToken ? `set (${envToken.length} chars)` : 'MISSING',
-      TELEGRAM_CHAT_ID: envChat ? 'set' : 'MISSING',
+      TELEGRAM_ADMIN_CHAT_ID: envChat ? 'set' : 'MISSING',
     },
     dashboard: { token: savedToken ? 'set' : 'empty', chatId: savedChat ? 'set' : 'empty' },
   });
@@ -17318,6 +17392,39 @@ async function sendAdminPaymentAlertEmail(args: {
 
 app.post('/api/admin/marketplace-courier', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
+
+  /*
+   * “Send to Courier” ALERT FOR MARKETPLACE ORDERS.
+   *
+   * This is the route a merchant's button actually calls for a marketplace
+   * child order, so it must alert exactly like `/api/courier/send`. `notify`
+   * closes over the RESOLVED order/store once they are known, and is declared
+   * before the first early return so an incomplete or unverified order still
+   * reports the click.
+   */
+  const alertFallback: Record<string, any> = (req.body && typeof req.body === 'object' ? req.body : {});
+  let alertOrder: Record<string, any> | null = null;
+  let alertStore: Record<string, any> | null = null;
+  const marketplaceNotify = (
+    status: CourierDispatchStatus,
+    extra: { courierName?: string; errorMessage?: string; trackingCode?: string } = {},
+  ): void => {
+    void (async () => {
+      try {
+        await notifyAdminCourierDispatch({
+          status,
+          courierName: extra.courierName,
+          errorMessage: extra.errorMessage,
+          trackingCode: extra.trackingCode,
+          order: alertOrder,
+          store: alertStore,
+          fallback: alertFallback,
+        });
+      } catch (alertErr: any) {
+        console.warn('[Courier][telegram] notification task error (ignored):', alertErr?.message || alertErr);
+      }
+    })();
+  };
   try {
     const body = req.body || {};
     const centralCfg = await resolveCentralCourierConfig();
@@ -17367,7 +17474,15 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
     if (order.cod_amount === undefined) order.cod_amount = body.codAmount ?? body.cod_amount ?? order.cod_amount ?? order.total ?? 0;
     if (!order.customer_note) order.customer_note = body.note || body.customer_note || order.customer_note || 'Handle with care';
 
+    // Published for the alert helper below: this is the COMPLETE parcel, with
+    // body fields merged over the stored document.
+    alertOrder = order;
+
     if (!order.customer_phone || !order.shipping_address) {
+      marketplaceNotify('failed', {
+        courierName: courierKey,
+        errorMessage: 'The customer phone and delivery address are required to book this parcel.',
+      });
       return res.status(200).json({
         ok: false,
         code: 'incomplete_order',
@@ -17388,6 +17503,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       (order as any).marketplace_order === true &&
       paymentStatus === 'Pending Verification'
     ) {
+      marketplaceNotify('disabled', {
+        courierName: courierKey,
+        errorMessage: 'The wallet payment is still Pending Verification, so dispatch was refused.',
+      });
       return res.status(200).json({
         ok: false,
         code: 'payment_unverified',
@@ -17470,6 +17589,23 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
     const pickupAddress = bodyPickup || centralPickupAddress || courierPickup || profileAddress;
     const pickupPhone = centralPickupPhone || storePhone;
 
+    /*
+     * Hand the resolved pickup + merchant identity to the alert helper. The
+     * store document supplies the name/phone; the pickup priority chain above
+     * supplies the address the courier is actually given, which is what the
+     * admin needs to see if the booking has to be re-entered by hand.
+     */
+    alertStore = {
+      ...(storeDoc || {}),
+      store_name:
+        (storeDoc as any)?.store_name ||
+        (storeDoc as any)?.storeName ||
+        (alertFallback.storeName ?? alertFallback.store_name) ||
+        storeRef,
+      phone: pickupPhone || storePhone || (storeDoc as any)?.phone,
+      pickup_address: pickupAddress || profileAddress,
+    };
+
     // Informational only — the dispatch is NOT refused when the seller has no
     // pickup profile. The response still carries what was used so the merchant
     // (and the admin audit trail) can see where the parcel was collected from.
@@ -17491,6 +17627,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
 
     if (courierKey === 'steadfast') {
       if (!defaults.apiKey || !defaults.secretKey) {
+        marketplaceNotify('disabled', {
+          courierName: 'Steadfast',
+          errorMessage: 'The Super Admin has not configured Steadfast API keys.',
+        });
         return res.status(200).json({
           ok: false,
           code: 'missing_credentials',
@@ -17518,6 +17658,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       });
     } else if (courierKey === 'pathao') {
       if (!defaults.clientId || !defaults.clientSecret) {
+        marketplaceNotify('disabled', {
+          courierName: 'Pathao',
+          errorMessage: 'The Super Admin has not configured Pathao API keys.',
+        });
         return res.status(200).json({
           ok: false,
           code: 'missing_credentials',
@@ -17526,6 +17670,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       }
       const token = await ensurePathaoToken(defaults.clientId, defaults.clientSecret, defaults.username, defaults.password);
       if (!token.token) {
+        marketplaceNotify('failed', {
+          courierName: 'Pathao',
+          errorMessage: token.error || 'Pathao authentication failed.',
+        });
         return res.status(200).json({ ok: false, code: 'auth_failed', error: token.error || 'Pathao authentication failed.' });
       }
       requestUrl = `${pathaoBaseUrl(defaults.clientId, defaults.clientSecret, defaults.username, defaults.password)}/aladdin/api/v1/parcel`;
@@ -17607,6 +17755,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         const steadfastReason = providerBody
           ? `Steadfast says: ${providerBody}`
           : 'Steadfast returned no response body.';
+        marketplaceNotify('failed', {
+          courierName: courierKey,
+          errorMessage: `HTTP ${httpStatus} — ${providerBody || 'no response body'}`,
+        });
         return res.status(200).json({
           ok: false,
           code: 'unauthorized',
@@ -17635,6 +17787,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         url: requestUrl,
         message: dispatched.message,
       });
+      marketplaceNotify('failed', {
+        courierName: courierKey,
+        errorMessage: dispatched.message || 'The courier booking request could not be sent.',
+      });
       return res.status(200).json({
         ok: false,
         code: 'dispatch_failed',
@@ -17660,6 +17816,7 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         'The central courier rejected this booking.',
       );
       console.warn('[Courier] central dispatch rejected by provider:', { courier: courierKey, status: dispatched.response?.status, reason });
+      marketplaceNotify('failed', { courierName: courierKey, errorMessage: reason });
       return res.status(200).json({
         ok: false,
         code: 'booking_rejected',
@@ -17698,6 +17855,11 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       severity: 'Info',
     }).catch(() => undefined);
 
+    marketplaceNotify('booked', {
+      courierName: courierKey === 'steadfast' ? 'Steadfast Courier' : courierKey === 'pathao' ? 'Pathao Courier' : courierKey,
+      trackingCode,
+    });
+
     return res.status(200).json({
       ok: true,
       courier: courierKey,
@@ -17731,6 +17893,10 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       : hint === 'CERT_HAS_EXPIRED' || String(err?.message || '').toLowerCase().includes('certificate') ? 'The courier API TLS certificate is invalid or expired.'
       : err?.name === 'AbortError' ? 'The courier API took too long to respond (timeout).'
       : '';
+    marketplaceNotify('failed', {
+      courierName: String((req.body && (req.body as any).courier) || 'Courier'),
+      errorMessage: friendly || err?.message || 'The central courier dispatch failed.',
+    });
     return res.status(200).json({
       ok: false,
       code: 'dispatch_failed',
@@ -17753,44 +17919,294 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
  * network, which added a round-trip, broke behind a proxy that rewrites the
  * host, and could only ever try ONE courier.
  */
-/* Telegram courier send notification — fire regardless of courier API result */
-    (async () => {
-      try {
-        const tg = await resolveTelegramAlertConfig();
-        if (tg.token && tg.chatId) {
-          const order = await findOrder(req.body?.orderId);
-          if (order) {
-            const itemsStr = order.items
-              .map((it: any) => it.productName + ' × ' + it.quantity)
-              .join(', ');
-            const totalAmount = order.codAmountBDT || 0;
-            const message = '📦 Courier Send Notification\n\n' +
-              'Merchant/Store: ' + (req.body?.merchantPhone || '') + '\n' +
-              'Customer: ' + (order.customer?.name || '') + '\n' +
-              'Order ID: #' + (order.orderNumber || orderId) + '\n' +
-              'Products: ' + itemsStr + '\n' +
-              'COD/Total: ' + totalAmount + ' BDT\n' +
-              'API Status: ' + (order.courierBooked ? 'succeeded' : 'failed (manual entry needed)');
+/* ────────────────────────────────────────────────────────────────────────────
+ * “SEND TO COURIER” ADMIN TELEGRAM NOTIFICATION
+ *
+ * Every merchant click on “Send to Courier” — whether the courier API books the
+ * parcel, rejects it, is unreachable, or is switched off — pushes ONE formatted
+ * message to the Super Admin's Telegram. That is the fallback: if automated
+ * booking did not happen, the admin has the full parcel details in hand and can
+ * enter it in the courier portal manually.
+ *
+ * RULES THIS HELPER ENFORCES
+ *   • It NEVER throws and never returns a rejection — Telegram being down, slow
+ *     or unconfigured must not affect the merchant's HTTP response in any way.
+ *   • It is fire-and-forget (`void notifyAdminCourierDispatch(...)`) and every
+ *     network call has its own deadline, so a hung Telegram request cannot keep
+ *     a serverless invocation (and therefore the UI) waiting.
+ *   • Secrets are never echoed: the bot token appears nowhere in the message.
+ *
+ * DESCRIPTION LOGIC
+ *   `status` is the dispatch outcome, so the admin can tell at a glance whether
+ *   manual entry is needed:
+ *     'booked'    → succeeded (tracking shown)
+ *     'failed'    → the courier API rejected or errored
+ *     'disabled'  → automated booking is not available at all
+ *     'sandbox'   → a test booking; no real parcel exists
+ * ──────────────────────────────────────────────────────────────────────────── */
+type CourierDispatchStatus = 'booked' | 'failed' | 'disabled' | 'sandbox';
 
-            await fetch('https://api.telegram.org/bot' + tg.token + '/sendMessage', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                chat_id: tg.chatId,
-                text: message,
-              }),
-            }).catch(() => {/* Telegram error does not block UI */});
-          }
-        }
-      } catch (tgErr) {
-        console.warn('[Courier] Telegram notification failed:', tgErr?.message || tgErr);
+/** Telegram Markdown-safe text: keep it to plain text, escaped for HTML mode. */
+function telegramField(label: string, value: unknown): string {
+  const text = String(value ?? '').trim();
+  return `${label}: ${text ? escapeHtmlForTelegram(text) : '—'}`;
+}
+
+/** `{name, qty}` lines from an order's `items` (array or JSON string). */
+function describeOrderItems(rawItems: unknown, maxLines = 12): string {
+  let items: any[] = [];
+  if (Array.isArray(rawItems)) {
+    items = rawItems;
+  } else if (typeof rawItems === 'string' && rawItems.trim()) {
+    try {
+      const parsed = JSON.parse(rawItems);
+      items = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      items = [];
+    }
+  }
+
+  const lines = items
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const name = String(
+        item.productName || item.product_name || item.name || item.title || item.productId || item.product_id || 'Item',
+      ).trim();
+      const qty = Number(item.quantity ?? item.qty ?? 1) || 1;
+      return `• ${name} × ${qty}`;
+    });
+
+  if (lines.length === 0) return '—';
+  const shown = lines.slice(0, maxLines).map(escapeHtmlForTelegram);
+  if (lines.length > maxLines) shown.push(`…and ${lines.length - maxLines} more`);
+  return shown.join('\n');
+}
+
+/**
+ * Push ONE “Send to Courier” alert to the Super Admin's Telegram chat.
+ *
+ * Accepts EVERYTHING the caller knows; `order` may be the posted payload or the
+ * stored document, and `store` the merchant record — missing fields render as
+ * “—”, so a partial payload still produces a useful message.
+ */
+async function notifyAdminCourierDispatch(args: {
+  status: CourierDispatchStatus;
+  courierName?: string;
+  /** Reason shown for a failed/disabled dispatch, and the provider's own words. */
+  errorMessage?: string;
+  trackingCode?: string;
+  order?: Record<string, any> | null;
+  store?: Record<string, any> | null;
+  /** Highest-precedence values (the request body) for anything the documents lack. */
+  fallback?: Record<string, any>;
+}): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const tg = await resolveTelegramAlertConfig();
+    if (!tg.botToken || !tg.chatId) {
+      // Not configured is a normal deployment state, not an error to surface.
+      console.warn('[Courier][telegram] alert skipped — no bot token / chat id configured.');
+      return { ok: false, error: 'Telegram is not configured.' };
+    }
+
+    const order = (args.order || {}) as Record<string, any>;
+    const store = (args.store || {}) as Record<string, any>;
+    const fb = args.fallback || {};
+
+    const pickStr = (...values: unknown[]): string => {
+      for (const value of values) {
+        if (value === undefined || value === null) continue;
+        const text = String(value).trim();
+        if (text) return text;
       }
-    })();
-    /* End Telegram courier send notification */
+      return '';
+    };
+
+    // ── Merchant / store ──
+    const storeName = pickStr(
+      store.store_name, store.storeName, fb.storeName, fb.store_name, order.storeName, order.store_name,
+    );
+    const merchantPhone = pickStr(
+      store.phone, store.store_phone, store.storePhone, store.support_phone, store.supportPhone,
+      store.pickup_phone, store.pickupPhone,
+      fb.merchantPhone, fb.storePhone, fb.store_phone, order.storePhone, order.store_phone,
+    );
+    const pickupAddress = pickStr(
+      fb.pickupAddress, fb.pickup_address,
+      store.pickup_address, store.pickupAddress, store.store_address, store.storeAddress, store.address,
+    );
+
+    // ── Customer ──
+    const customerName = pickStr(order.customer_name, order.customerName, fb.customerName, fb.customer_name);
+    const customerPhone = pickStr(order.customer_phone, order.customerPhone, fb.customerPhone, fb.customer_phone);
+    const deliveryAddress = pickStr(
+      order.shipping_address, order.address, fb.shipping_address, fb.address,
+    );
+    const customerCity = pickStr(order.customer_city, order.customerCity, fb.customerCity, fb.customer_city);
+
+    // ── Order ──
+    const orderNumber = pickStr(
+      order.order_number, order.orderNumber, order.invoice_id, order.invoiceId, order.id,
+      fb.orderNumber, fb.order_number, fb.orderId,
+    ).replace(/^#/, '');
+    const itemsText = describeOrderItems(order.items ?? fb.items);
+    const codAmount = toNumeric(
+      order.cod_amount ?? order.codAmount ?? order.codAmountBDT ?? order.total_price ?? order.totalBDT ??
+      fb.cod_amount ?? fb.codAmount ?? fb.totalBDT ?? fb.total ?? 0,
+      0,
+    );
+    const note = pickStr(order.customer_note, order.customerNote, order.note, fb.customer_note, fb.note);
+
+    // ── API status line ──
+    const courierLabel = args.courierName || 'Courier';
+    const statusHeadline: Record<CourierDispatchStatus, string> = {
+      booked: `✅ <b>API booking SUCCEEDED</b> — ${escapeHtmlForTelegram(courierLabel)}`,
+      failed: `⚠️ <b>API booking FAILED</b> — ${escapeHtmlForTelegram(courierLabel)}`,
+      disabled: `ℹ️ <b>Automated booking is DISABLED</b> — ${escapeHtmlForTelegram(courierLabel)}`,
+      sandbox: `🧪 <b>Sandbox booking (no real parcel)</b> — ${escapeHtmlForTelegram(courierLabel)}`,
+    };
+    const needsManualEntry = args.status === 'failed' || args.status === 'disabled';
+    const statusLines = [
+      statusHeadline[args.status],
+      args.trackingCode ? `🔖 Tracking: <code>${escapeHtmlForTelegram(args.trackingCode)}</code>` : '',
+      args.errorMessage ? `📝 Reason: ${escapeHtmlForTelegram(args.errorMessage)}` : '',
+      needsManualEntry ? '👉 <b>Manual entry may be required</b> in the courier portal.' : '',
+    ].filter(Boolean);
+
+    const message = [
+      '📦 <b>Send to Courier</b>',
+      '',
+      '<b>🏪 Store</b>',
+      telegramField('Store name', storeName),
+      telegramField('Merchant phone', merchantPhone),
+      telegramField('Pickup address', pickupAddress),
+      '',
+      '<b>👤 Customer</b>',
+      telegramField('Name', customerName),
+      telegramField('Phone', customerPhone),
+      telegramField('Delivery address', customerCity ? `${deliveryAddress}, ${customerCity}` : deliveryAddress),
+      '',
+      '<b>🧾 Order</b>',
+      telegramField('Order ID', orderNumber ? `#${orderNumber}` : ''),
+      `Products:\n${itemsText}`,
+      telegramField('COD / Total', `৳${codAmount} BDT`),
+      telegramField('Delivery note', note),
+      '',
+      '<b>🔌 Courier API</b>',
+      ...statusLines,
+    ].join('\n');
+
+    /*
+     * Bounded send. `AbortSignal.timeout` guarantees the request cannot hang,
+     * and every failure path returns rather than throwing — the caller is a
+     * fire-and-forget task, but a stray rejection here would still surface as an
+     * unhandled rejection in the function log.
+     */
+    const res = await fetch(`https://api.telegram.org/bot${tg.botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: tg.chatId,
+        text: message,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+
+    const data: any = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      const description = String(data?.description || `HTTP ${res.status}`);
+      console.warn('[Courier][telegram] courier alert rejected:', {
+        status: res.status,
+        description,
+        order: orderNumber,
+      });
+      return { ok: false, error: description };
+    }
+
+    console.log('[Courier][telegram] courier alert sent:', {
+      order: orderNumber,
+      status: args.status,
+      messageId: data?.result?.message_id,
+    });
+    return { ok: true };
+  } catch (err: any) {
+    // Includes the AbortError from the timeout — never rethrown.
+    console.warn('[Courier][telegram] courier alert failed (ignored):', err?.message || err);
+    return { ok: false, error: err?.message || 'Telegram request failed.' };
+  }
+}
+
 app.post('/api/courier/send', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
+
+  /*
+   * ONE NOTIFICATION PER CLICK, WHATEVER THE OUTCOME.
+   *
+   * `notify` is declared FIRST so every early return below — an unsupported
+   * courier name, a missing order, a thrown error — still alerts the admin.
+   * It snapshots the request payload immediately (the closure outlives the
+   * handler) and loads the store record lazily, once, only if an alert fires.
+   *
+   * It is always `void`-ed: nothing here may delay or fail the HTTP response.
+   */
+  const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+  const postedOrder: Record<string, any> = body.order && typeof body.order === 'object' ? body.order : {};
+  const storeSlugForAlert = cleanStoreRef(
+    body.store_slug || body.storeSlug || postedOrder.store_slug || postedOrder.storeSlug || '',
+  );
+
+  // Resolved once, on first use; a repeat click reuses the same promise.
+  let storeForAlert: Promise<Record<string, any> | null> | null = null;
+  const loadStoreForAlert = (): Promise<Record<string, any> | null> => {
+    if (!storeForAlert) {
+      storeForAlert = storeSlugForAlert
+        ? (async () => {
+            try {
+              const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+              if (!db) return null;
+              return await db.collection('stores').findOne({
+                $or: [
+                  { store_slug: storeSlugForAlert },
+                  { storeSlug: storeSlugForAlert },
+                  { store_code: storeSlugForAlert },
+                ],
+              }).catch(() => null) as Record<string, any> | null;
+            } catch {
+              return null;
+            }
+          })()
+        : Promise.resolve(null);
+    }
+    return storeForAlert;
+  };
+
+  const notify = (
+    status: CourierDispatchStatus,
+    extra: { courierName?: string; errorMessage?: string; trackingCode?: string } = {},
+  ): void => {
+    void (async () => {
+      try {
+        const store = await loadStoreForAlert();
+        // The POSTED order wins for anything it carries (it is what the
+        // merchant just confirmed); the store record fills in the rest.
+        await notifyAdminCourierDispatch({
+          status,
+          courierName: extra.courierName,
+          errorMessage: extra.errorMessage,
+          trackingCode: extra.trackingCode,
+          order: postedOrder,
+          store,
+          fallback: body,
+        });
+      } catch (notifyErr: any) {
+        // Belt and braces: the helper already swallows everything.
+        console.warn('[Courier][telegram] notification task error (ignored):', notifyErr?.message || notifyErr);
+      }
+    })();
+  };
+
   try {
-    const body = req.body || {};
     const rawName = String(
       body.courier || body.courierName || body.order?.courier_name || body.order?.courierName || ''
     ).trim();
@@ -17801,6 +18217,10 @@ app.post('/api/courier/send', async (req, res) => {
      */
     const requestedPrimary = rawName ? normalizeCourierKey(rawName) : '';
     if (rawName && !requestedPrimary) {
+      notify('disabled', {
+        courierName: rawName,
+        errorMessage: `"${rawName}" is not a courier the platform can book through.`,
+      });
       return res.status(200).json({
         success: false,
         code: 'unknown_courier',
@@ -17810,6 +18230,10 @@ app.post('/api/courier/send', async (req, res) => {
 
     const order: Record<string, any> = body.order || {};
     if (!order || Object.keys(order).length === 0) {
+      notify(requestedPrimary ? 'failed' : 'disabled', {
+        courierName: rawName || requestedPrimary,
+        errorMessage: 'No order was supplied to the courier booking request.',
+      });
       return res.status(200).json({
         success: false,
         code: 'no_order',
@@ -17821,9 +18245,7 @@ app.post('/api/courier/send', async (req, res) => {
     const result = await sendWithCourierFallback({
       order,
       merchantConfig: body.merchantConfig || {},
-      storeSlug: cleanStoreRef(
-        body.store_slug || body.storeSlug || order.store_slug || order.storeSlug || '',
-      ),
+      storeSlug: storeSlugForAlert,
       storeRef: {
         store_slug: body.store_slug || body.storeSlug || order.store_slug || order.storeSlug,
         store_id: body.store_id || order.store_id,
@@ -17841,9 +18263,34 @@ app.post('/api/courier/send', async (req, res) => {
           : undefined,
     });
 
+    /*
+     * Translate the dispatcher's envelope into the alert's status. A `success`
+     * means a real parcel was created; `missing_credentials` means the automated
+     * path is not configured at all (which the admin experiences as “disabled”);
+     * everything else is a genuine failure.
+     */
+    if (result?.success) {
+      const bookedCourier = String(result.courier_name || rawName || requestedPrimary || 'Courier');
+      notify(result.__sandbox === true ? 'sandbox' : 'booked', {
+        courierName: bookedCourier,
+        trackingCode: String(result.tracking_code || ''),
+      });
+    } else {
+      const firstAttempt: Record<string, any> = Array.isArray(result?.attempts) ? result.attempts[0] || {} : {};
+      const notConfigured = firstAttempt.code === 'missing_credentials' && Boolean(result?.error?.includes('configure'));
+      notify(notConfigured ? 'disabled' : 'failed', {
+        courierName: rawName || requestedPrimary || 'Courier',
+        errorMessage: String(result?.error || result?.message || 'The courier rejected the booking.'),
+      });
+    }
+
     return res.status(200).json(result);
   } catch (err: any) {
     console.error('[Courier] /api/courier/send dispatch error:', err);
+    notify('failed', {
+      courierName: String(body.courier || body.courierName || '').trim() || 'Courier',
+      errorMessage: err?.message || 'The courier dispatch could not be completed.',
+    });
     return res.status(200).json({
       success: false,
       code: 'dispatch_failed',
