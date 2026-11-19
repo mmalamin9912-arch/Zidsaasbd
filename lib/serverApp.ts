@@ -2967,8 +2967,11 @@ app.post('/api/admin/platform-config', async (req, res) => {
           const incomingTrimmed = String(incomingCourier[field] ?? '').trim();
           const isIncomingMask = isMask(incomingCourier[field]);
           const isIncomingEmpty = incomingTrimmed === '';
-          if ((isIncomingMask || isIncomingEmpty) && existingCourier[field] !== undefined) {
-            incomingCourier[field] = existingCourier[field];
+          if (isIncomingMask || isIncomingEmpty) {
+            // Never persist the redaction mask ('••configured••') into the
+            // database. Keep whatever was already stored; on first-ever save
+            // (no prior value) fall back to '' rather than baking in the mask.
+            incomingCourier[field] = existingCourier[field] !== undefined ? existingCourier[field] : '';
           }
         }
       }

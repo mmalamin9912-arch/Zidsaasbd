@@ -5563,7 +5563,7 @@ if (m.storeSlug) {
                       value={gatewayForm.centralCourier?.apiKey || ''}
                       onChange={(e) => setGatewayForm({
                         ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiKey: e.target.value },
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiKey: e.target.value.trim() },
                       })}
                       placeholder="Paste the courier API key"
                       className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
@@ -5578,7 +5578,7 @@ if (m.storeSlug) {
                       value={gatewayForm.centralCourier?.apiSecret || ''}
                       onChange={(e) => setGatewayForm({
                         ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiSecret: e.target.value },
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, apiSecret: e.target.value.trim() },
                       })}
                       placeholder="Paste the courier API secret"
                       className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
