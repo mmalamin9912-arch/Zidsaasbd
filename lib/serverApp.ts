@@ -18011,6 +18011,30 @@ function telegramField(label: string, value: unknown): string {
   return `${label}: ${text ? escapeHtmlForTelegram(text) : '—'}`;
 }
 
+/** Format a pickup address into a clear, multi-line representation if it contains
+ *  structured parts (area, thana/upazila, district/city, postal code), otherwise
+ *  return the original string. */
+function formatPickupAddress(raw: string): string {
+  const addr = String(raw ?? '').trim();
+  if (!addr) return '—';
+
+  // If it already looks like a multi-line address (contains newlines), keep it
+  if (addr.includes('\n')) {
+    return addr.split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+  }
+
+  // Try to split by common Bangladeshi address delimiters
+  // e.g. "House 10, Road 5, Gulshan, Dhaka-1212" or "Gulshan, Dhaka North, Dhaka, 1212"
+  const parts = addr.split(',').map(p => p.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    // Assume: [area/road/house], [thana/upazila], [district/city], [postal code]
+    // Join with line breaks for readability in Telegram
+    return parts.join('\n');
+  }
+
+  return addr;
+}
+
 /** `{name, qty}` lines from an order's `items` (array or JSON string). */
 function describeOrderItems(rawItems: unknown, maxLines = 12): string {
   let items: any[] = [];
@@ -18098,6 +18122,10 @@ async function notifyAdminCourierDispatch(args: {
       store.store_district, store.baseCity, store.base_city, store.merchant_pickup_address,
     );
 
+    // Build the full pickup address with area, thana/upazila, district/city,
+    // and postal code if present, rather than just a city name.
+    const formattedPickupAddress = formatPickupAddress(pickupAddress);
+
     // ── Customer ──
     const customerName = pickStr(order.customer_name, order.customerName, fb.customerName, fb.customer_name);
     const customerPhone = pickStr(order.customer_phone, order.customerPhone, fb.customerPhone, fb.customer_phone);
@@ -18141,7 +18169,7 @@ async function notifyAdminCourierDispatch(args: {
       '<b>🏪 Store</b>',
       telegramField('Store name', storeName),
       telegramField('Merchant phone', merchantPhone),
-      telegramField('Pickup address', pickupAddress),
+      telegramField('Pickup address', formattedPickupAddress),
       '',
       '<b>👤 Customer</b>',
       telegramField('Name', customerName),
