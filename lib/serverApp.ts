@@ -16149,9 +16149,19 @@ async function loadStoreForCourierAlert(storeSlug: unknown): Promise<Record<stri
   try {
     const db = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
     if (!db) return null;
-    return (await db.collection('stores').findOne({
-      $or: [{ store_slug: slug }, { storeSlug: slug }, { store_code: slug }],
-    }).catch(() => null)) as Record<string, any> | null;
+    const or = [
+      { store_slug: slug }, { storeSlug: slug }, { store_code: slug },
+      { slug: slug }, { id: slug }, { store_id: slug }, { merchant_id: slug },
+    ];
+    const [storeDoc, merchantDoc] = await Promise.all([
+      db.collection('stores').findOne({ $or: or }).catch(() => null),
+      db.collection('merchants').findOne({ $or: or }).catch(() => null),
+    ]);
+    const merged: Record<string, any> = { ...(merchantDoc || {}) };
+    for (const [key, value] of Object.entries(storeDoc || {})) {
+      if (value !== undefined && value !== null && value !== '') merged[key] = value;
+    }
+    return Object.keys(merged).length > 0 ? merged : null;
   } catch {
     return null;
   }
@@ -18047,12 +18057,16 @@ async function notifyAdminCourierDispatch(args: {
     );
     const merchantPhone = pickStr(
       store.phone, store.store_phone, store.storePhone, store.support_phone, store.supportPhone,
-      store.pickup_phone, store.pickupPhone,
+      store.support_contact, store.supportContact, store.contactPhone, store.contact_phone,
+      store.contact_phone_number, store.whatsappNumber, store.whatsapp_number,
+      store.pickup_phone, store.pickupPhone, store.merchantPhone, store.merchant_phone,
       fb.merchantPhone, fb.storePhone, fb.store_phone, order.storePhone, order.store_phone,
     );
     const pickupAddress = pickStr(
       fb.pickupAddress, fb.pickup_address,
-      store.pickup_address, store.pickupAddress, store.store_address, store.storeAddress, store.address,
+      store.pickup_address, store.pickupAddress, store.pickup_point, store.pickupLocation,
+      store.store_address, store.storeAddress, store.address, store.storeDistrict,
+      store.store_district, store.baseCity, store.base_city, store.merchant_pickup_address,
     );
 
     // ── Customer ──
