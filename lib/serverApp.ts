@@ -23446,6 +23446,146 @@ app.get('/api/admin/orders', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/courier-orders
+ *
+ * Returns dispatched orders with merchant/store identification info so the
+ * Super Admin can see which shop each order came from, the merchant's phone,
+ * pickup address, and dispatch status. Used by the Courier Orders List tab
+ * in the Super Admin portal.
+ */
+app.get('/api/admin/courier-orders', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    let dbConnected = false;
+    if (isMongoConfigured()) {
+      try {
+        await connectToMongoDB();
+        dbConnected = mongoose.connection.readyState === 1;
+      } catch (dbErr: any) {
+        console.warn('[Server] GET /api/admin/courier-orders DB connection warning:', dbErr?.message || dbErr);
+        dbConnected = false;
+      }
+    }
+
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 500;
+
+    // Query for orders that have been dispatched (have tracking ID or courier tracking)
+    const query: any = {
+      $or: [
+        { tracking_id: { $exists: true, $nin: [null, ''] } },
+        { courier_tracking: { $exists: true, $nin: [null, ''] } },
+        { trackingCode: { $exists: true, $nin: [null, ''] } },
+        { courier_status: { $in: ['booked', 'dispatched', 'picked_up', 'in_transit', 'delivered'] } },
+        { 'courier.tracking_id': { $exists: true, $nin: [null, ''] } },
+      ],
+    };
+
+    let orders: any[] = [];
+    let queryFailed = false;
+    if (dbConnected) {
+      try {
+        orders = await (Order as any)
+          .find(query)
+          .sort({ created_at: -1, updated_at: -1, _id: -1 })
+          .limit(limit)
+          .lean();
+      } catch (queryErr: any) {
+        console.warn('[Server] GET /api/admin/courier-orders query warning:', queryErr?.message || queryErr);
+        orders = [];
+        queryFailed = true;
+      }
+    }
+
+    // Merge with cached orders that have tracking info
+    const cachedOrders = Array.from(recentOrdersCache.values()).filter((o: any) => {
+      return o?.tracking_id || o?.courier_tracking || o?.trackingCode || o?.courier_status;
+    });
+    const combinedOrders = [...orders, ...cachedOrders];
+    const dedupedOrders = Array.from(
+      new Map(
+        combinedOrders.map((item: any) => [
+          String(item.id || item.order_number || item.orderNumber || item._id || '').replace(/^#/, '').trim(),
+          item,
+        ])
+      ).values()
+    ).sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime()).slice(0, limit);
+
+    // Enrich each order with merchant/store info (pickup address, phone, etc.)
+    const enrichedOrders = await Promise.all(
+      dedupedOrders.map(async (order: any) => {
+        const storeRef = order.store_slug || order.storeSlug || order.store_code || order.storeCode || '';
+        let merchantPhone = '';
+        let pickupAddress = '';
+        let storeName = order.store_name || order.vendor_name || '';
+        let storeSlug = order.store_slug || order.storeSlug || '';
+        let storeCode = order.store_code || order.storeCode || '';
+
+        if (storeRef && dbConnected && mongoose.connection.readyState === 1 && mongoose.connection.db) {
+          try {
+            const storeDoc = await (mongoose.connection.db.collection('stores') as any).findOne(
+              { $or: [
+                { store_slug: String(storeRef).toLowerCase() },
+                { storeSlug: String(storeRef).toLowerCase() },
+                { store_code: String(storeRef).toUpperCase() },
+              ]},
+              { projection: { 
+                phone: 1, store_phone: 1, support_phone: 1, supportPhone: 1, 
+                contactPhone: 1, contact_phone: 1, whatsappNumber: 1, whatsapp_number: 1, 
+                merchantPhone: 1, merchant_phone: 1,
+                pickup_address: 1, pickupAddress: 1, store_address: 1, storeAddress: 1, 
+                address: 1, storeDistrict: 1, baseCity: 1,
+                store_name: 1, storeName: 1, store_slug: 1, storeSlug: 1, store_code: 1, storeCode: 1
+              }}
+            );
+            if (storeDoc) {
+              const d = storeDoc as any;
+              // Merchant phone
+              const phoneVariants = [d.phone, d.store_phone, d.support_phone, d.supportPhone, d.contactPhone, d.contact_phone, d.whatsappNumber, d.whatsapp_number, d.merchantPhone, d.merchant_phone];
+              for (const v of phoneVariants) {
+                if (v && String(v).trim()) { merchantPhone = String(v).trim(); break; }
+              }
+              // Pickup address
+              const addrVariants = [d.pickup_address, d.pickupAddress, d.store_address, d.storeAddress, d.address, d.storeDistrict, d.baseCity];
+              for (const v of addrVariants) {
+                if (v && String(v).trim()) { pickupAddress = String(v).trim(); break; }
+              }
+              // Store info
+              if (d.store_name || d.storeName) storeName = d.store_name || d.storeName;
+              if (d.store_slug || d.storeSlug) storeSlug = d.store_slug || d.storeSlug;
+              if (d.store_code || d.storeCode) storeCode = d.store_code || d.storeCode;
+            }
+          } catch (e) {
+            console.warn('[CourierOrders] store lookup warning:', e?.message || e);
+          }
+        }
+
+        return {
+          ...order,
+          merchant_phone: merchantPhone,
+          pickup_address: pickupAddress,
+          store_name: storeName,
+          store_slug: storeSlug,
+          store_code: storeCode,
+        };
+      })
+    );
+
+    const degraded = !dbConnected || queryFailed;
+    res.setHeader('X-Orders-Source', degraded ? 'cache' : 'mongodb');
+    res.setHeader('X-Orders-Count', String(enrichedOrders.length));
+    if (degraded) {
+      res.setHeader('X-Orders-Degraded', 'true');
+      res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
+    }
+    return res.status(200).json({ orders: enrichedOrders });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/courier-orders error:', err);
+    return res.status(200).json({ ok: false, error: err?.message || 'Could not load courier orders.', orders: [] });
+  }
+});
+
 /*
  * ── Column type coercion for the Supabase `stores` mirror ───────────────────
  *

@@ -353,6 +353,150 @@ interface AdminPurgeResponse {
 /** The four status filter buttons that drive the request queries. */
 type ApprovalFilter = 'All' | 'Pending' | 'Approved' | 'Rejected';
 
+/**
+ * Courier Orders List component — shows dispatched orders with merchant/store info
+ * so the Super Admin can identify which shop (store) each order came from and
+ * whether it was sent to courier, persisted in MongoDB for admin visibility.
+ */
+function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersError, onRefresh }: {
+  courierOrders: any[];
+  courierOrdersLoading: boolean;
+  courierOrdersError: string | null;
+  onRefresh: () => void;
+}): React.ReactElement {
+  // Helper: format a merchant's pickup address into readable lines.
+  function formatAddress(addr: string): string {
+    if (!addr) return '—';
+    const a = String(addr).trim();
+    if (a.includes('\n')) return a.split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+    const parts = a.split(',').map(p => p.trim()).filter(Boolean);
+    if (parts.length >= 2) return parts.join('\n');
+    return a;
+  }
+
+  if (courierOrdersLoading) {
+    return (
+      <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-6 text-center">
+        <p className="text-slate-400">Loading courier orders…</p>
+      </div>
+    );
+  }
+
+  if (courierOrdersError) {
+    return (
+      <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-6 text-center text-red-400">
+        <p className="text-sm">{courierOrdersError}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h3 className="text-base font-bold text-white flex items-center gap-2">
+            <ShoppingBag className="w-5 h-5 text-indigo-400" />
+            <span>Courier Orders List</span>
+          </h3>
+          <p className="text-xs text-slate-400 mt-1">
+            Dispatched orders with merchant/store identification. Each row shows the
+            store name, slug, merchant phone, pickup address and dispatch status.
+          </p>
+        </div>
+        <div className="text-right">
+          <button
+            onClick={onRefresh}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-2 transition shadow-lg shadow-indigo-600/20 cursor-pointer"
+          >
+            <Loader2 className="w-4 h-4" />
+            <span>Refresh</span>
+          </button>
+          <span className="text-slate-400 ml-2 text-xs">
+            {courierOrders.length} orders
+          </span>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto border border-[#2E3548] rounded-xl bg-[#202533]/40">
+        <table className="w-full text-left text-xs">
+          <thead className="bg-[#202533] text-slate-400 uppercase font-semibold border-b border-[#2E3548]">
+            <tr>
+              <th className="p-3.5 font-black text-[10px]">#</th>
+              <th className="p-3.5 font-black text-[10px]">Customer</th>
+              <th className="p-3.5 font-black text-[10px]">Merchant (Seller)</th>
+              <th className="p-3.5 font-black text-[10px]">Amount BDT</th>
+              <th className="p-3.5 font-black text-[10px]">Payment Method</th>
+              <th className="p-3.5 font-black text-[10px]">Tracking ID</th>
+              <th className="p-3.5 font-black text-[10px]">Ordered</th>
+              <th className="p-3.5 text-right font-black text-[10px]">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#2E3548]">
+            {courierOrders.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="p-12 text-center text-slate-500">
+                  <div className="w-12 h-12 bg-[#202533] rounded-full flex items-center justify-center mx-auto mb-3 text-slate-600">
+                    <ShoppingBag className="w-6 h-6" />
+                  </div>
+                  <p className="font-bold uppercase text-[10px] tracking-widest">No courier orders yet</p>
+                </td>
+              </tr>
+            ) : (
+              courierOrders.map((order) => (
+                <tr key={order.id || order.order_number} className="hover:bg-[#202533]/50 transition">
+                  <td className="p-3.5 font-mono font-bold text-xs text-white">
+                    {order.order_number || '—'}
+                  </td>
+                  <td className="p-3.5 text-white">
+                    {order.customer_name || '—'}
+                  </td>
+                  <td className="p-3.5">
+                    <div className="font-semibold text-slate-200">{order.store_name || order.vendor_name || 'Store'}</div>
+                    {order.store_slug && (
+                      <div className="text-[10px] text-slate-500 truncate max-w-[180px]">{order.store_slug}</div>
+                    )}
+                    {order.store_code && (
+                      <div className="text-[10px] text-slate-400 font-mono">{order.store_code}</div>
+                    )}
+                    {order.merchant_phone && (
+                      <div className="text-[10px] text-slate-400 font-mono">{order.merchant_phone}</div>
+                    )}
+                    {order.pickup_address && (
+                      <div className="text-[10px] text-slate-500 whitespace-pre-wrap">{formatAddress(order.pickup_address)}</div>
+                    )}
+                  </td>
+                  <td className="p-3.5 font-extrabold text-[#00D68F] text-xs">৳{toNumber(order.totalBDT)}</td>
+                  <td className="p-3.5 text-slate-400 text-xs capitalize">
+                    {order.paymentMethod || '—'}
+                  </td>
+                  <td className="p-3.5">
+                    {order.tracking_id || order.courier_tracking || order.trackingCode ? (
+                      <span className="font-mono bg-[#181B26] text-emerald-400 px-2 py-1 rounded border border-[#2E3548] font-bold text-xs">
+                        {order.tracking_id || order.courier_tracking || order.trackingCode}
+                      </span>
+                    ) : (
+                      <span className="text-slate-500 text-xs">—</span>
+                    )}
+                  </td>
+                  <td className="p-3.5 text-slate-400 text-xs font-mono">
+                    {new Date(order.createdAt || order.created_at || 0).toLocaleDateString() || '—'}
+                  </td>
+                  <td className="p-3.5 text-right">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded-lg">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      Dispatched
+                    </span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   currentMerchant,
   onUpdateMerchant,
@@ -392,7 +536,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   onUpdateRolePermissions
 }) => {
   const toast = useToast();
-  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'orders' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics'>('analytics');
+  const [activeSubTab, setActiveSubTab] = useState<'analytics' | 'gateways' | 'approvals' | 'orders' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics' | 'courier_dispatch' | 'courier_orders'>('analytics');
   const [openCategory, setOpenCategory] = useState<string | null>(null);
 
   /*
@@ -405,6 +549,39 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
    */
   const [verificationOrders, setVerificationOrders] = useState<Order[]>([]);
   const [verificationLoading, setVerificationLoading] = useState(false);
+
+  // Courier Orders List state — dispatched orders with merchant/store info
+  const [courierOrders, setCourierOrders] = useState<any[]>([]);
+  const [courierOrdersLoading, setCourierOrdersLoading] = useState(false);
+  const [courierOrdersError, setCourierOrdersError] = useState<string | null>(null);
+
+  // Fetch courier orders with merchant/store info for admin visibility
+  const fetchCourierOrders = useCallback(async () => {
+    setCourierOrdersLoading(true);
+    setCourierOrdersError(null);
+    try {
+      const res = await fetch('/api/admin/courier-orders?limit=1000', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json().catch(() => null);
+      const orders = Array.isArray(data?.orders) ? data.orders : Array.isArray(data) ? data : [];
+      setCourierOrders(orders);
+    } catch (err: any) {
+      setCourierOrdersError(err?.message || 'Could not load courier orders.');
+      console.warn('[SuperAdmin] courier orders fetch warning:', err?.message || err);
+    } finally {
+      setCourierOrdersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSubTab === 'courier_orders') void fetchCourierOrders();
+  }, [activeSubTab, fetchCourierOrders]);
 
   // New modal state for creating merchant
   const [isCreateMerchantModalOpen, setIsCreateMerchantModalOpen] = useState(false);
@@ -2535,7 +2712,7 @@ if (m.storeSlug) {
           // Falls back to the in-memory merchant list before the request resolves.
           const totalMerchantAccounts = merchantCounts.all || allMerchants.length;
 
-          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'orders' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics';
+          type SubTabKey = 'analytics' | 'gateways' | 'approvals' | 'orders' | 'merchants' | 'settings' | 'announcements' | 'plans' | 'themes' | 'support' | 'addons' | 'security' | 'broadcast' | 'team' | 'marketplace' | 'taxonomy' | 'logistics' | 'courier_dispatch' | 'courier_orders';
 
           interface NavSubItem {
             id: SubTabKey;
@@ -2592,6 +2769,8 @@ if (m.storeSlug) {
                 { id: 'orders', label: 'Order Payment Verification', icon: CreditCard },
                 { id: 'taxonomy', label: 'Master Categories', icon: FolderTree },
                 { id: 'logistics', label: 'Logistics / Shipping Settings', icon: Truck },
+                { id: 'courier_dispatch', label: 'Courier Dispatch', icon: Truck, badgeColor: 'bg-emerald-500 text-white font-black' },
+                { id: 'courier_orders', label: 'Courier Orders List', icon: ShoppingBag, badgeColor: 'bg-blue-500 text-white font-black' },
               ]
             },
             {
@@ -2681,7 +2860,70 @@ if (m.storeSlug) {
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${sub.badgeColor || 'bg-amber-500 text-slate-950'}`}>
                                   {sub.badge}
                                 </span>
-                              )}
+)}
+
+        {/* Courier Dispatch Tab */}
+        {activeSubTab === 'courier_dispatch' && (
+          <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Truck className="w-5 h-5 text-emerald-400" />
+                  <span>Courier Dispatch</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Send orders to courier from the platform's central courier account. Orders are dispatched using the merchant's store address as the pickup point.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl space-y-4">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-slate-400 font-bold uppercase tracking-widest">Courier Provider:</span>
+                <select
+                  value={gatewayForm.centralCourier?.provider || 'steadfast'}
+                  onChange={(e) => setGatewayForm({
+                    ...gatewayForm,
+                    centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, provider: e.target.value as any },
+                  })}
+                  className="w-full sm:w-48 bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
+                >
+                  <option value="steadfast">Steadfast Courier</option>
+                  <option value="pathao">Pathao Courier</option>
+                  <option value="redx">RedX Logistics</option>
+                  <option value="paperfly">Paperfly</option>
+                  <option value="ecourier">eCourier</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-slate-400 font-bold uppercase tracking-widest">Pickup Address Source:</span>
+                <select
+                  value="merchant_store"
+                  disabled
+                  className="w-full sm:w-64 bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-slate-500 outline-none"
+                >
+                  <option value="merchant_store">Merchant's Store Address (from Settings)</option>
+                </select>
+              </div>
+
+              <div className="text-xs text-slate-500 italic">
+                Courier dispatch uses the platform's central API keys configured in <span className="text-slate-300">System & Gateways → Live Payment Gateways → Central Courier API</span>.
+                Each order's pickup address is taken from the merchant's store address (Settings → General → Pickup / Store Address).
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Courier Orders List Tab */}
+        {activeSubTab === 'courier_orders' && (
+          <CourierOrdersList
+            courierOrders={courierOrders}
+            courierOrdersLoading={courierOrdersLoading}
+            courierOrdersError={courierOrdersError}
+            onRefresh={fetchCourierOrders}
+          />
+        )}
                             </button>
                           );
                         })}
