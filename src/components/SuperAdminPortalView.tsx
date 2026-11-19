@@ -5620,7 +5620,7 @@ if (m.storeSlug) {
                       value={gatewayForm.centralCourier?.telegramBotToken || ''}
                       onChange={(e) => setGatewayForm({
                         ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, telegramBotToken: e.target.value },
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, telegramBotToken: e.target.value.trim() },
                       })}
                       placeholder="123456:ABC-DEF... (from @BotFather)"
                       className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"
@@ -5634,7 +5634,7 @@ if (m.storeSlug) {
                       value={gatewayForm.centralCourier?.telegramChatId || ''}
                       onChange={(e) => setGatewayForm({
                         ...gatewayForm,
-                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, telegramChatId: e.target.value },
+                        centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, telegramChatId: e.target.value.trim() },
                       })}
                       placeholder="e.g. 6841239511 (your personal chat id)"
                       className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white font-mono outline-none"

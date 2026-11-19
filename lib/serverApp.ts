@@ -2958,14 +2958,16 @@ app.post('/api/admin/platform-config', async (req, res) => {
      * any unrelated settings save — the alert would then silently stop. Keep the
      * stored secret whenever the incoming value is a mask.
      */
-    const isMask = (v: unknown) => /^•+configured•+$/i.test(String(v ?? '').trim()) || String(v ?? '').trim() === '••';
     try {
       const existing = await readPlatformConfig();
       const existingCourier = (existing?.data as any)?.adminPaymentConfig?.centralCourier || {};
       const incomingCourier = (payload as any)?.adminPaymentConfig?.centralCourier;
       if (incomingCourier && typeof incomingCourier === 'object') {
         for (const field of ['telegramBotToken', 'telegramChatId', 'apiKey', 'apiSecret']) {
-          if (isMask(incomingCourier[field]) && existingCourier[field] !== undefined) {
+          const incomingTrimmed = String(incomingCourier[field] ?? '').trim();
+          const isIncomingMask = isMask(incomingCourier[field]);
+          const isIncomingEmpty = incomingTrimmed === '';
+          if ((isIncomingMask || isIncomingEmpty) && existingCourier[field] !== undefined) {
             incomingCourier[field] = existingCourier[field];
           }
         }
@@ -16956,7 +16958,11 @@ async function resolveCentralCourierConfig(): Promise<Record<string, any>> {
   const provider = String(central.provider || '').toLowerCase().replace(/[^a-z]/g, '');
   const pick = (v: any, fb: string) => {
     const s = String(v ?? '').trim();
-    return s && s !== '••' ? s : fb;
+    // Reject the redaction mask ('••' or '••configured••') so a masked value
+    // never falls through to the fallback (which would put the mask in the
+    // resolved credential).
+    if (!s || isMask(s)) return fb;
+    return s;
   };
   const env = (ADMIN_COURIER_DEFAULTS as Record<string, any>);
   const out: Record<string, any> = {
@@ -17045,6 +17051,12 @@ function normalizeTelegramToken(raw: unknown): string {
   if (afterBot) token = afterBot[1];
   token = token.replace(/\/sendMessage$/i, '').replace(/\/+$/, '');
   return token.trim();
+}
+
+/** Check if a value is the Telegram alert config redaction mask ('••' or '••configured••'). */
+function isMask(v: unknown): boolean {
+  const s = String(v ?? '').trim();
+  return s === '••' || /^•+configured•+$/i.test(s);
 }
 
 /** Escape the three characters Telegram's HTML parse mode treats as markup. */
@@ -17221,16 +17233,21 @@ async function resolveTelegramAlertConfig(): Promise<{
   try {
     const saved = await readPlatformConfig();
     const central = (saved?.data as any)?.adminPaymentConfig?.centralCourier || {};
-    savedToken = normalizeTelegramToken(central.telegramBotToken);
-    savedChat = normalizeTelegramChatId(central.telegramChatId);
+    // Defensive: a masked value ('••configured••') must never be treated as a
+    // credential (it would be sent to Telegram and fail). Treat it as empty.
+    savedToken = isMask(central.telegramBotToken) ? '' : normalizeTelegramToken(central.telegramBotToken);
+    savedChat = isMask(central.telegramChatId) ? '' : normalizeTelegramChatId(central.telegramChatId);
   } catch (err: any) {
     console.warn('[Telegram] platform config read warning:', err?.message || err);
   }
 
   const botToken = savedToken || envToken;
   const chatId = savedToken ? (savedChat || envChat) : envChat;
+
+  const tokenFromDashboard = Boolean(savedToken);
+  const chatFromDashboard = Boolean(savedChat);
   const source: 'dashboard' | 'env' | 'none' = botToken && chatId
-    ? (savedToken ? 'dashboard' : 'env')
+    ? (tokenFromDashboard && chatFromDashboard ? 'dashboard' : 'env')
     : 'none';
 
   console.log('[Telegram] alert config resolved:', {
