@@ -140,6 +140,38 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const [currency, setCurrency] = useState(merchant?.currency || 'BDT');
   const [language, setLanguage] = useState(merchant?.language || 'en-US');
+
+  /*
+   * The parent `merchant` object is often painted first from a cached/local
+   * profile (or the `initialMerchant` placeholder, e.g. "My Store") and only
+   * later replaced by the real registration/onboarding record fetched from
+   * MongoDB/Supabase. `useState(merchant?.x)` reads that value ONLY on the first
+   * render, so without this effect the General / Account settings inputs would
+   * keep showing the placeholder (or stay blank) even after the real store data
+   * arrived. Re-hydrating here keeps the form in step with the live profile.
+   */
+  useEffect(() => {
+    if (!merchant) return;
+    setStoreName(merchant?.storeName || '');
+    setStoreSlug(merchant?.storeSlug || '');
+    setSupportEmail(merchant?.supportEmail || '');
+    setSupportPhone(merchant?.supportPhone || '');
+    setLogoUrl(merchant?.logoUrl || '');
+    setStoreTagline(merchant?.storeTagline || '');
+    setStoreDescription(merchant?.storeDescription || '');
+    setWhatsappNumber(normalizeWhatsapp(merchant?.whatsappNumber || ''));
+    setFacebookUrl(merchant?.facebookUrl || '');
+    setInstagramUrl(merchant?.instagramUrl || '');
+    setTiktokUrl(merchant?.tiktokUrl || '');
+    setMessengerHandle((merchant as any)?.messengerHandle || (merchant as any)?.messenger_username || '');
+    setTelegramHandle((merchant as any)?.telegramHandle || (merchant as any)?.telegram_username || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    merchant?.storeName, merchant?.storeSlug, merchant?.supportEmail, merchant?.supportPhone,
+    merchant?.logoUrl, merchant?.storeTagline, merchant?.storeDescription, merchant?.whatsappNumber,
+    merchant?.facebookUrl, merchant?.instagramUrl, merchant?.tiktokUrl,
+    (merchant as any)?.messengerHandle, (merchant as any)?.telegramHandle,
+  ]);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const { info: toastInfo } = useToast();
   // Tracks whether the single-floating-button toast already fired for the
