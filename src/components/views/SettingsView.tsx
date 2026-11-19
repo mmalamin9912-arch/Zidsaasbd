@@ -114,6 +114,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [logoUrl, setLogoUrl] = useState(merchant?.logoUrl || '');
   const [storeTagline, setStoreTagline] = useState(merchant?.storeTagline || '');
   const [storeDescription, setStoreDescription] = useState(merchant?.storeDescription || '');
+  // Pickup address: stored under multiple spellings across the codebase.
+  const [pickupAddress, setPickupAddress] = useState(
+    (merchant as any)?.pickupAddress || (merchant as any)?.pickup_address ||
+    (merchant as any)?.storeAddress || (merchant as any)?.store_address ||
+    (merchant as any)?.address || ''
+  );
 
   /** Normalise a WhatsApp input to clean international digits (e.g. `8801712345678`)
    *  so `wa.me/<number>` links resolve directly on the storefront. Local BD
@@ -159,6 +165,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setLogoUrl(merchant?.logoUrl || '');
     setStoreTagline(merchant?.storeTagline || '');
     setStoreDescription(merchant?.storeDescription || '');
+    setPickupAddress(
+      (merchant as any)?.pickupAddress || (merchant as any)?.pickup_address ||
+      (merchant as any)?.storeAddress || (merchant as any)?.store_address ||
+      (merchant as any)?.address || ''
+    );
     setWhatsappNumber(normalizeWhatsapp(merchant?.whatsappNumber || ''));
     setFacebookUrl(merchant?.facebookUrl || '');
     setInstagramUrl(merchant?.instagramUrl || '');
@@ -171,6 +182,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     merchant?.logoUrl, merchant?.storeTagline, merchant?.storeDescription, merchant?.whatsappNumber,
     merchant?.facebookUrl, merchant?.instagramUrl, merchant?.tiktokUrl,
     (merchant as any)?.messengerHandle, (merchant as any)?.telegramHandle,
+    (merchant as any)?.pickupAddress, (merchant as any)?.pickup_address,
+    (merchant as any)?.storeAddress, (merchant as any)?.store_address,
+    (merchant as any)?.address,
   ]);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const { info: toastInfo } = useToast();
@@ -1656,6 +1670,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       currency: currency as any,
       language: language as any,
       themeConfig: updatedThemeConfig,
+      // Pickup address: write under all canonical name variants so the DB pick-up
+      // saves regardless of which key the backend normalises.
+      pickupAddress,
     });
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
@@ -2192,6 +2209,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   onChange={(e) => setStoreTagline(e.target.value)}
                   placeholder="e.g. Best Online Bookshop in BD"
                   className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-bold mb-1.5">Pickup / Store Address (Pickup location for courier)
+                </label>
+                <textarea
+                  value={pickupAddress}
+                  onChange={(e) => setPickupAddress(e.target.value)}
+                  placeholder="Enter the pickup address for courier services..."
+                  rows={2}
+                  className="w-full bg-[#101420] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none resize-none"
                 />
               </div>
 

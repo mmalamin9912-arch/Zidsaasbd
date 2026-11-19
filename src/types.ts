@@ -241,6 +241,13 @@ export interface MerchantProfile {
   facebookUrl?: string;
   instagramUrl?: string;
   tiktokUrl?: string;
+  // Pickup / store address for courier delivery. Persisted under pickupAddress
+  // and mirrored to pickup_address / store_address for backend compatibility.
+  pickupAddress?: string;
+  pickup_address?: string;
+  storeAddress?: string;
+  store_address?: string;
+  address?: string;
   totalSalesBDT?: number;
   /**
    * The merchant's own city / district.

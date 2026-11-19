@@ -7655,100 +7655,110 @@ app.post('/api/stores/update', async (req, res) => {
       }
     }
 
-    // 2. Mirror the patch to Supabase (redundancy). The `stores` table only has
-    //    snake_case columns, so unknown camelCase keys are dropped to avoid a
-    //    PostgREST "unknown column" rejection. This is what makes a merchant's
-    //    persisted theme choice (activeThemeId/theme_config) readable from the
-    //    Supabase fallback store, not just MongoDB.
-    try {
-      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-      if (isConfigured && (storeSlug || email || storeId)) {
-        const allowed = [
-          'id', 'store_code', 'store_slug', 'store_name', 'owner_name', 'email', 'phone',
-          'password', 'logo_url', 'subscription_plan', 'subscription_expiry', 'plan_started_at',
-          'expires_at', 'duration_days', 'trial_ends_at', 'trial_days_remaining',
-          'is_locked', 'status', 'active_theme_id', 'theme_config', 'created_at', 'updated_at',
-          // Delivery zone columns. The merchant's base city is what the
-          // checkout's city → zone validation is derived from, and the fee
-          // columns carry the merchant's real numbers so no reader ever has to
-          // invent a fallback.
-          'base_city',
-          'inside_dhaka_fee',
-          'sub_dhaka_fee',
-          'outside_dhaka_fee',
-          'advance_amount',
-          'advance_delivery_charge_enabled',
-          'is_cod_enabled',
-        ];
-        const sbPayload: Record<string, any> = {};
-        for (const key of allowed) {
-          if (cleanMerchant[key] !== undefined) sbPayload[key] = cleanMerchant[key];
-        }
-        // Carry the merchant's base city under its snake_case column name.
-        const baseCity =
-          cleanMerchant.baseCity ?? cleanMerchant.base_city ?? cleanMerchant.storeCity ?? '';
-        if (baseCity !== '' && sbPayload.base_city === undefined) {
-          sbPayload.base_city = String(baseCity).trim();
-        }
-        // Carry the theme selection under its snake_case column names.
-        if (cleanMerchant.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = cleanMerchant.activeThemeId;
-        if (cleanMerchant.themeConfig && sbPayload.theme_config === undefined) sbPayload.theme_config = cleanMerchant.themeConfig;
-        if (storeSlug && sbPayload.store_slug === undefined) sbPayload.store_slug = storeSlug;
+   // 2. Mirror the patch to Supabase (redundancy). The `stores` table only has
+   //    snake_case columns, so unknown camelCase keys are dropped to avoid a
+   //    PostgREST "unknown column" rejection. This is what makes a merchant's
+   //    persisted theme choice (activeThemeId/theme_config) readable from the
+   //    Supabase fallback store, not just MongoDB.
+   try {
+     const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
+     if (isConfigured && (storeSlug || email || storeId)) {
+       const allowed = [
+         'id', 'store_code', 'store_slug', 'store_name', 'owner_name', 'email', 'phone',
+         // Merchant contact fields (support_contact, support_phone, contactPhone, contact_phone_number, whatsappNumber, whatsapp_number) — mapped to 'phone' for compatibility
+         'support_contact', 'supportContact', 'support_phone', 'supportPhone',
+         'contactPhone', 'contact_phone', 'contact_phone_number',
+         'whatsappNumber', 'whatsapp_number',
+         'password', 'logo_url', 'subscription_plan', 'subscription_expiry', 'plan_started_at',
+         'expires_at', 'duration_days', 'trial_ends_at', 'trial_days_remaining',
+         'is_locked', 'status', 'active_theme_id', 'theme_config', 'created_at', 'updated_at',
+         // Delivery zone columns. The merchant's base city is what the
+         // checkout's city → zone validation is derived from, and the fee
+         // columns carry the merchant's real numbers so no reader ever has to
+         // invent a fallback.
+         'base_city',
+         'inside_dhaka_fee',
+         'sub_dhaka_fee',
+         'outside_dhaka_fee',
+         'advance_amount',
+         'advance_delivery_charge_enabled',
+         'is_cod_enabled',
+         // Pickup address and additional contact fields for comprehensive store profile
+         'pickup_address', 'pickupAddress', 'store_address', 'storeAddress',
+         'address', 'shop_address', 'shopAddress', 'business_address', 'businessAddress',
+         'storeDistrict', 'store_district', 'baseDistrict', 'pickuptime', 'shopName',
+         'merchant_phone', 'merchantPhone', 'owner_phone', 'ownerPhone', 'ownerMobile', 'pickup_phone', 'pickupPhone',
+         'whatsapp', 'whatsapp_number_formatted',
+       ];
+       const sbPayload: Record<string, any> = {};
+       for (const key of allowed) {
+         if (cleanMerchant[key] !== undefined) sbPayload[key] = cleanMerchant[key];
+       }
+       // Carry the merchant's base city under its snake_case column name.
+       const baseCity =
+         cleanMerchant.baseCity ?? cleanMerchant.base_city ?? cleanMerchant.storeCity ?? '';
+       if (baseCity !== '' && sbPayload.base_city === undefined) {
+         sbPayload.base_city = String(baseCity).trim();
+       }
+       // Carry the theme selection under its snake_case column names.
+       if (cleanMerchant.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = cleanMerchant.activeThemeId;
+       if (cleanMerchant.themeConfig && sbPayload.theme_config === undefined) sbPayload.theme_config = cleanMerchant.themeConfig;
+       if (storeSlug && sbPayload.store_slug === undefined) sbPayload.store_slug = storeSlug;
 
-        /*
-         * MATCH THE DECLARED COLUMN TYPES.
-         *
-         * A merchant UI can post `is_cod_enabled: 'true'`, `inside_dhaka_fee:
-         * '৳80'` or `duration_days: '30 days'`. PostgREST rejects those for a
-         * boolean/numeric/integer column, and `postgrestWrite` then DROPS the
-         * column and retries — so the value silently never lands and the log
-         * fills with "Dropped unknown column". Coercing here (see migration
-         * 0017 for the schema) keeps every field in the payload.
-         */
-        const typedPayload = coerceStoreSupabasePayload(sbPayload);
+       /*
+        * MATCH THE DECLARED COLUMN TYPES.
+        *
+        * A merchant UI can post `is_cod_enabled: 'true'`, `inside_dhaka_fee:
+        * '৳80'` or `duration_days: '30 days'`. PostgREST rejects those for a
+        * boolean/numeric/integer column, and `postgrestWrite` then DROPS the
+        * column and retries — so the value silently never lands and the log
+        * fills with "Dropped unknown column". Coercing here (see migration
+        * 0017 for the schema) keeps every field in the payload.
+        */
+       const typedPayload = coerceStoreSupabasePayload(sbPayload);
 
-        // A theme_config can itself embed gallery images; strip those too so the
-        // Supabase mirror does not 400 on size.
-        const sbSanitized = sanitizeImagePayload(typedPayload);
-        const cleanSbPayload = sbSanitized.value as Record<string, any>;
+       // A theme_config can itself embed gallery images; strip those too so the
+       // Supabase mirror does not 400 on size.
+       const sbSanitized = sanitizeImagePayload(typedPayload);
+       const cleanSbPayload = sbSanitized.value as Record<string, any>;
 
-        if (Object.keys(cleanSbPayload).length > 0) {
-          // Stamp the SAME updated_at the Mongo update carries so both mirrors
-          // agree; postgrestWrite guarantees valid JSON + a castable ISO value
-          // and drops/retries any field the deployed table does not have
-          // (e.g. `password` on schemas without that column) instead of
-          // rejecting the entire profile save with a 400. On a unique-identity
-          // collision it PATCHes the existing row instead of failing.
-          if (cleanSbPayload.updated_at === undefined) {
-            cleanSbPayload.updated_at = new Date().toISOString();
-          }
-          const identityPatchPath = storeSlug
-            ? `/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeSlug)}`
-            : email
-              ? `/rest/v1/stores?email=eq.${encodeURIComponent(email)}`
-              : storeId
-                ? `/rest/v1/stores?id=eq.${encodeURIComponent(storeId)}`
-                : undefined;
-          const sbResult = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
-            method: 'POST',
-            headers: { Prefer: 'resolution=merge-duplicates' },
-            body: cleanSbPayload,
-            conflictPatchPath: identityPatchPath,
-          });
-          if (!sbResult.ok) {
-            // Read the body: a bare status code hid the real cause (usually an
-            // unknown column or a size rejection) behind "warning: 400".
-            console.warn(
-              '[Server] /api/stores/update Supabase mirror warning:',
-              sbResult.status,
-              sbResult.detail.slice(0, 300)
-            );
-          }
-        }
-      }
-    } catch (sbErr: any) {
-      console.warn('[Server] /api/stores/update Supabase warning:', sbErr?.message || sbErr);
-    }
+       if (Object.keys(cleanSbPayload).length > 0) {
+         // Stamp the SAME updated_at the Mongo update carries so both mirrors
+         // agree; postgrestWrite guarantees valid JSON + a castable ISO value
+         // and drops/retries any field the deployed table does not have
+         // (e.g. `password` on schemas without that column) instead of
+         // rejecting the entire profile save with a 400. On a unique-identity
+         // collision it PATCHes the existing row instead of failing.
+         if (cleanSbPayload.updated_at === undefined) {
+           cleanSbPayload.updated_at = new Date().toISOString();
+         }
+         const identityPatchPath = storeSlug
+           ? `/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeSlug)}`
+           : email
+             ? `/rest/v1/stores?email=eq.${encodeURIComponent(email)}`
+             : storeId
+               ? `/rest/v1/stores?id=eq.${encodeURIComponent(storeId)}`
+               : undefined;
+         const sbResult = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
+           method: 'POST',
+           headers: { Prefer: 'resolution=merge-duplicates' },
+           body: cleanSbPayload,
+           conflictPatchPath: identityPatchPath,
+         });
+         if (!sbResult.ok) {
+           // Read the body: a bare status code hid the real cause (usually an
+           // unknown column or a size rejection) behind "warning: 400".
+           console.warn(
+             '[Server] /api/stores/update Supabase mirror warning:',
+             sbResult.status,
+             sbResult.detail.slice(0, 300)
+           );
+         }
+       }
+     }
+   } catch (sbErr: any) {
+     console.warn('[Server] /api/stores/update Supabase warning:', sbErr?.message || sbErr);
+   }
 
     if (storeSlug) {
       merchantStore.set(storeSlug, cleanMerchant);
