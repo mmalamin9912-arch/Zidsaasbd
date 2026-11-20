@@ -15320,7 +15320,23 @@ async function persistCourierBooking(
       { name: provider.name, key: provider.key },
       trackingCode,
       attempt.data,
-      storeRef
+      /*
+       * Store identity for the Admin "Courier Orders List".
+       *
+       * The dispatcher already resolved the store (it needed it for the API
+       * keys), so merging its record here means the order document itself
+       * carries store_slug / store_code / store name / merchant phone / pickup
+       * address — exactly the columns the Admin list renders. Without this the
+       * list had a dispatched order but no idea which shop it belonged to.
+       */
+      {
+        ...storeRef,
+        store_slug: storeRef.store_slug || storeRef.storeSlug || order.store_slug || order.storeSlug || '',
+        store_code: storeRef.store_code || storeRef.storeCode || order.store_code || order.storeCode || '',
+        store_name: storeRef.store_name || storeRef.storeName || order.store_name || order.vendor_name || order.vendorName || '',
+        merchant_phone: storeRef.merchant_phone || storeRef.merchantPhone || order.merchant_phone || order.merchantPhone || '',
+        pickup_address: storeRef.pickup_address || storeRef.pickupAddress || order.pickup_address || '',
+      }
     );
     persisted = Boolean(result?.ok);
     orderUpdate = result?.order ? normalizeOrderRow(result.order) : null;
@@ -23471,13 +23487,30 @@ app.get('/api/admin/courier-orders', async (req, res) => {
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 500;
 
-    // Query for orders that have been dispatched (have tracking ID or courier tracking)
+    /*
+     * "Dispatched" is defined by ANY of the tracking/status spellings the various
+     * writers use. `recordCourierDispatch` now stamps all of them, but orders
+     * booked by an older build only carry `tracking_code` / `courier_booked` /
+     * `consignment_id`, so those are matched too — otherwise a genuinely
+     * dispatched order still reads as "not dispatched" and the tab stays empty.
+     */
     const query: any = {
       $or: [
         { tracking_id: { $exists: true, $nin: [null, ''] } },
         { courier_tracking: { $exists: true, $nin: [null, ''] } },
+        { tracking_code: { $exists: true, $nin: [null, ''] } },
         { trackingCode: { $exists: true, $nin: [null, ''] } },
-        { courier_status: { $in: ['booked', 'dispatched', 'picked_up', 'in_transit', 'delivered'] } },
+        { consignment_id: { $exists: true, $nin: [null, ''] } },
+        { courier_tracking_id: { $exists: true, $nin: [null, ''] } },
+        { courier_booked: true },
+        {
+          courier_status: {
+            $in: [
+              'booked', 'dispatched', 'picked_up', 'in_transit', 'delivered',
+              'pending', 'sent_to_courier', 'pickup_confirmed', 'cancelled',
+            ],
+          },
+        },
         { 'courier.tracking_id': { $exists: true, $nin: [null, ''] } },
       ],
     };
@@ -23516,9 +23549,11 @@ app.get('/api/admin/courier-orders', async (req, res) => {
     const enrichedOrders = await Promise.all(
       dedupedOrders.map(async (order: any) => {
         const storeRef = order.store_slug || order.storeSlug || order.store_code || order.storeCode || '';
-        let merchantPhone = '';
-        let pickupAddress = '';
-        let storeName = order.store_name || order.vendor_name || '';
+        // Values stamped on the order at booking time win for the identity
+        // columns; the store record fills in whatever it did not carry.
+        let merchantPhone = order.merchant_phone || order.merchantPhone || '';
+        let pickupAddress = order.pickup_address || order.pickupAddress || '';
+        let storeName = order.store_name || order.storeName || order.vendor_name || '';
         let storeSlug = order.store_slug || order.storeSlug || '';
         let storeCode = order.store_code || order.storeCode || '';
 
@@ -23688,6 +23723,97 @@ app.get('/api/admin/courier-orders/:orderId/labels', async (req, res) => {
   } catch (err: any) {
     console.error('[Server] GET /api/admin/courier-orders/:orderId/labels error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Could not load labels.', labels: [] });
+  }
+});
+
+/**
+ * PATCH /api/admin/orders/:orderId/status
+ *
+ * The Admin "Courier Orders List" courier/pickup status control (and the
+ * merchant dashboard's dropdown) both POST here, but the route never existed —
+ * Express answered 404 and the UI reported "Failed to update order status".
+ *
+ * Two different things travel through the same control:
+ *
+ *   • a COURIER status (pending / sent_to_courier / pickup_confirmed / in_transit
+ *     / delivered / cancelled) — stored on `courier_status` so the Admin list
+ *     filter and badge stay truthful, and mirrored onto the ORDER status so the
+ *     merchant and the customer see the same progression;
+ *   • a plain ORDER status (Processing / In delivery / Completed / Cancelled …)
+ *     — written straight through.
+ *
+ * The order is located by id, order_number or the `#ZID-…` display form, and
+ * both snake_case and camelCase spellings are written because the dashboard,
+ * the CSV export and the tracking page each read a different one.
+ */
+app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const rawStatus = String(body.status || body.courier_status || body.courierStatus || '').trim();
+    if (!rawStatus) {
+      return res.status(400).json({ ok: false, error: 'A status value is required.' });
+    }
+
+    const orderId = String(req.params.orderId || '').trim();
+    if (!orderId) {
+      return res.status(400).json({ ok: false, error: 'An order id is required.' });
+    }
+
+    /*
+     * Courier statuses and order statuses share this endpoint, so classify the
+     * value first: a courier status maps onto a real order status, an order
+     * status is used as-is.
+     */
+    const courierKey = rawStatus
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    const COURIER_STATUSES = ['pending', 'sent_to_courier', 'pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
+    const COURIER_TO_ORDER: Record<string, string> = {
+      pending: 'Processing',
+      sent_to_courier: 'In delivery',
+      pickup_confirmed: 'In delivery',
+      in_transit: 'In delivery',
+      delivered: 'Completed',
+      cancelled: 'Cancelled',
+    };
+    const isCourierStatus = COURIER_STATUSES.includes(courierKey);
+
+    const update: Record<string, any> = { updated_at: new Date() };
+    if (isCourierStatus) {
+      update.courier_status = courierKey;
+      update.courierStatus = courierKey;
+      update.courier_status_updated_at = new Date();
+      update.status = COURIER_TO_ORDER[courierKey];
+    } else {
+      update.status = rawStatus;
+      // Keep the order's own courier_status honest when Admin picks an order status.
+      if (courierKey === 'completed' || courierKey === 'delivered') {
+        update.courier_status = 'delivered';
+      }
+    }
+    if (body.note) update.status_note = String(body.note).slice(0, 500);
+
+    const result = await updateOrderFields(orderId, update, {
+      store_slug: body.store_slug || body.storeSlug || '',
+      store_id: body.store_id || '',
+      merchant_id: body.merchant_id || '',
+    });
+
+    if (!result.ok) {
+      return res.status(404).json({ ok: false, error: result.error || 'Order not found.', ...update });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      status: result.order?.status || update.status || rawStatus,
+      courier_status: result.order?.courier_status || update.courier_status || null,
+      order: result.order || null,
+    });
+  } catch (err: any) {
+    console.error('[Server] PATCH /api/admin/orders/:orderId/status error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not update order status.' });
   }
 });
 

@@ -446,6 +446,30 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     }
   }, [fetchingLabels, storeSlug]);
 
+  /**
+   * Load the labels the Super Admin attached to each DISPATCHED order.
+   *
+   * The state and the fetch already existed here but were never called, so an
+   * Admin-uploaded courier label never reached the merchant's dashboard. Each
+   * order is fetched at most once per mount (tracked in a ref, not in state, so
+   * `fetchCourierLabels` changing identity cannot re-trigger the effect in a
+   * loop).
+   */
+  const labelsRequestedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const dispatched = (orders || []).filter(
+      (o: any) => o && (o.trackingCode || o.tracking_code || o.tracking_id || o.trackingId),
+    );
+    if (dispatched.length === 0) return;
+    const storeRef = String(storeSlug || merchantId || '').trim();
+    for (const o of dispatched) {
+      const id = String((o as any).id || (o as any).orderNumber || '').trim();
+      if (!id || labelsRequestedRef.current.has(id)) continue;
+      labelsRequestedRef.current.add(id);
+      void fetchCourierLabels(id, storeRef);
+    }
+  }, [orders, storeSlug, merchantId, fetchCourierLabels]);
+
   // Live polling effect for orders sync from MongoDB.
   // Uses the flexible GET /api/orders endpoint and sends BOTH merchant_id and
   // store_slug, so an order placed by the storefront (which may only carry the
@@ -3215,6 +3239,44 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                   <span>{isBookingCourier[ord.id] ? 'Sending...' : 'Send to Courier'}</span>
                                 </button>
                               )}
+                              {/*
+                                COURIER LABEL / SCREENSHOT from the Admin panel.
+
+                                Super Admin can attach a label or a screenshot to a
+                                dispatched order; those files live on the order document
+                                and are served by /api/orders/:id/courier-labels. They are
+                                fetched once per row and shown here as a download link, so
+                                the merchant never has to ask support for the slip.
+                              */}
+                              {(() => {
+                                const labels = courierLabels[ord.id] || [];
+                                if (labels.length === 0) return null;
+                                return (
+                                  <div className="mt-1.5 space-y-1">
+                                    {labels.map((label: any) => {
+                                      const href = `data:${label.mimeType || 'application/octet-stream'};base64,${label.file || ''}`;
+                                      return (
+                                        <a
+                                          key={label.id}
+                                          href={href}
+                                          download={label.filename || 'courier-label'}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="flex items-center gap-1 text-[10px] font-bold text-indigo-300 hover:text-indigo-200 bg-indigo-500/10 border border-indigo-500/30 px-1.5 py-0.5 rounded max-w-[170px]"
+                                          title={`${label.filename}${label.note ? ` — ${label.note}` : ''}`}
+                                        >
+                                          {label.mimeType === 'application/pdf' ? (
+                                            <FileText className="w-3 h-3 flex-shrink-0" />
+                                          ) : (
+                                            <Download className="w-3 h-3 flex-shrink-0" />
+                                          )}
+                                          <span className="truncate">{label.note || label.filename || 'Courier label'}</span>
+                                        </a>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
                             </td>
 
                             {/* Payment Status Inline Interactive Dropdown */}

@@ -1,0 +1,70 @@
+﻿feat(courier): record dispatches in the Admin Courier Orders List + label/status flow
+
+WHY THE LIST WAS EMPTY
+  "Send to Courier" DID book the parcel, but three links in the chain were broken
+  so the Admin tab never showed it:
+
+  1. recordCourierDispatch() (lib/orderStatus.ts) wrote only
+     `tracking_code` / `trackingCode` / `consignment_id`, while
+     GET /api/admin/courier-orders selects on `tracking_id`,
+     `courier_tracking`, `trackingCode`, `courier.tracking_id` or a
+     `courier_status`. A genuinely dispatched order therefore matched NOTHING and
+     the list stayed empty for every order, #ZID-595825732 included.
+
+  2. The booking never stamped merchant/store identity on the order, and the list
+     only enriched from the `stores` collection while a DB handle happened to be
+     open — so store name / slug / code / phone / pickup address came back blank.
+
+  3. The Admin courier/pickup status control called
+     `PATCH /api/admin/orders/:id/status`, which DID NOT EXIST. Express answered
+     404 and the UI reported "Failed to update order status".
+
+  4. Merchant side: the dashboard fetched courier labels into state and then
+     never rendered them, so an Admin-attached label never reached the merchant.
+
+FIX
+  lib/orderStatus.ts — recordCourierDispatch now writes EVERY spelling the Admin
+  list, merchant dashboard and CSV export read:
+    tracking_id, courier_tracking, tracking_code, trackingCode,
+    courier_tracking_id, consignment_id, plus courier_status='dispatched',
+    courier_status_updated_at and courier_booked. It also stamps store_slug,
+    store_code, store_name, store_id, merchant_phone and pickup_address when the
+    caller supplies them.
+
+  lib/serverApp.ts
+    * persistCourierBooking passes the store identity through (slug/code/name/
+      phone/pickup address), so the order carries WHICH shop dispatched it.
+    * GET /api/admin/courier-orders matches every dispatched spelling
+      (tracking_code, consignment_id, courier_tracking_id, courier_booked) and
+      the full courier_status set, so older bookings appear too; the enrichment
+      now prefers values already on the order and only falls back to the store.
+    * NEW PATCH /api/admin/orders/:orderId/status — accepts either a courier
+      status (pending/sent_to_courier/pickup_confirmed/in_transit/delivered/
+      cancelled) or an order status. A courier status is stored on
+      `courier_status` AND mirrored onto the order status so the merchant and the
+      customer tracking page move in step. Located by id / order_number / #form.
+
+  SuperAdminPortalView.tsx — the static "Dispatched" badge became a real
+  6-option courier/pickup status dropdown (colour-coded per status) that calls
+  the new route, toasts the result and refreshes the list. The label upload /
+  delete / fetch flow that already existed now sits on a row that can actually
+  appear.
+
+  OrdersView.tsx (merchant) — attached courier labels are now loaded once per
+  dispatched order (ref-guarded, no fetch loop) and rendered in the Shipping
+  Courier cell as a download link, so an Admin-uploaded label or screenshot
+  reaches the owning merchant's dashboard.
+
+VERIFIED
+  * Real recordCourierDispatch(), Mongo layer stubbed: writes tracking_id +
+    courier_tracking + tracking_code, courier_status='dispatched',
+    courier_booked, store_slug/store_code/store_name/merchant_phone/
+    pickup_address, and status='In delivery' — all assertions pass.
+  * updateOrderFields on the same row applies courier_status='in_transit'.
+  * Headless Chromium, /admin -> Marketplace -> Courier Orders List with one
+    dispatched order: the row renders store name, slug, code, merchant phone,
+    pickup address, amount, payment method and tracking ID; the status control
+    has 6 options and selecting "In Transit" PATCHes
+    /api/admin/orders/ZID-595825732/status with {status:'in_transit'.
+  * 0 page errors, 0 console errors, no horizontal overflow.
+  * npm run lint and npm run build both pass.

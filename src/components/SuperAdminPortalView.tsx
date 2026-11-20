@@ -359,6 +359,26 @@ type ApprovalFilter = 'All' | 'Pending' | 'Approved' | 'Rejected';
  * whether it was sent to courier, persisted in MongoDB for admin visibility.
  * Also allows uploading courier labels (images/PDFs) for each order.
  */
+
+/** Courier / pickup statuses the Admin can set on a dispatched order. */
+const COURIER_STATUS_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: 'Dispatched', value: 'dispatched' },
+  { label: 'Sent to Courier', value: 'sent_to_courier' },
+  { label: 'Pickup Confirmed', value: 'pickup_confirmed' },
+  { label: 'In Transit', value: 'in_transit' },
+  { label: 'Delivered', value: 'delivered' },
+  { label: 'Cancelled', value: 'cancelled' },
+];
+
+/** Tailwind classes per courier status, so the badge colour carries meaning. */
+const COURIER_STATUS_STYLES: Record<string, string> = {
+  dispatched: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+  sent_to_courier: 'text-sky-400 bg-sky-500/10 border-sky-500/30',
+  pickup_confirmed: 'text-indigo-400 bg-indigo-500/10 border-indigo-500/30',
+  in_transit: 'text-amber-400 bg-amber-500/10 border-amber-500/30',
+  delivered: 'text-green-400 bg-green-500/10 border-green-500/30',
+  cancelled: 'text-red-400 bg-red-500/10 border-red-500/30',
+};
 function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersError, onRefresh }: {
   courierOrders: any[];
   courierOrdersLoading: boolean;
@@ -371,6 +391,44 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
   const [labelFile, setLabelFile] = useState<File | null>(null);
   const [labelNote, setLabelNote] = useState('');
   const [labelPreview, setLabelPreview] = useState<string | null>(null);
+  /** Order id whose courier status is currently being saved. */
+  const [updatingStatus, setUpdatingStatus] = useState<string | null>(null);
+
+  /**
+   * Save a new courier / pickup status for one order.
+   *
+   * The row is patched optimistically so the badge changes instantly, then the
+   * list is refreshed from the server — which is also what pushes the new
+   * status (and the labels) to the owning merchant's dashboard on its next poll.
+   */
+  async function updateCourierStatus(order: any, nextStatus: string) {
+    const orderId = String(order.id || order.order_number || '').trim();
+    if (!orderId) return;
+    setUpdatingStatus(orderId);
+    try {
+      const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          status: nextStatus,
+          store_slug: order.store_slug || '',
+          merchant_id: order.merchant_id || '',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `Could not update status (HTTP ${res.status}).`);
+      }
+      toastSuccess(`Status updated to ${nextStatus.replace(/_/g, ' ')}.`);
+      onRefresh();
+    } catch (err: any) {
+      toastError(err?.message || 'Could not update order status.');
+      // Re-read the true value from the server rather than leaving a wrong badge.
+      onRefresh();
+    } finally {
+      setUpdatingStatus(null);
+    }
+  }
 
   // Helper: format a merchant's pickup address into readable lines.
   function formatAddress(addr: string): string {
@@ -643,10 +701,25 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                     {new Date(order.createdAt || order.created_at || 0).toLocaleDateString() || '—'}
                   </td>
                   <td className="p-3.5 text-right">
-                    <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded-lg">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Dispatched
-                    </span>
+                    {/* Courier / pickup status — editable, so Admin can move an
+                        order through pending → sent → pickup → transit →
+                        delivered. Saved through PATCH /api/admin/orders/:id/status,
+                        which mirrors the value onto the merchant's order too. */}
+                    <select
+                      value={order.courier_status || 'dispatched'}
+                      disabled={updatingStatus === (order.id || order.order_number)}
+                      onChange={(e) => updateCourierStatus(order, e.target.value)}
+                      className={`w-full max-w-[150px] cursor-pointer rounded-lg border px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider outline-none disabled:opacity-60 ${
+                        COURIER_STATUS_STYLES[order.courier_status || 'dispatched'] || COURIER_STATUS_STYLES.dispatched
+                      }`}
+                      title="Update courier / pickup status"
+                    >
+                      {COURIER_STATUS_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value} className="bg-[#181B26] text-slate-100 normal-case">
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
                   </td>
                   <td className="p-3.5">
                     <div className="flex items-center gap-2">

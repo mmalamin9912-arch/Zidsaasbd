@@ -462,6 +462,23 @@ export async function updateOrderFields(
  * `shipping_courier` is written alongside `courier_name`/`courierName` because
  * the orders table, the CSV export and the filter dropdown each read a
  * different spelling.
+ *
+ * WHY SO MANY ALIASES
+ * ---------------------------------------------------------------------------
+ * `GET /api/admin/courier-orders` (the Admin "Courier Orders List") selects an
+ * order when it carries `tracking_id`, `courier_tracking`, `trackingCode`,
+ * `courier.tracking_id` or a `courier_status` in ['booked','dispatched',
+ * 'picked_up','in_transit','delivered']. This function used to write ONLY
+ * `tracking_code`/`trackingCode`, so a real booking was invisible to that list
+ * and the tab stayed empty for every dispatched order.
+ *
+ * Every one of those spellings is therefore written here, together with the
+ * `courier_status` / `courier_tracking_*` fields the Admin list and the
+ * merchant dashboard both read, so one write satisfies every reader.
+ *
+ * Merchant/store identity is stamped from `extra` when the caller knows it
+ * (store_slug / store_code / store name / merchant phone), which is what lets
+ * the Admin list show WHICH shop an order came from without a second lookup.
  */
 export async function recordCourierDispatch(
   id: string,
@@ -480,6 +497,9 @@ export async function recordCourierDispatch(
     courierKey: courier.key,
     courier_booked: true,
     courier_booked_at: new Date(),
+    // Drives the Admin "Courier Orders List" filter and its status badge.
+    courier_status: 'dispatched',
+    courier_status_updated_at: new Date(),
     // A successful dispatch moves the order into delivery.
     status: 'In delivery',
     fulfillment_status: 'In Transit',
@@ -489,9 +509,48 @@ export async function recordCourierDispatch(
   if (tracking) {
     fields.tracking_code = tracking;
     fields.trackingCode = tracking;
+    // The Admin list queries these two spellings — without them the booking
+    // never appears in "Courier Orders List".
+    fields.tracking_id = tracking;
+    fields.courier_tracking = tracking;
     fields.consignment_id = tracking;
     fields.consignmentId = tracking;
+    fields.courier_tracking_id = tracking;
+    fields.courierTrackingId = tracking;
   }
+
+  /*
+   * Merchant / store identity, stamped on the order itself.
+   *
+   * `extra` is the storeRef the dispatcher already carries; any value the
+   * caller actually has is written under both spellings so the Admin list, the
+   * merchant dashboard and the CSV export all resolve the same shop.
+   */
+  const storeSlug = String(extra.store_slug || extra.storeSlug || '').trim().toLowerCase();
+  if (storeSlug) {
+    fields.store_slug = storeSlug;
+    fields.storeSlug = storeSlug;
+  }
+  const storeCode = String(extra.store_code || extra.storeCode || '').trim();
+  if (storeCode) {
+    fields.store_code = storeCode;
+    fields.storeCode = storeCode;
+  }
+  const storeName = String(extra.store_name || extra.storeName || '').trim();
+  if (storeName) {
+    fields.store_name = storeName;
+    fields.storeName = storeName;
+  }
+  const storeId = String(extra.store_id || extra.storeId || '').trim();
+  if (storeId) fields.store_id = storeId;
+  const merchantPhone = String(extra.merchant_phone || extra.merchantPhone || '').trim();
+  if (merchantPhone) {
+    fields.merchant_phone = merchantPhone;
+    fields.merchantPhone = merchantPhone;
+  }
+  const pickupAddress = String(extra.pickup_address || extra.pickupAddress || '').trim();
+  if (pickupAddress) fields.pickup_address = pickupAddress;
+
   // Keep the raw provider payload so a support agent can see what was sent.
   if (raw && Object.keys(raw).length > 0) fields.courier_response = raw;
 
