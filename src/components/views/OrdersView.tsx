@@ -74,6 +74,93 @@ import {
   AlertTriangle
 } from 'lucide-react';
 
+// Convert File to base64 string
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result?.toString().split(',')[1] || '');
+    reader.onerror = error => reject(error);
+  });
+}
+
+// Courier label upload state
+const [showLabelModal, setShowLabelModal] = useState<{ orderId: string; orderNumber: string } | null>(null);
+const [labelFile, setLabelFile] = useState<File | null>(null);
+const [labelNote, setLabelNote] = useState('');
+const [uploadingLabel, setUploadingLabel] = useState<string | null>(null);
+
+// Existing courier labels state
+const [courierLabels, setCourierLabels] = useState<Record<string, any[]>>({});
+const [fetchingLabels, setFetchingLabels] = useState<Record<string, boolean>>({});
+
+// Open label upload modal
+function openLabelModal(order: any) {
+  setShowLabelModal({ orderId: order.id || order.order_number, orderNumber: order.order_number });
+  setLabelFile(null);
+  setLabelNote('');
+}
+
+// Close label upload modal
+function closeLabelModal() {
+  setShowLabelModal(null);
+  setLabelFile(null);
+  setLabelNote('');
+}
+
+// Upload label to server
+async function uploadLabel() {
+  if (!labelFile || !showLabelModal) return;
+
+  setUploadingLabel(showLabelModal.orderId);
+  try {
+    const base64 = await fileToBase64(labelFile);
+    const res = await fetch(`/api/admin/courier-orders/${showLabelModal.orderId}/label`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file: base64,
+        filename: labelFile.name,
+        mimeType: labelFile.type,
+        note: labelNote,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Upload failed');
+    // Refresh courier labels for this order
+    await fetchCourierLabels(showLabelModal.orderId, showLabelModal.orderNumber);
+    setUploadingLabel(null);
+    setShowLabelModal(null);
+    setLabelFile(null);
+    setLabelNote('');
+    // Show success toast
+    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
+    toastSuccess('Courier label uploaded successfully!');
+  } catch (err: any) {
+    console.error('[OrdersView] Failed to upload courier label:', err);
+    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
+    toastError(err?.message || 'Failed to upload courier label');
+  }
+}
+
+// Render label thumbnails/previews
+function renderLabels(order: any) {
+  const labels = order.courier_labels || [];
+  if (labels.length === 0) return <span className="text-slate-500 text-xs">No labels</span>;
+  return (
+    <div className="flex items-center gap-2">
+      {labels.map((label: any, idx: number) => (
+        <img
+          key={label.id}
+          src={`data:${label.mimeType || 'image'};base64,${label.file || ''}`}
+          alt="Courier label"
+          className="w-6 h-6 rounded-md object-cover"
+        />
+      ))}
+    </div>
+  );
+}
+
 // `getOrderToken` / `generateQRCodeSVG` moved to ../orders/PrintLabel so the
 // A4 print document and these on-screen previews share one implementation.
 
@@ -393,6 +480,27 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     at: number;
     message?: string;
   }>({ state: 'live', at: 0 });
+
+  // Courier Labels state — fetched from server for each order
+  const [courierLabels, setCourierLabels] = useState<Record<string, any[]>>({});
+  const [fetchingLabels, setFetchingLabels] = useState<Record<string, boolean>>({});
+
+  // Fetch courier labels for an order from the server
+  const fetchCourierLabels = useCallback(async (orderId: string, storeSlug: string) => {
+    if (fetchingLabels[orderId]) return;
+    setFetchingLabels(prev => ({ ...prev, [orderId]: true }));
+    try {
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/courier-labels?store_slug=${encodeURIComponent(storeSlug)}`);
+      const data = await res.json();
+      if (data.ok) {
+        setCourierLabels(prev => ({ ...prev, [orderId]: data.labels || [] }));
+      }
+    } catch (err) {
+      console.warn('[OrdersView] Failed to fetch courier labels:', err);
+    } finally {
+      setFetchingLabels(prev => ({ ...prev, [orderId]: false }));
+    }
+  }, [fetchingLabels, storeSlug]);
 
   // Live polling effect for orders sync from MongoDB.
   // Uses the flexible GET /api/orders endpoint and sends BOTH merchant_id and

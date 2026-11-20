@@ -357,6 +357,7 @@ type ApprovalFilter = 'All' | 'Pending' | 'Approved' | 'Rejected';
  * Courier Orders List component — shows dispatched orders with merchant/store info
  * so the Super Admin can identify which shop (store) each order came from and
  * whether it was sent to courier, persisted in MongoDB for admin visibility.
+ * Also allows uploading courier labels (images/PDFs) for each order.
  */
 function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersError, onRefresh }: {
   courierOrders: any[];
@@ -364,6 +365,13 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
   courierOrdersError: string | null;
   onRefresh: () => void;
 }): React.ReactElement {
+  const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
+  const [uploadingLabel, setUploadingLabel] = useState<string | null>(null);
+  const [showLabelModal, setShowLabelModal] = useState<{ orderId: string; orderNumber: string } | null>(null);
+  const [labelFile, setLabelFile] = useState<File | null>(null);
+  const [labelNote, setLabelNote] = useState('');
+  const [labelPreview, setLabelPreview] = useState<string | null>(null);
+
   // Helper: format a merchant's pickup address into readable lines.
   function formatAddress(addr: string): string {
     if (!addr) return '—';
@@ -372,6 +380,157 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
     const parts = a.split(',').map(p => p.trim()).filter(Boolean);
     if (parts.length >= 2) return parts.join('\n');
     return a;
+  }
+
+  // Convert File to base64
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Handle file selection
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'application/pdf'];
+    if (!allowedTypes.includes(file.type)) {
+      toastError('Invalid file type. Please upload PNG, JPEG, WebP, or PDF.');
+      return;
+    }
+
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      toastError('File too large. Maximum 5MB allowed.');
+      return;
+    }
+
+    setLabelFile(file);
+    setLabelPreview(URL.createObjectURL(file));
+  }
+
+  // Open label upload modal
+  function openLabelModal(order: any) {
+    setShowLabelModal({ orderId: order.id || order.order_number, orderNumber: order.order_number });
+    setLabelFile(null);
+    setLabelNote('');
+    setLabelPreview(null);
+  }
+
+  // Close label upload modal
+  function closeLabelModal() {
+    setShowLabelModal(null);
+    setLabelFile(null);
+    setLabelNote('');
+    if (labelPreview) URL.revokeObjectURL(labelPreview);
+    setLabelPreview(null);
+  }
+
+  // Upload label to server
+  async function uploadLabel() {
+    if (!labelFile || !showLabelModal) return;
+
+    setUploadingLabel(showLabelModal.orderId);
+    try {
+      const base64 = await fileToBase64(labelFile);
+      const res = await fetch(`/api/admin/courier-orders/${showLabelModal.orderId}/label`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file: base64,
+          filename: labelFile.name,
+          mimeType: labelFile.type,
+          note: labelNote,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Upload failed');
+      toastSuccess('Courier label uploaded successfully!');
+      closeLabelModal();
+      onRefresh(); // Refresh the orders list
+    } catch (err: any) {
+      toastError(err?.message || 'Failed to upload label.');
+    } finally {
+      setUploadingLabel(null);
+    }
+  }
+
+  // Delete a label
+  async function deleteLabel(orderId: string, labelId: string) {
+    if (!window.confirm('Are you sure you want to delete this label?')) return;
+    try {
+      const res = await fetch(`/api/admin/courier-orders/${orderId}/label/${labelId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Delete failed');
+      toastSuccess('Label deleted.');
+      onRefresh();
+    } catch (err: any) {
+      toastError(err?.message || 'Failed to delete label.');
+    }
+  }
+
+  // Fetch labels for an order
+  async function fetchLabels(orderId: string): Promise<any[]> {
+    try {
+      const res = await fetch(`/api/admin/courier-orders/${orderId}/labels`);
+      const data = await res.json();
+      return data.labels || [];
+    } catch {
+      return [];
+    }
+  }
+
+  // Render label thumbnails/previews
+  function renderLabels(order: any) {
+    const labels = order.courier_labels || [];
+    if (labels.length === 0) return <span className="text-slate-500 text-xs">No labels</span>;
+
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {labels.map((label: any) => (
+          <div key={label.id} className="relative group inline-flex flex-col items-center gap-1 bg-[#181B26] border border-[#2E3548] rounded-lg p-1.5 min-w-[70px]">
+            {label.mimeType === 'application/pdf' ? (
+              <FileText className="w-5 h-5 text-red-400" />
+            ) : (
+              label.file ? (
+                <img
+                  src={`data:${label.mimeType};base64,${label.file}`}
+                  alt={label.filename}
+                  className="w-10 h-10 object-cover rounded cursor-zoom-in"
+                  onClick={() => window.open(`data:${label.mimeType};base64,${label.file}`, '_blank')}
+                />
+              ) : (
+                <div className="w-10 h-10 bg-slate-700 rounded flex items-center justify-center">
+                  <FileText className="w-4 h-4 text-slate-500" />
+                </div>
+              )
+            )}
+            <span className="text-[9px] text-slate-400 truncate max-w-[80px] text-center" title={label.filename}>
+              {label.filename}
+            </span>
+            {label.note && (
+              <span className="text-[9px] text-slate-500 truncate max-w-[80px] text-center" title={label.note}>
+                {label.note}
+              </span>
+            )}
+            <button
+              onClick={() => deleteLabel(order.id || order.order_number, label.id)}
+              className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 text-red-400 hover:text-red-300 rounded"
+              title="Delete label"
+            >
+              <XCircle className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ))}
+      </div>
+    );
   }
 
   if (courierOrdersLoading) {
@@ -401,6 +560,7 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
           <p className="text-xs text-slate-400 mt-1">
             Dispatched orders with merchant/store identification. Each row shows the
             store name, slug, merchant phone, pickup address and dispatch status.
+            Click the label icon to upload/manage courier labels.
           </p>
         </div>
         <div className="text-right">
@@ -428,13 +588,14 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
               <th className="p-3.5 font-black text-[10px]">Payment Method</th>
               <th className="p-3.5 font-black text-[10px]">Tracking ID</th>
               <th className="p-3.5 font-black text-[10px]">Ordered</th>
-              <th className="p-3.5 text-right font-black text-[10px]">Status</th>
+              <th className="p-3.5 font-black text-[10px]">Status</th>
+              <th className="p-3.5 font-black text-[10px]">Labels</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[#2E3548]">
             {courierOrders.length === 0 ? (
               <tr>
-                <td colSpan={8} className="p-12 text-center text-slate-500">
+                <td colSpan={9} className="p-12 text-center text-slate-500">
                   <div className="w-12 h-12 bg-[#202533] rounded-full flex items-center justify-center mx-auto mb-3 text-slate-600">
                     <ShoppingBag className="w-6 h-6" />
                   </div>
@@ -487,12 +648,113 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                       Dispatched
                     </span>
                   </td>
+                  <td className="p-3.5">
+                    <div className="flex items-center gap-2">
+                      {renderLabels(order)}
+                      <button
+                        onClick={() => openLabelModal(order)}
+                        disabled={uploadingLabel === (order.id || order.order_number)}
+                        className="bg-[#202533] hover:bg-[#282E3F] text-slate-200 border border-[#3A435E] px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Upload/Manage Courier Labels"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>Labels</span>
+                        {(order.courier_labels?.length || 0) > 0 && (
+                          <span className="bg-emerald-500/20 text-emerald-400 font-black text-[9px] px-1.5 py-0.5 rounded-full">
+                            {order.courier_labels.length}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </div>
+
+      {/* Label Upload Modal */}
+      {showLabelModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={closeLabelModal}>
+          <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <FileText className="w-5 h-5 text-emerald-400" />
+                <span>Upload Courier Label</span>
+              </h3>
+              <button onClick={closeLabelModal} className="text-slate-400 hover:text-white p-1 rounded">
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-400 mb-4">
+              Order: <span className="font-mono text-white">{showLabelModal.orderNumber}</span>
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1.5">Select File (Image or PDF, max 5MB)</label>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,application/pdf"
+                  onChange={handleFileChange}
+                  className="w-full bg-[#101420] border border-[#2E3542] rounded-xl px-3 py-2 text-white text-xs file:mr-3 file:px-3 file:py-1.5 file:border-none file:bg-emerald-500 file:text-white file:font-bold file:rounded-lg cursor-pointer"
+                />
+                {labelPreview && (
+                  <div className="mt-2 relative max-h-48">
+                    {labelFile?.type === 'application/pdf' ? (
+                      <div className="bg-slate-800 border border-slate-700 rounded-lg p-3 flex items-center gap-2">
+                        <FileText className="w-8 h-8 text-red-400" />
+                        <span className="text-xs text-slate-300 truncate">{labelFile.name}</span>
+                      </div>
+                    ) : (
+                      <img
+                        src={labelPreview}
+                        alt="Preview"
+                        className="max-w-full max-h-48 rounded-lg border border-[#2E3548] object-contain"
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1.5">Note (optional)</label>
+                <textarea
+                  value={labelNote}
+                  onChange={(e) => setLabelNote(e.target.value)}
+                  placeholder="e.g. Courier pickup receipt, waybill, etc."
+                  rows={2}
+                  className="w-full bg-[#101420] border border-[#2E3548] rounded-xl px-3 py-2 text-white text-xs focus:border-emerald-500 outline-none resize-none"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 mt-6">
+              <button
+                onClick={closeLabelModal}
+                className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-4 py-2 rounded-xl text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={uploadLabel}
+                disabled={!labelFile || uploadingLabel === showLabelModal.orderId}
+                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {uploadingLabel === showLabelModal.orderId ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Uploading...</span>
+                  </>
+                ) : (
+                  <>
+                    <FileText className="w-4 h-4" />
+                    <span>Upload Label</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

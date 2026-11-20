@@ -23586,6 +23586,206 @@ app.get('/api/admin/courier-orders', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/courier-orders/:orderId/label
+ *
+ * Upload/attach a courier label (image or PDF) to a specific order.
+ * The file is stored as base64 in the order document under courier_labels array.
+ * Body: { file: base64 string, filename: string, mimeType: string, note?: string }
+ */
+app.post('/api/admin/courier-orders/:orderId/label', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { orderId } = req.params;
+    const { file, filename, mimeType, note } = req.body || {};
+
+    if (!file || !filename || !mimeType) {
+      return res.status(400).json({ ok: false, error: 'Missing required fields: file (base64), filename, mimeType' });
+    }
+
+    // Validate file type
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'application/pdf'];
+    if (!allowedTypes.includes(mimeType)) {
+      return res.status(400).json({ ok: false, error: 'Invalid file type. Allowed: PNG, JPEG, WebP, PDF' });
+    }
+
+    // Validate file size (base64 string length ~ 4/3 of actual bytes, max 5MB)
+    const maxBase64Length = 5 * 1024 * 1024 * 4 / 3; // ~6.67M chars
+    if (file.length > maxBase64Length) {
+      return res.status(400).json({ ok: false, error: 'File too large. Maximum 5MB.' });
+    }
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
+    }
+
+    const ordersCol = (mongoose.connection.db.collection('orders') as any);
+    const order = await ordersCol.findOne({ 
+      $or: [
+        { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
+        { order_number: orderId }, 
+        { orderNumber: orderId } 
+      ] 
+    });
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'Order not found.' });
+    }
+
+    const labelRecord = {
+      id: `lbl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      filename,
+      mimeType,
+      file, // base64 data
+      note: note || '',
+      uploadedAt: new Date().toISOString(),
+      uploadedBy: 'admin',
+    };
+
+    await ordersCol.updateOne(
+      { _id: order._id },
+      { $push: { courier_labels: labelRecord as any }, $set: { updated_at: new Date() } }
+    );
+
+    return res.status(200).json({ ok: true, label: labelRecord });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/courier-orders/:orderId/label error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not upload label.' });
+  }
+});
+
+/**
+ * GET /api/admin/courier-orders/:orderId/labels
+ *
+ * Retrieve all courier labels attached to an order.
+ */
+app.get('/api/admin/courier-orders/:orderId/labels', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { orderId } = req.params;
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
+    }
+
+    const ordersCol = (mongoose.connection.db.collection('orders') as any);
+    const order = await ordersCol.findOne(
+      { 
+        $or: [
+          { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
+          { order_number: orderId }, 
+          { orderNumber: orderId } 
+        ] 
+      },
+      { projection: { courier_labels: 1 } }
+    );
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'Order not found.', labels: [] });
+    }
+
+    return res.status(200).json({ ok: true, labels: order.courier_labels || [] });
+  } catch (err: any) {
+    console.error('[Server] GET /api/admin/courier-orders/:orderId/labels error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not load labels.', labels: [] });
+  }
+});
+
+/**
+ * DELETE /api/admin/courier-orders/:orderId/label/:labelId
+ *
+ * Delete a specific courier label from an order.
+ */
+app.delete('/api/admin/courier-orders/:orderId/label/:labelId', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { orderId, labelId } = req.params;
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
+    }
+
+    const ordersCol = (mongoose.connection.db.collection('orders') as any);
+    const order = await ordersCol.findOne({ 
+      $or: [
+        { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
+        { order_number: orderId }, 
+        { orderNumber: orderId } 
+      ] 
+    });
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'Order not found.' });
+    }
+
+    await ordersCol.updateOne(
+      { _id: order._id },
+      { $pull: { courier_labels: { id: labelId } }, $set: { updated_at: new Date() } }
+    );
+
+    return res.status(200).json({ ok: true });
+  } catch (err: any) {
+    console.error('[Server] DELETE /api/admin/courier-orders/:orderId/label/:labelId error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not delete label.' });
+  }
+});
+
+/**
+ * GET /api/orders/:orderId/courier-labels
+ *
+ * Merchant-facing endpoint to retrieve courier labels for their order.
+ * Requires store slug validation to ensure merchant owns the order.
+ */
+app.get('/api/orders/:orderId/courier-labels', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { orderId } = req.params;
+    const storeSlug = String(req.query.store_slug || req.query.storeSlug || '').trim().toLowerCase();
+
+    if (!storeSlug) {
+      return res.status(400).json({ ok: false, error: 'store_slug is required.', labels: [] });
+    }
+
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable.', labels: [] });
+    }
+
+    const ordersCol = (mongoose.connection.db.collection('orders') as any);
+    const order = await ordersCol.findOne(
+      {
+        $or: [
+          { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
+          { order_number: orderId }, 
+          { orderNumber: orderId },
+          { store_slug: storeSlug }, 
+          { storeSlug: storeSlug },
+        ],
+      },
+      { projection: { courier_labels: 1 } }
+    );
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'Order not found or access denied.', labels: [] });
+    }
+
+    // Only return labels that are visible to merchant (exclude admin-only notes if needed)
+    const labels = (order.courier_labels || []).map((l: any) => ({
+      id: l.id,
+      filename: l.filename,
+      mimeType: l.mimeType,
+      file: l.file,
+      note: l.note || '',
+      uploadedAt: l.uploadedAt,
+      uploadedBy: l.uploadedBy,
+    }));
+
+    return res.status(200).json({ ok: true, labels });
+  } catch (err: any) {
+    console.error('[Server] GET /api/orders/:orderId/courier-labels error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not load labels.', labels: [] });
+  }
+});
+
 /*
  * ── Column type coercion for the Supabase `stores` mirror ───────────────────
  *
