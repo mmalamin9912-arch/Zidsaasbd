@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+﻿import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { Order, OrderItem } from '../../types';
 import {
   safeAmount,
@@ -85,246 +85,14 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 // Courier label upload state
-const [showLabelModal, setShowLabelModal] = useState<{ orderId: string; orderNumber: string } | null>(null);
-const [labelFile, setLabelFile] = useState<File | null>(null);
-const [labelNote, setLabelNote] = useState('');
-const [uploadingLabel, setUploadingLabel] = useState<string | null>(null);
+//
+// NOTE: this state lives INSIDE the OrdersView component (see the `useState`
+// block further down). It used to be declared here, at module scope — calling a
+// hook outside a component makes React 19 read the internal dispatcher before
+// ReactDOM has installed it, so simply importing this module threw
+// `Cannot read properties of null (reading 'useState')` and the whole app
+// (every route, including /dashboard/mystore) failed to mount.
 
-// Existing courier labels state
-const [courierLabels, setCourierLabels] = useState<Record<string, any[]>>({});
-const [fetchingLabels, setFetchingLabels] = useState<Record<string, boolean>>({});
-
-// Courier/pickup status state
-const [showCourierStatusModal, setShowCourierStatusModal] = useState<{ orderId: string; orderNumber: string } | null>(null);
-const [courierStatus, setCourierStatus] = useState<string | null>(null);
-const [updatingCourierStatus, setUpdatingCourierStatus] = useState<string | null>(null);
-
-// Courier/pickup status options with colors
-const COURIER_STATUS_OPTIONS = [
-  { label: 'Pending', value: 'pending', color: 'text-slate-400', bg: 'bg-slate-600' },
-  { label: 'Sent to Courier', value: 'sent_to_courier', color: 'text-emerald-400', bg: 'bg-emerald-600' },
-  { label: 'Pickup Confirmed', value: 'pickup_confirmed', color: 'text-emerald-300', bg: 'bg-emerald-700' },
-  { label: 'In Transit', value: 'in_transit', color: 'text-sky-400', bg: 'bg-sky-600' },
-  { label: 'Delivered', value: 'delivered', color: 'text-green-400', bg: 'bg-green-600' },
-  { label: 'Cancelled', value: 'cancelled', color: 'text-red-400', bg: 'bg-red-600' },
-];
-
-// Open label upload modal
-function openLabelModal(order: any) {
-  setShowLabelModal({ orderId: order.id || order.order_number, orderNumber: order.order_number });
-  setLabelFile(null);
-  setLabelNote('');
-}
-
-// Close label upload modal
-function closeLabelModal() {
-  setShowLabelModal(null);
-  setLabelFile(null);
-  setLabelNote('');
-}
-
-// Upload label to server
-async function uploadLabel() {
-  if (!labelFile || !showLabelModal) return;
-
-  setUploadingLabel(showLabelModal.orderId);
-  try {
-    const base64 = await fileToBase64(labelFile);
-    const res = await fetch(`/api/admin/courier-orders/${showLabelModal.orderId}/label`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        file: base64,
-        filename: labelFile.name,
-        mimeType: labelFile.type,
-        note: labelNote,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || 'Upload failed');
-    // Refresh courier labels for this order
-    await fetchCourierLabels(showLabelModal.orderId, showLabelModal.orderNumber);
-    setUploadingLabel(null);
-    setShowLabelModal(null);
-    setLabelFile(null);
-    setLabelNote('');
-    // Show success toast
-    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
-    toastSuccess('Courier label uploaded successfully!');
-  } catch (err: any) {
-    console.error('[OrdersView] Failed to upload courier label:', err);
-    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
-    setError(err?.message || 'Failed to upload courier label');
-  }
-}
-
-// Render courier status badge
-function renderCourierStatusBadge(status: string | undefined) {
-  const option = COURIER_STATUS_OPTIONS.find((opt) => opt.value === status);
-  if (!status) return <span className="text-slate-500 text-xs">Pending</span>;
-  return (
-    <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${option?.bg} ${option?.color}`}>
-      {option?.label}
-    </span>
-  );
-}
-
-// Render courier status dropdown
-function renderCourierStatusDropdown(ord: Order) {
-  const currentStatus = ord.courier_status || 'pending';
-  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newStatus = e.target.value;
-    setCourierStatus(newStatus);
-    // Update the order status on server
-    updateCourierStatusFromDropdown(ord.id, newStatus);
-  };
-  return (
-    <select
-      value={currentStatus}
-      onChange={handleChange}
-      className="bg-slate-800 border border-slate-500 rounded text-slate-100 px-2 py-1 cursor-pointer text-[9px] focus:outline-none focus:border-emerald-400"
-    >
-      {COURIER_STATUS_OPTIONS.map((opt) => (
-        <option key={opt.value} value={opt.value}>
-          {opt.label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-// Update courier status from dropdown
-async function updateCourierStatusFromDropdown(orderId: string, status: string) {
-  setUpdatingCourierStatus(orderId);
-  try {
-    const res = await fetch(`/api/admin/orders/${orderId}/status`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to update status');
-    setUpdatingCourierStatus(null);
-    // Show success toast
-    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
-    toastSuccess('Order status updated successfully!');
-  } catch (err: any) {
-    console.error('[OrdersView] Failed to update courier status from dropdown:', err);
-    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
-    toastError(err?.message || 'Failed to update order status');
-  }
-}
-
-// Courier Status Upload Modal
-{showCourierStatusModal && (
-  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={closeCourierStatusModal}>
-    <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-base font-bold text-white">Update Order Status</h3>
-        <button onClick={closeCourierStatusModal} className="text-slate-400 hover:text-white p-1 rounded">
-          <XCircle className="w-5 h-5" />
-        </button>
-      </div>
-      <p className="text-xs text-slate-400 mb-4">
-        Order: <span className="font-mono text-white">{showCourierStatusModal?.orderNumber}</span>
-      </p>
-      <div className="space-y-4">
-        <div>
-          <label className="block text-slate-300 mb-2">
-            <span className="font-semibold text-slate-100">New Status</span>
-            <select
-              value={courierStatus || 'pending'}
-              onChange={(e) => setCourierStatus(e.target.value)}
-              className="w-full px-3 py-2 border border-slate-500 rounded text-slate-300 cursor-pointer"
-            >
-              {COURIER_STATUS_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div>
-          <p className="text-xs text-slate-400 mb-2">
-            Track the pickup and delivery progress of orders
-          </p>
-          <button
-            onClick={updateCourierStatus}
-            disabled={!courierStatus || updatingCourierStatus === showCourierStatusModal.orderId}
-            className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {updatingCourierStatus === showCourierStatusModal.orderId ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-              </>
-            ) : (
-              <span>Update Status</span>
-            )}
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-)}
-
-// Open courier status modal
-function openCourierStatusModal(order: any) {
-  setShowCourierStatusModal({ orderId: order.id || order.order_number, orderNumber: order.order_number });
-  setCourierStatus(null);
-}
-
-// Close courier status modal
-function closeCourierStatusModal() {
-  setShowCourierStatusModal(null);
-  setCourierStatus(null);
-}
-
-// Update courier/pickup status
-async function updateCourierStatus() {
-  if (!showCourierStatusModal) return;
-
-  setUpdatingCourierStatus(showCourierStatusModal.orderId);
-  try {
-    const res = await fetch(`/api/admin/orders/${showCourierStatusModal.orderId}/status`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: courierStatus }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to update status');
-    // Refresh the order data
-    await fetchCourierLabels(showCourierStatusModal.orderId, showCourierStatusModal.orderNumber);
-    setUpdatingCourierStatus(null);
-    setShowCourierStatusModal(null);
-    setCourierStatus(null);
-    // Show success toast
-    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
-    toastSuccess('Order status updated successfully!');
-  } catch (err: any) {
-    console.error('[OrdersView] Failed to update courier status:', err);
-    const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
-    toastError(err?.message || 'Failed to update order status');
-  }
-}
-
-// Render label thumbnails/previews
-function renderLabels(order: any) {
-  const labels = order.courier_labels || [];
-  if (labels.length === 0) return <span className="text-slate-500 text-xs">No labels</span>;
-  return (
-    <div className="flex items-center gap-2">
-      {labels.map((label: any, idx: number) => (
-        <img
-          key={label.id}
-          src={`data:${label.mimeType || 'image'};base64,${label.file || ''}`}
-          alt="Courier label"
-          className="w-6 h-6 rounded-md object-cover"
-        />
-      ))}
-    </div>
-  );
-}
 
 // `getOrderToken` / `generateQRCodeSVG` moved to ../orders/PrintLabel so the
 // A4 print document and these on-screen previews share one implementation.
@@ -649,6 +417,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   // Courier Labels state — fetched from server for each order
   const [courierLabels, setCourierLabels] = useState<Record<string, any[]>>({});
   const [fetchingLabels, setFetchingLabels] = useState<Record<string, boolean>>({});
+
+  // Courier label upload state
+  const [showLabelModal, setShowLabelModal] = useState<{ orderId: string; orderNumber: string } | null>(null);
+  const [labelFile, setLabelFile] = useState<File | null>(null);
+  const [labelNote, setLabelNote] = useState('');
+  const [uploadingLabel, setUploadingLabel] = useState<string | null>(null);
+
+  // Courier/pickup status state
+  const [showCourierStatusModal, setShowCourierStatusModal] = useState<{ orderId: string; orderNumber: string } | null>(null);
+  const [courierStatus, setCourierStatus] = useState<string | null>(null);
+  const [updatingCourierStatus, setUpdatingCourierStatus] = useState<string | null>(null);
 
   // Fetch courier labels for an order from the server
   const fetchCourierLabels = useCallback(async (orderId: string, storeSlug: string) => {

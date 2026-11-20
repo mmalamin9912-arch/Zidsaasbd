@@ -8,7 +8,7 @@ import CheckoutThumbnail from './CheckoutThumbnail';
 import type { AdminPaymentGatewayConfig } from '../types';
 import { useCart } from './CartProvider';
 import { resolveProductImage } from '../utils/imageFallback';
-import { type BasketLine, readPersistedBasket } from '../lib/useMarketplaceBasket';
+import { type BasketLine, readPersistedBasket } from '../lib/marketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
 import { loadShippingConfig } from '../lib/logisticsApi';
 import type { ShippingConfig } from '../lib/logisticsApi';

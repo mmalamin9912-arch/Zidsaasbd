@@ -24,6 +24,11 @@
 //   a far worse failure than showing an upgrade prompt.
 // =============================================================================
 
+// NOTE: this module must stay React-HOOK-FREE at module scope. `useEntitlements`
+// below does import React, but that is a STATIC import, so it is only ever
+// evaluated while the module graph loads — never from a lazy chunk that runs
+// before ReactDOM installed its dispatcher. See the comment on
+// `useEntitlements` for why no hook may be invoked outside a render.
 import { useMemo, useSyncExternalStore } from 'react';
 import type { PlanFeatureFlags, SubscriptionPlan } from '../types';
 import {
@@ -289,10 +294,26 @@ export function useEntitlements(): Entitlements {
   );
 }
 
+/**
+ * The entitlement set for the CURRENT store, read outside React.
+ *
+ * Hooks may only run while ReactDOM is rendering — `useState()` on a module
+ * that loads before `createRoot()` throws
+ * `Cannot read properties of null (reading 'useState')` because the internal
+ * dispatcher is still `null`. Non-component callers (services, event handlers,
+ * helpers) must use this function instead of `useEntitlements()`.
+ */
+export function getEntitlements(): Entitlements {
+  return state.planId || state.subscriptionStatus
+    ? entitlementsFor(state.planId, state.plans, state.subscriptionStatus)
+    : NO_PLAN;
+}
+
 export default {
   entitlementsFor,
   resolveActivePlan,
   primeEntitlements,
   isActiveSubscriptionStatus,
+  getEntitlements,
   useEntitlements,
 };

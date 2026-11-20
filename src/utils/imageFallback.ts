@@ -8,9 +8,27 @@
  *
  * Everything funnels through the local `/placeholder.svg` asset so a failure
  * resolves in a single in-origin request instead of retrying the broken host.
+ *
+ * IMPORTANT — this file deliberately has NO import of `react`.
+ * It is imported by services, API clients and helpers (`orderUtils`,
+ * `marketplaceStorefrontApi`, `supabaseMarketplaceNative`, the server bundle …)
+ * as well as by components. React 19 hooks read the internal dispatcher
+ * (`React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.H`),
+ * which is only installed while ReactDOM renders. Touch a hook from a module
+ * that can load outside a render and the whole bundle dies with
+ * `Cannot read properties of null (reading 'useState')`.
+ * Hooks that need these helpers live in `useBackgroundImage.ts` instead.
  */
-import { useEffect, useState } from 'react';
-import type { SyntheticEvent } from 'react';
+
+/**
+ * The slice of the DOM `error` event this module touches.
+ *
+ * Typed structurally instead of with React's `SyntheticEvent` so this helper
+ * stays importable without React while still accepting React's synthetic event.
+ */
+export interface ImageErrorEvent {
+  currentTarget: HTMLImageElement;
+}
 
 /** Local placeholder used whenever an external image cannot be loaded. */
 export const PLACEHOLDER_IMAGE = '/placeholder.svg';
@@ -437,7 +455,7 @@ export function hasImageSource(value?: string | null): value is string {
  * guard attribute prevents an infinite error loop in the (unlikely) event that
  * the placeholder itself cannot be fetched.
  */
-export function imgErrorFallback(event: SyntheticEvent<HTMLImageElement>): void {
+export function imgErrorFallback(event: ImageErrorEvent): void {
   const img = event.currentTarget;
 
   if (img.dataset.imageFallback === FALLBACK_FLAG) {
@@ -488,24 +506,4 @@ export function loadBackgroundImage(
   });
 }
 
-/** React hook variant of {@link loadBackgroundImage} for use in components. */
-export function useBackgroundImage(
-  src?: string | null,
-  fallback = PLACEHOLDER_IMAGE,
-): string {
-  const [resolved, setResolved] = useState<string>(() =>
-    hasImageSource(src) ? src.trim() : fallback,
-  );
 
-  useEffect(() => {
-    let cancelled = false;
-    loadBackgroundImage(src, fallback).then((next) => {
-      if (!cancelled) setResolved(next);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [src, fallback]);
-
-  return resolved;
-}
