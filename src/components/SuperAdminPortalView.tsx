@@ -3122,7 +3122,18 @@ if (m.storeSlug) {
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${sub.badgeColor || 'bg-amber-500 text-slate-950'}`}>
                                   {sub.badge}
                                 </span>
-)}
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {/* Courier Dispatch Tab */}
         {activeSubTab === 'courier_dispatch' && (
@@ -3170,7 +3181,7 @@ if (m.storeSlug) {
               </div>
 
               <div className="text-xs text-slate-500 italic">
-                Courier dispatch uses the platform's central API keys configured in <span className="text-slate-300">System & Gateways → Live Payment Gateways → Central Courier API</span>.
+                Courier dispatch uses the platform's central API keys configured in <span className="text-slate-300">System &amp; Gateways → Live Payment Gateways → Central Courier API</span>.
                 Each order's pickup address is taken from the merchant's store address (Settings → General → Pickup / Store Address).
               </div>
             </div>
@@ -3186,17 +3197,6 @@ if (m.storeSlug) {
             onRefresh={fetchCourierOrders}
           />
         )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })()}
 
         {/* 1. ANALYTICS & GLOBAL SALES TAB */}
         {activeSubTab === 'analytics' && (
