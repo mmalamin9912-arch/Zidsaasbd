@@ -658,21 +658,34 @@ export async function recordCourierDispatchAttempt(input: {
       return '';
     };
 
-    const storeSlug = pick(store.store_slug, store.storeSlug, order.store_slug, order.storeSlug).toLowerCase();
-    const storeCode = pick(store.store_code, store.storeCode, order.store_code, order.storeCode);
-    const storeId = pick(store.store_id, store.storeId, order.store_id, order.storeId, store.id);
+    /*
+     * STORE IDENTITY — the ORDER's own slug always wins.
+     *
+     * A store that has been renamed (or a request whose `storeSlug` is a
+     * stale/old alias) must not relabel the row as a different shop: the order
+     * that was just dispatched is stamped with the store it belongs to, and
+     * the resolved store record is only the fallback. Without this ordering a
+     * row could be filed under a slug no admin filter or dashboard query
+     * knows about — a visible write that still reads as “missing”.
+     */
+    const orderSlug = pick(order.store_slug, order.storeSlug, order.merchant_store_slug, order.merchant_storeSlug).toLowerCase();
+    const storeSlug = (orderSlug || pick(store.store_slug, store.storeSlug)).toLowerCase();
+    const storeCode = pick(order.store_code, order.storeCode, store.store_code, store.storeCode);
+    const storeId = pick(order.store_id, order.storeId, store.store_id, store.storeId, store.id);
     const storeName = pick(
-      store.store_name, store.storeName, store.name, order.store_name, order.storeName,
-      order.vendor_name, order.vendorName, storeSlug,
+      order.store_name, order.storeName, order.vendor_name, order.vendorName,
+      store.store_name, store.storeName, store.name, storeSlug,
     );
     const merchantPhone = pick(
+      order.merchant_phone, order.merchantPhone,
       store.merchant_phone, store.merchantPhone, store.phone, store.store_phone, store.storePhone,
       store.support_phone, store.supportPhone, store.contactPhone, store.contact_phone,
-      store.whatsappNumber, store.whatsapp_number, order.merchant_phone, order.merchantPhone,
+      store.whatsappNumber, store.whatsapp_number,
     );
     const pickupAddress = pick(
+      order.pickup_address, order.pickupAddress,
       store.pickup_address, store.pickupAddress, store.pickup_point, store.store_address,
-      store.storeAddress, store.address, order.pickup_address, order.pickupAddress,
+      store.storeAddress, store.address,
     );
 
     const customerName = pick(order.customer_name, order.customerName, order.name);
@@ -755,10 +768,37 @@ export async function recordCourierDispatchAttempt(input: {
       .collection(COURIER_ORDERS_COLLECTION)
       .findOne({ _id: id as any })
       .catch(() => null);
-    const advanced = ['pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
-    if (existing && advanced.includes(String(existing.courier_status || '')) && !advanced.includes(input.status)) {
-      delete set.courier_status;
-      delete set.courier_status_updated_at;
+    if (existing) {
+      const advanced = ['pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
+      if (advanced.includes(String(existing.courier_status || '')) && !advanced.includes(input.status)) {
+        delete set.courier_status;
+        delete set.courier_status_updated_at;
+      }
+      /*
+       * Never overwrite a known value with a blank one. A partial retry (the
+       * booking route only re-posts what the modal knows) must not wipe the
+       * customer, amount, store phone or labels an earlier, fuller write made.
+       */
+      const AMOUNT_FIELDS = ['amount', 'total_price', 'totalBDT'];
+      for (const [field, value] of Object.entries(set)) {
+        const previous = (existing as Record<string, any>)[field];
+        const previousKnown = previous !== undefined && previous !== null && previous !== '';
+        // A blank value never overwrites a known one…
+        if (value === '' || value === null || value === undefined) {
+          if (previousKnown) delete set[field];
+          continue;
+        }
+        // …and neither does `0`, which is what a partial body produces for an
+        // amount it did not send (a real ৳0 total is indistinguishable, and the
+        // later full write restores it either way).
+        if (AMOUNT_FIELDS.includes(field) && Number(value) === 0 && Number(previous) > 0) {
+          delete set[field];
+        }
+      }
+      if (Array.isArray(existing.courier_labels) && existing.courier_labels.length > 0) {
+        // Labels belong to the row, not to the attempt.
+        set.courier_labels = existing.courier_labels;
+      }
     }
 
     await db.collection(COURIER_ORDERS_COLLECTION).updateOne(
@@ -770,6 +810,7 @@ export async function recordCourierDispatchAttempt(input: {
       { upsert: true },
     );
 
+    console.log('[Courier][ledger] row saved', { id, status: set.courier_status || input.status, store: storeSlug });
     return { ok: true, id };
   } catch (err: any) {
     // `_id` is a String on this collection, so another shape can only fail the

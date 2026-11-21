@@ -23701,12 +23701,25 @@ app.get('/api/admin/courier-orders', async (req, res) => {
     const fieldFallbacks = [
       'customer_name', 'customer_phone', 'shipping_address', 'customer_address',
       'customer_city', 'payment_method', 'payment_status', 'items', 'tracking_code',
+      'store_name', 'store_slug', 'store_code', 'merchant_phone', 'pickup_address',
     ] as const;
+    /*
+     * THE MERGE KEY IS THE ORDER ID — `_id` only as a last resort.
+     *
+     * A ledger row always carries `id`/`order_id`/`order_number`, so preferring
+     * them keeps the ledger row and the stored order row in the SAME bucket and
+     * lets the field fallbacks below fill in the customer/amount columns. An
+     * older/partial row that only has its `_id` is still counted (via the
+     * trailing `_id` fallback) instead of being silently dropped.
+     */
     const merged = new Map<string, any>();
     for (const item of combinedOrders) {
-      const key = String(item.id || item.order_number || item.orderNumber || item._id || '')
+      const key = String(
+        item.id || item.order_id || item.order_number || item.orderNumber || item._id || ''
+      )
         .replace(/^#/, '')
-        .trim();
+        .trim()
+        .toLowerCase();
       if (!key) continue;
       const current = merged.get(key);
       if (!current) {
@@ -23835,7 +23848,14 @@ app.get('/api/admin/courier-orders', async (req, res) => {
           totalBDT: amount,
           paymentMethod: order.payment_method || order.paymentMethod || 'COD',
           paymentStatus: order.payment_status || order.paymentStatus || '',
-          courier_status: order.courier_status || (order.courier_booked ? 'booked' : 'sent_to_courier'),
+          /*
+           * A ledger row written by an older build may have no status yet; it
+           * is still a real dispatch attempt, so it must not fall back to a
+           * value the admin dropdown cannot display.
+           */
+          courier_status:
+            order.courier_status ||
+            (order.courier_booked === true ? 'booked' : order.courier_label ? 'dispatched' : 'sent_to_courier'),
           tracking_id:
             order.tracking_id || order.courier_tracking || order.tracking_code ||
             order.trackingCode || order.consignment_id || '',
@@ -23858,6 +23878,115 @@ app.get('/api/admin/courier-orders', async (req, res) => {
     return res.status(200).json({ ok: false, error: err?.message || 'Could not load courier orders.', orders: [] });
   }
 });
+
+/**
+ * Backfill ledger rows written by an EARLIER deployment.
+ *
+ * The first cut of the ledger wrote `courier_status` / `courier_name` but no
+ * store identity and sometimes no order number, so those rows already exist in
+ * production yet render an anonymous “Store” — or, worse, cannot be deduped
+ * against the real order. This route joins every such row to its `orders`
+ * document (and the `stores` record) once, and is safe to call repeatedly.
+ *
+ * GET and POST are both accepted so it can be triggered from a browser or a
+ * cron. It never deletes anything: labels and statuses are preserved.
+ */
+const migrateDispatchedLedger = async (_req: any, res: any) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    await connectToMongoDB();
+    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
+      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
+    }
+    const db = mongoose.connection.db;
+    const ledgerCol = db.collection(COURIER_ORDERS_COLLECTION) as any;
+    const rows = await ledgerCol.find({}).limit(5000).toArray();
+
+    let updated = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      // A row with NO identifier still has its `_id` (always present on Mongo),
+      // and that is exactly the order number the earlier build used as the key.
+      const key = courierOrderKey(
+        row.id, row.order_id, row.order_number, row.orderNumber, row._id,
+      );
+
+      const idCandidates: any[] = [String(row._id)];
+      if (/^[a-f0-9]{24}$/i.test(String(row._id))) {
+        try { idCandidates.push(new mongoose.Types.ObjectId(String(row._id))); } catch { /* ignore */ }
+      }
+      const lookupKeys = Array.from(new Set([
+        key,
+        String(row.id || '').toLowerCase(),
+        String(row.order_number || '').toLowerCase(),
+        String(row.orderNumber || '').toLowerCase(),
+      ])).filter(Boolean);
+      /*
+       * Case-insensitive compare: the ledger key is LOWERCASED (`zid-…`) while
+       * the order row stores the display form (`ZID-…`), so an exact `$in`
+       * silently matched nothing and the row was “migrated” with no store.
+       */
+      const insensitiveKeys = lookupKeys.map(
+        (k) => new RegExp(`^${String(k).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+      );
+      const orderDoc = await db.collection(ORDERS_COLLECTION).findOne({
+        $or: [
+          ...insensitiveKeys.flatMap((re) => [{ id: re }, { order_number: re }, { orderNumber: re }]),
+          { _id: { $in: idCandidates } },
+        ],
+      }).catch(() => null);
+
+      const storeRef = String(
+        row.store_slug || row.storeSlug || orderDoc?.store_slug || orderDoc?.storeSlug || '',
+      ).trim().toLowerCase();
+      const storeDoc = storeRef
+        ? await db.collection('stores').findOne({
+            $or: [
+              { store_slug: storeRef }, { storeSlug: storeRef }, { store_code: storeRef },
+              ...(orderDoc?.store_id ? [{ id: String(orderDoc.store_id) }] : []),
+            ],
+          }).catch(() => null)
+        : null;
+
+      const set: Record<string, any> = {
+        id: String(row.id || key),
+        order_id: String(row.order_id || key),
+        order_number: String(row.order_number || orderDoc?.order_number || orderDoc?.orderNumber || key),
+        orderNumber: String(row.orderNumber || orderDoc?.orderNumber || orderDoc?.order_number || key),
+        courier_status: row.courier_status || 'sent_to_courier',
+        migrated_at: new Date(),
+      };
+      if (!row.store_slug && storeRef) { set.store_slug = storeRef; set.storeSlug = storeRef; }
+      if (!row.store_name) {
+        set.store_name = String(storeDoc?.store_name || storeDoc?.storeName || orderDoc?.store_name || orderDoc?.vendor_name || storeRef || 'Store');
+        set.storeName = set.store_name;
+      }
+      if (!row.store_code) set.store_code = String(storeDoc?.store_code || orderDoc?.store_code || '');
+      if (!row.store_id) set.store_id = String(storeDoc?.id || orderDoc?.store_id || '');
+      if (!row.merchant_phone) set.merchant_phone = String(storeDoc?.phone || storeDoc?.store_phone || storeDoc?.merchant_phone || orderDoc?.merchant_phone || '');
+      if (!row.pickup_address) set.pickup_address = String(storeDoc?.pickup_address || storeDoc?.store_address || storeDoc?.address || orderDoc?.pickup_address || '');
+      if (!row.customer_name) set.customer_name = String(orderDoc?.customer_name || orderDoc?.customerName || '');
+      if (!row.customer_phone) set.customer_phone = String(orderDoc?.customer_phone || orderDoc?.customerPhone || '');
+      if (!row.shipping_address) set.shipping_address = String(orderDoc?.shipping_address || orderDoc?.address || '');
+      if (!row.payment_method) set.payment_method = String(orderDoc?.payment_method || orderDoc?.paymentMethod || 'COD');
+      if (!Number(row.amount) && orderDoc) {
+        set.amount = Number(orderDoc.total_price ?? orderDoc.totalBDT ?? orderDoc.cod_amount ?? 0) || 0;
+      }
+      if (!row.courier_name) set.courier_name = String(orderDoc?.courier_name || orderDoc?.shipping_courier || '');
+
+      await ledgerCol.updateOne({ _id: row._id }, { $set: set }).catch(() => null);
+      updated += 1;
+    }
+
+    console.log('[Courier][ledger] migration complete', { scanned: rows.length, updated, skipped });
+    return res.status(200).json({ ok: true, scanned: rows.length, updated, skipped });
+  } catch (err: any) {
+    console.error('[Courier][ledger] migration error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Migration failed.' });
+  }
+};
+app.post('/api/admin/courier-orders/migrate-dispatched', migrateDispatchedLedger);
+app.get('/api/admin/courier-orders/migrate-dispatched', migrateDispatchedLedger);
 
 /**
  * Locate the document a label belongs to — the `courier_orders` ledger row
