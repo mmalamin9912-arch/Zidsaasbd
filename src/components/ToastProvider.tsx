@@ -72,28 +72,28 @@ const VARIANT_STYLES: Record<ToastVariant, { accent: string; border: string; ico
   success: {
     accent: 'text-[#00D68F]',
     border: 'border-[#00D68F]/40',
-    icon: <CheckCircle2 className="w-4 h-4" />,
+    icon: <CheckCircle2 className="w-5 h-5" />,
   },
   error: {
     accent: 'text-rose-400',
     border: 'border-rose-500/40',
-    icon: <XCircle className="w-4 h-4" />,
+    icon: <XCircle className="w-5 h-5" />,
   },
   warning: {
     accent: 'text-amber-400',
     border: 'border-amber-500/40',
-    icon: <AlertTriangle className="w-4 h-4" />,
+    icon: <AlertTriangle className="w-5 h-5" />,
   },
   info: {
     accent: 'text-sky-400',
     border: 'border-sky-500/40',
-    icon: <Info className="w-4 h-4" />,
+    icon: <Info className="w-5 h-5" />,
   },
 };
 
-const DEFAULT_DURATION = 3500;
+const DEFAULT_DURATION = 5000;
 /** Errors linger longer — the merchant usually needs to read them fully. */
-const ERROR_DURATION = 6000;
+const ERROR_DURATION = 8000;
 
 /** Errors stay until dismissed; everything else auto-expires. */
 function resolveDuration(variant: ToastVariant, duration?: number): number {
@@ -226,7 +226,7 @@ export const ToastViewport: React.FC<{ toasts: ToastItem[]; onDismiss: (id: stri
   if (toasts.length === 0) return null;
   return (
     <div
-      className="fixed z-[200] bottom-4 right-4 left-4 sm:left-auto flex flex-col items-stretch sm:items-end gap-2 pointer-events-none"
+      className="fixed top-4 left-1/2 -translate-x-1/2 z-[210] flex flex-col items-center gap-2 pointer-events-none"
       role="region"
       aria-label="Notifications"
     >
@@ -243,11 +243,11 @@ const ToastCard: React.FC<{ toast: ToastItem; onDismiss: (id: string) => void }>
     <div
       role={t.variant === 'error' ? 'alert' : 'status'}
       aria-live={t.variant === 'error' ? 'assertive' : 'polite'}
-      className={`pointer-events-auto w-full sm:w-[360px] bg-[#181B26]/98 backdrop-blur-xl border ${style.border} rounded-xl shadow-2xl p-3 flex items-start gap-2.5 animate-toast-in`}
+      className={`pointer-events-auto w-full max-w-[640px] bg-[#181B26]/98 backdrop-blur-xl border ${style.border} rounded-xl shadow-2xl p-4 flex items-start gap-3 animate-toast-in`}
     >
       <span className={`${style.accent} shrink-0 mt-0.5`}>{style.icon}</span>
       <div className="min-w-0 flex-1">
-        <p className="text-xs font-bold text-white leading-snug break-words">{t.message}</p>
+        <p className="text-sm font-bold text-white leading-snug break-words">{t.message}</p>
         {t.description && (
           <p className="text-[11px] text-slate-400 leading-relaxed mt-1 break-words">{t.description}</p>
         )}
