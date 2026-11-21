@@ -176,6 +176,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const [priceBDT, setPriceBDT] = useState<string | number>(initialData?.priceBDT ?? '');
   const [costPriceBDT, setCostPriceBDT] = useState<string | number>(initialData?.costPriceBDT ?? '');
   const [compareAtPriceBDT, setCompareAtPriceBDT] = useState<string | number>(initialData?.compareAtPriceBDT ?? '');
+  const [discountPriceBDT, setDiscountPriceBDT] = useState<string | number>(initialData?.discountPriceBDT ?? '');
 
   // 3. SKU, Weight & Category State
   //
@@ -372,6 +373,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const numSellingPrice = typeof priceBDT === 'number' ? priceBDT : parseFloat(priceBDT) || 0;
   const numCostPrice = typeof costPriceBDT === 'number' ? costPriceBDT : parseFloat(costPriceBDT) || 0;
   const numComparePrice = typeof compareAtPriceBDT === 'number' ? compareAtPriceBDT : parseFloat(compareAtPriceBDT) || 0;
+  const numDiscountPrice = typeof discountPriceBDT === 'number' ? discountPriceBDT : parseFloat(discountPriceBDT) || 0;
 
   // Variants & Options State
   const [hasVariants, setHasVariants] = useState<boolean>((initialData?.variantsCount || 0) > 1);
@@ -950,6 +952,25 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       }
     }
 
+    // Discount is mandatory: must be provided, non-negative, and not exceed the
+    // selling price so the effective price never goes below zero.
+    const discountValue = Number(numDiscountPrice);
+    if (!Number.isFinite(discountValue)) {
+      setFormError('Discount is required.');
+      toast.error('Please enter a discount amount (৳).');
+      return;
+    }
+    if (discountValue < 0) {
+      setFormError('Discount cannot be negative.');
+      toast.error('Discount cannot be negative (৳).');
+      return;
+    }
+    if (discountValue > priceValue) {
+      setFormError('Discount cannot exceed the selling price.');
+      toast.error('Discount cannot be higher than the selling price (৳).');
+      return;
+    }
+
     // Inside City and Outside City are mandatory per product. Sub-Dhaka is an
     // optional separately-priced zone; if left blank, it uses that product's
     // Inside City fee at checkout. Explicitly saved ৳0 is valid.
@@ -994,6 +1015,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       priceBDT: numSellingPrice,
       costPriceBDT: numCostPrice,
       compareAtPriceBDT: hasDiscount ? numComparePrice : undefined,
+      discountPriceBDT: numDiscountPrice,
       weightKg: Math.round(finalWeightKg * 100) / 100,
       stock: totalStock,
       warehouseStocks: inventories,
@@ -1326,7 +1348,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 {/* Selling Price */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
@@ -1387,6 +1409,32 @@ onClick={suggestPricing}
                   </div>
                   <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
                     To obtain your profit data accurately. It is not shown to the customer in the store
+                  </p>
+                </div>
+
+                {/* Discount */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-bold text-slate-300">
+                      Discount *
+                    </label>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="any"
+                      required
+                      value={discountPriceBDT}
+                      onChange={(e) => setDiscountPriceBDT(toSafeNumberValue(e.target.value))}
+                      placeholder="0.00"
+                      className="w-full bg-[#181B26] border border-[#2E3548] rounded-xl pl-3.5 pr-8 py-2.5 text-sm font-bold text-slate-200 focus:outline-none focus:border-[#00D68F]"
+                    />
+                    <span className="absolute right-3.5 top-1/2 -translate-y-1/2 font-bold text-slate-400 text-sm">
+                      ৳
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                    Mandatory marketing discount. Deducted from the selling price at checkout.
                   </p>
                 </div>
               </div>
@@ -2740,6 +2788,9 @@ onClick={suggestPricing}
                 <div className="mt-2 flex items-center justify-between">
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-sm font-black text-[#00D68F]">৳{numSellingPrice.toLocaleString()}</span>
+                    {numDiscountPrice > 0 && (
+                      <span className="text-[11px] text-rose-400 line-through">৳{(numSellingPrice - numDiscountPrice).toLocaleString()}</span>
+                    )}
                     {hasDiscount && numComparePrice > numSellingPrice && (
                       <span className="text-[11px] text-slate-500 line-through">৳{numComparePrice.toLocaleString()}</span>
                     )}

@@ -184,6 +184,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         price: Number(savedProduct.priceBDT ?? anyProd.price) || 0,
         costPriceBDT: savedProduct.costPriceBDT,
         compareAtPriceBDT: savedProduct.compareAtPriceBDT,
+        discountPriceBDT: savedProduct.discountPriceBDT,
         stock: Number(savedProduct.stock ?? anyProd.quantity ?? anyProd.stock_quantity) || 0,
         stock_quantity: Number(savedProduct.stock ?? anyProd.quantity ?? anyProd.stock_quantity) || 0,
         quantity: Number(savedProduct.stock ?? anyProd.quantity ?? anyProd.stock_quantity) || 0,

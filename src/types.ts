@@ -134,6 +134,7 @@ export interface Product {
   priceBDT: number;
   costPriceBDT?: number;
   compareAtPriceBDT?: number;
+  discountPriceBDT?: number;
   weightKg?: number;
   stock: number;
   warehouseStocks?: WarehouseStock[];

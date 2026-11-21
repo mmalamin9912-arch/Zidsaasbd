@@ -216,6 +216,7 @@ export function buildProductDbPayload(product: any, merchant?: { id?: string; st
     price,
     costPriceBDT: product.costPriceBDT != null ? Number(product.costPriceBDT) : undefined,
     compareAtPriceBDT: product.compareAtPriceBDT != null ? Number(product.compareAtPriceBDT) : undefined,
+    discountPriceBDT: product.discountPriceBDT != null ? Number(product.discountPriceBDT) : undefined,
     stock,
     stock_quantity: stock,
     image,
