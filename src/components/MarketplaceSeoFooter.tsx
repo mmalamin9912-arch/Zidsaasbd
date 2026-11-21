@@ -242,13 +242,13 @@ const NAV_COLUMNS: NavColumn[] = [
   },
 ];
 
-/** About / Careers / Terms / Privacy / Sell in BD — the utility strip. */
+/** About / Careers / Terms / Privacy / Seller Pricing — the utility strip. */
 const UTILITY_LINKS: { label: string; labelBn: string }[] = [
   { label: 'About Us', labelBn: 'আমাদের সম্পর্কে' },
   { label: 'Careers', labelBn: 'ক্যারিয়ার' },
   { label: 'Terms of Use', labelBn: 'ব্যবহারের শর্তাবলী' },
   { label: 'Privacy Policy', labelBn: 'গোপনীয়তা নীতি' },
-  { label: 'Sell in BD', labelBn: 'আমাদের সাথে বিক্রি করুন' },
+  { label: 'Seller Pricing', labelBn: 'সেলার প্রাইসিং' },
 ];
 
 /**
@@ -466,12 +466,12 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
 
           <nav aria-labelledby="mm-sellerlinks-heading">
             <h3 id="mm-sellerlinks-heading" className="text-[12.5px] font-black" style={{ color: THEME.ink }}>
-              {t('Sell in BD', 'আমাদের সাথে বিক্রি করুন')}
+              {t('Seller Pricing', 'সেলার প্রাইসিং')}
             </h3>
             <ul className="mt-2 space-y-1.5">
               {[
                 { label: t('Open your store', 'আপনার স্টোর খুলুন'), onClick: onGoToPlans, Icon: Store },
-                { label: t('View plans', 'প্ল্যান দেখুন'), onClick: onGoToPlans, Icon: ArrowRight },
+                { label: t('View seller plans', 'সেলার প্ল্যান দেখুন'), onClick: onGoToPlans, Icon: ArrowRight },
                 { label: t('Merchant login', 'মার্চেন্ট লগইন'), onClick: onGoToPlans, Icon: Users },
               ].map(({ label, onClick, Icon }) => (
                 <li key={label}>
@@ -538,19 +538,19 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
             className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2 border-t pt-4"
             style={{ borderColor: THEME.line }}
           >
-            {UTILITY_LINKS.map((link) => {
+{UTILITY_LINKS.map((link) => {
               const label = lang === 'bn' ? link.labelBn : link.label;
-              // "Sell in BD" is the only true action; legal/corporate links route
+              // "Seller Pricing" is the only true action; legal/corporate links route
               // to the public storefront policy pages (/terms, /privacy, /about).
               // These never touch the merchant dashboard.
-              const isSell = link.label === 'Sell in BD';
+              const isSell = link.label === 'Seller Pricing';
               const isPolicy = link.label === 'Terms of Use' || link.label === 'Privacy Policy' || link.label === 'About Us';
               const handled = isSell ? onGoToPlans : (isPolicy ? () => navigatePolicy(link.label) : undefined);
               const disabled = !handled;
               return (
                 <a
                   key={link.label}
-                  href={isSell ? '/pricing' : undefined}
+                  href={isSell ? '/seller/pricing' : undefined}
                   onClick={
                     isSell
                       ? (e) => {
@@ -563,15 +563,15 @@ export const MarketplaceSeoFooter: React.FC<Props> = ({
                           navigatePolicy(link.label);
                         }
                       : undefined
-                   }
-                   disabled={disabled}
-                   className={`text-[11.5px] font-semibold transition ${isSell ? 'hover:underline' : 'well-link'} disabled:cursor-default`}
-                   style={{ color: isSell ? THEME.brand : THEME.inkMuted }}
-                 >
-                   {label}
-                 </a>
-               );
-             })}
+                 }
+                  disabled={disabled}
+                  className={`text-[11.5px] font-semibold transition ${isSell ? 'hover:underline' : 'well-link'} disabled:cursor-default`}
+                  style={{ color: isSell ? THEME.brand : THEME.inkMuted }}
+                >
+                  {label}
+                </a>
+              );
+            })}
           </div>
         </nav>
 

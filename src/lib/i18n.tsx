@@ -158,6 +158,15 @@ export const translations: Record<Language, Record<string, string>> = {
     'land_most_popular': 'Most Popular',
     'land_plan_desc': 'Perfect for growing businesses.',
 
+    // ---------- Seller Pricing (seller/pricing) ----------
+    'seller_launch_badge': 'Start Selling on Bangladesh\'s Leading Marketplace',
+    'seller_hero_title_1': 'Everything You Need to',
+    'seller_hero_title_2': 'Start Selling Online in Bangladesh',
+    'seller_hero_subtitle': 'Join thousands of sellers on Zid Marketplace. 0% Commission on sales. Local payment gateways built right in.',
+    'seller_sign_in': 'Seller Sign In',
+    'start_selling_free': 'Start Selling Free',
+    'go_to_seller_dashboard': 'Go to Seller Dashboard',
+
     // ---------- Auth / Login ----------
     'auth_badge': 'ZID SAAS Bangladesh',
     'auth_welcome_back': 'Welcome back!',
@@ -495,6 +504,15 @@ bn: {
     'land_subscribe_now': 'সাবস্ক্রাইব করুন',
     'land_most_popular': 'সবচেয়ে জনপ্রিয়',
     'land_plan_desc': 'বর্ধনশীল ব্যবসার জন্য পারফেক্ট।',
+
+    // ---------- Seller Pricing (seller/pricing) ----------
+    'seller_launch_badge': 'বাংলাদেশের শীর্ষ মার্কেটপ্লেসে বিক্রি শুরু করুন',
+    'seller_hero_title_1': 'বাংলাদেশে অনলাইনে বিক্রি শুরু করার জন্য',
+    'seller_hero_title_2': 'আপনার যা যা দরকার',
+    'seller_hero_subtitle': 'জিড মার্কেটপ্লেসে হাজার হাজার সেলারের সাথে যোগ দিন। বিক্রিতে ০% কমিশন। লোকাল পেমেন্ট গেটওয়ে বিল্ট-ইন।',
+    'seller_sign_in': 'সেলার সাইন ইন',
+    'start_selling_free': 'বিনামূল্যে বিক্রি শুরু করুন',
+    'go_to_seller_dashboard': 'সেলার ড্যাশবোর্ডে যান',
 
     // ---------- Auth / Login ----------
     'auth_badge': 'জি়আইডি সাস — বাংলাদেশ',

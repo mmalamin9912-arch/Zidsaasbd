@@ -280,7 +280,7 @@ export default function App() {
   // marketplace, so landing on it must NOT flip this flag on.
   const [showLanding, setShowLanding] = useState<boolean>(() => {
     const path = window.location.pathname;
-    if (path === '' || path === '/pricing' || path === '/landing') {
+    if (path === '' || path === '/pricing' || path === '/landing' || path === '/seller/pricing') {
       return true;
     }
     // The marketplace is a PUBLIC page — it must never be gated behind the
@@ -301,6 +301,7 @@ export default function App() {
       path === '' ||
       path === '/pricing' ||
       path === '/landing' ||
+      path === '/seller/pricing' ||
       path === '/marketplace' ||
       path === '/store/marketplace' ||
       path.startsWith('/marketplace/') ||
@@ -412,8 +413,8 @@ export default function App() {
         return;
       }
 
-      // Pricing / landing page.
-      if (path === '/pricing' || path === '/landing') {
+      // Pricing / landing page (including seller-specific route).
+      if (path === '/pricing' || path === '/landing' || path === '/seller/pricing') {
         setShowLanding(true);
         if (!hasSession) {
           setIsAuthenticated(false);
@@ -2471,8 +2472,8 @@ onPlaceOrder={async (newOrder) => {
           }
         }}
         onGoToPlans={() => {
-          window.history.pushState({}, '', '/pricing');
-          setCurrentPath('/pricing');
+          window.history.pushState({}, '', '/seller/pricing');
+          setCurrentPath('/seller/pricing');
         }}
         onNavigatePolicy={(pageKey) => {
           const slugMap: Record<string, string> = {
@@ -2665,9 +2666,11 @@ onPlaceOrder={async (newOrder) => {
   }
 
   if (showLanding) {
+    const isSellerPricing = currentPath === '/seller/pricing';
     return (
       <PublicPricingLanding
         isAuthenticated={isAuthenticated}
+        isSellerPricing={isSellerPricing}
         onGoToDashboard={() => {
           setShowLanding(false);
           setActiveTab('dashboard');

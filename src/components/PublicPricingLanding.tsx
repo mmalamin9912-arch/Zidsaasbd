@@ -18,6 +18,11 @@ interface PublicPricingLandingProps {
    * the entry point and needs its own link back to the shop floor.
    */
   onGoToMarketplace?: () => void;
+  /**
+   * Whether this is the seller-specific pricing route (/seller/pricing).
+   * Used to show seller-focused labels and CTAs.
+   */
+  isSellerPricing?: boolean;
 }
 
 export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({ 
@@ -26,6 +31,7 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
   isAuthenticated,
   onGoToDashboard,
   onGoToMarketplace,
+  isSellerPricing = false,
 }) => {
   const { t } = useLanguage();
   return (
@@ -40,7 +46,7 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
               onClick={onGoToMarketplace}
               className="hidden items-center gap-1.5 text-slate-300 transition hover:text-white sm:flex cursor-pointer"
             >
-              <span>Marketplace</span>
+              <span>{isSellerPricing ? 'Marketplace' : 'Marketplace'}</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           )}
@@ -51,7 +57,7 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
               onClick={onGoToDashboard} 
               className="bg-[#D4AF37] hover:bg-[#e4be42] text-slate-950 px-4 py-2 rounded-xl transition flex items-center gap-2 font-bold cursor-pointer"
             >
-              <span>{t('go_to_dashboard')}</span>
+              <span>{isSellerPricing ? t('go_to_seller_dashboard') : t('go_to_dashboard')}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           ) : (
@@ -61,14 +67,14 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
                 onClick={onLoginClick} 
                 className="text-slate-300 hover:text-white transition cursor-pointer"
               >
-                {t('sign_in')}
+                {isSellerPricing ? t('seller_sign_in') : t('sign_in')}
               </button>
               <button 
                 id="pricing-start-trial-btn"
                 onClick={() => onSelectPlan('free_trial')}
                 className="bg-[#D4AF37] hover:bg-[#e4be42] text-slate-950 px-4 py-2 rounded-xl transition flex items-center gap-2 cursor-pointer font-bold"
               >
-                <span>{t('start_free_trial')}</span>
+                <span>{isSellerPricing ? t('start_selling_free') : t('start_free_trial')}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </>
@@ -80,14 +86,14 @@ export const PublicPricingLanding: React.FC<PublicPricingLandingProps> = ({
       <div id="pricing-hero" className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-16 w-full flex flex-col items-center text-center">
         <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900 border border-[#D4AF37]/30 text-[#D4AF37] text-xs font-bold uppercase tracking-wider mb-6">
           <Sparkles className="w-4 h-4" />
-          <span>{t('land_launch_badge')}</span>
+          <span>{isSellerPricing ? t('seller_launch_badge') : t('land_launch_badge')}</span>
         </div>
         <h1 className="text-4xl md:text-5xl lg:text-6xl font-black text-white leading-tight mb-6 max-w-4xl">
-          {t('land_hero_title_1')} <br />
-          <span className="text-[#D4AF37]">{t('land_hero_title_2')}</span>
+          {isSellerPricing ? t('seller_hero_title_1') : t('land_hero_title_1')} <br />
+          <span className="text-[#D4AF37]">{isSellerPricing ? t('seller_hero_title_2') : t('land_hero_title_2')}</span>
         </h1>
         <p className="text-base md:text-lg text-slate-400 max-w-2xl mb-12">
-          {t('land_hero_subtitle')}
+          {isSellerPricing ? t('seller_hero_subtitle') : t('land_hero_subtitle')}
         </p>
 
         {/* Pricing Grid */}
