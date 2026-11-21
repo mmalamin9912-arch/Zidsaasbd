@@ -203,6 +203,14 @@ import {
   updateOrderFields,
   recordCourierDispatch,
   recordCourierDispatchAttempt,
+  recordCourierClickEverywhere,
+  buildCourierLedgerRow,
+  loadCourierLedgerRows,
+  mirrorCourierLedgerToSupabase,
+  readSupabaseEnv,
+  normalizeSupabaseLedgerRow,
+  patchSupabaseLedgerRow,
+  findSupabaseLedgerRow,
   courierOrderKey,
   COURIER_ORDERS_COLLECTION,
   findOrder,
@@ -18341,45 +18349,23 @@ app.post('/api/courier/send', async (req, res) => {
       raw?: Record<string, any> | null;
     } = {},
   ): void => {
-    void (async () => {
-      try {
-        const store = await loadStoreForAlert();
-        const result = await recordCourierDispatchAttempt({
-          orderId: String(
-            postedOrder.order_number || postedOrder.orderNumber ||
-            postedOrder.invoice_id || postedOrder.invoiceId || postedOrder.id || storeSlugForAlert || '',
-          ),
-          status:
-            status === 'booked'
-              ? 'booked'
-              : status === 'failed'
-                ? 'failed'
-                : status === 'sandbox'
-                  ? 'dispatched'
-                  // 'disabled' — automated booking is off, the admin must enter
-                  // the parcel by hand; it is still a real dispatch request.
-                  : 'sent_to_courier',
-          courierName: extra.courierName || String(body.courier || body.courierName || '').trim(),
-          courierKey: normalizeCourierKey(body.courier || body.courierName || ''),
-          trackingCode: extra.trackingCode,
-          error: extra.errorMessage,
-          booked: extra.booked === true,
-          order: postedOrder,
-          storeRef: {
-            ...(store || {}),
-            store_slug: store?.store_slug || store?.storeSlug || storeSlugForAlert || '',
-            merchant_phone: store?.merchant_phone || store?.merchantPhone || store?.phone || '',
-            pickup_address: store?.pickup_address || store?.pickupAddress || store?.address || '',
-          },
-          raw: extra.raw || null,
-        });
-        if (!result.ok) {
-          console.warn('[Courier][ledger] could not record the dispatch:', result.error);
-        }
-      } catch (ledgerErr: any) {
-        console.warn('[Courier][ledger] record task error (ignored):', ledgerErr?.message || ledgerErr);
-      }
-    })();
+    recordCourierClickEverywhere({
+      status,
+      courierName: extra.courierName || String(body.courier || body.courierName || '').trim(),
+      courierKey: normalizeCourierKey(body.courier || body.courierName || ''),
+      trackingCode: extra.trackingCode,
+      errorMessage: extra.errorMessage,
+      booked: extra.booked === true,
+      order: postedOrder,
+      fallback: body,
+      loadStore: loadStoreForAlert,
+      storeRef: {
+        store_slug: body.store_slug || body.storeSlug || postedOrder.store_slug || postedOrder.storeSlug || storeSlugForAlert || '',
+        store_id: body.store_id || postedOrder.store_id,
+        merchant_id: body.merchant_id || body.merchantId || postedOrder.merchant_id || postedOrder.merchantId,
+      },
+      raw: extra.raw || null,
+    });
   };
 
   const notify = (
@@ -23665,25 +23651,26 @@ app.get('/api/admin/courier-orders', async (req, res) => {
     /*
      * THE DISPATCH LEDGER — the real source of this list.
      *
-     * `recordCourierDispatchAttempt` writes one `courier_orders` row for EVERY
-     * “Send to Courier” click, including the ones that never produced a parcel
-     * (Steadfast 401, no API keys, manual entry). The `orders` query above only
-     * finds rows that already carry a tracking column, which is why this tab
-     * kept saying “No courier orders yet” after a failed or manual dispatch.
-     * Both sources are merged, the ledger winning on identity/status.
+     * PRODUCTION READS SUPABASE. `zid-marketplace.onrender.com` reports
+     * `provider: "Supabase Data Layer"`; MongoDB may be absent there, and this
+     * route used to read ONLY `mongoose.connection.db`, so it answered
+     * `orders: []` and the portal showed “NO COURIER ORDERS YET” even after a
+     * real click. `loadCourierLedgerRows` reads Supabase (the `courier_orders`
+     * table, or the `platform_config` fallback documents) AND MongoDB, unioned
+     * by order id — whichever store holds the click, the admin sees it.
      */
     let ledgerOrders: any[] = [];
-    if (dbConnected && mongoose.connection.db) {
-      try {
-        ledgerOrders = await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any)
-          .find({})
-          .sort({ updated_at: -1, created_at: -1, _id: -1 })
-          .limit(limit)
-          .toArray();
-      } catch (ledgerErr: any) {
-        console.warn('[Server] GET /api/admin/courier-orders ledger warning:', ledgerErr?.message || ledgerErr);
-        ledgerOrders = [];
-      }
+    let ledgerSources: string[] = [];
+    try {
+      const loaded = await loadCourierLedgerRows(limit);
+      ledgerOrders = loaded.rows;
+      ledgerSources = loaded.sources;
+    } catch (ledgerErr: any) {
+      console.warn('[Server] GET /api/admin/courier-orders ledger warning:', ledgerErr?.message || ledgerErr);
+      ledgerOrders = [];
+    }
+    if (ledgerOrders.length > 0) {
+      console.log('[Server] courier-orders ledger sources:', ledgerSources, 'rows:', ledgerOrders.length);
     }
 
     // Merge with cached orders that have tracking info
@@ -24064,14 +24051,30 @@ app.post('/api/admin/courier-orders/:orderId/label', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'File too large. Maximum 5MB.' });
     }
 
-    await connectToMongoDB();
-    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
-      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
-    }
+    /*
+     * PRODUCTION: Supabase is the store. The old body returned 503
+     * “Database unavailable” the moment MongoDB was unreachable — which is the
+     * deployed runtime — so labels could never be uploaded at all. Mongo is now
+     * the optional secondary; the request only fails when NEITHER store can be
+     * written.
+     */
+    const supabaseCfg = readSupabaseEnv();
+    const supabaseRow = supabaseCfg
+      ? (await findSupabaseLedgerRow(supabaseCfg, orderId)).row
+      : null;
 
-    const target = await resolveCourierOrderTarget(orderId);
-    if (!target) {
-      return res.status(404).json({ ok: false, error: 'Order not found.' });
+    let target: { kind: 'ledger' | 'order'; collection: any; id: any; doc: Record<string, any> } | null = null;
+    let mongoUp = false;
+    try {
+      await connectToMongoDB();
+      mongoUp = mongoose.connection.readyState === 1 && Boolean(mongoose.connection.db);
+    } catch (dbErr: any) {
+      console.warn('[Server] courier label: Mongo unavailable (using Supabase):', dbErr?.message || dbErr);
+    }
+    if (mongoUp) target = await resolveCourierOrderTarget(orderId);
+
+    if (!target && !supabaseRow) {
+      return res.status(404).json({ ok: false, error: 'Order not found in the courier ledger.' });
     }
 
     const labelRecord = {
@@ -24084,18 +24087,44 @@ app.post('/api/admin/courier-orders/:orderId/label', async (req, res) => {
       uploadedBy: 'admin',
     };
 
+    const existingLabels: any[] = [];
+    if (supabaseRow && Array.isArray(supabaseRow.courier_labels)) existingLabels.push(...supabaseRow.courier_labels);
+    if (target && target.kind === 'ledger' && Array.isArray(target.doc.courier_labels)) existingLabels.push(...target.doc.courier_labels);
+    const nextLabels = [...existingLabels, labelRecord];
+
     /*
-     * The label lives on BOTH documents: the `orders` row (which the merchant's
-     * dashboard prints from) and the `courier_orders` ledger row (which the
-     * Admin list renders). Writing only the order document meant a label was
-     * invisible — or un-uploadable — for a dispatch that never reached `orders`
-     * (a 401, a manual entry), i.e. exactly the rows this list exists for.
+     * 1. SUPABASE (the list the admin reads): push the label onto the ledger
+     *    row, creating the row when the order was dispatched by an older build.
      */
-    await target.collection.updateOne(
-      { _id: target.id },
-      { $push: { courier_labels: labelRecord as any }, $set: { updated_at: new Date() } }
-    );
-    if (target.kind === 'order') {
+    let supabaseSaved = false;
+    if (supabaseCfg) {
+      const base = supabaseRow || {
+        id: courierOrderKey(orderId),
+        order_id: courierOrderKey(orderId),
+        order_number: String(orderId).replace(/^#/, ''),
+        courier_status: 'sent_to_courier',
+      };
+      const written = await mirrorCourierLedgerToSupabase(
+        { ...base, courier_labels: nextLabels },
+        supabaseCfg,
+      );
+      supabaseSaved = written.ok;
+      if (!written.ok) console.warn('[Courier][labels] Supabase label write failed:', written.error);
+    }
+
+    /*
+     * 2. MONGODB (when present): the `orders` row (which the merchant prints
+     *    from) and the ledger row.
+     */
+    let mongoSaved = false;
+    if (target) {
+      await target.collection.updateOne(
+        { _id: target.id },
+        { $push: { courier_labels: labelRecord as any }, $set: { updated_at: new Date() } }
+      ).catch(() => null);
+      mongoSaved = true;
+    }
+    if (target && target.kind === 'order' && mongoose.connection.db) {
       const ledgerKey = courierOrderKey(
         target.doc.order_number, target.doc.orderNumber, target.doc.id, orderId,
       );
@@ -24124,10 +24153,18 @@ app.post('/api/admin/courier-orders/:orderId/label', async (req, res) => {
             { upsert: true },
           )
           .catch(() => null);
+        mongoSaved = true;
       }
     }
 
-    return res.status(200).json({ ok: true, label: labelRecord });
+    if (!mongoSaved && !supabaseSaved) {
+      return res.status(503).json({
+        ok: false,
+        error: 'The label could not be stored: neither Supabase nor MongoDB accepted the write.',
+      });
+    }
+
+    return res.status(200).json({ ok: true, label: labelRecord, stored_in: mongoSaved ? 'mongodb' : 'supabase' });
   } catch (err: any) {
     console.error('[Server] POST /api/admin/courier-orders/:orderId/label error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Could not upload label.' });
@@ -24144,23 +24181,45 @@ app.get('/api/admin/courier-orders/:orderId/labels', async (req, res) => {
   try {
     const { orderId } = req.params;
 
-    await connectToMongoDB();
-    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
-      return res.status(503).json({ ok: false, error: 'Database unavailable.' });
+    /*
+     * Read from BOTH stores; Supabase is authoritative in production. As with
+     * the upload route, an unreachable MongoDB must not turn a label read into a
+     * 503 — the admin needs to see the labels on the ledger row.
+     */
+    const supabaseCfg = readSupabaseEnv();
+    const collected: any[] = [];
+
+    if (supabaseCfg) {
+      const found = await findSupabaseLedgerRow(supabaseCfg, orderId);
+      const labels = found.row?.courier_labels;
+      if (Array.isArray(labels)) collected.push(...labels);
+      else if (typeof labels === 'string') {
+        try {
+          const parsed = JSON.parse(labels);
+          if (Array.isArray(parsed)) collected.push(...parsed);
+        } catch { /* not JSON — nothing to add */ }
+      }
     }
 
-    const target = await resolveCourierOrderTarget(orderId);
+    let target: { kind: 'ledger' | 'order'; collection: any; id: any; doc: Record<string, any> } | null = null;
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        target = await resolveCourierOrderTarget(orderId);
+      }
+    } catch (dbErr: any) {
+      console.warn('[Server] courier labels: Mongo unavailable (using Supabase):', dbErr?.message || dbErr);
+    }
 
     /*
-     * Labels may be split across the two documents (see the upload route), so
-     * both are read and unioned by label id.
+     * Labels may be split across the documents (see the upload route), so the
+     * Mongo copies are unioned in by label id.
      */
-    const collected: any[] = [];
     if (target) {
       collected.push(...(Array.isArray(target.doc.courier_labels) ? target.doc.courier_labels : []));
     }
     const ledgerKey = courierOrderKey(orderId, target?.doc?.order_number, target?.doc?.orderNumber);
-    if (ledgerKey && mongoose.connection.db) {
+    if (ledgerKey && mongoose.connection.readyState === 1 && mongoose.connection.db) {
       const ledgerDoc = await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any)
         .findOne({ _id: ledgerKey as any }, { projection: { courier_labels: 1 } })
         .catch(() => null);
@@ -24168,7 +24227,7 @@ app.get('/api/admin/courier-orders/:orderId/labels', async (req, res) => {
         collected.push(...ledgerDoc.courier_labels);
       }
     }
-    if (!target && collected.length === 0) {
+    if (!target && collected.length === 0 && !supabaseCfg) {
       return res.status(404).json({ ok: false, error: 'Order not found.', labels: [] });
     }
 
@@ -24273,9 +24332,10 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
      *
      * The ledger row is what that list renders, so a status chosen there (or in
      * the merchant dashboard) must also land on it — otherwise the dropdown
-     * snapped back on the next refresh. Best-effort and never fatal: the row may
-     * not exist yet for an order dispatched by an older build.
+     * snapped back on the next refresh. Supabase is written first because it is
+     * the store the production list reads; MongoDB is best-effort.
      */
+    let ledgerMirrored = false;
     try {
       const ledgerKey = courierOrderKey(orderId);
       const ledgerStatus =
@@ -24288,14 +24348,45 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
               : courierKey === 'in_delivery'
                 ? 'in_transit'
                 : undefined;
+
       if (ledgerKey && ledgerStatus) {
-        await (mongoose.connection.db!.collection(COURIER_ORDERS_COLLECTION) as any).updateOne(
-          { _id: ledgerKey as any },
-          { $set: { courier_status: ledgerStatus, courier_status_updated_at: new Date(), updated_at: new Date() } },
-        ).catch(() => null);
+        const supabaseCfg = readSupabaseEnv();
+        if (supabaseCfg) {
+          const patched = await patchSupabaseLedgerRow(supabaseCfg, orderId, {
+            courier_status: ledgerStatus,
+            courier_status_updated_at: new Date().toISOString(),
+          });
+          ledgerMirrored = patched.ok;
+          if (!patched.ok) {
+            console.warn('[Courier][ledger] Supabase status mirror skipped:', patched.error);
+          }
+        }
+
+        if (!ledgerMirrored && mongoose.connection.readyState === 1 && mongoose.connection.db) {
+          const resMongo = await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any).updateOne(
+            { _id: ledgerKey as any },
+            { $set: { courier_status: ledgerStatus, courier_status_updated_at: new Date(), updated_at: new Date() } },
+          ).catch(() => null);
+          ledgerMirrored = Boolean(resMongo?.matchedCount);
+        }
       }
     } catch (ledgerErr: any) {
       console.warn('[Courier][ledger] status mirror warning:', ledgerErr?.message || ledgerErr);
+    }
+
+    /*
+     * The ORDER row itself is also written to Supabase. In production Mongo may
+     * be unavailable, and then `updateOrderFields` fails — but the ledger row was
+     * already patched, so the admin's dropdown must still be treated as saved.
+     */
+    if (!result.ok && ledgerMirrored) {
+      return res.status(200).json({
+        ok: true,
+        status: update.status || rawStatus,
+        courier_status: update.courier_status || null,
+        order: null,
+        note: 'The courier status was saved on the dispatch ledger; the order row itself could not be reached.',
+      });
     }
 
     if (!result.ok) {
@@ -24377,55 +24468,83 @@ app.get('/api/orders/:orderId/courier-labels', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'store_slug is required.', labels: [] });
     }
 
-    await connectToMongoDB();
-    if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) {
-      return res.status(503).json({ ok: false, error: 'Database unavailable.', labels: [] });
-    }
-
     /*
-     * A label uploaded from the Admin list is written to the `courier_orders`
-     * ledger row AND the `orders` row; this merchant-facing read therefore
-     * unions both, so the label appears in the merchant dashboard too. Only
-     * rows whose store matches the caller are considered.
+     * SUPABASE FIRST — production runs on PostgREST, where MongoDB may not
+     * exist; the old 503 made every admin-uploaded label invisible to the
+     * merchant. Labels are only returned when the row's store matches the
+     * caller's slug, so one merchant still cannot read another's slip.
      */
-    const db = mongoose.connection.db;
-    const idCandidates: any[] = [orderId];
-    if (/^[a-f0-9]{24}$/i.test(String(orderId || ''))) {
-      try { idCandidates.push(new mongoose.Types.ObjectId(orderId)); } catch { /* ignore */ }
-    }
-    const scope = {
-      $or: [
-        { _id: { $in: idCandidates } },
-        { order_number: orderId },
-        { orderNumber: orderId },
-        { id: orderId },
-      ],
-    };
-    const storeScope = {
-      $or: [
-        { store_slug: storeSlug }, { storeSlug: storeSlug },
-        { store_code: storeSlug }, { storeCode: storeSlug },
-      ],
-    };
+    const supabaseCfg = readSupabaseEnv();
+    const collected: any[] = [];
+    let authorised = false;
 
-    const [order, ledgerDoc] = await Promise.all([
-      (db.collection('orders') as any)
-        .findOne({ $and: [scope, storeScope] }, { projection: { courier_labels: 1 } })
-        .catch(() => null),
-      (db.collection(COURIER_ORDERS_COLLECTION) as any)
-        .findOne(
-          { $and: [{ $or: [{ _id: courierOrderKey(orderId) as any }, { order_id: courierOrderKey(orderId) }, { order_number: orderId }] }, storeScope] },
-          { projection: { courier_labels: 1 } },
-        )
-        .catch(() => null),
-    ]);
-    if (!order && !ledgerDoc) {
+    if (supabaseCfg) {
+      const found = await findSupabaseLedgerRow(supabaseCfg, orderId);
+      const row = found.row;
+      if (row) {
+        const rowStores = [row.store_slug, row.storeSlug, row.store_code, row.storeCode]
+          .filter(Boolean).map((v: any) => String(v).toLowerCase());
+        if (rowStores.includes(storeSlug)) {
+          authorised = true;
+          let labels = row.courier_labels;
+          if (typeof labels === 'string') {
+            try { labels = JSON.parse(labels); } catch { labels = []; }
+          }
+          if (Array.isArray(labels)) collected.push(...labels);
+        }
+      }
+    }
+
+    let order: Record<string, any> | null = null;
+    let ledgerDoc: Record<string, any> | null = null;
+    try {
+      await connectToMongoDB();
+    } catch (dbErr: any) {
+      console.warn('[Server] courier-labels: Mongo unavailable (using Supabase):', dbErr?.message || dbErr);
+    }
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const db = mongoose.connection.db;
+      const idCandidates: any[] = [orderId];
+      if (/^[a-f0-9]{24}$/i.test(String(orderId || ''))) {
+        try { idCandidates.push(new mongoose.Types.ObjectId(orderId)); } catch { /* ignore */ }
+      }
+      const scope = {
+        $or: [
+          { _id: { $in: idCandidates } },
+          { order_number: orderId },
+          { orderNumber: orderId },
+          { id: orderId },
+        ],
+      };
+      const storeScope = {
+        $or: [
+          { store_slug: storeSlug }, { storeSlug: storeSlug },
+          { store_code: storeSlug }, { storeCode: storeSlug },
+        ],
+      };
+
+      [order, ledgerDoc] = await Promise.all([
+        (db.collection('orders') as any)
+          .findOne({ $and: [scope, storeScope] }, { projection: { courier_labels: 1 } })
+          .catch(() => null),
+        (db.collection(COURIER_ORDERS_COLLECTION) as any)
+          .findOne(
+            { $and: [{ $or: [{ _id: courierOrderKey(orderId) as any }, { order_id: courierOrderKey(orderId) }, { order_number: orderId }] }, storeScope] },
+            { projection: { courier_labels: 1 } },
+          )
+          .catch(() => null),
+      ]);
+      if (order || ledgerDoc) authorised = true;
+    }
+
+    if (!authorised) {
       return res.status(404).json({ ok: false, error: 'Order not found or access denied.', labels: [] });
     }
 
     // Only return labels that are visible to merchant (exclude admin-only notes if needed)
     const seen = new Set<string>();
     const rawLabels = [
+      ...collected,
       ...((order?.courier_labels as any[]) || []),
       ...((ledgerDoc?.courier_labels as any[]) || []),
     ].filter((l: any) => {

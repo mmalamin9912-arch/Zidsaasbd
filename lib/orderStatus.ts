@@ -32,6 +32,13 @@
  */
 
 import { getMongoUri, getMongoDb, DB_NAME } from './db.js';
+import {
+  upsertSupabaseLedger,
+  listSupabaseLedger,
+  findSupabaseLedgerRow,
+  patchSupabaseLedgerRow,
+  ledgerOrderKey,
+} from './courierLedgerSupabase.js';
 
 /* ────────────────────────── collections ────────────────────────── */
 
@@ -613,7 +620,7 @@ export function courierOrderKey(...candidates: unknown[]): string {
  * Never throws: the caller is a booking route, and a ledger write must not be
  * able to fail a dispatch.
  */
-export async function recordCourierDispatchAttempt(input: {
+export interface CourierDispatchAttemptInput {
   /** Any identifier the caller holds: order_number, invoice id, `_id`, … */
   orderId?: string;
   status: CourierOrderStatus;
@@ -630,193 +637,493 @@ export async function recordCourierDispatchAttempt(input: {
   storeRef?: Record<string, any> | null;
   /** Raw provider response, so support can see exactly what was sent back. */
   raw?: Record<string, any> | null;
+}
+
+/**
+ * The canonical ledger row for ONE dispatch click.
+ *
+ * Shared by the MongoDB writer and the Supabase writer so both stores always
+ * carry exactly the same columns — the Admin list must render identically
+ * whichever one answered the read.
+ */
+export function buildCourierLedgerRow(input: CourierDispatchAttemptInput): Record<string, any> | null {
+  const order = (input.order && typeof input.order === 'object' ? input.order : {}) as Record<string, any>;
+  const store = (input.storeRef && typeof input.storeRef === 'object' ? input.storeRef : {}) as Record<string, any>;
+
+  const id = courierOrderKey(
+    input.orderId,
+    order.order_number,
+    order.orderNumber,
+    order.invoice_id,
+    order.invoiceId,
+    order.id,
+  );
+  if (!id) return null;
+
+  const pick = (...values: unknown[]): string => {
+    for (const value of values) {
+      if (value === undefined || value === null) continue;
+      const text = String(value).trim();
+      if (text) return text;
+    }
+    return '';
+  };
+
+  /*
+   * STORE IDENTITY — the ORDER's own slug always wins (see the long note in
+   * recordCourierDispatchAttempt), then the store record fills in the rest.
+   */
+  const orderSlug = pick(order.store_slug, order.storeSlug, order.merchant_store_slug, order.merchant_storeSlug).toLowerCase();
+  const storeSlug = (orderSlug || pick(store.store_slug, store.storeSlug)).toLowerCase();
+  const storeCode = pick(order.store_code, order.storeCode, store.store_code, store.storeCode);
+  const storeId = pick(order.store_id, order.storeId, store.store_id, store.storeId, store.id);
+  const storeName = pick(
+    order.store_name, order.storeName, order.vendor_name, order.vendorName,
+    store.store_name, store.storeName, store.name, storeSlug,
+  );
+  const merchantPhone = pick(
+    order.merchant_phone, order.merchantPhone,
+    store.merchant_phone, store.merchantPhone, store.phone, store.store_phone, store.storePhone,
+    store.support_phone, store.supportPhone, store.contactPhone, store.contact_phone,
+    store.whatsappNumber, store.whatsapp_number,
+  );
+  const pickupAddress = pick(
+    order.pickup_address, order.pickupAddress,
+    store.pickup_address, store.pickupAddress, store.pickup_point, store.store_address,
+    store.storeAddress, store.address,
+  );
+
+  const customerName = pick(order.customer_name, order.customerName, order.name);
+  const customerPhone = pick(order.customer_phone, order.customerPhone, order.phone);
+  const customerAddress = pick(order.shipping_address, order.address, order.delivery_address);
+  const customerCity = pick(order.customer_city, order.customerCity);
+  const amount = Number(
+    order.total_price ?? order.totalBDT ?? order.total_amount ?? order.total ?? order.cod_amount ?? order.codAmount ?? 0,
+  ) || 0;
+  const paymentMethod = pick(order.payment_method, order.paymentMethod, order.payment?.method) || 'COD';
+  const paymentStatus = pick(order.payment_status, order.paymentStatus);
+  const orderNumber = pick(order.order_number, order.orderNumber, order.invoice_id, order.invoiceId, order.id, id);
+  const items = order.items ?? order.order_items ?? [];
+
+  const tracking = String(input.trackingCode || '').replace(/^#/, '').trim();
+  const now = new Date();
+
+  const row: Record<string, any> = {
+    id,
+    order_id: id,
+    order_number: orderNumber,
+    orderNumber,
+    store_slug: storeSlug,
+    storeSlug,
+    store_code: storeCode,
+    storeCode,
+    store_id: storeId,
+    store_name: storeName,
+    storeName,
+    merchant_phone: merchantPhone,
+    merchantPhone,
+    pickup_address: pickupAddress,
+    pickupAddress,
+    customer_name: customerName,
+    customerName,
+    customer_phone: customerPhone,
+    customerPhone,
+    customer_address: customerAddress,
+    shipping_address: customerAddress,
+    customer_city: customerCity,
+    amount,
+    total_price: amount,
+    totalBDT: amount,
+    payment_method: paymentMethod,
+    paymentMethod,
+    paymentStatus,
+    items,
+    courier_name: input.courierName || '',
+    courierName: input.courierName || '',
+    shipping_courier: input.courierName || '',
+    courier_key: input.courierKey || '',
+    courier_status: input.status,
+    courier_status_updated_at: now,
+    courier_booked: input.booked === true,
+    needs_manual_entry: input.booked !== true,
+    courier_last_error: input.error || '',
+    updated_at: now,
+    created_at: now,
+    admin_visible: true,
+  };
+  if (tracking) {
+    row.tracking_id = tracking;
+    row.courier_tracking = tracking;
+    row.tracking_code = tracking;
+    row.trackingCode = tracking;
+    row.consignment_id = tracking;
+    row.courier_tracking_id = tracking;
+    row.courier_booked_at = now;
+  }
+  if (input.raw && Object.keys(input.raw).length > 0) row.courier_response = input.raw;
+  return row;
+}
+
+export async function recordCourierDispatchAttempt(input: CourierDispatchAttemptInput): Promise<{ ok: boolean; id?: string; error?: string }> {
+  /*
+   * THE ROW IS BUILT FIRST, THEN WRITTEN TO BOTH STORES INDEPENDENTLY.
+   *
+   * Production (`zid-marketplace.onrender.com`) runs on Supabase/PostgREST and
+   * MongoDB may be missing or unreachable. The previous version returned early
+   * with `MONGODB_URI is not set` / `MongoDB is unavailable` BEFORE anything was
+   * persisted, so every "Send to Courier" click (including the 11:10 one for
+   * #ZID-507745498 that did fire the Telegram alert) was silently dropped and
+   * the Admin list stayed empty. Supabase is now written unconditionally; Mongo
+   * is the (optional) secondary store.
+   */
+  const set = buildCourierLedgerRow(input);
+  if (!set) return { ok: false, error: 'No order identifier was supplied.' };
+  const id = String(set.id);
+
+  let mongoOk = false;
+  let mongoError = '';
+  try {
+    if (getMongoUri()) {
+      const db = await getMongoDb(ORDERS_DB_NAME);
+      if (db) {
+        mongoOk = await writeLedgerToMongo(db, set, id, input);
+      } else {
+        mongoError = 'MongoDB is unavailable.';
+      }
+    } else {
+      mongoError = 'MONGODB_URI is not set.';
+    }
+  } catch (err: any) {
+    mongoError = err?.message || 'MongoDB write failed.';
+  }
+
+  /*
+   * PRODUCTION STORE — always attempted, even when Mongo already succeeded, so
+   * a project that reads from Supabase (the Admin portal does) always has the
+   * row. Best-effort: a Supabase outage must not fail the courier send.
+   */
+  const needsLabels = Array.isArray(input.storeRef?.courier_labels)
+    ? { courier_labels: input.storeRef!.courier_labels }
+    : {};
+  const supa = await mirrorCourierLedgerToSupabase({ ...set, ...needsLabels });
+
+  if (!mongoOk && !supa.ok) {
+    return {
+      ok: false,
+      id,
+      error: `Could not persist the dispatch. mongo: ${mongoError || 'failed'} | supabase: ${supa.error || 'failed'}`,
+    };
+  }
+  if (!mongoOk) {
+    console.warn('[Courier][ledger] stored in Supabase only:', mongoError);
+  }
+  return { ok: true, id };
+}
+
+/**
+ * Record ONE "Send to Courier" click in EVERY store — the function every
+ * dispatch route calls.
+ *
+ * It exists so a route cannot accidentally write to only one backend: the
+ * MongoDB ledger AND the Supabase ledger (the production data plane) are both
+ * attempted, the Supabase write most of all. It never throws, so a storage
+ * problem can never turn into a failed courier dispatch.
+ */
+export async function recordCourierClickEverywhere(args: {
+  status: 'booked' | 'failed' | 'disabled' | 'sandbox';
+  courierName?: string;
+  courierKey?: string;
+  trackingCode?: string;
+  errorMessage?: string;
+  booked?: boolean;
+  order: Record<string, any> | null;
+  fallback?: Record<string, any> | null;
+  storeRef?: Record<string, any> | null;
+  raw?: Record<string, any> | null;
+  /** A loader for the merchant/store document (phone, pickup address, name). */
+  loadStore?: () => Promise<Record<string, any> | null>;
 }): Promise<{ ok: boolean; id?: string; error?: string }> {
   try {
-    if (!getMongoUri()) return { ok: false, error: 'MONGODB_URI is not set.' };
-    const db = await getMongoDb(ORDERS_DB_NAME);
-    if (!db) return { ok: false, error: 'MongoDB is unavailable.' };
+    const status: CourierOrderStatus =
+      args.status === 'booked'
+        ? 'booked'
+        : args.status === 'failed'
+          ? 'failed'
+          : args.status === 'sandbox'
+            ? 'dispatched'
+            // 'disabled' — automated booking is off, the admin must enter the
+            // parcel by hand; it is still a real dispatch request.
+            : 'sent_to_courier';
 
-    const order = (input.order && typeof input.order === 'object' ? input.order : {}) as Record<string, any>;
-    const store = (input.storeRef && typeof input.storeRef === 'object' ? input.storeRef : {}) as Record<string, any>;
+    const order = (args.order && typeof args.order === 'object' ? args.order : {}) as Record<string, any>;
+    const posted = order.id || order.order_number || order.orderNumber || order.invoice_id || order.invoiceId ? '' : '';
+    const loadedStore = args.loadStore ? await args.loadStore().catch(() => null) : null;
+    const storeRef = { ...(loadedStore || {}), ...(args.storeRef || {}) };
+    const fb = args.fallback || {};
 
-    const id = courierOrderKey(
-      input.orderId,
-      order.order_number,
-      order.orderNumber,
-      order.invoice_id,
-      order.invoiceId,
-      order.id,
-    );
-    if (!id) return { ok: false, error: 'No order identifier was supplied.' };
-
-    const pick = (...values: unknown[]): string => {
-      for (const value of values) {
-        if (value === undefined || value === null) continue;
-        const text = String(value).trim();
-        if (text) return text;
-      }
-      return '';
-    };
-
-    /*
-     * STORE IDENTITY — the ORDER's own slug always wins.
-     *
-     * A store that has been renamed (or a request whose `storeSlug` is a
-     * stale/old alias) must not relabel the row as a different shop: the order
-     * that was just dispatched is stamped with the store it belongs to, and
-     * the resolved store record is only the fallback. Without this ordering a
-     * row could be filed under a slug no admin filter or dashboard query
-     * knows about — a visible write that still reads as “missing”.
-     */
-    const orderSlug = pick(order.store_slug, order.storeSlug, order.merchant_store_slug, order.merchant_storeSlug).toLowerCase();
-    const storeSlug = (orderSlug || pick(store.store_slug, store.storeSlug)).toLowerCase();
-    const storeCode = pick(order.store_code, order.storeCode, store.store_code, store.storeCode);
-    const storeId = pick(order.store_id, order.storeId, store.store_id, store.storeId, store.id);
-    const storeName = pick(
-      order.store_name, order.storeName, order.vendor_name, order.vendorName,
-      store.store_name, store.storeName, store.name, storeSlug,
-    );
-    const merchantPhone = pick(
-      order.merchant_phone, order.merchantPhone,
-      store.merchant_phone, store.merchantPhone, store.phone, store.store_phone, store.storePhone,
-      store.support_phone, store.supportPhone, store.contactPhone, store.contact_phone,
-      store.whatsappNumber, store.whatsapp_number,
-    );
-    const pickupAddress = pick(
-      order.pickup_address, order.pickupAddress,
-      store.pickup_address, store.pickupAddress, store.pickup_point, store.store_address,
-      store.storeAddress, store.address,
-    );
-
-    const customerName = pick(order.customer_name, order.customerName, order.name);
-    const customerPhone = pick(order.customer_phone, order.customerPhone, order.phone);
-    const customerAddress = pick(order.shipping_address, order.address, order.delivery_address);
-    const customerCity = pick(order.customer_city, order.customerCity);
-    const amount = Number(
-      order.total_price ?? order.totalBDT ?? order.total ?? order.cod_amount ?? order.codAmount ?? 0,
-    ) || 0;
-    const paymentMethod = pick(order.payment_method, order.paymentMethod, order.payment?.method) || 'COD';
-    const paymentStatus = pick(order.payment_status, order.paymentStatus);
-    const orderNumber = pick(order.order_number, order.orderNumber, order.invoice_id, order.invoiceId, order.id, id);
-    const items = order.items ?? order.order_items ?? [];
-
-    const tracking = String(input.trackingCode || '').replace(/^#/, '').trim();
-    const now = new Date();
-
-    const set: Record<string, any> = {
-      /* Identity of the row itself (both spellings the admin UI reads). */
-      id,
-      order_id: id,
-      order_number: orderNumber,
-      orderNumber,
-      store_slug: storeSlug,
-      storeSlug,
-      store_code: storeCode,
-      storeCode,
-      store_id: storeId,
-      store_name: storeName,
-      storeName,
-      merchant_phone: merchantPhone,
-      merchantPhone,
-      pickup_address: pickupAddress,
-      pickupAddress,
-      customer_name: customerName,
-      customerName,
-      customer_phone: customerPhone,
-      customerPhone,
-      customer_address: customerAddress,
-      shipping_address: customerAddress,
-      customer_city: customerCity,
-      amount,
-      total_price: amount,
-      totalBDT: amount,
-      payment_method: paymentMethod,
-      paymentMethod,
-      paymentStatus,
-      items,
-      courier_name: input.courierName || '',
-      courierName: input.courierName || '',
-      shipping_courier: input.courierName || '',
-      courier_key: input.courierKey || '',
-      courier_status: input.status,
-      courier_status_updated_at: now,
-      courier_booked: input.booked === true,
-      needs_manual_entry: input.booked !== true,
-      courier_last_error: input.error || '',
-      updated_at: now,
-      admin_visible: true,
-    };
-    if (tracking) {
-      set.tracking_id = tracking;
-      set.courier_tracking = tracking;
-      set.tracking_code = tracking;
-      set.trackingCode = tracking;
-      set.consignment_id = tracking;
-      set.courier_tracking_id = tracking;
-      set.courier_booked_at = now;
-    }
-    if (input.raw && Object.keys(input.raw).length > 0) {
-      set.courier_response = input.raw;
-    }
-
-    /*
-     * A retry must not undo real progress: if the admin already moved this row
-     * to in_transit/delivered/cancelled, a later dispatch attempt keeps that
-     * status (it still refreshes the identity columns and the tracking id).
-     */
-    const existing = await db
-      .collection(COURIER_ORDERS_COLLECTION)
-      .findOne({ _id: id as any })
-      .catch(() => null);
-    if (existing) {
-      const advanced = ['pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
-      if (advanced.includes(String(existing.courier_status || '')) && !advanced.includes(input.status)) {
-        delete set.courier_status;
-        delete set.courier_status_updated_at;
-      }
-      /*
-       * Never overwrite a known value with a blank one. A partial retry (the
-       * booking route only re-posts what the modal knows) must not wipe the
-       * customer, amount, store phone or labels an earlier, fuller write made.
-       */
-      const AMOUNT_FIELDS = ['amount', 'total_price', 'totalBDT'];
-      for (const [field, value] of Object.entries(set)) {
-        const previous = (existing as Record<string, any>)[field];
-        const previousKnown = previous !== undefined && previous !== null && previous !== '';
-        // A blank value never overwrites a known one…
-        if (value === '' || value === null || value === undefined) {
-          if (previousKnown) delete set[field];
-          continue;
-        }
-        // …and neither does `0`, which is what a partial body produces for an
-        // amount it did not send (a real ৳0 total is indistinguishable, and the
-        // later full write restores it either way).
-        if (AMOUNT_FIELDS.includes(field) && Number(value) === 0 && Number(previous) > 0) {
-          delete set[field];
-        }
-      }
-      if (Array.isArray(existing.courier_labels) && existing.courier_labels.length > 0) {
-        // Labels belong to the row, not to the attempt.
-        set.courier_labels = existing.courier_labels;
-      }
-    }
-
-    await db.collection(COURIER_ORDERS_COLLECTION).updateOne(
-      { _id: id as any },
-      {
-        $set: { ...set, _id: id as any },
-        $setOnInsert: { created_at: now, courier_labels: [] },
+    return await recordCourierDispatchAttempt({
+      orderId: String(
+        order.order_number || order.orderNumber ||
+        order.invoice_id || order.invoiceId || order.id ||
+        fb.orderNumber || fb.order_number || posted || storeRef.store_slug || '',
+      ),
+      status,
+      courierName: args.courierName,
+      courierKey: args.courierKey,
+      trackingCode: args.trackingCode,
+      error: args.errorMessage,
+      booked: args.booked === true,
+      order,
+      storeRef: {
+        ...storeRef,
+        store_slug: storeRef.store_slug || storeRef.storeSlug || order.store_slug || order.storeSlug || '',
+        merchant_phone: storeRef.merchant_phone || storeRef.merchantPhone || storeRef.phone || '',
+        pickup_address: storeRef.pickup_address || storeRef.pickupAddress || storeRef.address || '',
       },
-      { upsert: true },
-    );
-
-    console.log('[Courier][ledger] row saved', { id, status: set.courier_status || input.status, store: storeSlug });
-    return { ok: true, id };
+      raw: args.raw || null,
+    });
   } catch (err: any) {
-    // `_id` is a String on this collection, so another shape can only fail the
-    // duplicate check — never let it break the dispatch response.
+    console.warn('[Courier][ledger] record click failed (ignored):', err?.message || err);
     return { ok: false, error: err?.message || 'Could not record the courier dispatch.' };
   }
+}
+
+/**
+ * Upsert one row into the MongoDB ledger, preserving progress and labels.
+ * Shared by the dispatch recorder so the memory/durability rules live once.
+ */
+async function writeLedgerToMongo(
+  db: any,
+  set: Record<string, any>,
+  id: string,
+  input: CourierDispatchAttemptInput,
+): Promise<boolean> {
+  const now = new Date();
+  if (input.raw && Object.keys(input.raw).length > 0) set.courier_response = input.raw;
+
+  /*
+   * A retry must not undo real progress: if the admin already moved this row
+   * to in_transit/delivered/cancelled, a later dispatch attempt keeps that
+   * status (it still refreshes the identity columns and the tracking id).
+   */
+  const existing = await db
+    .collection(COURIER_ORDERS_COLLECTION)
+    .findOne({ _id: id as any })
+    .catch(() => null);
+  if (existing) {
+    const advanced = ['pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
+    if (advanced.includes(String(existing.courier_status || '')) && !advanced.includes(input.status)) {
+      delete set.courier_status;
+      delete set.courier_status_updated_at;
+    }
+    /*
+     * Never overwrite a known value with a blank one. A partial retry (the
+     * booking route only re-posts what the modal knows) must not wipe the
+     * customer, amount, store phone or labels an earlier, fuller write made.
+     */
+    const AMOUNT_FIELDS = ['amount', 'total_price', 'totalBDT'];
+    for (const [field, value] of Object.entries(set)) {
+      const previous = (existing as Record<string, any>)[field];
+      const previousKnown = previous !== undefined && previous !== null && previous !== '';
+      if (value === '' || value === null || value === undefined) {
+        if (previousKnown) delete set[field];
+        continue;
+      }
+      if (AMOUNT_FIELDS.includes(field) && Number(value) === 0 && Number(previous) > 0) {
+        delete set[field];
+      }
+    }
+    if (Array.isArray(existing.courier_labels) && existing.courier_labels.length > 0) {
+      // Labels belong to the row, not to the attempt.
+      set.courier_labels = existing.courier_labels;
+    }
+  }
+
+  await db.collection(COURIER_ORDERS_COLLECTION).updateOne(
+    { _id: id as any },
+    {
+      $set: { ...set, _id: id as any },
+      $setOnInsert: { created_at: now, courier_labels: [] },
+    },
+    { upsert: true },
+  );
+  console.log('[Courier][ledger] mongo row saved', { id, status: set.courier_status || input.status, store: set.store_slug });
+  return true;
+}
+
+/* ──────────────── Supabase (PostgREST) ledger — production store ──────────── */
+
+/**
+ * Write ONE ledger row to Supabase (the production data plane).
+ *
+ * Kept separate from `recordCourierDispatchAttempt` (MongoDB) and NEVER throws,
+ * so the two stores can be called independently: a deployment with only Supabase
+ * still records every click, and a deployment with only Mongo still does.
+ */
+export async function mirrorCourierLedgerToSupabase(
+  row: Record<string, any> | null,
+  cfg?: { supabaseUrl: string; supabaseKey: string },
+): Promise<{ ok: boolean; source?: string; error?: string }> {
+  if (!row) return { ok: false, error: 'No ledger row to write.' };
+  try {
+    const config = cfg || readSupabaseEnv();
+    if (!config) return { ok: false, error: 'Supabase is not configured.' };
+    const result = await upsertSupabaseLedger(config, toSupabaseLedgerPayload(row));
+    if (!result.ok) return { ok: false, source: result.source, error: result.error };
+    console.log('[Courier][ledger] Supabase row saved', {
+      id: row.id,
+      store: row.store_slug,
+      source: result.source,
+      dropped: result.droppedColumns?.length || 0,
+    });
+    return { ok: true, source: result.source };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Supabase ledger write failed.' };
+  }
+}
+
+/** Supabase credentials from the environment (service role wins, as on the server). */
+export function readSupabaseEnv(): { supabaseUrl: string; supabaseKey: string } | null {
+  const url = String(
+    process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  ).trim().replace(/\/+$/, '');
+  const key = String(
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
+  ).trim();
+  if (!url || !key || !/^https?:\/\//i.test(url)) return null;
+  return { supabaseUrl: url, supabaseKey: key };
+}
+
+/**
+ * Normalise a ledger row for a Postgres/PostgREST row.
+ *
+ * `items` is a JSON STRING column on the deployed `orders` table, `timestamps`
+ * must be ISO-8601, and `courier_response` is an object — JSON-encoded so the
+ * mirror never trips a 22P02 cast error. `courier_labels` is an array and is
+ * sent as JSON text for the same reason; the read path decodes it.
+ */
+export function toSupabaseLedgerPayload(row: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (value === undefined) continue;
+    if (value instanceof Date) {
+      out[key] = value.toISOString();
+      continue;
+    }
+    if ((key === 'items' || key === 'courier_labels' || key === 'courier_response')
+      && value !== null && typeof value === 'object') {
+      out[key] = JSON.stringify(value);
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** Decode a JSON-string column coming back from PostgREST. */
+export function parseLedgerJsonField(value: unknown, fallback: any): any {
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed === null || parsed === undefined ? fallback : parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Row-level Supabase helpers, re-exported for the routes.
+ *
+ * They live in `courierLedgerSupabase.ts` (pure PostgREST concerns); the routes
+ * and the Mongo writer import them from here so `orderStatus.js` remains the one
+ * module a caller needs for the courier ledger.
+ */
+export { patchSupabaseLedgerRow, findSupabaseLedgerRow };
+
+/**
+ * Every ledger row for the Admin list, whichever store holds it.
+ *
+ * Supabase first (the deployed data plane), MongoDB second, and rows are
+ * unioned by order id so a project that has been migrated between the two still
+ * shows one row per order.
+ */
+export async function loadCourierLedgerRows(limit = 500): Promise<{
+  rows: Record<string, any>[];
+  sources: string[];
+}> {
+  const byKey = new Map<string, Record<string, any>>();
+  const sources: string[] = [];
+
+  const cfg = readSupabaseEnv();
+  if (cfg) {
+    const supa = await listSupabaseLedger(cfg, limit);
+    if (supa.rows.length > 0) sources.push(`supabase-${supa.source}`);
+    for (const raw of supa.rows) {
+      const row = normalizeSupabaseLedgerRow(raw, cfg);
+      const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
+      if (key && !byKey.has(key)) byKey.set(key, row);
+    }
+  }
+
+  try {
+    if (getMongoUri()) {
+      const db = await getMongoDb(ORDERS_DB_NAME);
+      if (db) {
+        const mongoRows = await db.collection(COURIER_ORDERS_COLLECTION)
+          .find({})
+          .sort({ updated_at: -1, created_at: -1 })
+          .limit(Math.min(Math.max(limit, 1), 2000))
+          .toArray();
+        if (mongoRows.length > 0) sources.push('mongodb');
+        for (const row of mongoRows) {
+          const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber, row._id);
+          if (key && !byKey.has(key)) byKey.set(key, { ...row });
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Courier][ledger] Mongo read warning:', err?.message || err);
+  }
+
+  return { rows: Array.from(byKey.values()), sources };
+}
+
+/** Map a PostgREST ledger row onto the column names the Admin UI reads. */
+export function normalizeSupabaseLedgerRow(raw: Record<string, any>, cfg?: { supabaseUrl: string; supabaseKey: string }): Record<string, any> {
+  const row: Record<string, any> = { ...raw };
+  // The fallback store may wrap the payload.
+  if (row.value && typeof row.value === 'object' && !row.order_number && !row.orderNumber) {
+    Object.assign(row, row.value);
+  } else if (typeof row.value === 'string') {
+    const parsed = parseLedgerJsonField(row.value, null);
+    if (parsed && typeof parsed === 'object') Object.assign(row, parsed);
+  }
+  row.items = parseLedgerJsonField(row.items, []);
+  row.courier_labels = parseLedgerJsonField(row.courier_labels, []);
+  row.courier_response = parseLedgerJsonField(row.courier_response, null);
+  // camelCase aliases the admin table renders.
+  row.customerName = row.customerName || row.customer_name || 'Customer';
+  row.customerPhone = row.customerPhone || row.customer_phone || '';
+  row.storeName = row.storeName || row.store_name || '';
+  row.paymentMethod = row.paymentMethod || row.payment_method || 'COD';
+  row.totalBDT = Number(row.totalBDT ?? row.amount ?? row.total_price ?? row.total_amount ?? 0) || 0;
+  row.amount = row.totalBDT;
+  row.tracking_id = row.tracking_id || row.courier_tracking || row.tracking_code || row.consignment_id || '';
+  row.merchant_phone = row.merchant_phone || row.merchantPhone || '';
+  row.pickup_address = row.pickup_address || row.pickupAddress || '';
+  /*
+   * The STORE record fills in anything the ledger row did not carry (older
+   * rows, a partial request body) — the admin must see WHO the parcel belongs
+   * to even for a row written before those columns existed.
+   */
+  if (!row.store_name && cfg && row.store_slug) {
+    // Left as-is: enrichment happens in the GET route, which already caches
+    // lookups per request. Nothing to do here synchronously.
+  }
+  return row;
 }
 
 /**
@@ -926,6 +1233,13 @@ export function mapPathaoStatusToOrderStatus(rawStatus: unknown): {
 
 export default {
   ORDER_STATUSES,
+  buildCourierLedgerRow,
+  mirrorCourierLedgerToSupabase,
+  loadCourierLedgerRows,
+  recordCourierClickEverywhere,
+  patchSupabaseLedgerRow,
+  findSupabaseLedgerRow,
+  ledgerOrderKey,
   PAYMENT_STATUSES,
   ORDER_STATUS_TABS,
   canonicalOrderStatus,
