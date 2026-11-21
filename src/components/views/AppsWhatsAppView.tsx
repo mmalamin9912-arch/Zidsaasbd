@@ -22,7 +22,9 @@ import {
   Phone, 
   Globe,
   Crown,
-  AlertTriangle
+  AlertTriangle,
+  Loader2,
+  Save
 } from 'lucide-react';
 
 export interface AppIntegrationConfig {
@@ -213,6 +215,7 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
   const [f1Val, setF1Val] = useState('');
   const [f2Val, setF2Val] = useState('');
   const [f3Val, setF3Val] = useState('');
+  const [isSavingIntegration, setIsSavingIntegration] = useState(false);
 
   const handleOpenConfigure = (app: AppIntegrationConfig) => {
     // Check if free merchant is attempting to open a PRO app
@@ -306,6 +309,8 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
     e.preventDefault();
     if (!selectedApp) return;
 
+    setIsSavingIntegration(true);
+
     // Optimistic UI: badge flips to INSTALLED immediately, rolls back if the
     // server could not persist the record.
     setIntegrations(prev => prev.map(item => {
@@ -330,11 +335,13 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
         return item;
       }));
       toast.error('Could not save the integration to the server.', { description: 'Please try again.' });
+      setIsSavingIntegration(false);
       return;
     }
 
     setSelectedApp(null);
     toast.success(`Successfully connected and saved configuration for ${selectedApp.name}!`);
+    setIsSavingIntegration(false);
   };
 
   const handleUpgradeAccount = () => {
@@ -658,9 +665,11 @@ export const AppsWhatsAppView: React.FC<AppsWhatsAppViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-6 py-2.5 rounded-xl bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold text-xs transition cursor-pointer shadow-lg"
+                  disabled={isSavingIntegration}
+                  className="px-6 py-2.5 rounded-xl bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold text-xs transition cursor-pointer shadow-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                 >
-                  Save & Connect Integration
+                  {isSavingIntegration ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  <span>{isSavingIntegration ? 'Saving…' : 'Save & Connect Integration'}</span>
                 </button>
               </div>
             </form>

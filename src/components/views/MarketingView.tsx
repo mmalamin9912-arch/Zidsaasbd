@@ -327,6 +327,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
   const [isProPaymentModalOpen, setIsProPaymentModalOpen] = useState(false);
   const [pendingProUpgrade, setPendingProUpgrade] = useState<boolean>(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [isSavingIntegration, setIsSavingIntegration] = useState(false);
 
   const handleUpgradeMerchantPlan = () => {
     setIsProPaymentModalOpen(true);
@@ -362,6 +363,7 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
     e.preventDefault();
     if (!selectedApp) return;
 
+    setIsSavingIntegration(true);
     try {
       // Prepare the integration config payload
       const payload = {
@@ -427,6 +429,8 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
     } catch (error) {
       console.error('Error saving integration:', error);
       toast.error('Failed to save configuration.', { description: 'Please try again.' });
+    } finally {
+      setIsSavingIntegration(false);
     }
   };
 
@@ -2183,10 +2187,11 @@ export const MarketingView: React.FC<MarketingViewProps> = ({
                     </button>
                     <button
                       type="submit"
-                      disabled={isLocked}
-                      className="px-5 py-2.5 rounded-xl bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-50 text-slate-950 font-bold text-xs transition cursor-pointer shadow-lg"
+                      disabled={isLocked || isSavingIntegration}
+                      className="px-5 py-2.5 rounded-xl bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-50 text-slate-950 font-bold text-xs transition cursor-pointer shadow-lg flex items-center gap-2"
                     >
-                      Save & Connect Integration
+                      {isSavingIntegration ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                      <span>{isSavingIntegration ? 'Saving…' : 'Save & Connect Integration'}</span>
                     </button>
                   </div>
                 </div>

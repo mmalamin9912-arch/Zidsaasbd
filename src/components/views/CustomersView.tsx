@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Customer, CustomerSubTab } from '../../types';
 import { 
+  useToast 
+} from '../ToastProvider';
+import { 
   Users, 
   Plus, 
   Search, 
@@ -42,7 +45,9 @@ import {
   Globe,
   Tag,
   ShieldCheck,
-  ShieldAlert
+  ShieldAlert,
+  Loader2,
+  Save
 } from 'lucide-react';
 
 interface CustomersViewProps {
@@ -94,6 +99,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
   activeSubTab = 'all_customers',
   onSelectSubTab
 }) => {
+  const { success: toastSuccess, error: toastError } = useToast();
   // Navigation subtabs list
   const subTabsList: { id: CustomerSubTab; label: string; icon: React.ElementType }[] = [
     { id: 'all_customers', label: 'All customers', icon: Users },
@@ -340,6 +346,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
         return c;
       });
       onUpdateCustomers(updated);
+      toastSuccess('Customer updated successfully!');
     } else if (onUpdateCustomers) {
       // Create New
       const newCustomer: Customer = {
@@ -362,6 +369,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
         joinedDate: new Date().toISOString().split('T')[0],
       };
       onUpdateCustomers([newCustomer, ...customers]);
+      toastSuccess('Customer created successfully!');
     }
 
     setViewMode('list');
@@ -538,7 +546,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
               type="submit"
               className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-lg flex items-center gap-1.5"
             >
-              <Check className="w-4 h-4 stroke-[3]" />
+              <Save className="w-4 h-4" />
               <span>{viewMode === 'edit' ? 'Save Changes' : 'Create'}</span>
             </button>
           </div>

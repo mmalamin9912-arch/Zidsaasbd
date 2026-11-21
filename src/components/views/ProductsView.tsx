@@ -4,6 +4,7 @@ import { buildProductDbPayload, mapApiProduct, postCatalogJson, upsertProductToS
 import { resolveActiveStoreSlug } from '../../lib/activeStore';
 import { downscaleImage } from '../../utils/imageUtils';
 import SafeImage from '../SafeImage';
+import { useToast } from '../ToastProvider';
 import { PLACEHOLDER_IMAGE } from '../../utils/imageFallback';
 import {
   Boxes,
@@ -68,6 +69,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   merchant,
   platformSettings,
 }) => {
+  const { success: toastSuccess, error: toastError } = useToast();
   // Active merchant's store slug: prop (route/session) > logged-in session > legacy data.
   const activeStoreSlug = resolveActiveStoreSlug((merchant as any)?.storeSlug || (merchant as any)?.store_slug);
 
@@ -78,7 +80,6 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   const [sortBy, setSortBy] = useState<'latest' | 'price-desc' | 'price-asc' | 'stock-desc'>('latest');
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
-  const [toastNotification, setToastNotification] = useState<{ type: 'success' | 'error' | 'warning'; message: string } | null>(null);
 
   // Modals & Forms State
   const [isTypeModalOpen, setIsTypeModalOpen] = useState(false);
@@ -319,10 +320,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         : [updatedProduct, ...products];
       onUpdateProducts(mergedList);
 
-      setToastNotification({
-        type: 'success',
-        message: `Product "${payload.name}" saved successfully!`
-      });
+      toastSuccess(`Product "${payload.name}" saved successfully!`);
 
       setIsFormViewActive(false);
       setEditingProduct(null);
@@ -342,10 +340,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
       return;
     } catch (e: any) {
       console.error('[ProductsView] Network save product error:', e);
-      setToastNotification({
-        type: 'error',
-        message: `Error saving product: ${e?.message || 'Unknown error'}`
-      });
+      toastError(`Error saving product: ${e?.message || 'Unknown error'}`);
     }
   };
 
@@ -361,11 +356,11 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
       // Public storefront reads the same authoritative endpoint; invalidate its
       // browser cache so a deleted product cannot remain visible in another tab.
       window.dispatchEvent(new CustomEvent('zid-products-changed'));
-      setToastNotification({ type: 'success', message: 'Product deleted.' });
+      toastSuccess('Product deleted.');
     } catch (error) {
       onUpdateProducts(previous);
       console.warn('[ProductsView] Product delete failed:', error);
-      setToastNotification({ type: 'error', message: 'Product could not be deleted. Please try again.' });
+      toastError('Product could not be deleted. Please try again.');
     }
   };
 
@@ -392,38 +387,12 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         merchant={merchant}
         platformSettings={platformSettings}
         onOpenSubscriptionModal={onOpenSubscriptionModal}
-        onToast={setToastNotification}
       />
     );
   }
 
   return (
     <div className="space-y-6">
-
-      {/* Toast / Alert Feedback Banner */}
-      {toastNotification && (
-        <div className={`p-4 rounded-2xl flex items-center justify-between gap-3 border shadow-xl animate-in fade-in duration-200 ${
-          toastNotification.type === 'error'
-            ? 'bg-rose-950/60 border-rose-500/40 text-rose-200'
-            : toastNotification.type === 'warning'
-            ? 'bg-amber-950/60 border-amber-500/40 text-amber-200'
-            : 'bg-emerald-950/60 border-emerald-500/40 text-emerald-200'
-        }`}>
-          <div className="flex items-center gap-2.5 text-xs font-bold">
-            {toastNotification.type === 'error' && <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />}
-            {toastNotification.type === 'warning' && <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />}
-            {toastNotification.type === 'success' && <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />}
-            <span>{toastNotification.message}</span>
-          </div>
-          <button
-            onClick={() => setToastNotification(null)}
-            className="p-1.5 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white transition cursor-pointer"
-            title="Dismiss"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
 
       {/* 1. Sub-navigation Bar under Products */}
       <div className="bg-[#1D212E] border border-[#2E3548] rounded-2xl p-2 flex items-center gap-1.5 overflow-x-auto scrollbar-none shadow-md">

@@ -56,7 +56,8 @@ import {
   AlertCircle,
   Upload,
   Save,
-  Trash2
+  Trash2,
+  Loader2
 } from 'lucide-react';
 
 interface OnlineStoreViewProps {
@@ -177,6 +178,13 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
   // The store this dashboard is editing — every module write is scoped to it.
   const moduleStoreRef = merchant?.storeSlug || (merchant as any)?.store_slug || '';
+
+  // Loading states for save buttons
+  const [brandSaving, setBrandSaving] = useState(false);
+  const [menuSaving, setMenuSaving] = useState(false);
+  const [seoSaving, setSeoSaving] = useState(false);
+  const [blogSaving, setBlogSaving] = useState(false);
+  const [faqSaving, setFaqSaving] = useState(false);
 
   // Theme Unlock Check Helpers
   const isThemeUnlocked = (theme: ThemeMarketItem) => {
@@ -405,6 +413,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     e.preventDefault();
     if (!blogForm.title || !blogForm.author) return;
 
+    setBlogSaving(true);
     // Build the next list, then persist the WHOLE list — the server stores the
     // module as one document, so a partial update would drop sibling posts.
     let next: BlogPost[];
@@ -431,6 +440,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     const saved = await saveStoreModule<BlogPost[]>('blog', moduleStoreRef, next);
     if (saved) setBlogPosts(saved);
     else toast.error('The article could not be saved to the database.', { description: 'Please try again.' });
+    setBlogSaving(false);
   };
 
   const handleDeletePost = async (id: string) => {
@@ -463,6 +473,8 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     e.preventDefault();
     if (!faqForm.question || !faqForm.answer) return;
 
+    setFaqSaving(true);
+
     const next: FaqItem[] = editingFaq
       ? faqs.map(f => f.id === editingFaq.id ? { ...f, ...faqForm } : f)
       : [...faqs, { id: `faq-${Date.now()}`, ...faqForm }];
@@ -473,6 +485,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
     const saved = await saveStoreModule<FaqItem[]>('faqs', moduleStoreRef, next);
     if (saved) setFaqs(saved);
     else toast.error('The FAQ could not be saved to the database.', { description: 'Please try again.' });
+    setFaqSaving(false);
   };
 
   const handleDeleteFaq = async (id: string) => {
@@ -546,6 +559,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
    * updated in-memory React state, so a reload lost the logo and announcement.
    */
   const handleSaveBrand = async () => {
+    setBrandSaving(true);
     const brand: BrandConfig = {
       logoUrl: storeLogo || merchant?.logoUrl || '',
       faviconUrl: storeFavicon || '',
@@ -587,6 +601,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
         { description: 'Your changes are still on screen — please retry.' }
       );
     }
+    setBrandSaving(false);
   };
 
   /**
@@ -596,6 +611,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
    * storefront builds that read the menu from there.
    */
   const handleSaveMenu = async () => {
+    setMenuSaving(true);
     const navigation = { header: menuItems, footer: footerMenuItems };
 
     setMerchant(prev => ({
@@ -618,6 +634,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
         { description: 'Your changes are still on screen — please retry.' }
       );
     }
+    setMenuSaving(false);
   };
 
   // SEO States — hydrated from the database below.
@@ -628,6 +645,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
   /** Persist the SEO module so the storefront head is populated from MongoDB. */
   const handleSaveSeo = async () => {
+    setSeoSaving(true);
     const seo = {
       metaTitle,
       metaDescription,
@@ -647,6 +665,7 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
         { description: 'Your changes are still on screen — please retry.' }
       );
     }
+    setSeoSaving(false);
   };
 
   /** Persist a new custom page and make it reachable at /pages/<slug>. */
@@ -1191,10 +1210,11 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           <div className="pt-4 border-t border-[#2E3548] flex justify-end">
             <button
               onClick={handleSaveBrand}
-              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-6 py-3 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-[#00D68F]/20 transition transform active:scale-95 cursor-pointer"
+              disabled={brandSaving}
+              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-6 py-3 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-[#00D68F]/20 transition transform active:scale-95 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <Save className="w-4 h-4" />
-              <span>Save Changes</span>
+              {brandSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              <span>{brandSaving ? 'Saving…' : 'Save Changes'}</span>
             </button>
           </div>
         </div>
@@ -1235,10 +1255,11 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
           <div className="pt-4 border-t border-[#2E3548] flex justify-end">
             <button
               onClick={handleSaveMenu}
-              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-6 py-3 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-[#00D68F]/20 transition transform active:scale-95 cursor-pointer"
+              disabled={menuSaving}
+              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-6 py-3 rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-[#00D68F]/20 transition transform active:scale-95 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <Save className="w-4 h-4" />
-              <span>Save Menu Configuration</span>
+              {menuSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              <span>{menuSaving ? 'Saving…' : 'Save Menu Configuration'}</span>
             </button>
           </div>
         </div>
@@ -1494,13 +1515,13 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
 
           <div className="pt-4 border-t border-[#2E3548] flex justify-end">
             <button
-              onClick={() => {
-                toast.info('SEO settings saved. Your store will be re-indexed within 24-48 hours.');
-              }}
-              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-8 py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center gap-2 cursor-pointer"
+              type="button"
+              onClick={handleSaveSeo}
+              disabled={seoSaving}
+              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black px-8 py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <Save className="w-4 h-4" />
-              <span>Save SEO Settings</span>
+              {seoSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              <span>{seoSaving ? 'Saving…' : 'Save SEO Settings'}</span>
             </button>
           </div>
         </div>
@@ -2131,10 +2152,11 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center justify-center gap-2"
+                  disabled={blogSaving}
+                  className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  <Save className="w-4 h-4" />
-                  <span>{editingPost ? 'Update Article' : 'Publish Article'}</span>
+                  {blogSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  <span>{blogSaving ? 'Saving…' : (editingPost ? 'Update Article' : 'Publish Article')}</span>
                 </button>
               </div>
             </form>
@@ -2292,10 +2314,11 @@ export const OnlineStoreView: React.FC<OnlineStoreViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center justify-center gap-2"
+                  disabled={faqSaving}
+                  className="flex-1 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-black py-3 rounded-xl text-xs transition shadow-lg shadow-[#00D68F]/20 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  <Save className="w-4 h-4" />
-                  <span>{editingFaq ? 'Update FAQ' : 'Add FAQ'}</span>
+                  {faqSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  <span>{faqSaving ? 'Saving…' : (editingFaq ? 'Update FAQ' : 'Add FAQ')}</span>
                 </button>
               </div>
             </form>

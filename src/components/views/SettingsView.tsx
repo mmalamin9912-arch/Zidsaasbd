@@ -46,6 +46,7 @@ import {
   RefreshCw,
   Monitor,
   Laptop,
+  Loader2,
   // Social & Chat setup panel icons.
   Share2,
   Facebook,
@@ -203,13 +204,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     (merchant as any)?.address,
   ]);
   const [savedSuccess, setSavedSuccess] = useState(false);
-  const { info: toastInfo, error: toastError } = useToast();
+  const { info: toastInfo, error: toastError, success: toastSuccess } = useToast();
   // Tracks whether the single-floating-button toast already fired for the
   // current "both chats configured" state — re-fires only when the merchant
   // edits the fields into that state again (not on every keystroke/render).
   const dualChatToastedRef = useRef(false);
   // Locale persistence state (currency + default language).
   const [localeSaving, setLocaleSaving] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [localeNotice, setLocaleNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
 
   // Security Tab State
@@ -870,6 +872,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveCommunications = async () => {
     if (!storeRef) {
       setCommNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      toastError('Store is not loaded yet. Please refresh and try again.');
       return;
     }
     setCommSaving(true);
@@ -900,12 +903,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const data = await res.json();
       if (!data?.ok) {
         setCommNotice({ type: 'error', text: data?.error || 'Could not save communication settings.' });
+        toastError(data?.error || 'Could not save communication settings.');
         return;
       }
       applyCommunicationConfig(data.communicationConfig);
       setCommNotice({ type: 'ok', text: data.message || 'Communication settings saved.' });
+      toastSuccess('Communication settings saved successfully');
     } catch (err: any) {
       setCommNotice({ type: 'error', text: err?.message || 'Could not save communication settings.' });
+      toastError(err?.message || 'Could not save communication settings.');
     } finally {
       setCommSaving(false);
     }
@@ -1106,6 +1112,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveDomainSettings = async () => {
     if (!storeRef) {
       setDomainNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      toastError('Store is not loaded yet. Please refresh and try again.');
       return;
     }
     setDomainBusy('save');
@@ -1125,12 +1132,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const data = await res.json();
       if (!res.ok || !data?.ok) {
         setDomainNotice({ type: 'error', text: data?.error || 'Could not save domain settings.' });
+        toastError(data?.error || 'Could not save domain settings.');
         return;
       }
       if (data.domainConfig) applyDomainConfig(data.domainConfig);
       setDomainNotice({ type: 'ok', text: data.message || 'Domain settings saved.' });
+      toastSuccess('Domain settings saved successfully');
     } catch (err: any) {
       setDomainNotice({ type: 'error', text: err?.message || 'Could not save domain settings.' });
+      toastError(err?.message || 'Could not save domain settings.');
     } finally {
       setDomainBusy('');
     }
@@ -1298,6 +1308,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveCheckout = async () => {
     if (!storeRef) {
       setCheckoutNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      toastError('Store is not loaded yet. Please refresh and try again.');
       return;
     }
 
@@ -1313,6 +1324,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
     if (trimmedMin !== '' && (!Number.isFinite(Number(trimmedMin)) || Number(trimmedMin) < 0)) {
       setCheckoutNotice({ type: 'error', text: 'Minimum order amount must be a positive number.' });
+      toastError('Minimum order amount must be a positive number.');
       return;
     }
 
@@ -1326,13 +1338,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const data = await res.json();
       if (!data?.ok) {
         setCheckoutNotice({ type: 'error', text: data?.error || 'Could not save checkout settings.' });
+        toastError(data?.error || 'Could not save checkout settings.');
         return;
       }
       // Reflect exactly what the server stored (normalised values).
       applyCheckoutConfig(data.checkoutConfig);
       setCheckoutNotice({ type: 'ok', text: data.message || 'Checkout settings saved.' });
+      toastSuccess('Checkout settings saved successfully');
     } catch (err: any) {
       setCheckoutNotice({ type: 'error', text: err?.message || 'Could not save checkout settings.' });
+      toastError(err?.message || 'Could not save checkout settings.');
     } finally {
       setCheckoutSaving(false);
     }
@@ -1375,6 +1390,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   ): Promise<Record<string, any> | null> => {
     if (!storeRef) {
       setConfigNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      toastError('Store is not loaded yet. Please refresh and try again.');
       return null;
     }
 
@@ -1388,6 +1404,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const data = await res.json();
       if (!data?.ok) {
         setConfigNotice({ type: 'error', text: data?.error || `Could not save ${label}.` });
+        toastError(data?.error || `Could not save ${label}.`);
         return null;
       }
 
@@ -1395,9 +1412,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const saved = data[name] || {};
       onUpdateMerchant({ ...merchant, [name]: saved });
       setConfigNotice({ type: 'ok', text: data.message || `${label} saved.` });
+      toastSuccess(`${label} saved successfully`);
       return saved;
     } catch (err: any) {
       setConfigNotice({ type: 'error', text: err?.message || `Could not save ${label}.` });
+      toastError(err?.message || `Could not save ${label}.`);
       return null;
     } finally {
       setConfigSaving(false);
@@ -1695,6 +1714,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     //    and tab switches. Strip `_id` (Mongo error on $set) and never send a
     //    non-numeric `id` to Supabase (bigint PK column → 22P02 error).
     const { id: _stripId, _id: _stripMongoId, ...cleanPayload } = merchantPayload;
+    setIsSaving(true);
     try {
       const res = await fetch('/api/stores/update', {
         method: 'POST',
@@ -1708,10 +1728,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         toastError('Settings save failed: ' + msg);
         return;
       }
+      toastSuccess('Store details saved successfully');
     } catch (err: any) {
       setSavedSuccess(false);
       toastError('Settings save failed: ' + (err?.message || 'Network error'));
       return;
+    } finally {
+      setIsSaving(false);
     }
 
     setSavedSuccess(true);
@@ -1758,6 +1781,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveConstraints = async () => {
     if (!storeRef) {
       setConstraintsNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      toastError('Store is not loaded yet. Please refresh and try again.');
       return;
     }
     if (!baseCity || baseCity.trim() === '') {
@@ -1765,6 +1789,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         type: 'error',
         text: 'Store District / City is required. Please choose your store\'s district before saving.',
       });
+      toastError('Store District / City is required. Please choose your store\'s district before saving.');
       return;
     }
     setConstraintsSaving(true);
@@ -1785,11 +1810,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       });
       if (!saved) {
         setConstraintsNotice({ type: 'error', text: 'Delivery settings could not be saved to the database. Please try again.' });
+        toastError('Delivery settings could not be saved to the database. Please try again.');
         return;
       }
       setConstraintsNotice({ type: 'ok', text: 'Delivery settings saved — the checkout now uses these exact values.' });
+      toastSuccess('Delivery settings saved successfully');
     } catch (err: any) {
       setConstraintsNotice({ type: 'error', text: err?.message || 'Delivery settings could not be saved.' });
+      toastError(err?.message || 'Delivery settings could not be saved.');
     } finally {
       setConstraintsSaving(false);
     }
@@ -1829,6 +1857,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSaveLocale = async () => {
     if (!storeRef) {
       setLocaleNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      toastError('Store is not loaded yet. Please refresh and try again.');
       return;
     }
     setLocaleSaving(true);
@@ -1848,6 +1877,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const data = await res.json();
       if (!data?.ok) {
         setLocaleNotice({ type: 'error', text: data?.error || 'Could not save language & currency settings.' });
+        toastError(data?.error || 'Could not save language & currency settings.');
         return;
       }
       const saved = data.localeConfig || {};
@@ -1857,8 +1887,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       // Keep the in-memory merchant in step so other views see the change.
       onUpdateMerchant({ ...merchant, currency: saved.primaryCurrency || currency, language: saved.defaultLanguage || language });
       setLocaleNotice({ type: 'ok', text: data.message || 'Language & currency saved.' });
+      toastSuccess('Language & currency saved successfully');
     } catch (err: any) {
       setLocaleNotice({ type: 'error', text: err?.message || 'Could not save language & currency settings.' });
+      toastError(err?.message || 'Could not save language & currency settings.');
     } finally {
       setLocaleSaving(false);
     }
@@ -1907,6 +1939,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleSavePolicies = async () => {
     if (!storeRef) {
       setPoliciesNotice({ type: 'error', text: 'Store is not loaded yet. Please refresh and try again.' });
+      toastError('Store is not loaded yet. Please refresh and try again.');
       return;
     }
     setPoliciesSaving(true);
@@ -1928,12 +1961,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const data = await res.json();
       if (!data?.ok) {
         setPoliciesNotice({ type: 'error', text: data?.error || 'Could not save legal policies.' });
+        toastError(data?.error || 'Could not save legal policies.');
         return;
       }
       applyPolicies(data.policies);
       setPoliciesNotice({ type: 'ok', text: data.message || 'Legal policies saved.' });
+      toastSuccess('Legal policies saved successfully');
     } catch (err: any) {
       setPoliciesNotice({ type: 'error', text: err?.message || 'Could not save legal policies.' });
+      toastError(err?.message || 'Could not save legal policies.');
     } finally {
       setPoliciesSaving(false);
     }
@@ -2697,7 +2733,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={localeSaving}
                   className="flex items-center gap-2 px-6 py-2.5 bg-[#00D68F] hover:bg-[#00BD7E] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-bold rounded-xl transition shadow-lg shadow-[#00D68F]/20"
                 >
-                  <Save className="w-4 h-4" />
+                  {localeSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   {localeSaving ? 'Saving…' : 'Save Changes'}
                 </button>
               </div>
@@ -2819,7 +2855,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={configSaving}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {configSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{configSaving ? 'Saving…' : 'Save Tax Settings'}</span>
                 </button>
               </div>
@@ -2919,7 +2955,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     disabled={configSaving}
                     className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                   >
-                    <Save className="w-4 h-4" />
+                    {configSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     <span>{configSaving ? 'Saving…' : 'Save NBR Settings'}</span>
                   </button>
                 </div>
@@ -3257,7 +3293,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     disabled={checkoutSaving}
                     className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                   >
-                    <Save className="w-4 h-4" />
+                    {checkoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     <span>{checkoutSaving ? 'Saving…' : 'Save Checkout Settings'}</span>
                   </button>
                 </div>
@@ -3371,7 +3407,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     disabled={configSaving}
                     className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                   >
-                    <Save className="w-4 h-4" />
+                    {configSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     <span>{configSaving ? 'Saving…' : 'Save Gift Options'}</span>
                   </button>
                 </div>
@@ -3494,7 +3530,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={configSaving}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {configSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{configSaving ? 'Saving…' : 'Save Invoice Settings'}</span>
                 </button>
               </div>
@@ -3656,7 +3692,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={configSaving}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {configSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{configSaving ? 'Saving…' : 'Save Inventory Properties'}</span>
                 </button>
               </div>
@@ -4131,7 +4167,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={!hasProAccess || domainBusy === 'save'}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {domainBusy === 'save' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{domainBusy === 'save' ? 'Saving…' : 'Save Changes'}</span>
                 </button>
               </div>
@@ -4345,7 +4381,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={configSaving || !hasProAccess}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {configSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{configSaving ? "Saving..." : "Save API Integrations"}</span>
                 </button>
               </div>
@@ -4452,7 +4488,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={commSaving || commLoading}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {commSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{commSaving ? 'Saving...' : 'Save Changes'}</span>
                 </button>
               </div>
@@ -4552,7 +4588,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={commSaving || commLoading}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {commSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{commSaving ? 'Saving...' : 'Save Changes'}</span>
                 </button>
               </div>
@@ -4720,7 +4756,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={commSaving || commLoading}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {commSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{commSaving ? 'Saving...' : 'Save Changes'}</span>
                 </button>
               </div>
@@ -4871,7 +4907,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   disabled={policiesSaving || policiesLoading}
                   className="px-5 py-2.5 bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2"
                 >
-                  <Save className="w-4 h-4" />
+                  {policiesSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                   <span>{policiesSaving ? 'Saving…' : 'Save Changes'}</span>
                 </button>
               </div>
@@ -4908,10 +4944,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="pt-4 border-t border-[#272F45] flex justify-end">
             <button
               type="submit"
+              data-testid="store-save"
+              onClick={handleSave}
+              disabled={isSaving}
               className="px-6 py-3 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-extrabold rounded-xl text-xs transition flex items-center gap-2 cursor-pointer shadow-lg"
             >
-              <Save className="w-4 h-4" />
-              <span>Save Changes</span>
+              {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              <span>{isSaving ? 'Saving…' : 'Save Changes'}</span>
             </button>
           </div>
         </form>

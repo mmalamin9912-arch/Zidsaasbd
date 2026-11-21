@@ -36,7 +36,8 @@ import {
   DollarSign,
   AlertCircle,
   Smartphone,
-  X
+  X,
+  Loader2
 } from 'lucide-react';
 
 /** Couriers the backend can auto-dispatch through (see lib/serverApp.ts). */
@@ -556,8 +557,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
             disabled={isSavingCourier || !routingLoaded}
             className="self-end sm:self-auto inline-flex items-center gap-1.5 bg-[#00D68F] hover:bg-[#00c281] disabled:opacity-60 text-[#0B0F19] text-xs font-bold px-4 py-2 rounded-xl transition-colors"
           >
-            <Check className="w-3.5 h-3.5" />
-            Save routing
+            {isSavingCourier ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+            {isSavingCourier ? 'Saving…' : 'Save routing'}
           </button>
         </div>
       </div>
@@ -777,7 +778,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
               disabled={isSavingShipping}
               className="bg-[#282E3F] hover:bg-[#32394E] text-[#00D68F] font-bold px-6 py-2.5 rounded-xl text-xs border border-[#00D68F]/30 transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              {isSavingShipping && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+              {isSavingShipping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
               <span>{isSavingShipping ? 'Saving…' : 'Save Shipping Settings'}</span>
             </button>
           </div>
@@ -1043,11 +1044,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
                 disabled={isSavingCourier}
                 className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-6 py-2.5 rounded-xl text-xs flex items-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isSavingCourier ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Check className="w-4 h-4 stroke-[3]" />
-                )}
+                {isSavingCourier ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4 stroke-[3]" />}
                 <span>{isSavingCourier ? 'Saving…' : sandboxMode ? 'Save & Keep in Sandbox' : 'Save Credentials & Verify API'}</span>
               </button>
             </div>

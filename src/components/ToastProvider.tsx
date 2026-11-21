@@ -226,7 +226,7 @@ export const ToastViewport: React.FC<{ toasts: ToastItem[]; onDismiss: (id: stri
   if (toasts.length === 0) return null;
   return (
     <div
-      className="fixed top-4 left-1/2 -translate-x-1/2 z-[210] flex flex-col items-center gap-2 pointer-events-none"
+      className="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] flex flex-col items-center gap-2 pointer-events-none"
       role="region"
       aria-label="Notifications"
     >

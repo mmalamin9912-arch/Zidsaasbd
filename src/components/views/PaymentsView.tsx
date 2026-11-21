@@ -49,7 +49,8 @@ import {
   RefreshCw,
   TrendingUp,
   Banknote,
-  X
+  X,
+  Loader2
 } from 'lucide-react';
 
 interface PaymentsViewProps {
@@ -1044,7 +1045,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
               disabled={isSavingMobile}
               className="bg-[#00D68F] hover:bg-[#00E699] disabled:opacity-60 disabled:cursor-wait text-slate-950 font-black px-8 py-3 rounded-xl text-sm transition shadow-lg shadow-[#00D68F]/20 flex items-center gap-2"
             >
-              <CheckCircle2 className="w-5 h-5" />
+              {isSavingMobile ? <Loader2 className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}
               <span>{isSavingMobile ? 'Saving…' : 'Save Payment Settings'}</span>
             </button>
           </div>
@@ -1482,9 +1483,11 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           <div className="pt-2 flex justify-end">
             <button
               type="submit"
-              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-6 py-2.5 rounded-xl text-xs cursor-pointer shadow-md"
+              disabled={isSavingCod}
+              className="bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold px-6 py-2.5 rounded-xl text-xs cursor-pointer shadow-md disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              Save COD Rules
+              {isSavingCod ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              <span>{isSavingCod ? 'Saving…' : 'Save COD Rules'}</span>
             </button>
           </div>
         </form>

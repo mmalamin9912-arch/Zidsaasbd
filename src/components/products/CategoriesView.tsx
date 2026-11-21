@@ -29,7 +29,9 @@ import {
   ImageIcon,
   Lock,
   Layers,
-  FileText
+  FileText,
+  Loader2,
+  Save
 } from 'lucide-react';
 
 export interface CategoryNode {
@@ -258,6 +260,7 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
   // Form View State (List vs Create/Edit)
   const [viewMode, setViewMode] = useState<'list' | 'form'>('list');
   const [editingCategory, setEditingCategory] = useState<CategoryNode | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Form Fields State
   const [formNameEn, setFormNameEn] = useState('');
@@ -502,54 +505,63 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
   };
 
   // Save Category Form Submit
-  const handleSaveCategory = (e: React.FormEvent) => {
+  const handleSaveCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formNameEn.trim()) return;
 
-    if (editingCategory) {
-      // Update
-      setCategories(prev => prev.map(cat => {
-        if (cat.id === editingCategory.id) {
-          return {
-            ...cat,
-            name: formNameEn.trim(),
-            imageAltText: formAltText.trim(),
-            parentId: formParentId,
-            description: formDescriptionEn.trim(),
-            image: formImage || cat.image,
-            coverImage: formCoverImage,
-            status: formStatus,
-            slug: activeSlug,
-            metaTitle: formMetaTitle.trim() || formNameEn.trim(),
-            metaDescription: formMetaDescription.trim() || formDescriptionEn.trim(),
-            keywords: formKeywords.trim(),
-            noIndex: formNoIndex,
-          };
-        }
-        return cat;
-      }));
-    } else {
-      // Create new
-      const newCategory: CategoryNode = {
-        id: `cat-${Date.now()}`,
-        parentId: formParentId,
-        name: formNameEn.trim(),
-        imageAltText: formAltText.trim(),
-        image: formImage || 'https://images.unsplash.com/photo-1544816155-12df9643f363?w=200&auto=format&fit=crop&q=80',
-        coverImage: formCoverImage,
-        description: formDescriptionEn.trim(),
-        status: formStatus,
-        productCount: 0,
-        slug: activeSlug,
-        metaTitle: formMetaTitle.trim() || formNameEn.trim(),
-        metaDescription: formMetaDescription.trim() || formDescriptionEn.trim(),
-        keywords: formKeywords.trim(),
-        noIndex: formNoIndex,
-      };
-      setCategories(prev => [newCategory, ...prev]);
-    }
+    setIsSaving(true);
+    try {
+      if (editingCategory) {
+        // Update
+        setCategories(prev => prev.map(cat => {
+          if (cat.id === editingCategory.id) {
+            return {
+              ...cat,
+              name: formNameEn.trim(),
+              imageAltText: formAltText.trim(),
+              parentId: formParentId,
+              description: formDescriptionEn.trim(),
+              image: formImage || cat.image,
+              coverImage: formCoverImage,
+              status: formStatus,
+              slug: activeSlug,
+              metaTitle: formMetaTitle.trim() || formNameEn.trim(),
+              metaDescription: formMetaDescription.trim() || formDescriptionEn.trim(),
+              keywords: formKeywords.trim(),
+              noIndex: formNoIndex,
+            };
+          }
+          return cat;
+        }));
+        toastSuccess('Category updated successfully!');
+      } else {
+        // Create new
+        const newCategory: CategoryNode = {
+          id: `cat-${Date.now()}`,
+          parentId: formParentId,
+          name: formNameEn.trim(),
+          imageAltText: formAltText.trim(),
+          image: formImage || 'https://images.unsplash.com/photo-1544816155-12df9643f363?w=200&auto=format&fit=crop&q=80',
+          coverImage: formCoverImage,
+          description: formDescriptionEn.trim(),
+          status: formStatus,
+          productCount: 0,
+          slug: activeSlug,
+          metaTitle: formMetaTitle.trim() || formNameEn.trim(),
+          metaDescription: formMetaDescription.trim() || formDescriptionEn.trim(),
+          keywords: formKeywords.trim(),
+          noIndex: formNoIndex,
+        };
+        setCategories(prev => [newCategory, ...prev]);
+        toastSuccess('Category created successfully!');
+      }
 
-    setViewMode('list');
+      setViewMode('list');
+    } catch (error) {
+      toastError('Failed to save category. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Filter Categories by status & search query
@@ -1037,10 +1049,11 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
           </button>
           <button
             type="submit"
-            className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-lg flex items-center gap-1.5"
+            disabled={isSaving}
+            className="px-5 py-2 bg-[#00D68F] hover:bg-[#00E699] text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer shadow-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
           >
-            <Check className="w-4 h-4 stroke-[3]" />
-            <span>Save Category</span>
+            {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            <span>{isSaving ? 'Saving…' : 'Save Category'}</span>
           </button>
         </div>
       </div>

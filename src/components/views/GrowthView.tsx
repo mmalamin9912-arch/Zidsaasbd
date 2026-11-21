@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { TrendingUp, Sparkles, Search, MessageSquare, Zap, Globe, Check } from 'lucide-react';
+import { TrendingUp, Sparkles, Search, MessageSquare, Zap, Globe, Check, Loader2 } from 'lucide-react';
 
 import { MerchantProfile } from '../../types';
 import { useToast } from '../ToastProvider';
@@ -326,7 +326,7 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
             disabled={isSavingWhatsApp || isLoading}
             className="w-full py-2 bg-emerald-500 text-slate-950 font-bold text-xs rounded-xl hover:bg-emerald-400 transition cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
           >
-            <Zap className="w-4 h-4" />
+            {isSavingWhatsApp ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
             {isSavingWhatsApp ? 'Saving...' : 'Save WhatsApp Settings'}
           </button>
         </div>
@@ -359,8 +359,9 @@ export const GrowthView: React.FC<GrowthViewProps> = ({
             <button
               onClick={handleSavePixels}
               disabled={isSavingPixels || isLoading}
-              className="w-full py-2 bg-[#D4AF37] text-slate-950 font-bold text-xs rounded-xl hover:bg-[#00E699] transition cursor-pointer disabled:opacity-50"
+              className="w-full py-2 bg-[#D4AF37] text-slate-950 font-bold text-xs rounded-xl hover:bg-[#00E699] transition cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
             >
+              {isSavingPixels ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
               {isSavingPixels ? 'Saving...' : 'Save Pixel & SEO Settings'}
             </button>
           </div>
