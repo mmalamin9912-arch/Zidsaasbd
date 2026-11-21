@@ -32,6 +32,7 @@
  */
 
 import { getMongoUri, getMongoDb, DB_NAME } from './db.js';
+import { postgrestWrite } from './supabaseSchema.js';
 import {
   upsertSupabaseLedger,
   listSupabaseLedger,
@@ -424,10 +425,53 @@ export async function updateOrderFields(
     return { ok: false, error: 'No updatable fields were supplied.' };
   }
 
+  // Also mirror status / courier tracking to Supabase orders table if configured
+  let supaPatched = false;
+  const supaCfg = readSupabaseEnv();
+  if (supaCfg) {
+    try {
+      const cleanNum = key.replace(/^#/, '').trim();
+      const patchRes = await postgrestWrite(
+        supaCfg.supabaseUrl,
+        supaCfg.supabaseKey,
+        `/rest/v1/orders?order_number=eq.${encodeURIComponent(cleanNum)}`,
+        {
+          method: 'PATCH',
+          body: toSupabaseLedgerPayload(set),
+          headers: { Prefer: 'return=representation' },
+        }
+      );
+      supaPatched = patchRes.ok;
+      if (supaPatched) {
+        console.log(`[Courier][updateOrderFields] Supabase orders table updated for ${cleanNum}`);
+      }
+    } catch (supaErr: any) {
+      console.warn('[Courier][updateOrderFields] Supabase patch warning:', supaErr?.message || supaErr);
+    }
+  }
+
   try {
-    if (!getMongoUri()) return { ok: false, error: 'MONGODB_URI is not set.' };
+    if (!getMongoUri()) {
+      if (supaPatched) {
+        return {
+          ok: true,
+          updated: Object.keys(set).filter((k) => k !== 'updated_at'),
+          matched: 1,
+        };
+      }
+      return { ok: false, error: 'MONGODB_URI is not set and Supabase order was not matched.' };
+    }
     const db = await getMongoDb(ORDERS_DB_NAME);
-    if (!db) return { ok: false, error: 'MongoDB is unavailable.' };
+    if (!db) {
+      if (supaPatched) {
+        return {
+          ok: true,
+          updated: Object.keys(set).filter((k) => k !== 'updated_at'),
+          matched: 1,
+        };
+      }
+      return { ok: false, error: 'MongoDB is unavailable.' };
+    }
 
     const located = await findOrder(key, extra);
     if (!located.doc) {
@@ -807,7 +851,20 @@ export async function recordCourierDispatchAttempt(input: CourierDispatchAttempt
     : {};
   const supa = await mirrorCourierLedgerToSupabase({ ...set, ...needsLabels });
 
+  console.log('[Courier][ledger] dispatch attempt recorded:', {
+    orderId: id,
+    status: input.status,
+    courier: input.courierName,
+    mongo: mongoOk ? 'saved' : mongoError || 'not-connected',
+    supabase: supa.ok ? `saved (${supa.source})` : `FAILED (${supa.error || 'unknown'})`,
+  });
+
   if (!mongoOk && !supa.ok) {
+    console.error('[Courier][ledger] FAILED to persist dispatch attempt to any store:', {
+      orderId: id,
+      mongoError,
+      supabaseError: supa.error,
+    });
     return {
       ok: false,
       id,
@@ -861,12 +918,22 @@ export async function recordCourierClickEverywhere(args: {
     const storeRef = { ...(loadedStore || {}), ...(args.storeRef || {}) };
     const fb = args.fallback || {};
 
+    const targetOrderId = String(
+      order.order_number || order.orderNumber ||
+      order.invoice_id || order.invoiceId || order.id ||
+      fb.orderNumber || fb.order_number || posted || storeRef.store_slug || '',
+    );
+
+    console.log('[Courier][ledger] recordCourierClickEverywhere triggered:', {
+      orderId: targetOrderId,
+      status,
+      courier: args.courierName || args.courierKey,
+      booked: args.booked,
+      error: args.errorMessage,
+    });
+
     return await recordCourierDispatchAttempt({
-      orderId: String(
-        order.order_number || order.orderNumber ||
-        order.invoice_id || order.invoiceId || order.id ||
-        fb.orderNumber || fb.order_number || posted || storeRef.store_slug || '',
-      ),
+      orderId: targetOrderId,
       status,
       courierName: args.courierName,
       courierKey: args.courierKey,
@@ -883,7 +950,7 @@ export async function recordCourierClickEverywhere(args: {
       raw: args.raw || null,
     });
   } catch (err: any) {
-    console.warn('[Courier][ledger] record click failed (ignored):', err?.message || err);
+    console.error('[Courier][ledger] recordCourierClickEverywhere failed (ignored):', err?.message || err);
     return { ok: false, error: err?.message || 'Could not record the courier dispatch.' };
   }
 }
@@ -967,10 +1034,21 @@ export async function mirrorCourierLedgerToSupabase(
   if (!row) return { ok: false, error: 'No ledger row to write.' };
   try {
     const config = cfg || readSupabaseEnv();
-    if (!config) return { ok: false, error: 'Supabase is not configured.' };
+    if (!config) {
+      console.warn('[Courier][ledger] Supabase write skipped — credentials not configured.');
+      return { ok: false, error: 'Supabase is not configured.' };
+    }
     const result = await upsertSupabaseLedger(config, toSupabaseLedgerPayload(row));
-    if (!result.ok) return { ok: false, source: result.source, error: result.error };
-    console.log('[Courier][ledger] Supabase row saved', {
+    if (!result.ok) {
+      console.error('[Courier][ledger] Supabase row save FAILED:', {
+        id: row.id,
+        order_number: row.order_number,
+        source: result.source,
+        error: result.error,
+      });
+      return { ok: false, source: result.source, error: result.error };
+    }
+    console.log('[Courier][ledger] Supabase row saved successfully:', {
       id: row.id,
       store: row.store_slug,
       source: result.source,
@@ -978,20 +1056,28 @@ export async function mirrorCourierLedgerToSupabase(
     });
     return { ok: true, source: result.source };
   } catch (err: any) {
+    console.error('[Courier][ledger] Supabase write threw:', err?.message || err);
     return { ok: false, error: err?.message || 'Supabase ledger write failed.' };
   }
 }
 
 /** Supabase credentials from the environment (service role wins, as on the server). */
 export function readSupabaseEnv(): { supabaseUrl: string; supabaseKey: string } | null {
-  const url = String(
+  const cleanEnvStr = (raw?: string): string => {
+    if (!raw) return '';
+    let str = String(raw).trim();
+    str = str.replace(/^["'`\\]+|["'`\\]+$/g, '').trim();
+    return str.replace(/^["'`\\]+|["'`\\]+$/g, '').trim();
+  };
+  const rawUrl =
     process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  ).trim().replace(/\/+$/, '');
-  const key = String(
+    process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.DATABASE_URL || '';
+  const rawKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY ||
-    process.env.VITE_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
-  ).trim();
+    process.env.VITE_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_KEY || '';
+  const url = cleanEnvStr(rawUrl).replace(/\/+$/, '');
+  const key = cleanEnvStr(rawKey);
   if (!url || !key || !/^https?:\/\//i.test(url)) return null;
   return { supabaseUrl: url, supabaseKey: key };
 }
@@ -1059,12 +1145,50 @@ export async function loadCourierLedgerRows(limit = 500): Promise<{
 
   const cfg = readSupabaseEnv();
   if (cfg) {
-    const supa = await listSupabaseLedger(cfg, limit);
-    if (supa.rows.length > 0) sources.push(`supabase-${supa.source}`);
-    for (const raw of supa.rows) {
-      const row = normalizeSupabaseLedgerRow(raw, cfg);
-      const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
-      if (key && !byKey.has(key)) byKey.set(key, row);
+    try {
+      const supa = await listSupabaseLedger(cfg, limit);
+      if (supa.rows.length > 0) sources.push(`supabase-${supa.source}`);
+      for (const raw of supa.rows) {
+        const row = normalizeSupabaseLedgerRow(raw, cfg);
+        const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
+        if (key && !byKey.has(key)) byKey.set(key, row);
+      }
+    } catch (supaErr: any) {
+      console.warn('[Courier][ledger] listSupabaseLedger warning:', supaErr?.message || supaErr);
+    }
+
+    // Also query Supabase orders table for any orders that have tracking/consignment/courier_status
+    try {
+      const filter = `or=(tracking_code.not.is.null,consignment_id.not.is.null,courier_status.not.is.null)&limit=${Math.min(Math.max(limit, 1), 2000)}`;
+      const ordersRes = await fetch(`${cfg.supabaseUrl}/rest/v1/orders?${filter}`, {
+        headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout ? AbortSignal.timeout(8_000) : undefined,
+      });
+      if (ordersRes.ok) {
+        const directOrders = await ordersRes.json().catch(() => []);
+        if (Array.isArray(directOrders) && directOrders.length > 0) {
+          sources.push('supabase-orders');
+          for (const raw of directOrders) {
+            const row = normalizeSupabaseLedgerRow(raw, cfg);
+            const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
+            if (key) {
+              const prev = byKey.get(key);
+              if (!prev) {
+                byKey.set(key, row);
+              } else {
+                // Merge order fields onto the ledger row if missing
+                for (const [k, v] of Object.entries(row)) {
+                  if ((prev[k] === undefined || prev[k] === null || prev[k] === '') && v !== undefined && v !== null && v !== '') {
+                    prev[k] = v;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (ordErr: any) {
+      console.warn('[Courier][ledger] Supabase orders table query warning:', ordErr?.message || ordErr);
     }
   }
 

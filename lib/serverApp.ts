@@ -16075,16 +16075,19 @@ app.post('/api/courier/booking', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const body = req.body || {};
+    const order = body.order || {};
+    const storeSlug = cleanStoreRef(body.store_slug || body.storeSlug || order?.store_slug || order?.storeSlug || '');
+    const storeRef = {
+      store_slug: body.store_slug || body.storeSlug || order?.store_slug || order?.storeSlug || storeSlug,
+      store_id: body.store_id || order?.store_id,
+      merchant_id: body.merchant_id || body.merchantId || order?.merchant_id || order?.merchantId,
+    };
     const result = await sendWithCourierFallback({
-      order: body.order || {},
+      order,
       merchantConfig: body.merchantConfig || {},
-      storeSlug: cleanStoreRef(body.store_slug || body.storeSlug || body.order?.store_slug || body.order?.storeSlug || ''),
-      storeRef: {
-        store_slug: body.store_slug || body.storeSlug || body.order?.store_slug || body.order?.storeSlug,
-        store_id: body.store_id || body.order?.store_id,
-        merchant_id: body.merchant_id || body.merchantId || body.order?.merchant_id || body.order?.merchantId,
-      },
-      requestedPrimary: body.courier || body.primaryCourier || body.order?.courier_name || body.order?.courierName,
+      storeSlug,
+      storeRef,
+      requestedPrimary: body.courier || body.primaryCourier || order?.courier_name || order?.courierName,
       requestedSecondary: body.fallbackCourier || body.secondaryCourier,
       autoFallback: typeof body.autoFallback === 'boolean' ? body.autoFallback : undefined,
       disableFallback: body.disableFallback === true,
@@ -16095,6 +16098,62 @@ app.post('/api/courier/booking', async (req, res) => {
           ? body.useCentralFallback
           : undefined,
     });
+
+    if (result?.success) {
+      const bookedCourier = String(result.courier_name || body.courier || 'Courier');
+      recordCourierClickEverywhere({
+        status: result.__sandbox === true ? 'sandbox' : 'booked',
+        courierName: bookedCourier,
+        courierKey: normalizeCourierKey(bookedCourier),
+        trackingCode: String(result.tracking_code || ''),
+        booked: true,
+        order,
+        fallback: body,
+        storeRef,
+        raw: result.consignment && typeof result.consignment === 'object' ? result.consignment : null,
+      });
+      void (async () => {
+        try {
+          const store = await loadStoreForCourierAlert(storeSlug);
+          await notifyAdminCourierDispatch({
+            status: 'booked',
+            courierName: bookedCourier,
+            trackingCode: String(result.tracking_code || ''),
+            order,
+            store,
+            fallback: body,
+          });
+        } catch {}
+      })();
+    } else {
+      const firstAttempt: Record<string, any> = Array.isArray(result?.attempts) ? result.attempts[0] || {} : {};
+      const notConfigured = firstAttempt.code === 'missing_credentials';
+      recordCourierClickEverywhere({
+        status: notConfigured ? 'disabled' : 'failed',
+        courierName: firstAttempt.courier_name || body.courier || 'Courier',
+        courierKey: normalizeCourierKey(firstAttempt.courier_name || body.courier || ''),
+        errorMessage: String(result?.error || result?.message || 'The courier rejected the booking.'),
+        booked: false,
+        order,
+        fallback: body,
+        storeRef,
+        raw: firstAttempt.provider_body ? { provider_body: firstAttempt.provider_body } : null,
+      });
+      void (async () => {
+        try {
+          const store = await loadStoreForCourierAlert(storeSlug);
+          await notifyAdminCourierDispatch({
+            status: notConfigured ? 'disabled' : 'failed',
+            courierName: firstAttempt.courier_name || body.courier || 'Courier',
+            errorMessage: String(result?.error || result?.message || 'The courier rejected the booking.'),
+            order,
+            store,
+            fallback: body,
+          });
+        } catch {}
+      })();
+    }
+
     return res.status(200).json(result);
   } catch (err: any) {
     console.error('[Courier] POST /api/courier/booking error:', err);
@@ -16171,7 +16230,7 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
       raw: attempt.providerResponse && typeof attempt.providerResponse === 'object'
         ? (attempt.providerResponse as Record<string, any>)
         : null,
-    }).catch(() => null);
+    }).catch((err) => console.error(`[Courier] ${provider.name} failed dispatch attempt record error:`, err?.message || err));
     return res.status(200).json({
       success: false,
       code: attempt.code,
@@ -16201,7 +16260,7 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
     order,
     storeRef: { ...(await loadStoreForCourierAlert(storeRef.store_slug) || {}), ...storeRef },
     raw: attempt.data && typeof attempt.data === 'object' ? attempt.data : null,
-  }).catch(() => null);
+  }).catch((err) => console.error(`[Courier] ${provider.name} booked dispatch attempt record error:`, err?.message || err));
   // Success is reported too, so the admin sees every “Send to Courier” click —
   // not only the ones that went wrong.
   void (async () => {
@@ -17521,10 +17580,46 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
   const alertFallback: Record<string, any> = (req.body && typeof req.body === 'object' ? req.body : {});
   let alertOrder: Record<string, any> | null = null;
   let alertStore: Record<string, any> | null = null;
+
+  const marketplaceRecordLedger = (
+    status: CourierDispatchStatus,
+    extra: {
+      courierName?: string;
+      trackingCode?: string;
+      errorMessage?: string;
+      booked?: boolean;
+      raw?: Record<string, any> | null;
+    } = {},
+  ): void => {
+    const rawCourier = extra.courierName || String(alertFallback.courier || '').trim() || 'Steadfast Courier';
+    recordCourierClickEverywhere({
+      status,
+      courierName: rawCourier,
+      courierKey: normalizeCourierKey(rawCourier),
+      trackingCode: extra.trackingCode,
+      errorMessage: extra.errorMessage,
+      booked: extra.booked === true,
+      order: alertOrder,
+      fallback: alertFallback,
+      storeRef: alertStore,
+      raw: extra.raw || null,
+    });
+  };
+
   const marketplaceNotify = (
     status: CourierDispatchStatus,
-    extra: { courierName?: string; errorMessage?: string; trackingCode?: string } = {},
+    extra: {
+      courierName?: string;
+      errorMessage?: string;
+      trackingCode?: string;
+      booked?: boolean;
+      raw?: Record<string, any> | null;
+    } = {},
   ): void => {
+    // Record into Admin Courier Orders List (Supabase + Mongo)
+    marketplaceRecordLedger(status, extra);
+
+    // Send instant Telegram alert
     void (async () => {
       try {
         await notifyAdminCourierDispatch({
@@ -17874,6 +17969,8 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         marketplaceNotify('failed', {
           courierName: courierKey,
           errorMessage: `HTTP ${httpStatus} — ${providerBody || 'no response body'}`,
+          booked: false,
+          raw: dispatched.data ?? null,
         });
         return res.status(200).json({
           ok: false,
@@ -17906,6 +18003,8 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       marketplaceNotify('failed', {
         courierName: courierKey,
         errorMessage: dispatched.message || 'The courier booking request could not be sent.',
+        booked: false,
+        raw: dispatched.data ?? null,
       });
       return res.status(200).json({
         ok: false,
@@ -17932,7 +18031,12 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
         'The central courier rejected this booking.',
       );
       console.warn('[Courier] central dispatch rejected by provider:', { courier: courierKey, status: dispatched.response?.status, reason });
-      marketplaceNotify('failed', { courierName: courierKey, errorMessage: reason });
+      marketplaceNotify('failed', {
+        courierName: courierKey,
+        errorMessage: reason,
+        booked: false,
+        raw: providerData,
+      });
       return res.status(200).json({
         ok: false,
         code: 'booking_rejected',
@@ -17974,6 +18078,8 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
     marketplaceNotify('booked', {
       courierName: courierKey === 'steadfast' ? 'Steadfast Courier' : courierKey === 'pathao' ? 'Pathao Courier' : courierKey,
       trackingCode,
+      booked: true,
+      raw: providerData,
     });
 
     return res.status(200).json({
@@ -23859,6 +23965,7 @@ app.get('/api/admin/courier-orders', async (req, res) => {
       res.setHeader('X-Orders-Degraded', 'true');
       res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
     }
+    console.log(`[Server] GET /api/admin/courier-orders: returning ${enrichedOrders.length} orders (ledger: ${ledgerOrders.length}, mongo: ${orders.length}, cached: ${cachedOrders.length}, sources: ${ledgerSources.join(', ') || 'none'})`);
     return res.status(200).json({ orders: enrichedOrders });
   } catch (err: any) {
     console.error('[Server] GET /api/admin/courier-orders error:', err);

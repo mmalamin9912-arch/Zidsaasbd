@@ -3218,51 +3218,178 @@ if (m.storeSlug) {
         {/* Courier Dispatch Tab */}
         {activeSubTab === 'courier_dispatch' && (
           <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-6">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-[#2E3548] pb-5">
               <div>
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <Truck className="w-5 h-5 text-emerald-400" />
-                  <span>Courier Dispatch</span>
+                  <span>Courier Dispatch &amp; Central API Integration</span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-1">
-                  Send orders to courier from the platform's central courier account. Orders are dispatched using the merchant's store address as the pickup point.
+                  Manage the platform's central courier account used to dispatch marketplace and automated orders. Each vendor's store address serves as the collection point.
+                </p>
+              </div>
+
+              {/* Direct Quick Actions */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveSubTab('courier_orders')}
+                  className="bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm"
+                >
+                  <ShoppingBag className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Courier Orders List</span>
+                  <span className="ml-1 px-1.5 py-0.2 bg-indigo-500/30 text-indigo-200 rounded-full text-[10px] font-mono">
+                    {courierOrders.length}
+                  </span>
+                  <ArrowUpRight className="w-3.5 h-3.5 opacity-70" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveSubTab('logistics')}
+                  className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-sm"
+                >
+                  <Settings className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Central Courier API Settings</span>
+                  <ArrowUpRight className="w-3.5 h-3.5 opacity-70" />
+                </button>
+              </div>
+            </div>
+
+            {/* Provider & API Status Overview Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Card 1: Active Central Courier Provider */}
+              <div className="bg-[#202533] border border-[#2E3548] p-4 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Active Central Provider</span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                    gatewayForm.centralCourier?.enabled !== false
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                  }`}>
+                    {gatewayForm.centralCourier?.enabled !== false ? '● Active' : '○ Disabled'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Truck className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="text-sm font-black text-white capitalize">
+                    {gatewayForm.centralCourier?.provider ? `${gatewayForm.centralCourier.provider} Courier` : 'Steadfast Courier'}
+                  </span>
+                </div>
+                <div className="pt-1">
+                  <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Switch Provider</label>
+                  <select
+                    value={gatewayForm.centralCourier?.provider || 'steadfast'}
+                    onChange={(e) => setGatewayForm({
+                      ...gatewayForm,
+                      centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, provider: e.target.value as any },
+                    })}
+                    className="w-full bg-[#181B26] border border-[#3A435E] rounded-lg px-3 py-1.5 text-xs text-white outline-none"
+                  >
+                    <option value="steadfast">Steadfast Courier</option>
+                    <option value="pathao">Pathao Courier</option>
+                    <option value="redx">RedX Logistics</option>
+                    <option value="paperfly">Paperfly</option>
+                    <option value="ecourier">eCourier</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Card 2: API Key & Secret Status */}
+              <div className="bg-[#202533] border border-[#2E3548] p-4 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">API Authentication</span>
+                  {Boolean(gatewayForm.centralCourier?.apiKey) ? (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                      <CheckCircle className="w-3 h-3" /> Configured
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" /> Missing Keys
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Key className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <span className="text-xs font-mono text-slate-300">
+                    {gatewayForm.centralCourier?.apiKey ? `Key: ••••${gatewayForm.centralCourier.apiKey.slice(-4)}` : 'No API key set'}
+                  </span>
+                </div>
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setActiveSubTab('logistics')}
+                    className="w-full bg-[#181B26] hover:bg-[#282E3F] text-slate-300 hover:text-white border border-[#3A435E] rounded-lg px-3 py-1.5 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition"
+                  >
+                    <Settings className="w-3 h-3 text-slate-400" />
+                    <span>Edit API Credentials</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Card 3: Telegram Dispatch Alerts */}
+              <div className="bg-[#202533] border border-[#2E3548] p-4 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Telegram Dispatch Bot</span>
+                  {Boolean(gatewayForm.centralCourier?.telegramBotToken && gatewayForm.centralCourier?.telegramChatId) ? (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-400 border border-sky-500/30 flex items-center gap-1">
+                      <CheckCircle className="w-3 h-3" /> Alerts Ready
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-500/10 text-slate-400 border border-slate-500/30 flex items-center gap-1">
+                      <Info className="w-3 h-3" /> Unconfigured
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Send className="w-4 h-4 text-sky-400 shrink-0" />
+                  <span className="text-xs font-mono text-slate-300">
+                    {gatewayForm.centralCourier?.telegramChatId ? `Chat ID: ${gatewayForm.centralCourier.telegramChatId}` : 'No chat ID linked'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-slate-500 leading-tight">
+                  Instant push notification to Admin Telegram on every parcel dispatch or error attempt.
                 </p>
               </div>
             </div>
 
+            {/* Operational Configuration & Guidance Card */}
             <div className="bg-[#202533] border border-[#2E3548] p-6 rounded-2xl space-y-4">
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-slate-400 font-bold uppercase tracking-widest">Courier Provider:</span>
-                <select
-                  value={gatewayForm.centralCourier?.provider || 'steadfast'}
-                  onChange={(e) => setGatewayForm({
-                    ...gatewayForm,
-                    centralCourier: { ...defaultCentralCourier, ...gatewayForm.centralCourier, provider: e.target.value as any },
-                  })}
-                  className="w-full sm:w-48 bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-white outline-none"
-                >
-                  <option value="steadfast">Steadfast Courier</option>
-                  <option value="pathao">Pathao Courier</option>
-                  <option value="redx">RedX Logistics</option>
-                  <option value="paperfly">Paperfly</option>
-                  <option value="ecourier">eCourier</option>
-                </select>
+              <h4 className="text-xs font-bold text-slate-200 uppercase tracking-widest flex items-center gap-2">
+                <Info className="w-4 h-4 text-emerald-400" />
+                <span>Pickup &amp; Routing Operations</span>
+              </h4>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="bg-[#181B26] border border-[#2E3548] p-4 rounded-xl space-y-1.5">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Parcel Collection Point</span>
+                  <p className="text-xs text-white font-medium">Merchant's Store Profile Address</p>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    The rider will collect the order directly from each merchant's configured store/pickup address. If a vendor profile lacks an address, the central platform fallback address is used.
+                  </p>
+                </div>
+
+                <div className="bg-[#181B26] border border-[#2E3548] p-4 rounded-xl space-y-1.5">
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Automated Ledger Logging</span>
+                  <p className="text-xs text-white font-medium">Recorded in Courier Orders List</p>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    Every click on "Send to Courier" (successful, failed, or manual) is recorded directly in the Supabase &amp; MongoDB ledger so the Super Admin never loses track of dispatches.
+                  </p>
+                </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-slate-400 font-bold uppercase tracking-widest">Pickup Address Source:</span>
-                <select
-                  value="merchant_store"
-                  disabled
-                  className="w-full sm:w-64 bg-[#181B26] border border-[#3A435E] rounded-xl px-4 py-2.5 text-xs text-slate-500 outline-none"
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-[#181B26]/60 border border-[#2E3548] p-4 rounded-xl">
+                <div className="text-xs text-slate-400">
+                  Looking for order tracking codes, statuses, and courier airway bills?
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSubTab('courier_orders')}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition cursor-pointer shadow-md"
                 >
-                  <option value="merchant_store">Merchant's Store Address (from Settings)</option>
-                </select>
-              </div>
-
-              <div className="text-xs text-slate-500 italic">
-                Courier dispatch uses the platform's central API keys configured in <span className="text-slate-300">System &amp; Gateways → Live Payment Gateways → Central Courier API</span>.
-                Each order's pickup address is taken from the merchant's store address (Settings → General → Pickup / Store Address).
+                  <ShoppingBag className="w-3.5 h-3.5" />
+                  <span>Open Courier Orders List</span>
+                </button>
               </div>
             </div>
           </div>

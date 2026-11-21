@@ -140,13 +140,28 @@ async function readFallbackRows(
   cfg: CourierLedgerStoreConfig,
 ): Promise<{ rows: CourierLedgerRow[]; source: 'fallback' | 'none'; error?: string }> {
   try {
-    const url =
+    // 1. Try config_key (the standard column in 0004_platform_config.sql)
+    let res = await fetch(
       `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}` +
-      `?select=*&key=like.${encodeURIComponent(FALLBACK_KEY_PREFIX_LC + '*')}&limit=2000`;
-    const res = await fetch(url, {
-      headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
-      signal: AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
-    });
+      `?select=*&config_key=like.${encodeURIComponent(FALLBACK_KEY_PREFIX_LC + '*')}&limit=2000`,
+      {
+        headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
+      },
+    );
+
+    // 2. Fall back to key=like if config_key column was rejected
+    if (!res.ok) {
+      res = await fetch(
+        `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}` +
+        `?select=*&key=like.${encodeURIComponent(FALLBACK_KEY_PREFIX_LC + '*')}&limit=2000`,
+        {
+          headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
+          signal: AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
+        },
+      );
+    }
+
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
       console.warn('[CourierLedger] fallback read failed:', res.status, detail.slice(0, 200));
@@ -155,7 +170,7 @@ async function readFallbackRows(
     const docs = await res.json().catch(() => []);
     const rows: CourierLedgerRow[] = [];
     for (const doc of Array.isArray(docs) ? docs : []) {
-      const value = doc?.value ?? doc?.data ?? doc?.config ?? doc?.json ?? null;
+      const value = doc?.payload ?? doc?.value ?? doc?.data ?? doc?.config ?? doc?.json ?? null;
       const parsed = typeof value === 'string'
         ? (() => { try { return JSON.parse(value); } catch { return null; } })()
         : value;
@@ -310,6 +325,7 @@ export async function upsertSupabaseLedger(
     },
   );
   if (tableResult.ok) {
+    console.log('[CourierLedger] table write OK for order', key);
     return { ok: true, source: 'table', droppedColumns: tableResult.droppedColumns };
   }
 
@@ -330,7 +346,14 @@ export async function upsertSupabaseLedger(
 
   // ── 2. `platform_config` fallback (always present). ──
   const fallback = await writeFallbackRow(cfg, key, payload);
-  if (fallback.ok) return { ...fallback, droppedColumns: tableResult.droppedColumns };
+  if (fallback.ok) {
+    console.log('[CourierLedger] fallback write OK for order', key, '(platform_config)');
+    return { ...fallback, droppedColumns: tableResult.droppedColumns };
+  }
+  console.error('[CourierLedger] both table and fallback writes FAILED for order', key, {
+    tableError: (tableResult.detail || '').slice(0, 200),
+    fallbackError: (fallback.error || '').slice(0, 200),
+  });
   return {
     ok: false,
     source: 'none',
@@ -346,45 +369,86 @@ async function writeFallbackRow(
   row: CourierLedgerRow,
 ): Promise<LedgerUpsertResult> {
   const docKey = `${FALLBACK_KEY_PREFIX_LC}${key}`;
+  const now = new Date().toISOString();
 
-  // PATCH first: an UPDATE that matches nothing returns 204 and tells us the
-  // row does not exist yet, so a re-dispatch never depends on a unique index
-  // the deployment may not have.
+  // Send payload with BOTH column conventions (config_key+payload per 0004_platform_config.sql,
+  // AND key+value as alias). postgrestWrite automatically drops any column the target table lacks.
+  const payloadDoc = {
+    config_key: docKey,
+    payload: row,
+    key: docKey,
+    value: row,
+    updated_at: now,
+  };
+
+  // 1. Try PATCH on config_key first
   const patched = await postgrestWrite(
+    cfg.supabaseUrl,
+    cfg.supabaseKey,
+    `/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?config_key=eq.${encodeURIComponent(docKey)}`,
+    {
+      method: 'PATCH',
+      headers: { ...jsonHeaders(), Prefer: 'return=representation' },
+      body: payloadDoc,
+      timeoutMs: 10_000,
+    },
+  );
+  if (patched.ok) {
+    const check = await readFallbackRow(cfg, docKey);
+    if (check) return { ok: true, source: 'fallback' };
+  }
+
+  // 2. Try PATCH on key=eq if config_key was not recognized
+  const patchedKey = await postgrestWrite(
     cfg.supabaseUrl,
     cfg.supabaseKey,
     `/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?key=eq.${encodeURIComponent(docKey)}`,
     {
       method: 'PATCH',
       headers: { ...jsonHeaders(), Prefer: 'return=representation' },
-      body: { value: row },
+      body: payloadDoc,
       timeoutMs: 10_000,
     },
   );
-  if (patched.ok) {
-    // `ok` on a PATCH can mean "matched nothing"; verify by reading it back.
+  if (patchedKey.ok) {
     const check = await readFallbackRow(cfg, docKey);
     if (check) return { ok: true, source: 'fallback' };
   }
 
+  // 3. Try POST with conflictPatchPath on config_key
   const inserted = await postgrestWrite(
+    cfg.supabaseUrl,
+    cfg.supabaseKey,
+    `/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?on_conflict=config_key`,
+    {
+      method: 'POST',
+      headers: { ...jsonHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: payloadDoc,
+      conflictPatchPath: `/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?config_key=eq.${encodeURIComponent(docKey)}`,
+      timeoutMs: 10_000,
+    },
+  );
+  if (inserted.ok) return { ok: true, source: 'fallback' };
+
+  // 4. Try POST plain
+  const insertedPlain = await postgrestWrite(
     cfg.supabaseUrl,
     cfg.supabaseKey,
     `/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}`,
     {
       method: 'POST',
       headers: { ...jsonHeaders(), Prefer: 'return=minimal' },
-      body: { key: docKey, value: row },
-      conflictPatchPath: `/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?key=eq.${encodeURIComponent(docKey)}`,
+      body: payloadDoc,
+      conflictPatchPath: `/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?config_key=eq.${encodeURIComponent(docKey)}`,
       timeoutMs: 10_000,
     },
   );
-  if (inserted.ok) return { ok: true, source: 'fallback' };
+  if (insertedPlain.ok) return { ok: true, source: 'fallback' };
 
   return {
     ok: false,
     source: 'none',
-    error: (inserted.detail || patched.detail || '').slice(0, 300) || 'Could not write the fallback row.',
+    error: (inserted.detail || insertedPlain.detail || patched.detail || patchedKey.detail || '').slice(0, 300) || 'Could not write the fallback row.',
   };
 }
 
@@ -393,18 +457,29 @@ async function readFallbackRow(
   docKey: string,
 ): Promise<CourierLedgerRow | null> {
   try {
-    const res = await fetch(
-      `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?select=key,value&key=eq.${encodeURIComponent(docKey)}&limit=1`,
+    // 1. Try config_key
+    let res = await fetch(
+      `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?select=*&config_key=eq.${encodeURIComponent(docKey)}&limit=1`,
       {
         headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
         signal: AbortSignal.timeout ? AbortSignal.timeout(8_000) : undefined,
       },
     );
+    // 2. Try key
+    if (!res.ok) {
+      res = await fetch(
+        `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_FALLBACK_TABLE}?select=*&key=eq.${encodeURIComponent(docKey)}&limit=1`,
+        {
+          headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
+          signal: AbortSignal.timeout ? AbortSignal.timeout(8_000) : undefined,
+        },
+      );
+    }
     if (!res.ok) return null;
     const rows = await res.json().catch(() => []);
     const first = Array.isArray(rows) ? rows[0] : null;
     if (!first) return null;
-    const value = first.value;
+    const value = first.payload ?? first.value ?? first.data ?? first.config ?? null;
     return typeof value === 'string' ? JSON.parse(value) : value;
   } catch {
     return null;
@@ -421,11 +496,12 @@ export async function findSupabaseLedgerRow(
 
   let tableRow: CourierLedgerRow | null = null;
   try {
+    const rawNum = String(orderId).replace(/^#/, '').trim();
     const filters = [
-      `id=eq.${encodeURIComponent(key)}`,
-      `order_id=eq.${encodeURIComponent(key)}`,
-      `order_number=eq.${encodeURIComponent(String(orderId).replace(/^#/, ''))}`,
-    ].join('&');
+      `id.eq.${encodeURIComponent(key)}`,
+      `order_id.eq.${encodeURIComponent(key)}`,
+      `order_number.eq.${encodeURIComponent(rawNum)}`,
+    ].join(',');
     const res = await fetch(
       `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_TABLE}?select=*&or=(${filters})&limit=1`,
       {
