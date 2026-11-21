@@ -1009,8 +1009,22 @@ async function writeLedgerToMongo(
   await db.collection(COURIER_ORDERS_COLLECTION).updateOne(
     { _id: id as any },
     {
-      $set: { ...set, _id: id as any },
-      $setOnInsert: { created_at: now, courier_labels: [] },
+      /*
+       * `created_at` MUST NOT APPEAR IN BOTH OPERATORS.
+       *
+       * It is always present on a freshly built row, and the insert branch also
+       * set it via `$setOnInsert` — Mongo rejects the whole upsert with
+       * `Updating the path 'created_at' would create a conflict at
+       * 'created_at'`, so NEITHER the update nor the insert happened. On
+       * production that surfaced as the ledger staying empty. It is now removed
+       * from `$set` and left to `$setOnInsert`, so the original creation time is
+       * preserved across retries.
+       */
+      $set: (() => {
+        const { created_at: _drop, ...rest } = set;
+        return { ...rest, _id: id as any };
+      })(),
+      $setOnInsert: { created_at: set.created_at || now, courier_labels: [] },
     },
     { upsert: true },
   );

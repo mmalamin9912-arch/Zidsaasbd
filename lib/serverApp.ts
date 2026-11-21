@@ -7668,16 +7668,54 @@ app.post('/api/stores/update', async (req, res) => {
           if (Object.keys(setDoc).length <= 3) {
             console.warn('[Server] /api/stores/update: nothing to update after sanitizing the patch.');
           } else {
-            await mongoose.connection.db.collection('stores').updateOne(
-              { $or: filterOr },
-              {
-                $set: setDoc,
-                // Seed the slug/code on insert only; $setOnInsert never clobbers
-                // an existing document's identity fields.
-                ...(storeSlug ? { $setOnInsert: { store_slug: storeSlug, storeSlug } } : {}),
-              },
-              { upsert: true }
-            );
+            /*
+             * UPDATE FIRST, INSERT ONLY WHEN NOTHING MATCHED (store_slug fix).
+             *
+             * The previous `updateOne({$or: filterOr}, {$set…}, {upsert:true})`
+             * could INSERT a document that reused the patch's `store_slug` while
+             * a DIFFERENT store already owned that slug — the filter matched on
+             * `email`, the insert carried the other store's slug, and Mongo
+             * answered `E11000 duplicate key error … stores.store_slug`. The
+             * save then silently warned and the merchant's change was lost.
+             *
+             * A plain update (no upsert) can only ever touch the rows the
+             * caller identified; the insert path below is reached ONLY when no
+             * row matched, and it refuses to create a second document for a
+             * slug that is already taken.
+             */
+            const existing = await mongoose.connection.db.collection('stores').findOne({ $or: filterOr });
+            const targetSlug = storeSlug || String(m.storeSlug || '').trim().toLowerCase();
+
+            if (existing) {
+              await mongoose.connection.db.collection('stores').updateOne(
+                { _id: existing._id },
+                { $set: setDoc },
+              );
+            } else if (targetSlug) {
+              // No row matched the caller's identity. Refuse to insert a
+              // duplicate slug: re-point the update at the row that owns it,
+              // so the merchant's edit lands on their real store record.
+              const slugOwner = await mongoose.connection.db.collection('stores').findOne({
+                $or: [{ store_slug: targetSlug }, { storeSlug: targetSlug }],
+              });
+              if (slugOwner) {
+                await mongoose.connection.db.collection('stores').updateOne(
+                  { _id: slugOwner._id },
+                  { $set: setDoc },
+                );
+              } else {
+                const insertDoc: Record<string, any> = {
+                  ...sanitizeMongoPatch(cleanMerchant),
+                  store_slug: targetSlug,
+                  storeSlug: targetSlug,
+                  email: email || m.email,
+                  created_at: new Date(),
+                  updated_at: new Date(),
+                };
+                delete insertDoc._id;
+                await mongoose.connection.db.collection('stores').insertOne(insertDoc);
+              }
+            }
           }
         }
       } catch (mongoErr) {
@@ -7690,6 +7728,11 @@ app.post('/api/stores/update', async (req, res) => {
    //    PostgREST "unknown column" rejection. This is what makes a merchant's
    //    persisted theme choice (activeThemeId/theme_config) readable from the
    //    Supabase fallback store, not just MongoDB.
+   //
+   //    `supabaseMirror` reports the OUTCOME in the HTTP response, so a Render
+   //    log (or the merchant's network tab) shows exactly why a mirror did or
+   //    did not land instead of a bare "warning: 400".
+   let supabaseMirror: Record<string, any> | undefined;
    try {
      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
      if (isConfigured && (storeSlug || email || storeId)) {
@@ -7762,28 +7805,104 @@ app.post('/api/stores/update', async (req, res) => {
          if (cleanSbPayload.updated_at === undefined) {
            cleanSbPayload.updated_at = new Date().toISOString();
          }
-         const identityPatchPath = storeSlug
+
+         /*
+          * `id` MUST NOT BE SENT ON AN UPDATE (22P02 fix).
+          *
+          * Production logs showed the store mirror failing with
+          *   `400  22P02: invalid input syntax for type bigint`
+          * because `stores.id` is a bigint on hand-provisioned projects while
+          * the dashboard posts its OWN id (`MP-…`, a UUID, or the slug).
+          * The id is the row's identity, never an updatable value: the row is
+          * already located by `store_slug` / `email` / `id` in the PATCH path,
+          * so sending it can only ever cause this cast error.
+          * The payload is therefore stripped of `id` and the row is UPDATED by
+          * its natural key. A row that does not exist yet is created by the
+          * PATCH-or-INSERT helper below, which omits the bigint id and lets
+          * Postgres assign it.
+          */
+         delete cleanSbPayload.id;
+
+         /*
+          * A `bigint`/`integer` id is only assignable when it is numeric. If
+          * the caller's id is numeric the row still exists, so the PATCH by id
+          * is a safe fallback; otherwise the identity path must use the slug.
+          */
+         const numericId = /^\d+$/.test(storeId) ? storeId : '';
+         const updateBy = storeSlug
            ? `/rest/v1/stores?store_slug=eq.${encodeURIComponent(storeSlug)}`
            : email
              ? `/rest/v1/stores?email=eq.${encodeURIComponent(email)}`
-             : storeId
-               ? `/rest/v1/stores?id=eq.${encodeURIComponent(storeId)}`
+             : numericId
+               ? `/rest/v1/stores?id=eq.${numericId}`
                : undefined;
-         const sbResult = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
-           method: 'POST',
-           headers: { Prefer: 'resolution=merge-duplicates' },
-           body: cleanSbPayload,
-           conflictPatchPath: identityPatchPath,
-         });
+
+         /*
+          * PATCH FIRST, INSERT ONLY IF THE ROW IS MISSING.
+          *
+          * `POST ?on_conflict=` needs a unique index on the conflict target.
+          * Where that index is absent (the `store_slug` duplicate-key error
+          * below) PostgREST answers 42P10 and the mirror never lands. An
+          * explicit PATCH by the natural key always works, and only falls back
+          * to an INSERT when zero rows matched — which is exactly when a row
+          * genuinely needs creating. That removes BOTH failure modes:
+          *   • no `on_conflict` dependency  → no "no unique constraint" 42P10;
+          *   • the insert path drops `id`   → no bigint 22P02.
+          */
+         let sbResult = updateBy
+           ? await postgrestWrite(supabaseUrl, supabaseKey, updateBy, {
+               method: 'PATCH',
+               headers: { Prefer: 'return=representation' },
+               body: { ...cleanSbPayload, updated_at: new Date().toISOString() },
+             })
+           : null;
+
+         /*
+          * A PATCH THAT MATCHED NOTHING IS NOT A SAVE.
+          *
+          * PostgREST answers `204 No Content` when an update matched zero rows,
+          * and `postgrestWrite` reports any 2xx as `ok:true`. Without this check
+          * the code believed the store row existed and skipped the INSERT, so a
+          * merchant whose `stores` row had not been mirrored yet never got one —
+          * a silent no-op that looked like success in the log.
+          */
+         const patchMatchedNothing = Boolean(sbResult && sbResult.ok && sbResult.status === 204);
+         if (!sbResult || !sbResult.ok || patchMatchedNothing) {
+           // A 405/404 means "no such filter column"; 204 means the filter
+           // matched no row. Either way the row must be created.
+           const insertBody: Record<string, any> = { ...cleanSbPayload };
+           delete insertBody.id;
+           if (storeSlug && insertBody.store_slug === undefined) insertBody.store_slug = storeSlug;
+           if (email && insertBody.email === undefined) insertBody.email = email;
+           sbResult = await postgrestWrite(supabaseUrl, supabaseKey, '/rest/v1/stores', {
+             method: 'POST',
+             headers: { Prefer: 'return=representation' },
+             body: insertBody,
+           });
+         }
+
          if (!sbResult.ok) {
-           // Read the body: a bare status code hid the real cause (usually an
-           // unknown column or a size rejection) behind "warning: 400".
+           // Read the body: a bare status code hid the real cause (an unknown
+           // column, a size rejection, or a bigint cast) behind "warning: 400".
            console.warn(
              '[Server] /api/stores/update Supabase mirror warning:',
              sbResult.status,
-             sbResult.detail.slice(0, 300)
+             sbResult.detail.slice(0, 300),
            );
+         } else {
+           console.log('[Server] /api/stores/update Supabase mirror OK:', {
+             store_slug: storeSlug || null,
+             updated_by: updateBy,
+             dropped: sbResult.droppedColumns,
+           });
          }
+         supabaseMirror = {
+           ok: sbResult.ok,
+           status: sbResult.status,
+           path: updateBy || '/rest/v1/stores',
+           ...(sbResult.ok ? {} : { error: sbResult.detail.slice(0, 300) }),
+           droppedColumns: sbResult.droppedColumns,
+         };
        }
      }
    } catch (sbErr: any) {
@@ -7833,6 +7952,9 @@ app.post('/api/stores/update', async (req, res) => {
       ok: true,
       store_slug: storeSlug || payload.merchant?.storeSlug || '',
       ...(onboardingStatus ? { onboarding: onboardingStatus } : {}),
+      // The Supabase mirror's real outcome, so a failed mirror is visible in the
+      // Render log and the merchant's network tab instead of a silent warning.
+      ...(supabaseMirror ? { supabase_mirror: supabaseMirror } : {}),
       // Tell the client when an image had to be dropped, so the UI can warn
       // instead of the merchant silently losing their logo.
       ...(imageSanitized.changed
