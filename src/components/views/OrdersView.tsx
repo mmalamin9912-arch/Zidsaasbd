@@ -457,8 +457,22 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    */
   const labelsRequestedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    /*
+     * Fetch labels for every order the courier ledger has touched — NOT only
+     * the ones with a tracking code.
+     *
+     * A dispatch that failed (Steadfast 401) or needed manual entry has NO
+     * tracking id, yet the admin may still upload the label/screenshot to the
+     * ledger row. Keying on trackingCode alone hid exactly those labels from the
+     * merchant, so the courier status/error fields count too.
+     */
     const dispatched = (orders || []).filter(
-      (o: any) => o && (o.trackingCode || o.tracking_code || o.tracking_id || o.trackingId),
+      (o: any) => o && (
+        o.trackingCode || o.tracking_code || o.tracking_id || o.trackingId ||
+        o.courierStatus || o.courier_status ||
+        o.courierLastError || o.courier_last_error ||
+        o.needsManualEntry === true || o.needs_manual_entry === true
+      ),
     );
     if (dispatched.length === 0) return;
     const storeRef = String(storeSlug || merchantId || '').trim();
@@ -3257,6 +3271,32 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                 <Truck className="w-3.5 h-3.5 text-slate-400" />
                                 <span>{courierName}</span>
                               </div>
+                              {/*
+                                COURIER STATUS from the ledger (Admin “Courier
+                                Orders List”). The server merges courier_status /
+                                courierStatus onto the order, so the shopkeeper
+                                sees the same badge the admin set — including a
+                                cancellation or an issue.
+                              */}
+                              {(() => {
+                                const cs = String((ord as any).courierStatus || (ord as any).courier_status || '').trim();
+                                if (!cs) return null;
+                                const bad = /cancell?ed|fail|return|issue|hold/i.test(cs);
+                                const good = /deliver/i.test(cs);
+                                return (
+                                  <div
+                                    className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded mt-1 border ${
+                                      bad
+                                        ? 'text-rose-300 bg-rose-500/10 border-rose-500/20'
+                                        : good
+                                          ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20'
+                                          : 'text-slate-300 bg-[#202533] border-[#2E3548]'
+                                    }`}
+                                  >
+                                    <span>{cs}</span>
+                                  </div>
+                                );
+                              })()}
                               {ord.trackingCode ? (
                                 <div className="inline-flex items-center gap-1 text-[10px] text-[#00D68F] font-mono font-bold bg-[#00D68F]/10 border border-[#00D68F]/20 px-1.5 py-0.5 rounded mt-1">
                                   <span>TRK: {ord.trackingCode}</span>
@@ -3484,6 +3524,134 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                           </div>
                                         )}
                                       </div>
+
+                                      {/*
+                                        COURIER DISPATCH INFO — mirrors the Admin
+                                        “Courier Orders List”.
+
+                                        The server merges the courier ledger
+                                        (public.courier_orders) onto this order, so the
+                                        merchant sees the same courier status, tracking /
+                                        token id, issue or cancellation reason and label
+                                        the admin sees. Rendered only when the order
+                                        actually carries courier data.
+                                      */}
+                                      {(() => {
+                                        const courierStatusText = String(
+                                          (ord as any).courierStatus || (ord as any).courier_status || '',
+                                        ).trim();
+                                        const trackingText = String(
+                                          (ord as any).trackingCode || (ord as any).tracking_code ||
+                                          (ord as any).tracking_id || (ord as any).courier_tracking || '',
+                                        ).trim();
+                                        const courierNameText = String(
+                                          courierName || (ord as any).courierName || (ord as any).courier_name || '',
+                                        ).trim();
+                                        const issueText = String(
+                                          (ord as any).cancellationReason || (ord as any).cancellation_reason ||
+                                          (ord as any).issueReason || (ord as any).issue_reason ||
+                                          (ord as any).statusNote || (ord as any).status_note || '',
+                                        ).trim();
+                                        const courierError = String(
+                                          (ord as any).courierLastError || (ord as any).courier_last_error || '',
+                                        ).trim();
+                                        const needsManual = (ord as any).needsManualEntry === true ||
+                                          (ord as any).needs_manual_entry === true;
+                                        const isCancelled = (ord as any).courier_cancelled === true ||
+                                          (ord as any).courierCancelled === true ||
+                                          /cancell?ed/i.test(courierStatusText);
+
+                                        if (!courierStatusText && !trackingText && !issueText && !courierError && !needsManual) {
+                                          return null;
+                                        }
+
+                                        return (
+                                          <div className="border-t border-[#2E3548] pt-2 space-y-1.5" data-testid="order-courier-info">
+                                            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                                              <Truck className="w-3.5 h-3.5 text-[#00D68F]" />
+                                              Courier Status
+                                            </div>
+
+                                            <div className="bg-[#12141D] p-2 rounded-lg border border-[#2E3548] space-y-1.5 text-[11px]">
+                                              <div className="flex items-center justify-between gap-2">
+                                                <span className="text-slate-400 text-[10px]">Courier</span>
+                                                <span className="font-bold text-white truncate">{courierNameText || '—'}</span>
+                                              </div>
+
+                                              <div className="flex items-center justify-between gap-2">
+                                                <span className="text-slate-400 text-[10px]">Status</span>
+                                                <span
+                                                  className={`font-mono font-extrabold text-[10px] px-2 py-0.5 rounded-full border ${
+                                                    isCancelled
+                                                      ? 'text-rose-400 border-rose-500/30 bg-rose-500/10'
+                                                      : /deliver/i.test(courierStatusText)
+                                                        ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
+                                                        : /fail|return|cancel|hold/i.test(courierStatusText)
+                                                          ? 'text-amber-400 border-amber-500/30 bg-amber-500/10'
+                                                          : 'text-slate-300 border-[#2E3548] bg-[#202533]'
+                                                  }`}
+                                                >
+                                                  {courierStatusText || 'Not dispatched'}
+                                                </span>
+                                              </div>
+
+                                              {trackingText && (
+                                                <div className="flex items-center justify-between gap-2">
+                                                  <span className="text-slate-400 text-[10px]">Tracking / Token</span>
+                                                  <span className="font-mono font-bold text-[#00D68F] truncate">{trackingText}</span>
+                                                </div>
+                                              )}
+
+                                              {isCancelled && (
+                                                <div className="text-rose-300 text-[10px] font-bold bg-rose-500/10 border border-rose-500/20 rounded px-2 py-1">
+                                                  Cancelled{issueText ? `: ${issueText}` : ''}
+                                                </div>
+                                              )}
+
+                                              {!isCancelled && issueText && (
+                                                <div className="text-amber-300 text-[10px] bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                                                  Note: {issueText}
+                                                </div>
+                                              )}
+
+                                              {needsManual && (
+                                                <div className="text-amber-300 text-[10px] bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                                                  ⚠ Manual courier entry required{courierError ? `: ${courierError}` : ''}
+                                                </div>
+                                              )}
+
+                                              {!needsManual && courierError && (
+                                                <div className="text-rose-300 text-[10px] bg-rose-500/10 border border-rose-500/20 rounded px-2 py-1">
+                                                  {courierError}
+                                                </div>
+                                              )}
+
+                                              {(() => {
+                                                const labels = courierLabels[ord.id] || [];
+                                                if (labels.length === 0) return null;
+                                                return (
+                                                  <div className="pt-1 border-t border-[#2E3548] space-y-1">
+                                                    <div className="text-slate-400 text-[10px] font-bold">Courier label</div>
+                                                    {labels.map((label: any, idx: number) => (
+                                                      <a
+                                                        key={label.id || idx}
+                                                        href={label.file || '#'}
+                                                        download={label.filename || `label-${idx + 1}`}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="flex items-center gap-1.5 text-[10px] font-bold text-[#00D68F] hover:underline"
+                                                      >
+                                                        <Download className="w-3 h-3" />
+                                                        {label.filename || `Label ${idx + 1}`}
+                                                      </a>
+                                                    ))}
+                                                  </div>
+                                                );
+                                              })()}
+                                            </div>
+                                          </div>
+                                        );
+                                      })()}
 
                                       <div className="border-t border-[#2E3548] pt-2">
                                         {/* Steadfast Delivery Reliability Report */}

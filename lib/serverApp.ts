@@ -20282,6 +20282,129 @@ function hydrateOrderItemImages(order: any): any {
   return { ...order, items: Array.isArray(raw) ? hydrated : JSON.stringify(hydrated) };
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * COURIER LEDGER → MERCHANT'S OWN ORDERS
+ *
+ * The Admin “Courier Orders List” is built from `public.courier_orders`, which
+ * records EVERY dispatch click (booked, Steadfast 401, manual entry) plus the
+ * status the admin sets, the tracking/token id, any issue or cancellation
+ * reason, and the label/photo the admin uploads.
+ *
+ * The merchant's dashboard read ONLY the `orders` collection, so all of that was
+ * visible to the admin but invisible to the shopkeeper — the one person who
+ * actually has to hand the parcel over.
+ *
+ * `mergeCourierLedgerIntoOrders` copies those fields onto the merchant's order
+ * objects, matched by:
+ *   • order id → `_id` → order_number → invoice id, case-insensitively, AND
+ *   • the store, whenever the ledger row names one — so merchant A can never
+ *     read merchant B's dispatch.
+ *
+ * It only FILLS IN gaps: a value already stored on the order always wins, so
+ * nothing the merchant already sees can change. Never throws — a ledger outage
+ * must not break the order list.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Ledger columns that are projectable onto a merchant order. */
+const COURIER_LEDGER_FIELDS_FOR_MERCHANT = [
+  'courier_status', 'courierStatus', 'courier_status_updated_at',
+  'courier_name', 'courierName', 'shipping_courier', 'courier_key',
+  'tracking_id', 'tracking_code', 'trackingCode', 'courier_tracking',
+  'courier_tracking_id', 'consignment_id', 'courier_booked', 'courier_booked_at',
+  'needs_manual_entry', 'courier_last_error', 'status_note', 'statusNote',
+  'cancellation_reason', 'cancellationReason', 'issue_reason', 'issueReason',
+  'issue_note', 'issueNote', 'courier_cancelled', 'courier_cancelled_at',
+  'courier_labels', 'courier_label', 'label_url', 'labelUrl',
+] as const;
+
+/**
+ * Copy the courier ledger onto `orders` (mutates in place, returns the same
+ * array). See the block comment above for the matching + ownership rules.
+ */
+async function mergeCourierLedgerIntoOrders(
+  orders: any[],
+  refValues: string[],
+): Promise<void> {
+  if (!Array.isArray(orders) || orders.length === 0) return;
+  try {
+    const merchantRefs = Array.from(
+      new Set(refValues.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)),
+    );
+
+    const ledger = await loadCourierLedgerRows(2000);
+    if (ledger.rows.length === 0) return;
+
+    const byKey = new Map<string, Record<string, any>>();
+    for (const row of ledger.rows) {
+      const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
+      if (!key) continue;
+
+      const rowStores = [
+        row.store_slug, row.storeSlug, row.store_id, row.storeId,
+        row.store_code, row.storeCode,
+      ]
+        .map((v) => String(v || '').trim().toLowerCase())
+        .filter(Boolean);
+
+      // A row that names a store must belong to THIS merchant.
+      if (rowStores.length > 0) {
+        if (merchantRefs.length === 0) continue;
+        if (!rowStores.some((s) => merchantRefs.includes(s))) continue;
+      }
+      byKey.set(key.toLowerCase(), row);
+    }
+    if (byKey.size === 0) return;
+
+    let matched = 0;
+    for (const order of orders) {
+      if (!order || typeof order !== 'object') continue;
+      const candidates = [
+        order.id, order._id, order.order_number, order.orderNumber,
+        order.invoice_id, order.invoiceId,
+      ]
+        .map((v) => String(v ?? '').replace(/^#/, '').trim().toLowerCase())
+        .filter(Boolean);
+
+      const row = candidates.map((c) => byKey.get(c)).find(Boolean);
+      if (!row) continue;
+      matched += 1;
+
+      for (const field of COURIER_LEDGER_FIELDS_FOR_MERCHANT) {
+        const current = order[field];
+        const missing =
+          current === undefined || current === null ||
+          (typeof current === 'string' && current.trim() === '') ||
+          (Array.isArray(current) && current.length === 0);
+        if (missing && row[field] !== undefined && row[field] !== null) {
+          order[field] = row[field];
+        }
+      }
+
+      // The merchant's badge and the label fetch both read camelCase.
+      if (!order.trackingCode && order.tracking_code) order.trackingCode = order.tracking_code;
+      if (!order.courierStatus && order.courier_status) order.courierStatus = order.courier_status;
+      if (!order.courierName && order.courier_name) order.courierName = order.courier_name;
+      if (!order.statusNote && order.status_note) order.statusNote = order.status_note;
+      if (!order.cancellationReason && order.cancellation_reason) {
+        order.cancellationReason = order.cancellation_reason;
+      }
+      if (!order.issueReason && order.issue_reason) order.issueReason = order.issue_reason;
+      if (!order.courierLastError && order.courier_last_error) {
+        order.courierLastError = order.courier_last_error;
+      }
+      if (order.needsManualEntry === undefined && row.needs_manual_entry !== undefined) {
+        order.needsManualEntry = row.needs_manual_entry;
+      }
+    }
+
+    console.log('[Server] courier ledger → merchant orders:', {
+      sources: ledger.sources, ledgerRows: ledger.rows.length, matched,
+    });
+  } catch (ledgerErr: any) {
+    console.warn('[Server] courier ledger merge warning:', ledgerErr?.message || ledgerErr);
+  }
+}
+
 // GET /api/orders — list orders with FLEXIBLE matching. Accepts the store
 // reference from the query string (`store_slug` / `storeSlug` / `store_id` /
 // `merchant_id` / `merchantId` / `storeRef` / `slug`) or the path. When NO
@@ -20385,6 +20508,9 @@ app.get('/api/orders', async (req, res) => {
     )
       .sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime())
       .slice(0, limit);
+
+    // The courier status / tracking / label the admin sees must reach the merchant.
+    await mergeCourierLedgerIntoOrders(dedupedOrders, refValues);
 
     if (dbConnected && !queryFailed) {
       res.setHeader('X-Orders-Count', String(dedupedOrders.length));
@@ -20532,6 +20658,9 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     )
       .sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime())
       .slice(0, limit);
+
+    // The courier status / tracking / label the admin sees must reach the merchant.
+    await mergeCourierLedgerIntoOrders(dedupedOrders, refValues);
 
     res.setHeader('X-Orders-Count', String(dedupedOrders.length));
     res.setHeader('X-Orders-Filtered', filterClauses ? 'true' : 'false');
