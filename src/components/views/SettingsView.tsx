@@ -147,6 +147,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [currency, setCurrency] = useState(merchant?.currency || 'BDT');
   const [language, setLanguage] = useState(merchant?.language || 'en-US');
 
+  // ── Account Settings state (merchant profile fields) ──
+  // These are separate from the General store-config fields and reflect the
+  // merchant's own account record (owner name, email, verified phone).
+  const [accountName, setAccountName] = useState(
+    (merchant as any)?.ownerName || merchant?.storeName || ''
+  );
+  const [accountEmail, setAccountEmail] = useState(merchant?.email || '');
+  const [accountPhone, setAccountPhone] = useState(
+    merchant?.phone || merchant?.whatsappNumber || ''
+  );
+
   /*
    * The parent `merchant` object is often painted first from a cached/local
    * profile (or the `initialMerchant` placeholder, e.g. "My Store") and only
@@ -176,18 +187,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTiktokUrl(merchant?.tiktokUrl || '');
     setMessengerHandle((merchant as any)?.messengerHandle || (merchant as any)?.messenger_username || '');
     setTelegramHandle((merchant as any)?.telegramHandle || (merchant as any)?.telegram_username || '');
+    // Account settings hydration (merchant profile fields)
+    setAccountName((merchant as any)?.ownerName || merchant?.storeName || '');
+    setAccountEmail(merchant?.email || '');
+    setAccountPhone(merchant?.phone || merchant?.whatsappNumber || '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     merchant?.storeName, merchant?.storeSlug, merchant?.supportEmail, merchant?.supportPhone,
     merchant?.logoUrl, merchant?.storeTagline, merchant?.storeDescription, merchant?.whatsappNumber,
     merchant?.facebookUrl, merchant?.instagramUrl, merchant?.tiktokUrl,
+    merchant?.email, merchant?.phone, merchant?.ownerName,
     (merchant as any)?.messengerHandle, (merchant as any)?.telegramHandle,
     (merchant as any)?.pickupAddress, (merchant as any)?.pickup_address,
     (merchant as any)?.storeAddress, (merchant as any)?.store_address,
     (merchant as any)?.address,
   ]);
   const [savedSuccess, setSavedSuccess] = useState(false);
-  const { info: toastInfo } = useToast();
+  const { info: toastInfo, error: toastError } = useToast();
   // Tracks whether the single-floating-button toast already fired for the
   // current "both chats configured" state — re-fires only when the merchant
   // edits the fields into that state again (not on every keystroke/render).
@@ -1634,7 +1650,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   }, [activeSubTab, hasMessengerChat, hasWhatsappChat, toastInfo]);
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     const updatedThemeConfig = merchant.themeConfig ? {
       ...merchant.themeConfig,
@@ -1645,8 +1661,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       aiRecommendationsEnabled
     };
 
-    onUpdateMerchant({
-      ...merchant,
+    // Build the merchant payload for backend persistence.
+    const merchantPayload: Record<string, any> = {
       storeName,
       storeSlug,
       supportEmail,
@@ -1658,22 +1674,46 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       facebookUrl,
       instagramUrl,
       tiktokUrl,
-      /*
-       * Chat handles — Messenger (m.me) and Telegram (t.me).
-       *
-       * A bare @username or username is normalised to the canonical share URL
-       * before saving, so the storefront can render the chat link directly
-       * without re-deriving it. A full https URL the merchant already pasted is
-       * kept verbatim.
-       */
       ...normalizeChatHandles(messengerHandle, telegramHandle),
       currency: currency as any,
       language: language as any,
       themeConfig: updatedThemeConfig,
-      // Pickup address: write under all canonical name variants so the DB pick-up
-      // saves regardless of which key the backend normalises.
       pickupAddress,
-    });
+      // Account settings fields
+      ownerName: accountName,
+      email: accountEmail,
+      phone: accountPhone,
+    };
+
+    // 1. Update in-memory merchant state (instant UI feedback).
+    onUpdateMerchant({
+      ...merchant,
+      ...merchantPayload,
+    } as MerchantProfile);
+
+    // 2. Persist to backend via /api/stores/update so changes survive reload
+    //    and tab switches. Strip `_id` (Mongo error on $set) and never send a
+    //    non-numeric `id` to Supabase (bigint PK column → 22P02 error).
+    const { id: _stripId, _id: _stripMongoId, ...cleanPayload } = merchantPayload;
+    try {
+      const res = await fetch('/api/stores/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ merchant: cleanPayload }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.ok === false) {
+        const msg = data?.error || `HTTP ${res.status}`;
+        setSavedSuccess(false);
+        toastError('Settings save failed: ' + msg);
+        return;
+      }
+    } catch (err: any) {
+      setSavedSuccess(false);
+      toastError('Settings save failed: ' + (err?.message || 'Network error'));
+      return;
+    }
+
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
   };
@@ -2154,8 +2194,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {/* Form Body for Active Tab */}
         <form onSubmit={handleSave} className="space-y-6 text-xs">
 
-          {(activeSubTab === 'settings_general' || activeSubTab === 'settings_account' || activeSubTab === 'store_details') && (
+          {activeSubTab === 'settings_general' && (
             <div className="space-y-4">
+              {/* Store configuration fields — General tab */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-slate-300 font-bold mb-1.5">Store Title / Merchant Name</label>
@@ -2336,6 +2377,100 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </p>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {activeSubTab === 'settings_account' && (
+            <div className="space-y-4">
+              {/* Merchant account details — Account settings tab */}
+              <div className="bg-[#101420] border border-[#2E3852] rounded-2xl p-6 space-y-5">
+                <div>
+                  <h3 className="text-lg font-bold text-white mb-1 flex items-center gap-2">
+                    <User className="w-5 h-5 text-[#00D68F]" />
+                    Account Details
+                  </h3>
+                  <p className="text-sm text-slate-400 leading-relaxed">
+                    আপনার মर्चেন্ট অ্যাকাউন্টের তথ্য এখানে দেখ এবং সংশোধন করতে পারবেন। এই মেটার vendido ستون অ্যাপের লগইন ও প্রোফাইলের সাথে লিঙ্কড।
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">Account Name (Owner)</label>
+                    <input
+                      type="text"
+                      value={accountName}
+                      onChange={(e) => setAccountName(e.target.value)}
+                      placeholder="Your full name or business owner name"
+                      className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-bold mb-1.5">Account Email</label>
+                    <input
+                      type="email"
+                      value={accountEmail}
+                      onChange={(e) => setAccountEmail(e.target.value)}
+                      placeholder="you@yourstore.com"
+                      className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-bold mb-1.5">Verified WhatsApp / Phone Number</label>
+                  <input
+                    type="text"
+                    value={accountPhone}
+                    onChange={(e) => setAccountPhone(e.target.value)}
+                    placeholder="017xxxxxxxx (verified at registration)"
+                    className="w-full bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5 text-white focus:border-[#00D68F] outline-none font-mono"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                    এই নম্বরটি রেজিস্ট্রেশনের সময় ভেরিফাই করা নম্বর। স্টোরফ্রন্ট ইনভœയും SMS নোটিফিকেশনে ব্যবহার হবে।
+                  </p>
+                </div>
+
+                <div className="pt-4 border-t border-[#272F45]">
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <div>
+                      <h3 className="text-sm font-bold text-white">Store Status</h3>
+                      <p className="text-xs text-slate-400 mt-1">
+                        আপনার অ্যাকাউন্টের বর্তমান স্ট্যাটাস। অ্যাকাউন্ট লক বা সাসপেন্ড হওয়া গেলে অডমিনের সাথে যোগাযোগ করুন।
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-slate-300 font-bold mb-1.5">Account Status</label>
+                      <span className="inline-block px-2.5 py-1 rounded text-[10px] font-bold border">
+                        {(merchant as any)?.accountStatus === 'active' ? (
+                          <span className="bg-[#00D68F]/20 text-[#00D68F] border-[#00D68F]/30">Active</span>
+                        ) : (
+                          <span className="bg-[#f43f5e]/20 text-[#f43f5e] border-[#f43f5e]/30">
+                            {(merchant as any)?.accountStatus || 'Unknown'}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 font-bold mb-1.5">Store Code</label>
+                      <span className="font-mono text-xs text-slate-300 bg-[#161B28] border border-[#2E3852] rounded-xl px-3.5 py-2.5">
+                        {(merchant as any)?.storeCode || merchant?.store_code || '—'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSubTab === 'store_details' && (
+            <div className="space-y-4">
+              {/* Legacy Store details panel — kept for backward compatibility */}
+              <div>
+                <p className="text-xs text-slate-400">Store details are also editable in the General tab above.</p>
               </div>
             </div>
           )}

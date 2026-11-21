@@ -7864,7 +7864,12 @@ app.post('/api/stores/update', async (req, res) => {
        ];
        const sbPayload: Record<string, any> = {};
        for (const key of allowed) {
-         if (cleanMerchant[key] !== undefined) sbPayload[key] = cleanMerchant[key];
+         if (cleanMerchant[key] === undefined) continue;
+         // Never send a non-numeric `id` to Supabase: the `stores` PK is bigint,
+         // and a MongoDB ObjectId (e.g. "65e8a...") raises 22P02. The `id` is
+         // not needed for the mirror — the row is matched by store_slug/email.
+         if (key === 'id' && !/^\d+$/.test(String(cleanMerchant[key]))) continue;
+         sbPayload[key] = cleanMerchant[key];
        }
        // Carry the merchant's base city under its snake_case column name.
        const baseCity =
