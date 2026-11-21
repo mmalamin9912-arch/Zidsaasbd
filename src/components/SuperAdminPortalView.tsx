@@ -599,14 +599,6 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
     );
   }
 
-  if (courierOrdersError) {
-    return (
-      <div className="bg-[#202533] border border-[#2E3548] rounded-2xl p-6 text-center text-red-400">
-        <p className="text-sm">{courierOrdersError}</p>
-      </div>
-    );
-  }
-
   return (
     <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 space-y-6">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -624,7 +616,7 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
         <div className="text-right">
           <button
             onClick={onRefresh}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-xs flex items-center gap-2 transition shadow-lg shadow-indigo-600/20 cursor-pointer"
+            className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-xs inline-flex items-center gap-2 transition shadow-lg shadow-indigo-600/20 cursor-pointer"
           >
             <Loader2 className="w-4 h-4" />
             <span>Refresh</span>
@@ -634,6 +626,14 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
           </span>
         </div>
       </div>
+
+      {/* A failed refresh is shown ABOVE the table, never instead of it: the
+          rows already loaded stay visible and the reason is still readable. */}
+      {courierOrdersError && (
+        <div className="bg-red-500/10 border border-red-500/30 text-red-300 rounded-xl px-3 py-2 text-xs">
+          {courierOrdersError}
+        </div>
+      )}
 
       <div className="overflow-x-auto border border-[#2E3548] rounded-xl bg-[#202533]/40">
         <table className="w-full text-left text-xs">
@@ -670,7 +670,12 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                     {order.customer_name || '—'}
                   </td>
                   <td className="p-3.5">
-                    <div className="font-semibold text-slate-200">{order.store_name || order.vendor_name || 'Store'}</div>
+                    <div className="font-semibold text-slate-200">{order.store_name || order.storeName || order.vendor_name || 'Store'}</div>
+                    {(order.courier_last_error || order.needs_manual_entry) && (
+                      <div className="text-[10px] text-amber-400/90 max-w-[200px] truncate" title={order.courier_last_error || 'Manual entry required'}>
+                        {order.courier_last_error ? `⚠ ${order.courier_last_error}` : '⚠ Manual entry required'}
+                      </div>
+                    )}
                     {order.store_slug && (
                       <div className="text-[10px] text-slate-500 truncate max-w-[180px]">{order.store_slug}</div>
                     )}
@@ -684,9 +689,11 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                       <div className="text-[10px] text-slate-500 whitespace-pre-wrap">{formatAddress(order.pickup_address)}</div>
                     )}
                   </td>
-                  <td className="p-3.5 font-extrabold text-[#00D68F] text-xs">৳{toNumber(order.totalBDT)}</td>
+                  <td className="p-3.5 font-extrabold text-[#00D68F] text-xs">
+                    ৳{toNumber(order.totalBDT ?? order.amount ?? order.total_price ?? order.cod_amount)}
+                  </td>
                   <td className="p-3.5 text-slate-400 text-xs capitalize">
-                    {order.paymentMethod || '—'}
+                    {order.paymentMethod || order.payment_method || '—'}
                   </td>
                   <td className="p-3.5">
                     {order.tracking_id || order.courier_tracking || order.trackingCode ? (
@@ -706,7 +713,7 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                         delivered. Saved through PATCH /api/admin/orders/:id/status,
                         which mirrors the value onto the merchant's order too. */}
                     <select
-                      value={order.courier_status || 'dispatched'}
+                      value={order.courier_status || (order.courier_booked ? 'dispatched' : 'sent_to_courier')}
                       disabled={updatingStatus === (order.id || order.order_number)}
                       onChange={(e) => updateCourierStatus(order, e.target.value)}
                       className={`w-full max-w-[150px] cursor-pointer rounded-lg border px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider outline-none disabled:opacity-60 ${

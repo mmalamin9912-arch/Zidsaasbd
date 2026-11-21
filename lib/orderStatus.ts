@@ -557,6 +557,227 @@ export async function recordCourierDispatch(
   return updateOrderFields(id, fields, extra);
 }
 
+/* ────────────────────── admin “Courier Orders List” ledger ────────────────── */
+
+/**
+ * Collection behind the Super Admin's “Courier Orders List”.
+ *
+ * WHY A SEPARATE COLLECTION
+ * ---------------------------------------------------------------------------
+ * That tab used to be a QUERY over the `orders` collection: it only found an
+ * order that happened to carry a tracking column (or a `courier_status` in a
+ * whitelist). Everything else — a Steadfast 401, a store with no API keys, a
+ * booking the merchant has to enter in the courier portal by hand — left the
+ * order untouched, so the tab kept saying “No courier orders yet” even though
+ * the merchant had just clicked “Send to Courier”.
+ *
+ * Every click now writes ONE row here, whatever the outcome. The row is the
+ * admin's work list: which store, which merchant phone, which pickup address,
+ * the customer and amount, the tracking id, the courier status, and the labels
+ * (stored as base64 under `courier_labels`, exactly like before).
+ */
+export const COURIER_ORDERS_COLLECTION = 'courier_orders';
+
+/** Statuses the ledger row can carry (mirrors the Admin dropdown). */
+export type CourierOrderStatus =
+  | 'booked'
+  | 'dispatched'
+  | 'sent_to_courier'
+  | 'pending'
+  | 'failed'
+  | 'pickup_confirmed'
+  | 'in_transit'
+  | 'delivered'
+  | 'cancelled';
+
+/** Stable, idempotent key for one order's ledger row. */
+export function courierOrderKey(...candidates: unknown[]): string {
+  for (const candidate of candidates) {
+    const text = String(candidate ?? '').replace(/^#/, '').trim();
+    if (text) return text.toLowerCase();
+  }
+  return '';
+}
+
+/**
+ * Remember ONE “Send to Courier” event for the Admin Courier Orders List.
+ *
+ * Called for EVERY click — booked, rejected (401/403/422), or not configured at
+ * all — so the admin always gets a row with the store identity, the customer
+ * info, the amount, the payment method, the tracking id (when the courier gave
+ * one) and the outcome. The row is UPSERTED on the order identifier, so a
+ * retry updates the same row instead of creating a duplicate, and a row that a
+ * merchant/driver later moves to `delivered` is never reset backwards by a
+ * re-dispatch.
+ *
+ * Never throws: the caller is a booking route, and a ledger write must not be
+ * able to fail a dispatch.
+ */
+export async function recordCourierDispatchAttempt(input: {
+  /** Any identifier the caller holds: order_number, invoice id, `_id`, … */
+  orderId?: string;
+  status: CourierOrderStatus;
+  courierName?: string;
+  courierKey?: string;
+  trackingCode?: string;
+  /** Failure reason (the provider's own wording) for the admin column. */
+  error?: string;
+  /** False means the parcel has to be entered in the courier portal by hand. */
+  booked?: boolean;
+  /** The posted/stored order document. */
+  order?: Record<string, any> | null;
+  /** Store identity + contact details (`store_slug`, `merchant_phone`, …). */
+  storeRef?: Record<string, any> | null;
+  /** Raw provider response, so support can see exactly what was sent back. */
+  raw?: Record<string, any> | null;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  try {
+    if (!getMongoUri()) return { ok: false, error: 'MONGODB_URI is not set.' };
+    const db = await getMongoDb(ORDERS_DB_NAME);
+    if (!db) return { ok: false, error: 'MongoDB is unavailable.' };
+
+    const order = (input.order && typeof input.order === 'object' ? input.order : {}) as Record<string, any>;
+    const store = (input.storeRef && typeof input.storeRef === 'object' ? input.storeRef : {}) as Record<string, any>;
+
+    const id = courierOrderKey(
+      input.orderId,
+      order.order_number,
+      order.orderNumber,
+      order.invoice_id,
+      order.invoiceId,
+      order.id,
+    );
+    if (!id) return { ok: false, error: 'No order identifier was supplied.' };
+
+    const pick = (...values: unknown[]): string => {
+      for (const value of values) {
+        if (value === undefined || value === null) continue;
+        const text = String(value).trim();
+        if (text) return text;
+      }
+      return '';
+    };
+
+    const storeSlug = pick(store.store_slug, store.storeSlug, order.store_slug, order.storeSlug).toLowerCase();
+    const storeCode = pick(store.store_code, store.storeCode, order.store_code, order.storeCode);
+    const storeId = pick(store.store_id, store.storeId, order.store_id, order.storeId, store.id);
+    const storeName = pick(
+      store.store_name, store.storeName, store.name, order.store_name, order.storeName,
+      order.vendor_name, order.vendorName, storeSlug,
+    );
+    const merchantPhone = pick(
+      store.merchant_phone, store.merchantPhone, store.phone, store.store_phone, store.storePhone,
+      store.support_phone, store.supportPhone, store.contactPhone, store.contact_phone,
+      store.whatsappNumber, store.whatsapp_number, order.merchant_phone, order.merchantPhone,
+    );
+    const pickupAddress = pick(
+      store.pickup_address, store.pickupAddress, store.pickup_point, store.store_address,
+      store.storeAddress, store.address, order.pickup_address, order.pickupAddress,
+    );
+
+    const customerName = pick(order.customer_name, order.customerName, order.name);
+    const customerPhone = pick(order.customer_phone, order.customerPhone, order.phone);
+    const customerAddress = pick(order.shipping_address, order.address, order.delivery_address);
+    const customerCity = pick(order.customer_city, order.customerCity);
+    const amount = Number(
+      order.total_price ?? order.totalBDT ?? order.total ?? order.cod_amount ?? order.codAmount ?? 0,
+    ) || 0;
+    const paymentMethod = pick(order.payment_method, order.paymentMethod, order.payment?.method) || 'COD';
+    const paymentStatus = pick(order.payment_status, order.paymentStatus);
+    const orderNumber = pick(order.order_number, order.orderNumber, order.invoice_id, order.invoiceId, order.id, id);
+    const items = order.items ?? order.order_items ?? [];
+
+    const tracking = String(input.trackingCode || '').replace(/^#/, '').trim();
+    const now = new Date();
+
+    const set: Record<string, any> = {
+      /* Identity of the row itself (both spellings the admin UI reads). */
+      id,
+      order_id: id,
+      order_number: orderNumber,
+      orderNumber,
+      store_slug: storeSlug,
+      storeSlug,
+      store_code: storeCode,
+      storeCode,
+      store_id: storeId,
+      store_name: storeName,
+      storeName,
+      merchant_phone: merchantPhone,
+      merchantPhone,
+      pickup_address: pickupAddress,
+      pickupAddress,
+      customer_name: customerName,
+      customerName,
+      customer_phone: customerPhone,
+      customerPhone,
+      customer_address: customerAddress,
+      shipping_address: customerAddress,
+      customer_city: customerCity,
+      amount,
+      total_price: amount,
+      totalBDT: amount,
+      payment_method: paymentMethod,
+      paymentMethod,
+      paymentStatus,
+      items,
+      courier_name: input.courierName || '',
+      courierName: input.courierName || '',
+      shipping_courier: input.courierName || '',
+      courier_key: input.courierKey || '',
+      courier_status: input.status,
+      courier_status_updated_at: now,
+      courier_booked: input.booked === true,
+      needs_manual_entry: input.booked !== true,
+      courier_last_error: input.error || '',
+      updated_at: now,
+      admin_visible: true,
+    };
+    if (tracking) {
+      set.tracking_id = tracking;
+      set.courier_tracking = tracking;
+      set.tracking_code = tracking;
+      set.trackingCode = tracking;
+      set.consignment_id = tracking;
+      set.courier_tracking_id = tracking;
+      set.courier_booked_at = now;
+    }
+    if (input.raw && Object.keys(input.raw).length > 0) {
+      set.courier_response = input.raw;
+    }
+
+    /*
+     * A retry must not undo real progress: if the admin already moved this row
+     * to in_transit/delivered/cancelled, a later dispatch attempt keeps that
+     * status (it still refreshes the identity columns and the tracking id).
+     */
+    const existing = await db
+      .collection(COURIER_ORDERS_COLLECTION)
+      .findOne({ _id: id as any })
+      .catch(() => null);
+    const advanced = ['pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
+    if (existing && advanced.includes(String(existing.courier_status || '')) && !advanced.includes(input.status)) {
+      delete set.courier_status;
+      delete set.courier_status_updated_at;
+    }
+
+    await db.collection(COURIER_ORDERS_COLLECTION).updateOne(
+      { _id: id as any },
+      {
+        $set: { ...set, _id: id as any },
+        $setOnInsert: { created_at: now, courier_labels: [] },
+      },
+      { upsert: true },
+    );
+
+    return { ok: true, id };
+  } catch (err: any) {
+    // `_id` is a String on this collection, so another shape can only fail the
+    // duplicate check — never let it break the dispatch response.
+    return { ok: false, error: err?.message || 'Could not record the courier dispatch.' };
+  }
+}
+
 /**
  * Map Pathao shipment statuses to store order statuses.
  *
@@ -674,7 +895,10 @@ export default {
   findOrder,
   updateOrderFields,
   recordCourierDispatch,
+  recordCourierDispatchAttempt,
+  courierOrderKey,
   mapPathaoStatusToOrderStatus,
   ORDERS_DB_NAME,
   ORDERS_COLLECTION,
+  COURIER_ORDERS_COLLECTION,
 };

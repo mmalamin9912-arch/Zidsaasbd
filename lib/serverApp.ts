@@ -202,6 +202,9 @@ import {
   fulfillmentForStatus,
   updateOrderFields,
   recordCourierDispatch,
+  recordCourierDispatchAttempt,
+  courierOrderKey,
+  COURIER_ORDERS_COLLECTION,
   findOrder,
   mapPathaoStatusToOrderStatus,
 } from './orderStatus.js';
@@ -16143,6 +16146,24 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
         console.warn('[Courier][telegram] notification task error (ignored):', alertErr?.message || alertErr);
       }
     })();
+    /*
+     * The Admin Courier Orders List row is written for a FAILED single-provider
+     * booking too (401/403/422/…), so the admin has the parcel details on hand
+     * and can enter it in the courier portal by hand.
+     */
+    void recordCourierDispatchAttempt({
+      orderId: String(order.invoice_id || order.id || order.order_number || ''),
+      status: 'failed',
+      courierName: provider.name,
+      courierKey: provider.key,
+      error: attempt.message,
+      booked: false,
+      order,
+      storeRef: { ...(await loadStoreForCourierAlert(storeRef.store_slug) || {}), ...storeRef },
+      raw: attempt.providerResponse && typeof attempt.providerResponse === 'object'
+        ? (attempt.providerResponse as Record<string, any>)
+        : null,
+    }).catch(() => null);
     return res.status(200).json({
       success: false,
       code: attempt.code,
@@ -16161,6 +16182,18 @@ async function handleCourierBooking(req: any, res: any, provider: CourierProvide
   console.log(
     `[Courier] ${provider.name} booking OK for order ${orderId}: tracking=${persisted.tracking_code} persisted=${persisted.persisted}`
   );
+  // The durable Admin-list row for a successful single-provider booking.
+  void recordCourierDispatchAttempt({
+    orderId,
+    status: 'booked',
+    courierName: provider.name,
+    courierKey: provider.key,
+    trackingCode: persisted.tracking_code,
+    booked: true,
+    order,
+    storeRef: { ...(await loadStoreForCourierAlert(storeRef.store_slug) || {}), ...storeRef },
+    raw: attempt.data && typeof attempt.data === 'object' ? attempt.data : null,
+  }).catch(() => null);
   // Success is reported too, so the admin sees every “Send to Courier” click —
   // not only the ones that went wrong.
   void (async () => {
@@ -18288,10 +18321,79 @@ app.post('/api/courier/send', async (req, res) => {
     return storeForAlert;
   };
 
+  /*
+   * …and ONE row in the Admin “Courier Orders List” ledger.
+   *
+   * `notify` and the ledger are registered together because they answer the
+   * same question: “what happened to this click?”. Telegram is best-effort
+   * (it can be unconfigured); the ledger is the durable fallback the Super
+   * Admin actually reads in the portal, so a 401 / missing API key / manual
+   * entry still leaves a visible, labelable row instead of
+   * “No courier orders yet”.
+   */
+  const recordLedger = (
+    status: CourierDispatchStatus,
+    extra: {
+      courierName?: string;
+      trackingCode?: string;
+      errorMessage?: string;
+      booked?: boolean;
+      raw?: Record<string, any> | null;
+    } = {},
+  ): void => {
+    void (async () => {
+      try {
+        const store = await loadStoreForAlert();
+        const result = await recordCourierDispatchAttempt({
+          orderId: String(
+            postedOrder.order_number || postedOrder.orderNumber ||
+            postedOrder.invoice_id || postedOrder.invoiceId || postedOrder.id || storeSlugForAlert || '',
+          ),
+          status:
+            status === 'booked'
+              ? 'booked'
+              : status === 'failed'
+                ? 'failed'
+                : status === 'sandbox'
+                  ? 'dispatched'
+                  // 'disabled' — automated booking is off, the admin must enter
+                  // the parcel by hand; it is still a real dispatch request.
+                  : 'sent_to_courier',
+          courierName: extra.courierName || String(body.courier || body.courierName || '').trim(),
+          courierKey: normalizeCourierKey(body.courier || body.courierName || ''),
+          trackingCode: extra.trackingCode,
+          error: extra.errorMessage,
+          booked: extra.booked === true,
+          order: postedOrder,
+          storeRef: {
+            ...(store || {}),
+            store_slug: store?.store_slug || store?.storeSlug || storeSlugForAlert || '',
+            merchant_phone: store?.merchant_phone || store?.merchantPhone || store?.phone || '',
+            pickup_address: store?.pickup_address || store?.pickupAddress || store?.address || '',
+          },
+          raw: extra.raw || null,
+        });
+        if (!result.ok) {
+          console.warn('[Courier][ledger] could not record the dispatch:', result.error);
+        }
+      } catch (ledgerErr: any) {
+        console.warn('[Courier][ledger] record task error (ignored):', ledgerErr?.message || ledgerErr);
+      }
+    })();
+  };
+
   const notify = (
     status: CourierDispatchStatus,
-    extra: { courierName?: string; errorMessage?: string; trackingCode?: string } = {},
+    extra: {
+      courierName?: string;
+      errorMessage?: string;
+      trackingCode?: string;
+      booked?: boolean;
+      raw?: Record<string, any> | null;
+    } = {},
   ): void => {
+    // Every alert ALSO writes the durable admin row (see `recordLedger`).
+    recordLedger(status, extra);
     void (async () => {
       try {
         const store = await loadStoreForAlert();
@@ -18381,13 +18483,30 @@ app.post('/api/courier/send', async (req, res) => {
       notify(result.__sandbox === true ? 'sandbox' : 'booked', {
         courierName: bookedCourier,
         trackingCode: String(result.tracking_code || ''),
+        booked: true,
+        raw: result.consignment && typeof result.consignment === 'object' ? result.consignment : null,
       });
     } else {
       const firstAttempt: Record<string, any> = Array.isArray(result?.attempts) ? result.attempts[0] || {} : {};
       const notConfigured = firstAttempt.code === 'missing_credentials' && Boolean(result?.error?.includes('configure'));
+      /*
+       * The provider's own words (e.g. Steadfast's
+       * `{"status":401,"message":"Invalid Api Key or Secret Key"}`) go into the
+       * admin row too, so the Courier Orders List explains WHY a parcel still
+       * has to be entered by hand. `result.attempts` carries one entry per
+       * courier tried, so every reason is preserved.
+       */
+      const attemptMessages = (Array.isArray(result?.attempts) ? result.attempts : [])
+        .map((a: any) => `${a?.courier_name || a?.courier || 'Courier'}: ${a?.error || a?.code || 'failed'}`)
+        .join(' | ');
       notify(notConfigured ? 'disabled' : 'failed', {
-        courierName: rawName || requestedPrimary || 'Courier',
-        errorMessage: String(result?.error || result?.message || 'The courier rejected the booking.'),
+        courierName:
+          firstAttempt.courier_name || rawName || requestedPrimary || 'Courier',
+        errorMessage: String(
+          result?.error || result?.message || attemptMessages || 'The courier rejected the booking.',
+        ),
+        booked: false,
+        raw: firstAttempt.provider_body ? { provider_body: firstAttempt.provider_body } : null,
       });
     }
 
@@ -23484,6 +23603,18 @@ app.get('/api/admin/courier-orders', async (req, res) => {
       }
     }
 
+    /*
+     * WHAT COUNTS AS A "COURIER ORDER"
+     * -----------------------------------------------------------------------
+     * An admin row exists from the moment “Send to Courier” is clicked, so the
+     * ledger (`courier_orders`) is authoritative. The `orders` query below is
+     * only a BACKFILL for dispatches booked by a build that predates the ledger
+     * — those rows carry the tracking columns but no ledger entry. Merging the
+     * two means the tab is never empty for a real dispatch or a real attempt.
+     */
+    const rawStatusFilter = String(req.query.status || req.query.courier_status || '').trim().toLowerCase();
+    const rawStoreFilter = String(req.query.store || req.query.store_slug || '').trim().toLowerCase();
+
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 2000) : 500;
 
@@ -23531,19 +23662,100 @@ app.get('/api/admin/courier-orders', async (req, res) => {
       }
     }
 
+    /*
+     * THE DISPATCH LEDGER — the real source of this list.
+     *
+     * `recordCourierDispatchAttempt` writes one `courier_orders` row for EVERY
+     * “Send to Courier” click, including the ones that never produced a parcel
+     * (Steadfast 401, no API keys, manual entry). The `orders` query above only
+     * finds rows that already carry a tracking column, which is why this tab
+     * kept saying “No courier orders yet” after a failed or manual dispatch.
+     * Both sources are merged, the ledger winning on identity/status.
+     */
+    let ledgerOrders: any[] = [];
+    if (dbConnected && mongoose.connection.db) {
+      try {
+        ledgerOrders = await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any)
+          .find({})
+          .sort({ updated_at: -1, created_at: -1, _id: -1 })
+          .limit(limit)
+          .toArray();
+      } catch (ledgerErr: any) {
+        console.warn('[Server] GET /api/admin/courier-orders ledger warning:', ledgerErr?.message || ledgerErr);
+        ledgerOrders = [];
+      }
+    }
+
     // Merge with cached orders that have tracking info
     const cachedOrders = Array.from(recentOrdersCache.values()).filter((o: any) => {
       return o?.tracking_id || o?.courier_tracking || o?.trackingCode || o?.courier_status;
     });
-    const combinedOrders = [...orders, ...cachedOrders];
-    const dedupedOrders = Array.from(
-      new Map(
-        combinedOrders.map((item: any) => [
-          String(item.id || item.order_number || item.orderNumber || item._id || '').replace(/^#/, '').trim(),
-          item,
-        ])
-      ).values()
-    ).sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime()).slice(0, limit);
+    const combinedOrders = [...ledgerOrders, ...orders, ...cachedOrders];
+    /*
+     * The ledger row is FIRST in `combinedOrders`, so it must survive the dedupe
+     * AND receive the customer/amount/payment fields that only the stored order
+     * carries. A ledger row written from a partial request body used to win the
+     * merge with empty customer columns — an admin row that identified the shop
+     * but showed no customer and ৳0.
+     */
+    const fieldFallbacks = [
+      'customer_name', 'customer_phone', 'shipping_address', 'customer_address',
+      'customer_city', 'payment_method', 'payment_status', 'items', 'tracking_code',
+    ] as const;
+    const merged = new Map<string, any>();
+    for (const item of combinedOrders) {
+      const key = String(item.id || item.order_number || item.orderNumber || item._id || '')
+        .replace(/^#/, '')
+        .trim();
+      if (!key) continue;
+      const current = merged.get(key);
+      if (!current) {
+        merged.set(key, { ...item });
+        continue;
+      }
+      const mergedRow: Record<string, any> = { ...current };
+      for (const [field, value] of Object.entries(item)) {
+        const empty = mergedRow[field] === undefined || mergedRow[field] === null || mergedRow[field] === '';
+        if (empty && value !== undefined && value !== null && value !== '') mergedRow[field] = value;
+      }
+      for (const field of fieldFallbacks) {
+        if (mergedRow[field] === undefined && item[field] !== undefined) mergedRow[field] = item[field];
+      }
+      // Amount is a number, so it never trips the "empty" test — take the
+      // first non-zero value from whichever source has one.
+      const amount = Number(mergedRow.amount ?? mergedRow.totalBDT ?? mergedRow.total_price ?? 0);
+      if (!amount) {
+        const fallbackAmount = Number(item.amount ?? item.totalBDT ?? item.total_price ?? item.cod_amount ?? 0);
+        if (fallbackAmount) {
+          mergedRow.amount = fallbackAmount;
+          mergedRow.totalBDT = fallbackAmount;
+          mergedRow.total_price = fallbackAmount;
+        }
+      }
+      merged.set(key, mergedRow);
+    }
+    const dedupedOrders = Array.from(merged.values())
+      .filter((row: any) => {
+        if (rawStoreFilter) {
+          const rowStore = String(row.store_slug || row.storeSlug || row.store_code || row.storeCode || '').toLowerCase();
+          const inRow = [row.store_slug, row.storeSlug, row.store_code, row.storeCode, row.store_id]
+            .filter(Boolean).map((v: any) => String(v).toLowerCase());
+          if (!inRow.includes(rawStoreFilter) && !rowStore.includes(rawStoreFilter)) return false;
+        }
+        if (rawStatusFilter && rawStatusFilter !== 'all') {
+          const rowStatus = String(row.courier_status || '').toLowerCase();
+          if (rawStatusFilter === 'dispatched') {
+            return ['booked', 'dispatched', 'sent_to_courier', 'pickup_confirmed', 'in_transit', 'delivered'].includes(rowStatus);
+          }
+          return rowStatus === rawStatusFilter;
+        }
+        return true;
+      })
+      .sort((a: any, b: any) =>
+        new Date(b.updated_at || b.created_at || b.createdAt || 0).getTime() -
+        new Date(a.updated_at || a.created_at || a.createdAt || 0).getTime(),
+      )
+      .slice(0, limit);
 
     // Enrich each order with merchant/store info (pickup address, phone, etc.)
     const enrichedOrders = await Promise.all(
@@ -23596,13 +23808,38 @@ app.get('/api/admin/courier-orders', async (req, res) => {
           }
         }
 
+        /*
+         * One row shape for BOTH sources (ledger + backfilled order). The Admin
+         * table reads camelCase (`order.totalBDT`, `order.paymentMethod`,
+         * `order.customerName`), while a Mongo order row only carries the
+         * snake_case columns — so it used to render a blank customer and ৳0.
+         */
+        const amount = Number(order.amount ?? order.total_price ?? order.totalBDT ?? order.cod_amount ?? 0) || 0;
         return {
           ...order,
           merchant_phone: merchantPhone,
+          merchantPhone,
           pickup_address: pickupAddress,
-          store_name: storeName,
+          pickupAddress,
+          store_name: storeName || storeSlug || 'Store',
+          storeName: storeName || storeSlug || 'Store',
           store_slug: storeSlug,
+          storeSlug,
           store_code: storeCode,
+          storeCode,
+          customerName: order.customer_name || order.customerName || 'Customer',
+          customerPhone: order.customer_phone || order.customerPhone || '',
+          customerCity: order.customer_city || order.customerCity || '',
+          address: order.shipping_address || order.customer_address || order.address || '',
+          amount,
+          totalBDT: amount,
+          paymentMethod: order.payment_method || order.paymentMethod || 'COD',
+          paymentStatus: order.payment_status || order.paymentStatus || '',
+          courier_status: order.courier_status || (order.courier_booked ? 'booked' : 'sent_to_courier'),
+          tracking_id:
+            order.tracking_id || order.courier_tracking || order.tracking_code ||
+            order.trackingCode || order.consignment_id || '',
+          createdAt: order.created_at || order.createdAt || new Date().toISOString(),
         };
       })
     );
@@ -23610,6 +23847,7 @@ app.get('/api/admin/courier-orders', async (req, res) => {
     const degraded = !dbConnected || queryFailed;
     res.setHeader('X-Orders-Source', degraded ? 'cache' : 'mongodb');
     res.setHeader('X-Orders-Count', String(enrichedOrders.length));
+    res.setHeader('X-Orders-Cache-Control', 'no-store');
     if (degraded) {
       res.setHeader('X-Orders-Degraded', 'true');
       res.setHeader('X-Orders-Warning', dbConnected ? 'query-failed' : 'database-unavailable');
@@ -23620,6 +23858,53 @@ app.get('/api/admin/courier-orders', async (req, res) => {
     return res.status(200).json({ ok: false, error: err?.message || 'Could not load courier orders.', orders: [] });
   }
 });
+
+/**
+ * Locate the document a label belongs to — the `courier_orders` ledger row
+ * first (it exists for EVERY dispatch click), then the stored `orders` row.
+ *
+ * Returns the collection, the `_id` to update and the document itself, so the
+ * label routes do not care which of the two actually holds the order.
+ */
+async function resolveCourierOrderTarget(
+  orderId: string,
+): Promise<{ kind: 'ledger' | 'order'; collection: any; id: any; doc: Record<string, any> } | null> {
+  if (mongoose.connection.readyState !== 1 || !mongoose.connection.db) return null;
+  const db = mongoose.connection.db;
+  const cleaned = String(orderId || '').replace(/^#/, '').trim();
+  if (!cleaned) return null;
+
+  const ledgerCol = db.collection(COURIER_ORDERS_COLLECTION) as any;
+  try {
+    const ledgerDoc = await ledgerCol.findOne({
+      $or: [{ _id: cleaned as any }, { order_number: cleaned }, { orderNumber: cleaned }, { order_id: cleaned }],
+    });
+    if (ledgerDoc) return { kind: 'ledger', collection: ledgerCol, id: ledgerDoc._id, doc: ledgerDoc };
+  } catch (err: any) {
+    console.warn('[CourierOrders] ledger lookup warning:', err?.message || err);
+  }
+
+  const ordersCol = db.collection('orders') as any;
+  const idCandidates: any[] = [cleaned];
+  // Casting a non-ObjectId string throws and fails the whole `$or`, so only a
+  // 24-hex value is added.
+  if (/^[a-f0-9]{24}$/i.test(cleaned)) {
+    try {
+      idCandidates.push(new mongoose.Types.ObjectId(cleaned));
+    } catch { /* ignore */ }
+  }
+  const orderDoc = await ordersCol.findOne({
+    $or: [
+      { _id: { $in: idCandidates } },
+      { order_number: cleaned },
+      { orderNumber: cleaned },
+      { id: cleaned },
+    ],
+  });
+  if (orderDoc) return { kind: 'order', collection: ordersCol, id: orderDoc._id, doc: orderDoc };
+
+  return null;
+}
 
 /**
  * POST /api/admin/courier-orders/:orderId/label
@@ -23655,15 +23940,8 @@ app.post('/api/admin/courier-orders/:orderId/label', async (req, res) => {
       return res.status(503).json({ ok: false, error: 'Database unavailable.' });
     }
 
-    const ordersCol = (mongoose.connection.db.collection('orders') as any);
-    const order = await ordersCol.findOne({ 
-      $or: [
-        { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
-        { order_number: orderId }, 
-        { orderNumber: orderId } 
-      ] 
-    });
-    if (!order) {
+    const target = await resolveCourierOrderTarget(orderId);
+    if (!target) {
       return res.status(404).json({ ok: false, error: 'Order not found.' });
     }
 
@@ -23677,10 +23955,48 @@ app.post('/api/admin/courier-orders/:orderId/label', async (req, res) => {
       uploadedBy: 'admin',
     };
 
-    await ordersCol.updateOne(
-      { _id: order._id },
+    /*
+     * The label lives on BOTH documents: the `orders` row (which the merchant's
+     * dashboard prints from) and the `courier_orders` ledger row (which the
+     * Admin list renders). Writing only the order document meant a label was
+     * invisible — or un-uploadable — for a dispatch that never reached `orders`
+     * (a 401, a manual entry), i.e. exactly the rows this list exists for.
+     */
+    await target.collection.updateOne(
+      { _id: target.id },
       { $push: { courier_labels: labelRecord as any }, $set: { updated_at: new Date() } }
     );
+    if (target.kind === 'order') {
+      const ledgerKey = courierOrderKey(
+        target.doc.order_number, target.doc.orderNumber, target.doc.id, orderId,
+      );
+      if (ledgerKey) {
+        await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any)
+          .updateOne(
+            { _id: ledgerKey as any },
+            {
+              $push: { courier_labels: labelRecord as any },
+              $set: {
+                updated_at: new Date(),
+                // A label upload IS a Send-to-Courier event: make sure the row
+                // exists in the list even when the dispatch predates the ledger.
+                courier_labels_updated_at: new Date(),
+              },
+              $setOnInsert: {
+                id: ledgerKey,
+                order_id: ledgerKey,
+                order_number: String(target.doc.order_number || target.doc.orderNumber || ledgerKey),
+                courier_status: target.doc.courier_status || (target.doc.courier_booked ? 'booked' : 'sent_to_courier'),
+                created_at: new Date(),
+                store_slug: String(target.doc.store_slug || target.doc.storeSlug || ''),
+                store_name: String(target.doc.store_name || target.doc.storeName || target.doc.store_slug || ''),
+              },
+            },
+            { upsert: true },
+          )
+          .catch(() => null);
+      }
+    }
 
     return res.status(200).json({ ok: true, label: labelRecord });
   } catch (err: any) {
@@ -23704,22 +24020,38 @@ app.get('/api/admin/courier-orders/:orderId/labels', async (req, res) => {
       return res.status(503).json({ ok: false, error: 'Database unavailable.' });
     }
 
-    const ordersCol = (mongoose.connection.db.collection('orders') as any);
-    const order = await ordersCol.findOne(
-      { 
-        $or: [
-          { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
-          { order_number: orderId }, 
-          { orderNumber: orderId } 
-        ] 
-      },
-      { projection: { courier_labels: 1 } }
-    );
-    if (!order) {
+    const target = await resolveCourierOrderTarget(orderId);
+
+    /*
+     * Labels may be split across the two documents (see the upload route), so
+     * both are read and unioned by label id.
+     */
+    const collected: any[] = [];
+    if (target) {
+      collected.push(...(Array.isArray(target.doc.courier_labels) ? target.doc.courier_labels : []));
+    }
+    const ledgerKey = courierOrderKey(orderId, target?.doc?.order_number, target?.doc?.orderNumber);
+    if (ledgerKey && mongoose.connection.db) {
+      const ledgerDoc = await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any)
+        .findOne({ _id: ledgerKey as any }, { projection: { courier_labels: 1 } })
+        .catch(() => null);
+      if (ledgerDoc && Array.isArray(ledgerDoc.courier_labels)) {
+        collected.push(...ledgerDoc.courier_labels);
+      }
+    }
+    if (!target && collected.length === 0) {
       return res.status(404).json({ ok: false, error: 'Order not found.', labels: [] });
     }
 
-    return res.status(200).json({ ok: true, labels: order.courier_labels || [] });
+    const seen = new Set<string>();
+    const labels = collected.filter((label: any) => {
+      const key = String(label?.id || label?.filename || '').trim();
+      if (key && seen.has(key)) return false;
+      if (key) seen.add(key);
+      return true;
+    });
+
+    return res.status(200).json({ ok: true, labels });
   } catch (err: any) {
     console.error('[Server] GET /api/admin/courier-orders/:orderId/labels error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Could not load labels.', labels: [] });
@@ -23769,8 +24101,10 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '');
-    const COURIER_STATUSES = ['pending', 'sent_to_courier', 'pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
+    const COURIER_STATUSES = ['booked', 'dispatched', 'pending', 'sent_to_courier', 'pickup_confirmed', 'in_transit', 'delivered', 'cancelled'];
     const COURIER_TO_ORDER: Record<string, string> = {
+      booked: 'In delivery',
+      dispatched: 'In delivery',
       pending: 'Processing',
       sent_to_courier: 'In delivery',
       pickup_confirmed: 'In delivery',
@@ -23785,7 +24119,11 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
       update.courier_status = courierKey;
       update.courierStatus = courierKey;
       update.courier_status_updated_at = new Date();
-      update.status = COURIER_TO_ORDER[courierKey];
+      update.status = COURIER_TO_ORDER[courierKey] || 'In delivery';
+      // A row the admin has actively decided on no longer needs manual entry.
+      if (['pickup_confirmed', 'in_transit', 'delivered', 'cancelled', 'dispatched', 'booked'].includes(courierKey)) {
+        update.needs_manual_entry = false;
+      }
     } else {
       update.status = rawStatus;
       // Keep the order's own courier_status honest when Admin picks an order status.
@@ -23800,6 +24138,36 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
       store_id: body.store_id || '',
       merchant_id: body.merchant_id || '',
     });
+
+    /*
+     * Mirror the status onto the Admin Courier Orders List row.
+     *
+     * The ledger row is what that list renders, so a status chosen there (or in
+     * the merchant dashboard) must also land on it — otherwise the dropdown
+     * snapped back on the next refresh. Best-effort and never fatal: the row may
+     * not exist yet for an order dispatched by an older build.
+     */
+    try {
+      const ledgerKey = courierOrderKey(orderId);
+      const ledgerStatus =
+        isCourierStatus
+          ? courierKey
+          : courierKey === 'completed'
+            ? 'delivered'
+            : courierKey === 'canceled' || courierKey === 'cancelled'
+              ? 'cancelled'
+              : courierKey === 'in_delivery'
+                ? 'in_transit'
+                : undefined;
+      if (ledgerKey && ledgerStatus) {
+        await (mongoose.connection.db!.collection(COURIER_ORDERS_COLLECTION) as any).updateOne(
+          { _id: ledgerKey as any },
+          { $set: { courier_status: ledgerStatus, courier_status_updated_at: new Date(), updated_at: new Date() } },
+        ).catch(() => null);
+      }
+    } catch (ledgerErr: any) {
+      console.warn('[Courier][ledger] status mirror warning:', ledgerErr?.message || ledgerErr);
+    }
 
     if (!result.ok) {
       return res.status(404).json({ ok: false, error: result.error || 'Order not found.', ...update });
@@ -23832,22 +24200,30 @@ app.delete('/api/admin/courier-orders/:orderId/label/:labelId', async (req, res)
       return res.status(503).json({ ok: false, error: 'Database unavailable.' });
     }
 
-    const ordersCol = (mongoose.connection.db.collection('orders') as any);
-    const order = await ordersCol.findOne({ 
-      $or: [
-        { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
-        { order_number: orderId }, 
-        { orderNumber: orderId } 
-      ] 
-    });
-    if (!order) {
-      return res.status(404).json({ ok: false, error: 'Order not found.' });
+    /*
+     * Remove the label from BOTH copies (the ledger row and the stored order),
+     * so deleting it in the Admin list also removes it from the merchant's
+     * dashboard instead of leaving a ghost entry behind.
+     */
+    const db = mongoose.connection.db;
+    const ledgerKey = courierOrderKey(orderId);
+    const pull = { $pull: { courier_labels: { id: labelId } }, $set: { updated_at: new Date() } } as any;
+    let removed = 0;
+
+    const ledgerRes = await (db.collection(COURIER_ORDERS_COLLECTION) as any)
+      .updateOne({ _id: ledgerKey as any }, pull)
+      .catch(() => null);
+    if (ledgerRes?.matchedCount) removed += 1;
+
+    const target = await resolveCourierOrderTarget(orderId);
+    if (target && target.kind === 'order') {
+      const orderRes = await target.collection.updateOne({ _id: target.id }, pull).catch(() => null);
+      if (orderRes?.matchedCount) removed += 1;
     }
 
-    await ordersCol.updateOne(
-      { _id: order._id },
-      { $pull: { courier_labels: { id: labelId } }, $set: { updated_at: new Date() } }
-    );
+    if (!removed) {
+      return res.status(404).json({ ok: false, error: 'Order not found.' });
+    }
 
     return res.status(200).json({ ok: true });
   } catch (err: any) {
@@ -23877,25 +24253,59 @@ app.get('/api/orders/:orderId/courier-labels', async (req, res) => {
       return res.status(503).json({ ok: false, error: 'Database unavailable.', labels: [] });
     }
 
-    const ordersCol = (mongoose.connection.db.collection('orders') as any);
-    const order = await ordersCol.findOne(
-      {
-        $or: [
-          { _id: { $in: [orderId, new mongoose.Types.ObjectId(orderId)] } },
-          { order_number: orderId }, 
-          { orderNumber: orderId },
-          { store_slug: storeSlug }, 
-          { storeSlug: storeSlug },
-        ],
-      },
-      { projection: { courier_labels: 1 } }
-    );
-    if (!order) {
+    /*
+     * A label uploaded from the Admin list is written to the `courier_orders`
+     * ledger row AND the `orders` row; this merchant-facing read therefore
+     * unions both, so the label appears in the merchant dashboard too. Only
+     * rows whose store matches the caller are considered.
+     */
+    const db = mongoose.connection.db;
+    const idCandidates: any[] = [orderId];
+    if (/^[a-f0-9]{24}$/i.test(String(orderId || ''))) {
+      try { idCandidates.push(new mongoose.Types.ObjectId(orderId)); } catch { /* ignore */ }
+    }
+    const scope = {
+      $or: [
+        { _id: { $in: idCandidates } },
+        { order_number: orderId },
+        { orderNumber: orderId },
+        { id: orderId },
+      ],
+    };
+    const storeScope = {
+      $or: [
+        { store_slug: storeSlug }, { storeSlug: storeSlug },
+        { store_code: storeSlug }, { storeCode: storeSlug },
+      ],
+    };
+
+    const [order, ledgerDoc] = await Promise.all([
+      (db.collection('orders') as any)
+        .findOne({ $and: [scope, storeScope] }, { projection: { courier_labels: 1 } })
+        .catch(() => null),
+      (db.collection(COURIER_ORDERS_COLLECTION) as any)
+        .findOne(
+          { $and: [{ $or: [{ _id: courierOrderKey(orderId) as any }, { order_id: courierOrderKey(orderId) }, { order_number: orderId }] }, storeScope] },
+          { projection: { courier_labels: 1 } },
+        )
+        .catch(() => null),
+    ]);
+    if (!order && !ledgerDoc) {
       return res.status(404).json({ ok: false, error: 'Order not found or access denied.', labels: [] });
     }
 
     // Only return labels that are visible to merchant (exclude admin-only notes if needed)
-    const labels = (order.courier_labels || []).map((l: any) => ({
+    const seen = new Set<string>();
+    const rawLabels = [
+      ...((order?.courier_labels as any[]) || []),
+      ...((ledgerDoc?.courier_labels as any[]) || []),
+    ].filter((l: any) => {
+      const key = String(l?.id || l?.filename || '').trim();
+      if (key && seen.has(key)) return false;
+      if (key) seen.add(key);
+      return true;
+    });
+    const labels = rawLabels.map((l: any) => ({
       id: l.id,
       filename: l.filename,
       mimeType: l.mimeType,
