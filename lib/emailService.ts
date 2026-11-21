@@ -94,7 +94,10 @@ export async function sendEmail(options: SendEmailOptions): Promise<EmailDeliver
     process.env.RESEND_API_KEY || process.env.RESEND_KEY || process.env.VITE_RESEND_API_KEY;
   if (resendApiKey) {
     try {
-      const res = await fetch('https://api.resend.com/emails', {
+      // `RESEND_API_BASE` lets a test/staging environment point at a local
+      // mock; production keeps the real Resend host.
+      const resendBase = (process.env.RESEND_API_BASE || 'https://api.resend.com').replace(/\/$/, '');
+      const res = await fetch(`${resendBase}/emails`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${resendApiKey}`,

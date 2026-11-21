@@ -292,6 +292,14 @@ import { PLACEHOLDER_IMAGE } from '../src/utils/imageFallback.js';
 // broadcast and automation-trigger email goes through `sendEmail` so delivery
 // attempts and failures produce one consistent, greppable log line.
 import { sendEmail, isEmailConfigured, buildBrandedEmailHtml, escapeHtml, paragraphsFromText } from './emailService.js';
+import {
+  notifyMerchantCourierUpdate,
+  normaliseWhatsAppNumber,
+  courierStatusLabel,
+  whatsAppDirectLink,
+  type MerchantContact,
+  type CourierNotificationResult,
+} from './merchantCourierNotify.js';
 // Local BD SMS gateway dispatch (Greenweb / SSL Wireless / Bulk SMS BD / Alpha).
 // The merchant's saved SMS settings were previously persisted but never acted
 // on — nothing in the codebase sent an SMS. See lib/smsService.ts.
@@ -7526,6 +7534,97 @@ async function resolveStoreRecordFlexible(ref: string): Promise<Record<string, u
   return null;
 }
 
+/*
+ * ── MERCHANT COURIER NOTIFICATION ────────────────────────────────────────────
+ *
+ * Called from the Admin “Courier Orders List” whenever a courier status or a
+ * label changes. It resolves the merchant's contact details from the STORE
+ * record (the same record the order belongs to) and sends the update to their
+ * email and verified WhatsApp.
+ *
+ * Best-effort by design: a notification failure must never fail the admin's
+ * status change or label upload, so every error is swallowed and returned in the
+ * response as diagnostics.
+ */
+async function notifyMerchantAboutCourierChange(
+  orderId: string,
+  doc: Record<string, any> | null,
+  input: {
+    orderNumber: string;
+    statusLabel: string;
+    trackingCode?: string;
+    courierName?: string;
+    note?: string;
+    label?: { filename: string; mimeType: string; base64: string; note?: string } | null;
+  },
+): Promise<CourierNotificationResult> {
+  try {
+    const storeRef = String(
+      doc?.store_slug || doc?.storeSlug || doc?.store_code || doc?.storeCode || doc?.store_id || '',
+    ).trim();
+
+    let store: Record<string, any> | null = null;
+    if (storeRef) {
+      store = (await resolveStoreRecordFlexible(storeRef).catch(() => null)) as Record<string, any> | null;
+    }
+
+    // Contact details, first non-empty wins. The store record is authoritative;
+    // the ledger row is the fallback when the store could not be resolved.
+    const pick = (...values: unknown[]) => {
+      for (const v of values) {
+        const s = String(v ?? '').trim();
+        if (s) return s;
+      }
+      return '';
+    };
+
+    const contact: MerchantContact = {
+      email: pick(
+        store?.email, store?.merchant_email, store?.merchantEmail, store?.owner_email,
+        store?.ownerEmail, store?.contact_email, store?.contactEmail, store?.support_email,
+        doc?.merchant_email, doc?.merchantEmail,
+      ).toLowerCase(),
+      whatsapp: normaliseWhatsAppNumber(pick(
+        store?.whatsappNumber, store?.whatsapp_number, store?.whatsapp, store?.whatsapp_phone,
+        store?.phone, store?.store_phone, store?.supportPhone, store?.support_phone,
+        store?.contactPhone, store?.contact_phone, store?.merchantPhone, store?.merchant_phone,
+        doc?.merchant_phone, doc?.merchantPhone,
+      )),
+      phone: pick(
+        store?.phone, store?.store_phone, store?.supportPhone, store?.support_phone,
+        store?.contactPhone, store?.contact_phone, store?.merchantPhone, store?.merchant_phone,
+        doc?.merchant_phone, doc?.merchantPhone,
+      ),
+      storeName: pick(store?.store_name, store?.storeName, doc?.store_name, doc?.storeName),
+      storeSlug: pick(store?.store_slug, store?.storeSlug, storeRef),
+    };
+
+    const dashboardUrl = `${process.env.APP_PUBLIC_URL || process.env.PUBLIC_APP_URL || ''}`.replace(/\/$/, '')
+      || '';
+
+    const result = await notifyMerchantCourierUpdate(input, contact, {
+      dashboardUrl: dashboardUrl ? `${dashboardUrl}/dashboard?order=${encodeURIComponent(orderId)}` : '',
+      dispatchWhatsApp: (phone, message) => dispatchWhatsAppTextMessage(phone, message),
+    });
+
+    console.log('[Courier][merchant-notify]', {
+      order: orderId,
+      store: contact.storeSlug,
+      email: result.email,
+      whatsapp: { attempted: result.whatsapp.attempted, ok: result.whatsapp.ok, error: result.whatsapp.error },
+      skipped: result.skipped,
+    });
+    return result;
+  } catch (err: any) {
+    console.warn('[Courier][merchant-notify] failed (ignored):', err?.message || err);
+    return {
+      email: { attempted: false, ok: false },
+      whatsapp: { attempted: false, ok: false },
+      skipped: err?.message || 'Notification failed.',
+    };
+  }
+}
+
 // Store lookup by slug via explicit path: /api/stores/slug/:slug.
 //
 // Registered as `app.all` (not `app.get`) so OPTIONS/HEAD probes — and any
@@ -9438,6 +9537,114 @@ async function dispatchLiveWhatsAppMessage(phone: string, code: string, userType
     provider: 'Supabase DB & Direct WhatsApp Dispatch',
     details: `Live 6-digit OTP generated for ${phone}. Direct one-tap WhatsApp link available.`,
     directLink
+  };
+}
+
+/*
+ * A GENERIC WhatsApp send — the same provider chain as the OTP dispatcher
+ * (UltraMsg → Twilio → Meta Cloud API → GreenAPI → Supabase edge → custom
+ * gateway), but with the CALLER's message instead of an OTP template.
+ *
+ * Used by the merchant courier notifications. When no provider is configured it
+ * returns `sent: false` plus the one-tap `wa.me` deep link, so the admin can
+ * still deliver the update by hand.
+ */
+async function dispatchWhatsAppTextMessage(
+  phone: string,
+  messageBody: string,
+): Promise<WhatsAppDeliveryResult> {
+  const digitsOnly = String(phone || '').replace(/[^\d]/g, '');
+  const directLink = `https://api.whatsapp.com/send?phone=${digitsOnly}&text=${encodeURIComponent(messageBody)}`;
+  if (!digitsOnly) {
+    return { sent: false, provider: 'none', error: 'No WhatsApp number on file.', directLink: '' };
+  }
+
+  // 1. UltraMsg
+  const ultraInstance = process.env.ULTRAMSG_INSTANCE_ID || process.env.WHATSAPP_ULTRAMSG_INSTANCE_ID;
+  const ultraToken = process.env.ULTRAMSG_TOKEN || process.env.WHATSAPP_ULTRAMSG_TOKEN;
+  // `ULTRAMSG_API_BASE` lets a test/staging environment point at a local mock.
+  const ultraBase = (process.env.ULTRAMSG_API_BASE || 'https://api.ultramsg.com').replace(/\/$/, '');
+  if (ultraInstance && ultraToken) {
+    try {
+      const res = await fetch(`${ultraBase}/${ultraInstance}/messages/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ token: ultraToken, to: `+${digitsOnly}`, body: messageBody }).toString(),
+      });
+      if (res.ok) return { sent: true, provider: 'UltraMsg', directLink };
+    } catch (e: any) {
+      console.warn('[WhatsApp UltraMsg courier notice]', e?.message);
+    }
+  }
+
+  // 2. Twilio
+  const twilioSid = process.env.TWILIO_ACCOUNT_SID;
+  const twilioToken = process.env.TWILIO_AUTH_TOKEN;
+  const twilioFrom = process.env.TWILIO_WHATSAPP_FROM;
+  if (twilioSid && twilioToken && twilioFrom) {
+    try {
+      const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Messages.json`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${twilioSid}:${twilioToken}`).toString('base64')}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          From: twilioFrom.startsWith('whatsapp:') ? twilioFrom : `whatsapp:${twilioFrom}`,
+          To: `whatsapp:+${digitsOnly}`,
+          Body: messageBody,
+        }).toString(),
+      });
+      const json: any = await res.json().catch(() => null);
+      if (res.ok && json?.sid) return { sent: true, provider: 'Twilio WhatsApp', directLink };
+    } catch (e: any) {
+      console.warn('[WhatsApp Twilio courier notice]', e?.message);
+    }
+  }
+
+  // 3. Meta WhatsApp Cloud API
+  const metaToken = process.env.WHATSAPP_CLOUD_API_TOKEN || process.env.META_WHATSAPP_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+  const metaPhone = process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.META_PHONE_NUMBER_ID;
+  if (metaToken && metaPhone) {
+    try {
+      const res = await fetch(`https://graph.facebook.com/v18.0/${metaPhone}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${metaToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: digitsOnly,
+          type: 'text',
+          text: { preview_url: false, body: messageBody },
+        }),
+      });
+      if (res.ok) return { sent: true, provider: 'Meta WhatsApp Cloud API', directLink };
+    } catch (e: any) {
+      console.warn('[WhatsApp Meta courier notice]', e?.message);
+    }
+  }
+
+  // 4. GreenAPI
+  const greenInstance = process.env.GREENAPI_INSTANCE_ID;
+  const greenToken = process.env.GREENAPI_API_TOKEN;
+  if (greenInstance && greenToken) {
+    try {
+      const res = await fetch(`https://api.green-api.com/waInstance${greenInstance}/sendMessage/${greenToken}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId: `${digitsOnly}@c.us`, message: messageBody }),
+      });
+      if (res.ok) return { sent: true, provider: 'GreenAPI', directLink };
+    } catch (e: any) {
+      console.warn('[WhatsApp GreenAPI courier notice]', e?.message);
+    }
+  }
+
+  return {
+    sent: false,
+    provider: 'none',
+    error: 'No WhatsApp provider is configured on the server.',
+    directLink,
   };
 }
 
@@ -24606,7 +24813,33 @@ app.post('/api/admin/courier-orders/:orderId/label', async (req, res) => {
       });
     }
 
-    return res.status(200).json({ ok: true, label: labelRecord, stored_in: mongoSaved ? 'mongodb' : 'supabase' });
+    /*
+     * TELL THE MERCHANT — the label they must print is now on their order.
+     *
+     * Sent to the store's email (with the label attached) and verified
+     * WhatsApp. Best-effort: a notification failure never fails the upload.
+     */
+    const doc = target?.doc || supabaseRow || null;
+    const notifyResult = await notifyMerchantAboutCourierChange(orderId, doc, {
+      orderNumber: String(
+        doc?.order_number || doc?.orderNumber || doc?.id || orderId,
+      ),
+      statusLabel: courierStatusLabel(doc?.courier_status || 'sent_to_courier'),
+      trackingCode: String(
+        doc?.tracking_code || doc?.trackingCode || doc?.tracking_id ||
+        doc?.consignment_id || '',
+      ),
+      courierName: String(doc?.courier_name || doc?.courierName || ''),
+      note: note ? String(note).slice(0, 500) : '',
+      label: { filename, mimeType, base64: file, note: note || '' },
+    });
+
+    return res.status(200).json({
+      ok: true,
+      label: labelRecord,
+      stored_in: mongoSaved ? 'mongodb' : 'supabase',
+      merchant_notify: notifyResult,
+    });
   } catch (err: any) {
     console.error('[Server] POST /api/admin/courier-orders/:orderId/label error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Could not upload label.' });
@@ -24792,12 +25025,28 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
                 : undefined;
 
       if (ledgerKey && ledgerStatus) {
+        /*
+         * The STATUS NOTE / ISSUE REASON must live on the ledger row too.
+         *
+         * The merchant's badge and the “why was this cancelled?” line are read
+         * from the ledger (see mergeCourierLedgerIntoOrders), so a note typed in
+         * the admin panel would otherwise reach the order row but not the list
+         * the merchant's dashboard renders. `cancellation_reason` is the column
+         * the UI treats as the cancellation/issue text.
+         */
+        const noteText = body.note ? String(body.note).slice(0, 500) : '';
+        const ledgerPatch: Record<string, any> = {
+          courier_status: ledgerStatus,
+          courier_status_updated_at: new Date().toISOString(),
+        };
+        if (noteText) {
+          ledgerPatch.status_note = noteText;
+          ledgerPatch.cancellation_reason = noteText;
+        }
+
         const supabaseCfg = readSupabaseEnv();
         if (supabaseCfg) {
-          const patched = await patchSupabaseLedgerRow(supabaseCfg, orderId, {
-            courier_status: ledgerStatus,
-            courier_status_updated_at: new Date().toISOString(),
-          });
+          const patched = await patchSupabaseLedgerRow(supabaseCfg, orderId, ledgerPatch);
           ledgerMirrored = patched.ok;
           if (!patched.ok) {
             console.warn('[Courier][ledger] Supabase status mirror skipped:', patched.error);
@@ -24807,7 +25056,7 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
         if (!ledgerMirrored && mongoose.connection.readyState === 1 && mongoose.connection.db) {
           const resMongo = await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any).updateOne(
             { _id: ledgerKey as any },
-            { $set: { courier_status: ledgerStatus, courier_status_updated_at: new Date(), updated_at: new Date() } },
+            { $set: { ...ledgerPatch, courier_status_updated_at: new Date(), updated_at: new Date() } },
           ).catch(() => null);
           ledgerMirrored = Boolean(resMongo?.matchedCount);
         }
@@ -24835,11 +25084,37 @@ app.patch('/api/admin/orders/:orderId/status', async (req, res) => {
       return res.status(404).json({ ok: false, error: result.error || 'Order not found.', ...update });
     }
 
+    /*
+     * TELL THE MERCHANT — email + verified WhatsApp.
+     *
+     * The admin just changed the courier status (or added a note/issue reason),
+     * and the shopkeeper must know without opening the dashboard. Best-effort:
+     * a notification failure never fails the status change, and the outcome is
+     * returned as `merchant_notify` so the admin can see what happened.
+     */
+    const notifyResult = await notifyMerchantAboutCourierChange(orderId, result.order || null, {
+      orderNumber: String(
+        result.order?.order_number || result.order?.orderNumber ||
+        (result.order as any)?.invoice_id || orderId,
+      ),
+      statusLabel: courierStatusLabel(update.courier_status || update.status || rawStatus),
+      trackingCode: String(
+        result.order?.tracking_code || result.order?.trackingCode ||
+        result.order?.tracking_id || result.order?.consignment_id || '',
+      ),
+      courierName: String(
+        result.order?.courier_name || result.order?.courierName ||
+        result.order?.shipping_courier || '',
+      ),
+      note: body.note ? String(body.note).slice(0, 500) : '',
+    });
+
     return res.status(200).json({
       ok: true,
       status: result.order?.status || update.status || rawStatus,
       courier_status: result.order?.courier_status || update.courier_status || null,
       order: result.order || null,
+      merchant_notify: notifyResult,
     });
   } catch (err: any) {
     console.error('[Server] PATCH /api/admin/orders/:orderId/status error:', err);

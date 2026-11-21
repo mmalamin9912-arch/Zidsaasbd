@@ -456,6 +456,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    * loop).
    */
   const labelsRequestedRef = useRef<Set<string>>(new Set());
+  /** Last courier status seen per order — drives the in-app courier toast. */
+  const courierStatusSnapshotRef = useRef<Record<string, string>>({});
   useEffect(() => {
     /*
      * Fetch labels for every order the courier ledger has touched — NOT only
@@ -587,6 +589,44 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // the list back to the server.
         const normalized = normalizeOrders(rows);
         const uniqueFetched = Array.from(new Map(normalized.map(item => [item.id, item])).values());
+
+        /*
+         * IN-APP COURIER NOTIFICATION.
+         *
+         * The Admin can change a courier status or upload a label at any time.
+         * The same data now arrives on the order objects (server-side ledger
+         * merge), so a status that differs from the last sync is surfaced as a
+         * toast — the shopkeeper sees the change without hunting for the row.
+         * Compared against the previous snapshot so a refresh does not re-toast.
+         */
+        try {
+          const previous = courierStatusSnapshotRef.current;
+          const next: Record<string, string> = {};
+          for (const o of uniqueFetched as any[]) {
+            const id = String(o?.id || o?.orderNumber || '').trim();
+            const status = String(o?.courierStatus || o?.courier_status || '').trim();
+            if (!id || !status) continue;
+            next[id] = status;
+            const before = previous[id];
+            if (before !== undefined && before !== status) {
+              const problem = /cancell?ed|reject|return|issue|fail|hold/i.test(status);
+              const reason = String(o?.cancellationReason || o?.cancellation_reason || o?.statusNote || o?.status_note || '').trim();
+              if (problem) {
+                toast.error(`Courier ${status}: ${o?.orderNumber || id}`, {
+                  description: reason || 'Open the order to see the details.',
+                });
+              } else {
+                toast.success(`Courier status updated: ${status}`, {
+                  description: `${o?.orderNumber || id}${reason ? ` — ${reason}` : ''}`,
+                });
+              }
+            }
+          }
+          courierStatusSnapshotRef.current = next;
+        } catch {
+          // A notification must never break the order sync.
+        }
+
         mergeServerOrders(uniqueFetched);
       } catch (err) {
         console.warn('Error fetching live orders:', err);

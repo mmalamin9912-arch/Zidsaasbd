@@ -404,6 +404,27 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
   async function updateCourierStatus(order: any, nextStatus: string) {
     const orderId = String(order.id || order.order_number || '').trim();
     if (!orderId) return;
+
+    /*
+     * A CANCELLATION / ISSUE MUST CARRY ITS REASON.
+     *
+     * The merchant's dashboard renders the reason from the ledger, so the admin
+     * is asked for one when the status is a problem status. Optional for the
+     * normal progression (Sent to Courier / Pickup Confirmed / In Transit /
+     * Delivered) so a routine status change stays one click.
+     */
+    const isProblem = /cancell?ed|reject|return|issue|fail|hold/i.test(String(nextStatus));
+    let note = '';
+    if (isProblem) {
+      const entered = typeof window !== 'undefined'
+        ? window.prompt(
+            `Reason for “${String(nextStatus).replace(/_/g, ' ')}” (the merchant will see this):`,
+            '',
+          )
+        : null;
+      note = String(entered ?? '').trim();
+    }
+
     setUpdatingStatus(orderId);
     try {
       const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/status`, {
@@ -411,6 +432,7 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({
           status: nextStatus,
+          ...(note ? { note } : {}),
           store_slug: order.store_slug || '',
           merchant_id: order.merchant_id || '',
         }),
