@@ -23716,6 +23716,41 @@ const handleOrderUpdate = async (req: any, res: any) => {
       });
     }
 
+    // ── WALLET CREDITING on payment status → Paid (non-COD orders) ──────────
+    // When a store order is marked Paid by the merchant, credit their wallet
+    // with the order amount (net of any platform commission). Idempotent via
+    // the wallet_credited flag so re-saving or toggling Paid/Unpaid never double-credits.
+    let walletCreditResult: Record<string, any> | null = null;
+    if (paymentStatus === 'Paid') {
+      const orderDoc = result.order;
+      const paymentMethod = String(orderDoc?.payment_method || orderDoc?.paymentMethod || '').toLowerCase();
+      const isCodOrder = paymentMethod.includes('cod') || paymentMethod.includes('cash');
+      const alreadyCredited = String(orderDoc?.wallet_credited || '').trim().toLowerCase() === 'true';
+
+      if (!isCodOrder && !alreadyCredited) {
+        const vendorId = String(orderDoc?.vendor_id || orderDoc?.vendorId || orderDoc?.store_id || orderDoc?.storeId || orderDoc?.merchant_id || orderDoc?.merchantId || '').trim();
+        const storeSlug = String(orderDoc?.store_slug || orderDoc?.storeSlug || '').trim().toLowerCase();
+        const vendorName = String(orderDoc?.vendor_name || orderDoc?.vendorName || orderDoc?.store_name || orderDoc?.storeName || '').trim();
+        const orderNumber = String(orderDoc?.order_number || orderDoc?.orderNumber || id).replace(/^#/, '').trim();
+        const totalBDT = toNumeric(orderDoc?.totalBDT ?? orderDoc?.total_price ?? orderDoc?.total_bdt ?? orderDoc?.total, 0);
+        const commissionBDT = toNumeric(orderDoc?.commission_bdt ?? orderDoc?.commissionBdt ?? 0, 0);
+        const netAmount = round2(Math.max(0, totalBDT - commissionBDT));
+
+        if (vendorId && netAmount > 0) {
+          walletCreditResult = await creditVendorWallet(
+            { vendorId, ...(storeSlug ? { storeSlug } : {}), ...(vendorName ? { vendorName } : {}) },
+            { available: netAmount, gross: totalBDT, commission: commissionBDT, courierFee: 0, orderNumber },
+          ).catch(() => null);
+
+          if (walletCreditResult?.ok) {
+            await updateOrderFields(result.order?._id || id, {
+              wallet_credited: true,
+            }, { store_slug: storeSlug }).catch(() => undefined);
+          }
+        }
+      }
+    }
+
     // ── Supabase single order status sync ────────────────────────────────
     // Updates the single matching order in Supabase without creating or returning duplicate records.
     try {
@@ -25654,12 +25689,22 @@ async function applyPaymentVerification(args: {
 
     // Credit the selling merchant's wallet with the net payable (prepaid
     // wallet order — customer already paid; the platform releases the funds).
+    // Idempotency: skip if this order's wallet has already been credited
+    // (prevents double-crediting when the admin re-approves or toggles Paid/Unpaid).
     let walletResult: Record<string, any> | null = null;
-    if (vendorId && netPayable > 0) {
+    const isAlreadyCredited = String(doc.wallet_credited || '').trim().toLowerCase() === 'true';
+    if (vendorId && netPayable > 0 && !isAlreadyCredited) {
       walletResult = await creditVendorWallet(
         { vendorId, ...(storeSlug ? { storeSlug } : {}), ...(vendorName ? { vendorName } : {}) },
         { available: netPayable, gross: totalBDT, commission: commissionBDT, courierFee: 0, orderNumber },
       ).catch(() => null);
+
+      // Mark the order's wallet as credited so re-approving never double-credits.
+      if (walletResult?.ok) {
+        await updateOrderFields(canonicalOrderId, {
+          wallet_credited: true,
+        }, { ...extra, order_number: orderNumber }).catch(() => undefined);
+      }
     }
 
     // Record / advance the vendor payout ledger to 'processing'.
