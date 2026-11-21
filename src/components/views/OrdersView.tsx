@@ -808,15 +808,27 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    * points the merchant to Logistics → Courier API → Setup. */
   const [dispatchConfirmed, setDispatchConfirmed] = useState(false);
 
-  /* PAYMENT VERIFICATION GATE (strict).
+  /* PAYMENT GATE (strict) — MARKETPLACE ORDERS ONLY.
    *
-   * A marketplace wallet order lands as 'Pending Verification' — the customer
-   * claims they sent the money but nobody has reconciled the TrxID yet. Until
-   * the Super Admin flips the status to 'Paid', the vendor MUST NOT dispatch:
-   * the courier collects the parcel and the platform has no proof of payment.
-   * COD and already-Paid orders pass straight through. */
-  const paymentVerificationLock = (ord: Order): boolean =>
-    isMarketplaceOrder(ord) && String(ord.paymentStatus || '') === 'Pending Verification';
+   * A marketplace order's money reaches the PLATFORM, not the merchant, so the
+   * platform must be paid before the parcel leaves the shop. Both non-paid
+   * states are refused:
+   *
+   *   'Pending Verification' — the customer claims a transfer but the Super
+   *                           Admin has not reconciled the TrxID yet.
+   *   'Unpaid'              — nobody has paid at all.
+   *
+   * Only 'Paid' unlocks dispatch. A STORE-LINK order (the merchant's own
+   * storefront / manual / POS order) is settled directly with the merchant, so
+   * it is deliberately NOT gated here — its current behaviour is unchanged.
+   *
+   * The backend enforces the same rule in /api/courier/send and
+   * /api/admin/marketplace-courier, so a forged request cannot bypass it. */
+  const paymentVerificationLock = (ord: Order): boolean => {
+    if (!isMarketplaceOrder(ord)) return false;
+    const status = String(ord.paymentStatus || '').trim().toLowerCase();
+    return status === 'unpaid' || status === 'pending verification';
+  };
 
   const resolvedPickupInfo = useMemo(() => resolvePrintStoreInfo(), [selectedOrderForCourier?.id]);
   const pickupPreviewAddress = String(resolvedPickupInfo.address || '').trim();
@@ -856,6 +868,24 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
    *     badge survives the next poll.
    */
   const handleBooking = async (ord: Order) => {
+    /*
+     * MARKETPLACE PAYMENT GATE (client-side guard).
+     *
+     * The buttons are disabled for these orders, but `handleBooking` is also
+     * reachable from the confirmation modal and from code paths that bypass the
+     * button. Refuse here as well so the merchant sees a clear reason instead of
+     * a courier request the server will reject. STORE-LINK orders are never
+     * gated — their behaviour is unchanged.
+     */
+    if (paymentVerificationLock(ord)) {
+      const isUnpaid = String(ord.paymentStatus || '').trim().toLowerCase() === 'unpaid';
+      alert(
+        isUnpaid
+          ? 'This marketplace order is Unpaid. Send to Courier is allowed only after the payment status is Paid.'
+          : 'This marketplace order\'s payment is not verified yet. Dispatch unlocks once the Super Admin marks it Paid.',
+      );
+      return;
+    }
     setIsBookingCourier(prev => ({ ...prev, [ord.id]: true }));
     try {
       let merchantSettings: any = {};
@@ -921,6 +951,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               ? 'The platform has not configured its courier API keys yet — contact the marketplace administrator.'
               : centralData.code === 'payment_unverified'
               ? 'The marketplace administrator has not verified this wallet payment yet. Dispatch unlocks once the payment is marked Paid.'
+              : centralData.code === 'payment_unpaid'
+              ? 'This marketplace order is Unpaid. Send to Courier is allowed only after the payment status is Paid.'
               : `Central courier booking failed (${centralData.code || centralRes.status}).`);
 
           /*
@@ -3232,8 +3264,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                               ) : (
                                 <button
                                   onClick={() => handleBooking(ord)}
-                                  disabled={isBookingCourier[ord.id]}
-                                  className="mt-1.5 flex items-center gap-1 text-[10px] font-bold bg-[#00D68F]/10 text-[#00D68F] hover:bg-[#00D68F] hover:text-slate-950 border border-[#00D68F]/30 px-2 py-0.5 rounded transition cursor-pointer disabled:opacity-50"
+                                  /* A marketplace order whose payment is not 'Paid' cannot be
+                                     dispatched — the backend refuses it too. */
+                                  disabled={isBookingCourier[ord.id] || paymentVerificationLock(ord)}
+                                  title={paymentVerificationLock(ord) ? 'Marketplace order payment is not confirmed as Paid — dispatch is locked.' : undefined}
+                                  className="mt-1.5 flex items-center gap-1 text-[10px] font-bold bg-[#00D68F]/10 text-[#00D68F] hover:bg-[#00D68F] hover:text-slate-950 border border-[#00D68F]/30 px-2 py-0.5 rounded transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                   <Send className="w-3 h-3" />
                                   <span>{isBookingCourier[ord.id] ? 'Sending...' : 'Send to Courier'}</span>
@@ -3351,8 +3386,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                     <div className="flex items-center gap-2">
                                       <button
                                         onClick={() => handleBooking(ord)}
-                                        disabled={isBookingCourier[ord.id]}
-                                        className="bg-[#00D68F] text-slate-950 hover:bg-[#00E699] px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                        disabled={isBookingCourier[ord.id] || paymentVerificationLock(ord)}
+                                        title={paymentVerificationLock(ord) ? 'Marketplace order payment is not confirmed as Paid — dispatch is locked.' : undefined}
+                                        className="bg-[#00D68F] text-slate-950 hover:bg-[#00E699] px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                                       >
                                         <Send className="w-3.5 h-3.5" />
                                         <span>{isBookingCourier[ord.id] ? 'Sending...' : 'Send to Courier'}</span>

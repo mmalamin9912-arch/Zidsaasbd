@@ -17736,10 +17736,14 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
       trackingCode?: string;
       booked?: boolean;
       raw?: Record<string, any> | null;
+      /** A business-rule refusal is not a courier order — keep it off the list. */
+      skipLedger?: boolean;
     } = {},
   ): void => {
-    // Record into Admin Courier Orders List (Supabase + Mongo)
-    marketplaceRecordLedger(status, extra);
+    // Record into Admin Courier Orders List (Supabase + Mongo) — real attempts only.
+    if (extra.skipLedger !== true) {
+      marketplaceRecordLedger(status, extra);
+    }
 
     // Send instant Telegram alert
     void (async () => {
@@ -17829,21 +17833,31 @@ app.post('/api/admin/marketplace-courier', async (req, res) => {
     // the courier ships goods the platform has not been paid for — so the
     // dispatch is REFUSED at the API level, not just hidden in the UI. A
     // client that forges the request cannot get around this.
+    /*
+     * The route already only serves marketplace orders, so the gate is simple:
+     * dispatch is allowed ONLY when the payment status is 'Paid'. Both
+     * 'Unpaid' and 'Pending Verification' are refused. Store-link orders never
+     * reach this route — they keep their own (ungated) behaviour.
+     */
     const paymentStatus = String(
       (order as any).payment_status || (order as any).paymentStatus || ''
     ).trim();
-    if (
-      (order as any).marketplace_order === true &&
-      paymentStatus === 'Pending Verification'
-    ) {
+    if (paymentStatus.toLowerCase() !== 'paid') {
+      const isUnpaid = paymentStatus.toLowerCase() === 'unpaid';
       marketplaceNotify('disabled', {
         courierName: courierKey,
-        errorMessage: 'The wallet payment is still Pending Verification, so dispatch was refused.',
+        errorMessage: isUnpaid
+          ? 'The marketplace order is Unpaid, so dispatch was refused.'
+          : 'The wallet payment is still Pending Verification, so dispatch was refused.',
+        // Refused before any parcel existed: no courier row for this click.
+        skipLedger: true,
       });
       return res.status(200).json({
         ok: false,
-        code: 'payment_unverified',
-        error: 'This order\'s wallet payment has not been verified by the marketplace administrator yet. Dispatch unlocks automatically once the payment status is "Paid".',
+        code: isUnpaid ? 'payment_unpaid' : 'payment_unverified',
+        error: isUnpaid
+          ? 'This marketplace order is Unpaid. Send to Courier is allowed only after the payment status is Paid.'
+          : 'This order\'s wallet payment has not been verified by the marketplace administrator yet. Dispatch unlocks automatically once the payment status is "Paid".',
       });
     }
 
@@ -18604,10 +18618,21 @@ app.post('/api/courier/send', async (req, res) => {
       trackingCode?: string;
       booked?: boolean;
       raw?: Record<string, any> | null;
+      /**
+       * Set when the request was REFUSED by a business rule (e.g. a marketplace
+       * order whose payment is not Paid) rather than attempted against a courier.
+       * Such a click is NOT a courier order: no parcel was ever prepared for
+       * dispatch, so it must not appear in the Admin "Courier Orders List".
+       * The Telegram alert still fires so the admin knows why the merchant's
+       * click did nothing.
+       */
+      skipLedger?: boolean;
     } = {},
   ): void => {
-    // Every alert ALSO writes the durable admin row (see `recordLedger`).
-    recordLedger(status, extra);
+    // Every real dispatch attempt ALSO writes the durable admin row.
+    if (extra.skipLedger !== true) {
+      recordLedger(status, extra);
+    }
     void (async () => {
       try {
         const store = await loadStoreForAlert();
@@ -18663,6 +18688,65 @@ app.post('/api/courier/send', async (req, res) => {
         error: 'No order was supplied to the courier booking request.',
         message: 'No order was supplied to the courier booking request.',
       });
+    }
+
+    /*
+     * ── PAYMENT GATE: MARKETPLACE ORDERS ONLY ──
+     *
+     * A marketplace order's money goes to the PLATFORM, so the parcel must not
+     * leave the shop until the platform is actually paid. The gate refuses both
+     * non-paid states and allows only 'Paid':
+     *
+     *   'Unpaid'              → refused (nobody has paid)
+     *   'Pending Verification' → refused (TrxID not reconciled yet)
+     *   'Paid'                → allowed
+     *
+     * A STORE-LINK order is settled directly with the merchant, so it is NOT
+     * gated here — its behaviour is unchanged. The check runs BEFORE the
+     * courier call and BEFORE the Telegram alert, so a refused click never
+     * reaches Steadfast and never sends a misleading "dispatched" message.
+     * The merchant UI hides the button for the same orders; this is the
+     * server-side enforcement for a forged request.
+     */
+    const dispatchChannel = String(
+      order.order_source_channel ?? order.orderSourceChannel ?? order.channel ??
+      postedOrder.order_source_channel ?? postedOrder.orderSourceChannel ?? postedOrder.channel ?? '',
+    ).trim().toLowerCase();
+    const isStoreLinkOrder =
+      dispatchChannel === 'store_link' || dispatchChannel === 'storelink' || dispatchChannel === 'store';
+    const isMarketplaceDispatch =
+      !isStoreLinkOrder &&
+      (dispatchChannel === 'marketplace' ||
+        order.marketplace_order === true || order.marketplaceOrder === true ||
+        String(order.marketplace_order ?? order.marketplaceOrder ?? '') === 'true' ||
+        postedOrder.marketplace_order === true || postedOrder.marketplaceOrder === true ||
+        String(postedOrder.marketplace_order ?? postedOrder.marketplaceOrder ?? '') === 'true' ||
+        (Array.isArray(order.vendor_slugs ?? order.vendorSlugs) && (order.vendor_slugs ?? order.vendorSlugs).length > 1) ||
+        (Array.isArray(postedOrder.vendor_slugs ?? postedOrder.vendorSlugs) && (postedOrder.vendor_slugs ?? postedOrder.vendorSlugs).length > 1));
+
+    if (isMarketplaceDispatch) {
+      const rawPaymentStatus = String(
+        order.payment_status ?? order.paymentStatus ??
+        postedOrder.payment_status ?? postedOrder.paymentStatus ?? '',
+      ).trim().toLowerCase();
+      const paymentIsPaid = rawPaymentStatus === 'paid';
+      if (!paymentIsPaid) {
+        const label = rawPaymentStatus === 'unpaid' ? 'Unpaid' : (rawPaymentStatus || 'not set');
+        notify('disabled', {
+          courierName: rawName || requestedPrimary,
+          errorMessage: `Marketplace order payment is ${label}; dispatch is allowed only when the payment status is Paid.`,
+          // A gate refusal is not a courier order — keep it out of the Admin list.
+          skipLedger: true,
+        });
+        return res.status(200).json({
+          success: false,
+          code: 'payment_not_paid',
+          error: rawPaymentStatus === 'unpaid'
+            ? 'This marketplace order is Unpaid. Send to Courier is allowed only after the payment status is Paid.'
+            : 'This marketplace order\'s payment is not confirmed as Paid yet. Dispatch unlocks automatically once the Super Admin sets the payment status to "Paid".',
+          message: 'Marketplace orders can be sent to the courier only when the payment status is Paid.',
+        });
+      }
     }
 
     const result = await sendWithCourierFallback({
