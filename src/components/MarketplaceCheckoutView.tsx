@@ -550,6 +550,21 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
   // picker anymore, so a shopper can never tick the cheaper "Inside City"
   // option from a district they do not live in.
   const customerDistrict = String(form.district || '').trim();
+  const customerArea = String(form.area || '').trim();
+
+  // Alias-aware match of the customer's entered area against the merchant's own
+  // saved sub-districts (e.g. "Savar Sadar" matches "Savar"), so the checkout
+  // prices from the merchant's actual list, not just hardcoded defaults.
+  const areaIsMerchantSubDistrict = (areas: string[] | undefined) => {
+    if (!areas || !customerArea) return false;
+    const needle = customerArea.toLowerCase();
+    return areas.some(
+      (a) =>
+        (a = String(a).toLowerCase()) === needle ||
+        needle.includes(a) ||
+        a.includes(needle),
+    );
+  };
 
   // Per-vendor delivery: each merchant charges by THEIR store district vs the
   // customer's district. An unconfigured older merchant defaults to Dhaka.
@@ -560,11 +575,15 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       const merchantDistrict = (cfg?.baseCity || 'Dhaka') || 'Dhaka';
       const sameCity =
         customerDistrict.toLowerCase() === merchantDistrict.toLowerCase();
+      const inSavedSubAreas = areaIsMerchantSubDistrict(cfg?.subDhakaAreas);
       let zone: 'inside' | 'sub' | 'outside';
       let fee: number;
       if (sameCity) {
         zone = 'inside';
         fee = Number(cfg?.insideDhakaFee ?? 60);
+      } else if (inSavedSubAreas && cfg?.subDhakaFee != null) {
+        zone = 'sub';
+        fee = cfg.subDhakaFee;
       } else if (
         SUB_DHAKA_DISTRICTS.has(customerDistrict) &&
         cfg?.subDhakaFee != null
@@ -583,7 +602,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         merchantDistrict,
       };
     });
-  }, [vendors, vendorConfigs, customerDistrict, itemCount]);
+  }, [vendors, vendorConfigs, customerDistrict, customerArea, itemCount]);
 
   const totalDeliveryCharge = perVendorDelivery.reduce(
     (sum, d) => sum + d.fee,

@@ -88,6 +88,25 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
 
   // Standard Shipping Settings State
   const [shippingForm, setShippingForm] = useState<CodConfig>(codConfig);
+  /** Draft text for a new sub-district tag; committed to `subDhakaAreas` on Add/Enter. */
+  const [newSubDistrict, setNewSubDistrict] = useState('');
+
+  const addSubDistrict = () => {
+    const name = newSubDistrict.trim();
+    if (!name || shippingForm.subDhakaAreas.includes(name)) return;
+    setShippingForm((prev) => ({
+      ...prev,
+      subDhakaAreas: [...prev.subDhakaAreas, name],
+    }));
+    setNewSubDistrict('');
+  };
+
+  const removeSubDistrict = (toRemove: string) => {
+    setShippingForm((prev) => ({
+      ...prev,
+      subDhakaAreas: prev.subDhakaAreas.filter((a) => a !== toRemove),
+    }));
+  };
 
   // Delivery-fee labels derived from the merchant's base city so the shipping
   // panel and the rate calculator are never hardcoded to "Dhaka".
@@ -770,6 +789,62 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl p-3 text-white text-xs placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
               />
             </div>
+          </div>
+
+          {/* ── Sub-District Tags ─────────────────────────────────────────────
+             Merchant picks the areas around their base city that carry the
+             Sub-District fee. Each tag can be removed with ×; new tags are
+             added with the input + Add (or Enter). Saved to the database on
+             "Save Shipping Settings" and re-hydrated on every load, so the
+             checkout always prices from the merchant's own list. */}
+          <div className="space-y-2 pt-2 border-t border-[#2E3548]">
+            <label className="text-xs font-semibold text-slate-300 block">
+              Sub-Districts around {shippingForm.baseCity || 'your district'}
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {shippingForm.subDhakaAreas.map((area) => (
+                <span
+                  key={area}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#202533] border border-[#3A435E] text-[10px] font-bold text-slate-200"
+                >
+                  {area}
+                  <button
+                    type="button"
+                    onClick={() => removeSubDistrict(area)}
+                    aria-label={`Remove ${area}`}
+                    className="w-4 h-4 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-600 transition"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={newSubDistrict}
+                  onChange={(e) => setNewSubDistrict(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addSubDistrict()}
+                  placeholder="e.g. Dumuria"
+                  className="bg-[#181B26] border border-[#3A435E] rounded-lg px-3 py-1.5 text-white text-[11px] focus:outline-none focus:border-[#00D68F] w-32"
+                />
+                <button
+                  type="button"
+                  onClick={addSubDistrict}
+                  disabled={
+                    !newSubDistrict.trim() ||
+                    shippingForm.subDhakaAreas.includes(newSubDistrict.trim())
+                  }
+                  className="px-3 py-1.5 rounded-lg bg-[#00D68F] hover:bg-[#00e699] text-slate-950 text-[11px] font-bold disabled:opacity-50 disabled:cursor-not-allowed transition"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+            <p className="mt-1 text-[10px] text-slate-500">
+              Sub-districts around your base city that carry the{' '}
+              {shippingZoneLabels.sub.toLowerCase()}. Leave blank to fall back to
+              the built-in suburb list.
+            </p>
           </div>
 
           <div className="flex justify-end pt-2">
