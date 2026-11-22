@@ -1969,7 +1969,10 @@ export default function App() {
             outsideDhakaFee: shipping.outsideDhakaFee ?? prev.outsideDhakaFee,
             subDhakaFee: shipping.subDhakaFee ?? prev.subDhakaFee,
             // Restore the merchant's Sub-Dhaka area selection from the database.
-            subDhakaAreas: Array.isArray(shipping.subDhakaAreas) && shipping.subDhakaAreas.length > 0
+            // An explicitly saved list (including an EMPTY one meaning "no
+            // sub-districts") always wins over any stale local copy — this is
+            // what made a removed (×) tag reappear after a reload.
+            subDhakaAreas: Array.isArray(shipping.subDhakaAreas)
               ? shipping.subDhakaAreas
               : prev.subDhakaAreas,
             freeShippingThreshold: shipping.freeShippingThreshold ?? prev.freeShippingThreshold,
@@ -1978,7 +1981,9 @@ export default function App() {
             advanceDeliveryChargeAmount: shipping.advanceDeliveryChargeAmount ?? '',
             // The merchant's base city anchors the checkout's delivery-zone
             // validation, so it must be restored from the database too.
-            baseCity: shipping.baseCity ?? prev.baseCity ?? '',
+            baseCity: shipping.baseCity || prev.baseCity || '',
+            // Shipping instruction notes come from the same stored config.
+            notes: shipping.notes ?? prev.notes ?? '',
           }));
         }
       }
@@ -3127,6 +3132,10 @@ onPlaceOrder={async (newOrder) => {
                 onOpenSubscriptionModal={() => setIsSubscriptionModalOpen(true)}
                 merchant={merchant}
                 platformSettings={platformSettings}
+                codConfig={codConfig}
+                couriers={couriers}
+                onUpdateCodConfig={setCodConfig}
+                onUpdateCouriers={setCouriers}
               />
             )}
 

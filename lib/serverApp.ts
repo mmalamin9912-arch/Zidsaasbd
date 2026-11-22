@@ -539,6 +539,163 @@ export function isMongoConfigured(): boolean {
   return listMongoUriCandidates().length > 0;
 }
 
+/*
+ * ── SRV LOOKUP RESILIENCE (KEEP IN SYNC with lib/db.ts) ──────────────────────
+ *
+ * A `mongodb+srv://` URI needs an SRV DNS query through Node's (c-ares)
+ * resolver. On many Windows / ISP networks that query is REFUSED
+ * (`querySrv ECONNREFUSED`) even though the cluster is reachable and the OS
+ * resolver can look the records up — `nslookup` works while Node fails.
+ *
+ * When that happened, EVERY Mongo write failed quietly (writeStoreConfig only
+ * logs a warning), so a delivery-zone save looked successful but was never
+ * stored anywhere. Recovery: expand the SRV record into a plain seed-list URI
+ * (DNS-over-HTTPS first, then the OS resolver via nslookup) and connect with
+ * that. A network whose DNS already works keeps the original URI untouched.
+ */
+const resolvedMongoUriCache = new Map<string, string>();
+
+function srvHostOf(uri: string): string {
+  const match = /^mongodb\+srv:\/\/[^@]*@([^/?]+)/i.exec(uri);
+  return match ? match[1] : '';
+}
+
+/** SRV records → `host:port` seeds, via DoH then the OS resolver. Never throws. */
+async function lookupMongoSrvSeeds(host: string): Promise<string[]> {
+  // 1) The OS resolver, via `nslookup`. Node's c-ares SRV query is what gets
+  //    refused on these networks, while the OS resolver answers instantly — so
+  //    this is tried FIRST, which also keeps a save fast.
+  const viaOs = await lookupMongoSrvSeedsViaNslookup(host);
+  if (viaOs.length) return viaOs;
+
+  // 2) DNS-over-HTTPS, for hosts without `nslookup` (containers, some Linux).
+  for (const endpoint of ['https://dns.google/resolve', 'https://cloudflare-dns.com/dns-query']) {
+    try {
+      const res = await fetch(`${endpoint}?name=${encodeURIComponent(`_mongodb._tcp.${host}`)}&type=SRV`, {
+        headers: { accept: 'application/dns-json' },
+        signal: AbortSignal.timeout ? AbortSignal.timeout(4000) : undefined,
+      });
+      if (!res.ok) continue;
+      const data: any = await res.json();
+      const seeds = (Array.isArray(data?.Answer) ? data.Answer : [])
+        .filter((a: any) => (!a.type || a.type === 33) && typeof a.data === 'string')
+        .map((a: any) => {
+          const [priority, , port, target] = String(a.data).trim().split(/\s+/);
+          return { host: String(target || '').replace(/\.$/, ''), port: port || '27017', priority: Number(priority) || 0 };
+        })
+        .filter((h: any) => h.host.includes(host))
+        .sort((a: any, b: any) => a.priority - b.priority)
+        .map((h: any) => `${h.host}:${h.port}`);
+      if (seeds.length) return seeds;
+    } catch { /* next resolver */ }
+  }
+  return [];
+}
+
+/** SRV records through the OS resolver (`nslookup -type=SRV`). Never throws. */
+async function lookupMongoSrvSeedsViaNslookup(host: string): Promise<string[]> {
+  try {
+    const { spawnSync } = await import('node:child_process');
+    // `spawnSync` (unlike `execFile`) captures the child's whole stdout on
+    // Windows; `execFile` truncated it to the first stderr warning.
+    const result = spawnSync(
+      process.platform === 'win32' ? 'nslookup.exe' : 'nslookup',
+      ['-type=SRV', `_mongodb._tcp.${host}`],
+      { timeout: 5000, windowsHide: true, encoding: 'utf8' },
+    );
+    const output = String(result.stdout || '');
+    if (!output) return [];
+    const seeds: string[] = [];
+    const nameRe = /svr hostname\s*=\s*([^\s,]+)/gi;
+    let match: RegExpExecArray | null;
+    while ((match = nameRe.exec(output)) !== null) {
+      const clean = match[1].replace(/\.$/, '');
+      const before = output.slice(Math.max(0, match.index - 220), match.index);
+      // A NON-global regex: a global one would carry `lastIndex` from this inner
+      // scan into the outer loop and skip every second record.
+      const portMatch = /port\s*=\s*(\d+)/i.exec(before);
+      const port = portMatch ? portMatch[1] : '27017';
+      // Keep every SRV target that looks like a hostname. Atlas returns its
+      // SHARD hosts (`ac-xxxx-shard-00-00.<zone>.mongodb.net`) — not the
+      // cluster label from the URI — so the check is deliberately generic:
+      // a dotted host is a host, a cluster label is not.
+      if (clean && /[a-z0-9-]+\.[a-z0-9.-]+$/i.test(clean)) seeds.push(`${clean}:${port}`);
+    }
+    return seeds;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The URI to hand to the driver, with `mongodb+srv` expanded when Node's own
+ * SRV lookup is refused. NEVER throws and NEVER adds noticeable latency:
+ *
+ *   • the host resolver works (the common case) → the URI is returned as-is;
+ *   • it fails → the expanded seed list is remembered; an unreachable public
+ *     DNS endpoint can therefore add at most one short delay, once.
+ */
+async function resolveMongoUriForDriver(uri: string): Promise<string> {
+  if (!/^mongodb\+srv:\/\//i.test(uri)) return uri;
+  const cachedUri = resolvedMongoUriCache.get(uri);
+  if (cachedUri) return cachedUri;
+
+  const host = srvHostOf(uri);
+  if (!host) return uri;
+
+  try {
+    const dns = await import('node:dns/promises');
+    const records = await dns.resolveSrv(`_mongodb._tcp.${host}`);
+    if (records?.length) {
+      resolvedMongoUriCache.set(uri, uri);
+      return uri;
+    }
+  } catch { /* fall through to the seed list */ }
+
+  const seeds = await lookupMongoSrvSeeds(host);
+  if (!seeds.length) {
+    // Nothing could expand it — remember that, so each retry does not pay for
+    // the lookups again. The driver then reports its own connection error.
+    resolvedMongoUriCache.set(uri, uri);
+    return uri;
+  }
+
+  const replaced = uri.replace(/^mongodb\+srv:\/\//i, 'mongodb://').replace(`@${host}`, `@${seeds.join(',')}`);
+  const withTls = /[?&](ssl|tls)=/i.test(replaced)
+    ? replaced
+    : `${replaced}${replaced.includes('?') ? '&' : '?'}ssl=true&authSource=admin`;
+  console.log(
+    `[MongoDB] SRV lookup for ${host} was refused by Node's resolver; using an expanded seed list (${seeds.length} hosts).`,
+  );
+  resolvedMongoUriCache.set(uri, withTls);
+  return withTls;
+}
+
+/**
+ * URIs whose CREDENTIALS were rejected. `bad auth` is not a dead cluster — it
+ * points at a configuration mistake (an expired Atlas user, a rotated
+ * password). Retrying it on every request used to add a ~20 second timeout to
+ * each store read, which the dashboard's hydration call could not survive — a
+ * saved Delivery Zone then rendered blank even though the database held it.
+ * A rejected pair is therefore skipped for a few minutes before being retried.
+ */
+const rejectedMongoUris = new Map<string, number>();
+const MONGO_AUTH_RETRY_MS = 5 * 60 * 1000;
+
+/** When the shared pool last failed, and why — see the rapid-fail window. */
+let cachedFailureAt: number | null = null;
+let cachedFailureMessage: string | null = null;
+
+function mongoUriIsRejected(uri: string): boolean {
+  const at = rejectedMongoUris.get(uri);
+  if (!at) return false;
+  if (Date.now() - at > MONGO_AUTH_RETRY_MS) {
+    rejectedMongoUris.delete(uri);
+    return false;
+  }
+  return true;
+}
+
 /**
  * Establish (or reuse) a single shared mongoose connection. Throws a descriptive
  * Error if the connection cannot be established so callers can surface real
@@ -557,6 +714,20 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
 
   if (cached.conn && mongoose.connection.readyState === 1) {
     return cached.conn;
+  }
+
+  /*
+   * RAPID-FAIL WINDOW.
+   *
+   * A pool that just failed (rejected credentials, DNS refusal, a cluster that
+   * does not answer) is remembered for 2 minutes and NOT retried on every
+   * method call. Without this, a single store read could spend ~20 seconds
+   * retrying two dead Atlas URIs — long enough for the dashboard's hydration
+   * request to be abandoned, which is exactly how a SAVED Delivery Zone ended
+   * up rendering as blank fields.
+   */
+  if (cachedFailureAt && Date.now() - cachedFailureAt < 120000) {
+    throw new Error(`[MongoDB] Unavailable (last failure ${Math.round((Date.now() - cachedFailureAt) / 1000)}s ago): ${cachedFailureMessage || 'connection failed'}`);
   }
 
   if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
@@ -583,6 +754,8 @@ export async function connectToDatabase(dbName: string = DB_NAME): Promise<typeo
         // Reset so the next request can retry instead of reusing a dead promise.
         cached.promise = null;
         cached.conn = null;
+        cachedFailureAt = Date.now();
+        cachedFailureMessage = String(err?.message || err);
         console.error('[MongoDB] Connection failed:', err?.message || err);
         throw err;
       });
@@ -614,8 +787,14 @@ async function connectMongoWithFailover(
   const failures: string[] = [];
 
   for (let i = 0; i < candidates.length; i += 1) {
-    const uri = candidates[i];
+    const uri = await resolveMongoUriForDriver(candidates[i]);
     const label = i === 0 ? 'primary' : 'secondary';
+    // A URI whose credentials were just rejected is SKIPPED: retrying it only
+    // stalls the request (see `rejectedMongoUris`).
+    if (mongoUriIsRejected(uri)) {
+      failures.push(`${label}: skipped (credentials rejected recently)`);
+      continue;
+    }
     console.log(
       `[MongoDB] Opening new connection pool via ${label} URI (dbName=${dbName}, host=${redactMongoUri(uri)})`
     );
@@ -634,7 +813,8 @@ async function connectMongoWithFailover(
 
       // Rejected credentials are an operator error, not a dead cluster: trying
       // the other URI would hide a mistyped password behind an unrelated one.
-      if (/bad auth|authentication failed|auth failed/i.test(message)) {
+      if (/bad auth|authentication failed|auth failed|invalid credentials/i.test(message)) {
+        rejectedMongoUris.set(uri, Date.now());
         throw new Error(`[MongoDB] Authentication failed for the ${label} URI. Check the username and password.`);
       }
       // Fall through to the next candidate.
@@ -647,8 +827,8 @@ async function connectMongoWithFailover(
 export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
   // SECONDARY is a preference: with only MONGODB_URI set, the primary is a valid
   // catalogue source, so it is used instead of throwing.
-  const uri = readMongoUri(SECONDARY_DB_ROLE) || readMongoUri('primary');
-  if (!uri) throw new Error('[MongoDB] Neither MONGODB_URI_2 nor MONGODB_URI is set for the secondary database.');
+  const uri = await resolveMongoUriForDriver(readMongoUri(SECONDARY_DB_ROLE) || readMongoUri('primary'));
+  if (!uri || !uri.trim()) throw new Error('[MongoDB] Neither MONGODB_URI_2 nor MONGODB_URI is set for the secondary database.');
   if (secondaryCached.conn?.readyState === 1) return secondaryCached.conn;
   if (!secondaryCached.promise) {
     secondaryCached.promise = mongoose
@@ -1279,21 +1459,15 @@ async function connectToMongoDB() {
   const uri = readMongoUri();
   if (!uri) return;
   if ((mongoose.connection.readyState as number) === 1) return;
-  let lastErr = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      await connectToDatabase(ORDERS_DB_NAME);
-      if ((mongoose.connection.readyState as number) === 1) return;
-    } catch (err: any) {
-      lastErr = err;
-      if (attempt < 2) {
-        await new Promise((res) => setTimeout(res, 200));
-      }
-    }
-  }
-  if (lastErr) {
-    console.error('[Server] connectToMongoDB failed after retries:', lastErr?.message || lastErr);
-    throw lastErr;
+  // ONE attempt. `connectToDatabase` already fail-overs between both URIs and
+  // remembers a recent failure (see its rapid-fail window), so retrying here
+  // only doubled the latency of every dead-database read.
+  try {
+    await connectToDatabase(ORDERS_DB_NAME);
+    if ((mongoose.connection.readyState as number) === 1) return;
+  } catch (err: any) {
+    console.error('[Server] connectToMongoDB failed:', err?.message || err);
+    throw err;
   }
 }
 
@@ -1354,6 +1528,55 @@ function sanitizeServerMerchant(m: any) {
 }
 
 const jsonError = (res: express.Response, status: number, error: string) => res.status(status).json({ ok: false, error });
+
+/**
+ * Resolve with `fallback` after `ms` — the promise keeps running, its result is
+ * simply ignored. Used to keep a slow optional layer (Supabase mirror) from
+ * holding up a request that Mongo/the file mirror can already answer.
+ */
+function withTimeout<T>(promise: Promise<T | null | undefined>, ms: number): Promise<T | null> {
+  return Promise.race([
+    promise.then((value) => (value === undefined ? null : (value as T | null))),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
+/**
+ * SUPABASE CIRCUIT BREAKER.
+ *
+ * Supabase is an OPTIONAL mirror here; the store record also lives in MongoDB and
+ * the local payload file. When the project does not answer in time, every read
+ * used to wait its full 2.5–6 second timeout — and because a store read happens
+ * on EVERY dashboard mount, that latency (not a lost value) is what made the
+ * Delivery Zone form render blank.
+ *
+ * After a timeout the mirror is skipped for 60 seconds, so reads stay fast while
+ * it is down and recover automatically once it answers again.
+ */
+let supabaseSkippedUntil = 0;
+
+function supabaseRecentlyUnreachable(): boolean {
+  return Date.now() < supabaseSkippedUntil;
+}
+
+const SUPABASE_TIMEOUT_MS = 2000;
+
+/** `fetch` against Supabase with the shared timeout + circuit breaker. */
+async function supabaseFetch(url: string, key: string, extraHeaders: Record<string, string> = {}) {
+  if (supabaseRecentlyUnreachable()) {
+    throw new Error('Supabase mirror skipped (recent timeout)');
+  }
+  try {
+    return await fetch(url, {
+      headers: { apikey: key, Authorization: `Bearer ${key}`, ...extraHeaders },
+      signal: AbortSignal.timeout ? AbortSignal.timeout(SUPABASE_TIMEOUT_MS) : undefined,
+    });
+  } catch (err) {
+    // A timeout/abort means the mirror is unreachable — trip the breaker.
+    supabaseSkippedUntil = Date.now() + 60000;
+    throw err;
+  }
+}
 
 async function readStorePayload() {
   try {
@@ -5511,9 +5734,7 @@ async function resolveStoreSlugFromRef(storeRef: string): Promise<string | undef
   // UUID lookup
   if (isUuidLike(clean)) {
     try {
-      const res = await fetch(`${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
-        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
-      });
+      const res = await supabaseFetch(`${supabaseUrl}/rest/v1/stores?id=eq.${encodeURIComponent(clean)}&select=store_slug&limit=1`, supabaseKey);
       if (res.ok) {
         const rows = await res.json();
         if (Array.isArray(rows) && rows.length > 0) return rows[0].store_slug;
@@ -5524,9 +5745,7 @@ async function resolveStoreSlugFromRef(storeRef: string): Promise<string | undef
   // ZID-BD store code lookup
   if (STORE_CODE_RE.test(clean)) {
     try {
-      const res = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(clean)}&select=store_slug&limit=1`, {
-        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` }
-      });
+      const res = await supabaseFetch(`${supabaseUrl}/rest/v1/stores?store_code=ilike.${encodeURIComponent(clean)}&select=store_slug&limit=1`, supabaseKey);
       if (res.ok) {
         const rows = await res.json();
         if (Array.isArray(rows) && rows.length > 0) return rows[0].store_slug;
@@ -5620,9 +5839,7 @@ async function resolveStoreIdentity(rawRef: string): Promise<StoreIdentity> {
         : STORE_CODE_RE.test(ref)
           ? `store_code=eq.${encodeURIComponent(ref)}`
           : `store_slug=eq.${encodeURIComponent(ref.toLowerCase())}`;
-      const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?${filter}&select=id,store_slug,store_code&limit=1`, {
-        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
-      });
+      const sbRes = await supabaseFetch(`${supabaseUrl}/rest/v1/stores?${filter}&select=id,store_slug,store_code&limit=1`, supabaseKey);
       if (sbRes.ok) {
         const rows = await sbRes.json();
         const row = Array.isArray(rows) ? rows[0] : null;
@@ -6948,7 +7165,12 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       // The merchant's own city/district. The checkout derives the delivery
       // zone from it: picking this city enables "Inside City", picking any
       // other district forces "Outside City" and blocks the cheaper option.
-      baseCity: resolveMerchantBaseCity(merchantRecord, storefrontMerchant),
+      // The shipping settings are the FIRST source: the value the merchant
+      // saved on the Delivery Zones page must beat a stale `store_city`/address
+      // field, or a district change would silently revert on the checkout.
+      baseCity:
+        String((shippingConfig as any)?.baseCity ?? '').trim()
+        || resolveMerchantBaseCity(merchantRecord, storefrontMerchant),
       // The district list the checkout's "District / জেলা" dropdown renders.
       districts: BANGLADESH_DISTRICTS,
       // City / Area / Thana options per district — the dependent second
@@ -6958,14 +7180,30 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       // Areas priced as "Sub-Dhaka / Dhaka Suburbs" — the checkout derives the
       // Sub-Dhaka zone from the customer's area, not from their district alone.
       // The MERCHANT'S OWN selection wins: when they have configured one in the
-      // COD settings we ship exactly those areas, so the storefront never
+      // shipping settings we ship exactly those areas, so the storefront never
       // hardcodes the default list over the merchant's choice. Only when they
       // have never configured a selection do we fall back to the built-ins.
-      subDhakaAreas:
-        Array.isArray((shippingConfig as any)?.subDhakaAreas)
-          && (shippingConfig as any).subDhakaAreas.length > 0
-          ? (shippingConfig as any).subDhakaAreas
-          : SUB_DHAKA_AREAS,
+      // The Mongo column (`sub_dhaka_areas` / `sub_districts`) and the
+      // `codConfig` mirror are read as fallbacks, so the tags survive even if
+      // the `shippingConfig` blob is the one copy that failed to land.
+      subDhakaAreas: (() => {
+        const candidates: any[] = [
+          (shippingConfig as any)?.subDhakaAreas,
+          (shippingConfig as any)?.sub_dhaka_areas,
+          merchantRecord?.sub_dhaka_areas,
+          merchantRecord?.sub_districts,
+          (codConfig as any)?.subDhakaAreas,
+        ];
+        for (const list of candidates) {
+          if (Array.isArray(list) && list.length > 0) {
+            return list.map((a: any) => String(a ?? '').trim()).filter(Boolean);
+          }
+        }
+        return SUB_DHAKA_AREAS;
+      })(),
+      // Shipping instruction notes shown under the delivery section.
+      shippingNotes:
+        String((shippingConfig as any)?.notes ?? (codConfig as any)?.notes ?? ''),
       // Public storefront modules. Only published pages/posts are exposed.
       brandConfig,
       navigationMenus,
@@ -7174,9 +7412,9 @@ async function lookupStoreRecord(slug: string): Promise<Record<string, unknown> 
     const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
     if (isConfigured) {
       try {
-        const sbRes = await fetch(
+        const sbRes = await supabaseFetch(
           `${supabaseUrl}/rest/v1/stores?or=(store_slug.eq.${encodeURIComponent(clean)},store_code.ilike.${encodeURIComponent(clean)})&select=*&limit=1`,
-          { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
+          supabaseKey,
         );
         if (sbRes.ok) {
           const rows = await sbRes.json();
@@ -7189,9 +7427,9 @@ async function lookupStoreRecord(slug: string): Promise<Record<string, unknown> 
       }
 
       try {
-        const merchRes = await fetch(
+        const merchRes = await supabaseFetch(
           `${supabaseUrl}/rest/v1/merchants?store_slug=eq.${encodeURIComponent(clean)}&select=*&limit=1`,
-          { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } }
+          supabaseKey,
         );
         if (merchRes.ok) {
           const rows = await merchRes.json();
@@ -7484,15 +7722,37 @@ async function resolveStoreRecordFlexible(ref: string): Promise<Record<string, u
   const clean = String(ref || '').split(':')[0].trim();
   if (!clean) return null;
 
-  // 1. Supabase REST / memory / local payload file.
+  // 1. Local mirror / memory first — it answers instantly and, importantly,
+  //    it needs no network. Asking Supabase first used to add 6+ seconds to
+  //    EVERY store resolution on a slow mirror, long enough for the
+  //    dashboard's hydration call to give up and render blank fields.
   try {
-    const found = await lookupStoreRecord(clean);
+    const payload = await readStorePayload();
+    const merchant = payload.merchant || {};
+    const known = merchant.storeSlug === clean.toLowerCase() || merchant.store_slug === clean.toLowerCase()
+      || (Array.isArray(payload.allMerchants) && payload.allMerchants.some((m: any) =>
+        m && (String(m.storeSlug || m.store_slug || '').toLowerCase() === clean.toLowerCase())));
+    const mem = merchantStore.get(clean.toLowerCase());
+    if (known || mem) {
+      const found = await lookupStoreRecord(clean);
+      if (found) return canonicalizeThemeConfig(found as any);
+    }
+  } catch (e: any) {
+    console.warn('[Server] resolveStoreRecordFlexible local warning:', e?.message || e);
+  }
+
+  // 2. Supabase REST / memory / local payload file. The Supabase probe is capped
+  //    at 2.5s: when the mirror is slow or unreachable, this lookup used to take
+  //    6+ seconds per call and starve the dashboard's hydration request, which
+  //    then rendered the saved Delivery Zone as blank.
+  try {
+    const found = await withTimeout(lookupStoreRecord(clean), 2500);
     if (found) return canonicalizeThemeConfig(found as any);
   } catch (e: any) {
     console.warn('[Server] resolveStoreRecordFlexible lookup warning:', e?.message || e);
   }
 
-  // 2. MongoDB `stores` collection — the same table the products/orders flow
+  // 3. MongoDB `stores` collection — the same table the products/orders flow
   //    resolves against, so a store that exists only there is still found.
   try {
     await connectToMongoDB();
@@ -13046,13 +13306,23 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
       fallback.outsideDhakaFee ?? fallback.outsideCityFee,
       { min: 0 },
     ),
-    subDhakaFee: cfgNumOrNull(src.subDhakaFee, fallback.subDhakaFee, { min: 0 }),
+    subDhakaFee: cfgNumOrNull(
+      src.subDhakaFee ?? src.sub_district_fee ?? src.subDistrictFee,
+      fallback.subDhakaFee ?? fallback.sub_district_fee,
+      { min: 0 },
+    ),
     // The merchant's OWN Sub-Dhaka selection. Stored as normalised display
     // names; the checkout matches with the same alias-aware normalisation.
     // Absent → fall back to the built-in list; present (even empty) → ONLY
     // these areas are priced as suburbs.
+    //
+    // `sub_districts` / `subDistricts` are accepted as aliases so a payload
+    // written under those spellings (or by an older panel) is never dropped —
+    // that is exactly how a saved sub-district list used to vanish on reload.
+    // `subDistrictFees` (an explicit per-area fee map) is kept VERBATIM so a
+    // custom fee per tag survives the database round-trip.
     subDhakaAreas: (() => {
-      const rawList = src.subDhakaAreas ?? src.sub_dhaka_areas;
+      const rawList = src.subDhakaAreas ?? src.sub_dhaka_areas ?? src.sub_districts ?? src.subDistricts;
       if (Array.isArray(rawList)) {
         return rawList.map((a: any) => String(a ?? '').trim()).filter(Boolean);
       }
@@ -13060,8 +13330,29 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
       if (typeof rawList === 'string' && rawList.trim()) {
         return rawList.split(',').map((a: string) => a.trim()).filter(Boolean);
       }
-      const fallbackList = fallback.subDhakaAreas ?? fallback.sub_dhaka_areas;
+      const fallbackList = fallback.subDhakaAreas
+        ?? fallback.sub_dhaka_areas
+        ?? fallback.sub_districts
+        ?? fallback.subDistricts;
       return Array.isArray(fallbackList) ? fallbackList : [];
+    })(),
+    // Optional per-sub-district custom fees: `{ "Savar": 90, "Tongi": 85 }`.
+    // Never invented — only kept when the merchant actually saved one.
+    subDistrictFees: (() => {
+      const rawFees = src.subDistrictFees ?? src.sub_district_fees;
+      if (rawFees && typeof rawFees === 'object' && !Array.isArray(rawFees)) {
+        const out: Record<string, number> = {};
+        for (const [area, fee] of Object.entries(rawFees as Record<string, any>)) {
+          const name = String(area ?? '').trim();
+          const n = Number(fee);
+          if (name && Number.isFinite(n) && n >= 0) out[name] = n;
+        }
+        return out;
+      }
+      const fallbackFees = fallback.subDistrictFees ?? fallback.sub_district_fees;
+      return (fallbackFees && typeof fallbackFees === 'object' && !Array.isArray(fallbackFees))
+        ? (fallbackFees as Record<string, number>)
+        : {};
     })(),
     // 0 / blank disables the offer, so it is normalised to null (= "not offered")
     // rather than a threshold of zero, which would make every order free.
@@ -13069,7 +13360,11 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
       const n = cfgNumOrNull(src.freeShippingThreshold, fallback.freeShippingThreshold, { min: 1 });
       return n === 0 ? null : n;
     })(),
-    maxOrderLimit: cfgNumOrNull(src.maxOrderLimit, fallback.maxOrderLimit, { min: 0 }),
+    maxOrderLimit: cfgNumOrNull(
+      src.maxOrderLimit ?? src.max_order_limit,
+      fallback.maxOrderLimit ?? fallback.max_order_limit,
+      { min: 0 },
+    ),
     // The toggle accepts EVERY spelling the panels/schema have ever used, so a
     // save from PaymentsView, LogisticsView or a flat SQL-shaped payload all
     // land on the same canonical boolean.
@@ -13084,17 +13379,24 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
       src.advanceDeliveryChargeAmount
         ?? src.advance_delivery_charge_amount
         ?? src.advance_amount,
-      fallback.advanceDeliveryChargeAmount,
+      fallback.advanceDeliveryChargeAmount
+        ?? fallback.advance_delivery_charge_amount
+        ?? fallback.advance_amount,
       { min: 0 },
     ),
     // The merchant's base city. Read from the shipping config first, then
     // from the store record's own base-city field, so the checkout's zone
     // validation always has an anchor.
     baseCity: cfgStr(
-      src.baseCity ?? src.base_city ?? src.storeCity ?? src.store_city,
-      fallback.baseCity ?? fallback.base_city ?? '',
+      src.baseCity ?? src.base_city ?? src.baseDistrict ?? src.base_district ?? src.storeCity ?? src.store_city,
+      fallback.baseCity ?? fallback.base_city ?? fallback.baseDistrict ?? fallback.base_district ?? '',
     ).trim(),
-    notes: cfgStr(src.notes, fallback.notes),
+    // Shipping instruction notes — accepted under every spelling the panels
+    // and the SQL schema use, so a note saved once never comes back blank.
+    notes: cfgStr(
+      src.notes ?? src.shippingInstructionNotes ?? src.shipping_instruction_notes,
+      fallback.notes ?? fallback.shippingInstructionNotes ?? fallback.shipping_instruction_notes,
+    ),
   };
 }
 
@@ -13507,6 +13809,42 @@ async function readStoreConfig(name: StoreConfigName, storeRef: string) {
         break;
       }
     }
+    // ── COLUMN FALLBACK (this is what made a save vanish on reload) ────────
+    // The shipping save mirrors every value onto its own column
+    // (`inside_dhaka_fee`, `sub_dhaka_areas`, `base_city`, …). If the store
+    // document has no `shippingConfig` blob at all — a row written by an older
+    // build, or a Mongo mirror that never landed — those columns are the ONLY
+    // copy of the merchant's settings. Without this fallback the read
+    // returned an all-blank config and the dashboard showed "Dhaka"/fees
+    // reset on the next page load.
+    if (!storedFound && name === 'shipping' && record && typeof record === 'object') {
+      const row = record as Record<string, any>;
+      const hasColumn = (k: string) => row[k] !== undefined && row[k] !== null;
+      if (
+        hasColumn('inside_dhaka_fee')
+        || hasColumn('sub_dhaka_areas')
+        || hasColumn('sub_districts')
+        || hasColumn('base_city')
+        || hasColumn('base_district')
+        || hasColumn('free_shipping_threshold')
+      ) {
+        stored = {
+          insideDhakaFee: row.inside_dhaka_fee,
+          outsideDhakaFee: row.outside_dhaka_fee,
+          subDhakaFee: row.sub_dhaka_fee,
+          subDhakaAreas: row.sub_dhaka_areas ?? row.sub_districts,
+          subDistrictFees: row.sub_district_fees,
+          freeShippingThreshold: row.free_shipping_threshold,
+          maxOrderLimit: row.max_order_limit,
+          advanceDeliveryChargeAmount: row.advance_amount,
+          requestAdvanceDeliveryCharge: row.advance_delivery_charge_enabled,
+          isEnabled: row.is_cod_enabled,
+          baseCity: row.base_city ?? row.base_district ?? row.baseCity,
+          notes: row.shipping_instruction_notes,
+        };
+        storedFound = true;
+      }
+    }
   } catch (err: any) {
     console.warn(`[Server] read ${keys[0]} lookup warning:`, err?.message || err);
   }
@@ -13535,6 +13873,10 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
 
   const current = await readStoreConfig(name, slug);
   const next = normalize(patch, current);
+  // The SAVED copy, before this write — the fallback for a column whose value
+  // is blank in the patch. Using it means a partial save (e.g. "Save COD Rules"
+  // which does not send every fee) can never blank a real database value.
+  const fallbackNum = current as Record<string, any>;
   cache.set(slug, next);
   storeConfigSourceCache.set(`${name}:${slug}`, 'cache');
 
@@ -13565,23 +13907,66 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
       // No fallback number is ever invented here.
       if (name === 'shipping') {
         const shippingNext = next as Record<string, any>;
-        $set.inside_dhaka_fee = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
-        $set.sub_dhaka_fee = cfgNumOrNull(shippingNext.subDhakaFee, undefined, { min: 0 });
+        // An EXPLICIT, typed fallback for each column: a partial save (e.g.
+        // "Save COD Rules", which does not send every fee) must never blank a
+        // real value the merchant saved earlier. A fee the merchant DID clear
+        // arrives as '' and stays null — it is only an ABSENT field that falls
+        // back to the stored copy.
+        const pickFee = (srcVal: any, keys: string[]): number | null => {
+          if (srcVal === null || srcVal === '' || srcVal === undefined) {
+            if (srcVal === undefined) {
+              for (const k of keys) {
+                const v = (fallbackNum as any)[k];
+                if (v !== null && v !== '' && v !== undefined && Number.isFinite(Number(v))) return Number(v);
+              }
+            }
+            return null;
+          }
+          return cfgNumOrNull(srcVal, null, { min: 0 });
+        };
+        $set.inside_dhaka_fee = pickFee(shippingNext.insideDhakaFee, ['insideDhakaFee']);
+        $set.sub_dhaka_fee = pickFee(
+          shippingNext.subDhakaFee,
+          ['subDhakaFee', 'sub_district_fee', 'subDistrictFee'],
+        );
         // The merchant's Sub-Dhaka area selection — an explicit array (even an
         // empty one) is stored verbatim so "no suburbs" survives the round-trip.
+        // Written under BOTH the canonical `sub_dhaka_areas` and the
+        // `sub_districts` alias so every reader finds the merchant's list.
         if (Array.isArray(shippingNext.subDhakaAreas)) {
           $set.sub_dhaka_areas = shippingNext.subDhakaAreas;
+          $set.sub_districts = shippingNext.subDhakaAreas;
         }
-        $set.outside_dhaka_fee = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
+        // Per-tag custom fees, only when the merchant saved some.
+        if (shippingNext.subDistrictFees && typeof shippingNext.subDistrictFees === 'object') {
+          $set.sub_district_fees = shippingNext.subDistrictFees;
+        }
+        $set.outside_dhaka_fee = pickFee(shippingNext.outsideDhakaFee, ['outsideDhakaFee']);
+        // Free-shipping threshold + max order limit are first-class columns too.
+        // `min: 1` — 0/blank means "offer disabled" and is stored as NULL.
+        $set.free_shipping_threshold = cfgNumOrNull(
+          shippingNext.freeShippingThreshold,
+          undefined,
+          { min: 1 },
+        );
+        $set.max_order_limit = cfgNumOrNull(shippingNext.maxOrderLimit, undefined, { min: 0 });
         $set.advance_amount = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 }) ?? 0;
         $set.advance_delivery_charge_enabled = shippingNext.requestAdvanceDeliveryCharge === true;
         $set.is_cod_enabled = shippingNext.isEnabled !== false;
+        // Shipping instruction notes, under both spellings.
+        const notesValue = String(shippingNext.notes ?? '');
+        $set.shipping_instruction_notes = notesValue;
         // The merchant's base city, under BOTH spellings, so every reader
         // (Mongo query, Supabase column, storefront payload) finds it.
+        // An empty value is NOT written, so a partial save can never erase the
+        // district the merchant already chose.
         const baseCityValue = String(shippingNext.baseCity ?? '').trim();
         if (baseCityValue) {
           $set.baseCity = baseCityValue;
           $set.base_city = baseCityValue;
+          // The SQL/aligned name for the same value, so `base_district`
+          // readers are never left on a default.
+          $set.base_district = baseCityValue;
         }
       }
 
@@ -13591,8 +13976,24 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
         .updateOne({ $or: orClauses }, update);
 
       if (!storesResult?.matchedCount) {
-        await (mongoose.connection.db.collection('merchants') as any)
+        const merchResult: any = await (mongoose.connection.db.collection('merchants') as any)
           .updateOne({ $or: [{ store_slug: slug }, { storeSlug: slug }] }, update);
+
+        // Neither collection holds this store yet (a brand-new merchant whose
+        // row is still only in Supabase / the file payload). Without an upsert
+        // the save was silently dropped — nothing matched, nothing written —
+        // and every value reverted to a default on the next load. Create the
+        // row under the canonical identity so the write always lands.
+        if (!merchResult?.matchedCount) {
+          await (mongoose.connection.db.collection('stores') as any).updateOne(
+            { store_slug: slug },
+            {
+              $set: { ...$set, store_slug: slug, storeSlug: slug },
+              $setOnInsert: { created_at: new Date().toISOString() },
+            },
+            { upsert: true },
+          );
+        }
       }
     }
   } catch (err: any) {
@@ -13644,10 +14045,17 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
     const insideFeeColumn = cfgNumOrNull(shippingNext.insideDhakaFee, undefined, { min: 0 });
     const subFeeColumn = cfgNumOrNull(shippingNext.subDhakaFee, undefined, { min: 0 });
     const subAreasColumn = Array.isArray(shippingNext.subDhakaAreas) ? shippingNext.subDhakaAreas : null;
+    const subFeesColumn = shippingNext.subDistrictFees && typeof shippingNext.subDistrictFees === 'object'
+      ? shippingNext.subDistrictFees
+      : null;
     const outsideFeeColumn = cfgNumOrNull(shippingNext.outsideDhakaFee, undefined, { min: 0 });
+    const freeThresholdColumn = cfgNumOrNull(shippingNext.freeShippingThreshold, undefined, { min: 1 });
+    const maxOrderLimitColumn = cfgNumOrNull(shippingNext.maxOrderLimit, undefined, { min: 0 });
     const advanceAmountColumn = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 });
     const advanceEnabledColumn = shippingNext.requestAdvanceDeliveryCharge === true;
     const codEnabledColumn = shippingNext.isEnabled !== false;
+    const baseDistrictColumn = String(shippingNext.baseCity ?? '').trim() || null;
+    const notesColumn = String(shippingNext.notes ?? '');
     try {
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
       if (isConfigured) {
@@ -13670,8 +14078,15 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
               // The merchant's own Sub-Dhaka selection, as a JSON column. Sent
               // as null when never configured so the default list applies.
               ...(subAreasColumn !== null ? { sub_dhaka_areas: subAreasColumn } : {}),
+              // The same list under its SQL alias + the per-tag custom fees.
+              ...(subAreasColumn !== null ? { sub_districts: subAreasColumn } : {}),
+              ...(subFeesColumn !== null ? { sub_district_fees: subFeesColumn } : {}),
               outside_dhaka_fee: outsideFeeColumn,
-              base_city: String(shippingNext.baseCity ?? '').trim() || null,
+              free_shipping_threshold: freeThresholdColumn,
+              max_order_limit: maxOrderLimitColumn,
+              shipping_instruction_notes: notesColumn,
+              base_city: baseDistrictColumn,
+              base_district: baseDistrictColumn,
               shipping_config: shippingNext,
               updated_at: new Date().toISOString(),
             },
@@ -13697,8 +14112,14 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
               inside_dhaka_fee: insideFeeColumn,
               sub_dhaka_fee: subFeeColumn,
               ...(subAreasColumn !== null ? { sub_dhaka_areas: subAreasColumn } : {}),
+              ...(subAreasColumn !== null ? { sub_districts: subAreasColumn } : {}),
+              ...(subFeesColumn !== null ? { sub_district_fees: subFeesColumn } : {}),
               outside_dhaka_fee: outsideFeeColumn,
-              base_city: String(shippingNext.baseCity ?? '').trim() || null,
+              free_shipping_threshold: freeThresholdColumn,
+              max_order_limit: maxOrderLimitColumn,
+              shipping_instruction_notes: notesColumn,
+              base_city: baseDistrictColumn,
+              base_district: baseDistrictColumn,
               updated_at: new Date().toISOString(),
             },
             conflictPatchPath: `/rest/v1/stores?store_slug=eq.${encodeURIComponent(slug)}`,
@@ -13720,7 +14141,7 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
           console.warn(
             '[Server] shipping Supabase mirror: columns missing on public.stores —',
             sbResult.droppedColumns.join(', ') || '(row not found, upserted)',
-            '· run supabase/migrations/0012 & 0013 to enable the advance-charge columns.',
+            '· run supabase/migrations/0013-0019 to enable the delivery-zone columns.',
           );
         }
       }
@@ -13840,6 +14261,11 @@ async function mirrorShippingToCodConfig(storeRef: string, shipping: Record<stri
         isEnabled: shipping.isEnabled !== false,
         requestAdvanceDeliveryCharge: shipping.requestAdvanceDeliveryCharge === true,
         advanceDeliveryChargeAmount: shipping.advanceDeliveryChargeAmount ?? '',
+        // The base city + instruction notes travel with the fees too, so the
+        // storefront payload (which hands `codConfig` to the checkout) can
+        // derive the delivery zone without parsing `shippingConfig`.
+        baseCity: shipping.baseCity ?? '',
+        notes: shipping.notes ?? '',
       };
 
       await collection.updateOne({ $or: orClauses }, {
@@ -13883,10 +14309,19 @@ for (const route of CONFIG_ROUTES) {
     const aliases: Record<string, string> = {
       advance_delivery_charge_enabled: 'requestAdvanceDeliveryCharge',
       advance_amount: 'advanceDeliveryChargeAmount',
+      advance_delivery_charge_amount: 'advanceDeliveryChargeAmount',
       inside_dhaka_fee: 'insideDhakaFee',
       sub_dhaka_fee: 'subDhakaFee',
+      sub_district_fee: 'subDhakaFee',
       sub_dhaka_areas: 'subDhakaAreas',
+      sub_districts: 'subDhakaAreas',
+      sub_district_fees: 'subDistrictFees',
       outside_dhaka_fee: 'outsideDhakaFee',
+      free_shipping_threshold: 'freeShippingThreshold',
+      max_order_limit: 'maxOrderLimit',
+      shipping_instruction_notes: 'notes',
+      base_city: 'baseCity',
+      base_district: 'baseCity',
     };
     for (const [column, configKey] of Object.entries(aliases)) {
       if (rest[column] !== undefined && rest[configKey] === undefined) {

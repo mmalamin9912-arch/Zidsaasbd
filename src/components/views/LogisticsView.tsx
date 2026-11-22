@@ -221,6 +221,10 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
   useEffect(() => {
     let active = true;
     (async () => {
+      // ALWAYS read the database — never seed from the local `codConfig` copy.
+      // The `hydrating` flag below also keeps a second run (e.g. when the
+      // merchant profile object refreshes after an unrelated save) from
+      // overwriting edits the merchant has already made on this tab.
       const stored = await loadShippingConfig(merchant?.storeSlug);
       if (!active || !stored) return;
       setShippingForm((prev) => ({
@@ -230,6 +234,8 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
         outsideDhakaFee: stored.outsideDhakaFee ?? '',
         subDhakaFee: stored.subDhakaFee ?? '',
         // The merchant's own suburb selection (from their COD settings).
+        // An empty saved list means "no sub-districts" and is kept as such —
+        // it must never fall back to a stale local/default list.
         subDhakaAreas: Array.isArray(stored.subDhakaAreas) ? stored.subDhakaAreas : [],
         freeShippingThreshold: stored.freeShippingThreshold ?? '',
         maxOrderLimit: stored.maxOrderLimit ?? '',
@@ -237,7 +243,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
         advanceDeliveryChargeAmount: stored.advanceDeliveryChargeAmount ?? '',
         // The merchant's base city anchors the checkout's zone validation, so
         // it must be restored from the database like every other fee field.
-        baseCity: stored.baseCity ?? merchant?.baseCity ?? '',
+        // Only a store that never saved one falls back to the profile value.
+        baseCity: stored.baseCity || merchant?.baseCity || '',
+        notes: stored.notes ?? prev.notes ?? '',
       }));
     })();
 
@@ -275,7 +283,11 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     })();
 
     return () => { active = false; };
-  }, [merchant?.storeSlug, merchant?.baseCity]);
+    // Deliberately keyed on the store ONLY. `merchant.baseCity` used to be a
+    // dependency, so any profile refresh re-ran this effect and re-seeded the
+    // form — wiping unsaved (or just-saved) district / fee / sub-district
+    // edits. The database is the single source of truth for this form.
+  }, [merchant?.storeSlug]);
 
   /**
    * Persist the primary → fallback routing.
@@ -317,7 +329,25 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     setIsSavingShipping(true);
     // Update local state first so the UI feels instant, then persist to Mongo.
     onUpdateCodConfig(shippingForm);
-    const saved = await saveShippingConfig(merchant?.storeSlug, shippingForm);
+    // Send the COMPLETE, explicitly-shaped payload. Every field the Delivery
+    // Zones page owns — base city, all three fees, the free-shipping
+    // threshold, the advance charge, the instruction notes and the full
+    // sub-district list (tags the merchant added AND removed via ×) — is
+    // present in ONE write, so nothing is left to a stale default.
+    const payload = {
+      isEnabled: shippingForm.isEnabled !== false,
+      baseCity: String(shippingForm.baseCity ?? '').trim(),
+      insideDhakaFee: shippingForm.insideDhakaFee ?? '',
+      outsideDhakaFee: shippingForm.outsideDhakaFee ?? '',
+      subDhakaFee: shippingForm.subDhakaFee ?? '',
+      subDhakaAreas: Array.isArray(shippingForm.subDhakaAreas) ? [...shippingForm.subDhakaAreas] : [],
+      freeShippingThreshold: shippingForm.freeShippingThreshold ?? '',
+      maxOrderLimit: shippingForm.maxOrderLimit ?? '',
+      requestAdvanceDeliveryCharge: shippingForm.requestAdvanceDeliveryCharge === true,
+      advanceDeliveryChargeAmount: shippingForm.advanceDeliveryChargeAmount ?? '',
+      notes: shippingForm.notes ?? '',
+    };
+    const saved = await saveShippingConfig(merchant?.storeSlug, payload);
     setIsSavingShipping(false);
 
     if (!saved) {
@@ -326,6 +356,30 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
       });
       return;
     }
+
+    // Write the SERVER's normalised copy back into the form (and the shared
+    // codConfig), so what the merchant now sees is exactly what the database
+    // holds — no drift between the panel and the checkout.
+    setShippingForm((prev) => ({
+      ...prev,
+      isEnabled: saved.isEnabled,
+      baseCity: saved.baseCity ?? '',
+      insideDhakaFee: saved.insideDhakaFee ?? '',
+      outsideDhakaFee: saved.outsideDhakaFee ?? '',
+      subDhakaFee: saved.subDhakaFee ?? '',
+      subDhakaAreas: Array.isArray(saved.subDhakaAreas) ? saved.subDhakaAreas : [],
+      freeShippingThreshold: saved.freeShippingThreshold ?? '',
+      maxOrderLimit: saved.maxOrderLimit ?? '',
+      requestAdvanceDeliveryCharge: saved.requestAdvanceDeliveryCharge === true,
+      advanceDeliveryChargeAmount: saved.advanceDeliveryChargeAmount ?? '',
+      notes: saved.notes ?? '',
+    }));
+    onUpdateCodConfig({
+      ...shippingForm,
+      ...saved,
+      subDhakaAreas: Array.isArray(saved.subDhakaAreas) ? saved.subDhakaAreas : [],
+    } as CodConfig);
+
     toast.success('Shipping settings saved successfully!', {
       description: 'Delivery fees are now live on your storefront checkout.',
     });

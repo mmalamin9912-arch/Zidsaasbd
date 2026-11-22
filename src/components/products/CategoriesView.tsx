@@ -533,7 +533,7 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
           }
           return cat;
         }));
-        toastSuccess('Category updated successfully!');
+        toast.success('Category updated successfully!');
       } else {
         // Create new
         const newCategory: CategoryNode = {
@@ -553,12 +553,12 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
           noIndex: formNoIndex,
         };
         setCategories(prev => [newCategory, ...prev]);
-        toastSuccess('Category created successfully!');
+        toast.success('Category created successfully!');
       }
 
       setViewMode('list');
     } catch (error) {
-      toastError('Failed to save category. Please try again.');
+      toast.error('Failed to save category. Please try again.');
     } finally {
       setIsSaving(false);
     }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Product, ProductSubTab, ProductType, MerchantProfile } from '../../types';
+import { Product, ProductSubTab, ProductType, MerchantProfile, CodConfig, CourierService } from '../../types';
 import { buildProductDbPayload, mapApiProduct, postCatalogJson, upsertProductToSupabase } from '../../utils/catalogPayload';
 import { resolveActiveStoreSlug } from '../../lib/activeStore';
 import { downscaleImage } from '../../utils/imageUtils';
@@ -31,7 +31,8 @@ import {
   Lock,
   ChevronRight,
   Sparkles,
-  FolderTree
+  FolderTree,
+  Truck
 } from 'lucide-react';
 
 // Server-side product writes touch MongoDB + the file payload + a Supabase
@@ -39,6 +40,21 @@ import {
 // fired mid-request and the save surfaced as a "timed out" failure even though
 // the server kept working. 15s matches the server's own IO budget.
 const PRODUCT_SAVE_TIMEOUT_MS = 15000;
+
+/** Empty delivery-zone config used when the parent does not pass one in. */
+const DEFAULT_DELIVERY_ZONE_CONFIG: CodConfig = {
+  isEnabled: true,
+  insideDhakaFee: '',
+  outsideDhakaFee: '',
+  subDhakaFee: '',
+  subDhakaAreas: [],
+  freeShippingThreshold: '',
+  maxOrderLimit: '',
+  requestAdvanceDeliveryCharge: false,
+  advanceDeliveryChargeAmount: '',
+  baseCity: '',
+  notes: '',
+};
 
 import { ProductTypeModal } from '../products/ProductTypeModal';
 import { SingleProductForm } from '../products/SingleProductForm';
@@ -49,6 +65,7 @@ import { FiltersView } from '../products/FiltersView';
 import { CustomFieldsView } from '../products/CustomFieldsView';
 import { OptionsLibraryView } from '../products/OptionsLibraryView';
 import { CategoriesView } from '../products/CategoriesView';
+import { LogisticsView } from './LogisticsView';
 
 interface ProductsViewProps {
   products: Product[];
@@ -58,6 +75,11 @@ interface ProductsViewProps {
   onOpenSubscriptionModal?: () => void;
   merchant?: MerchantProfile;
   platformSettings?: any;
+  /** Delivery-zone settings, shown by the Products → Delivery Zones tab. */
+  codConfig?: CodConfig;
+  couriers?: CourierService[];
+  onUpdateCodConfig?: (config: CodConfig) => void;
+  onUpdateCouriers?: (couriers: CourierService[]) => void;
 }
 
 export const ProductsView: React.FC<ProductsViewProps> = ({
@@ -68,6 +90,10 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   onOpenSubscriptionModal,
   merchant,
   platformSettings,
+  codConfig,
+  couriers,
+  onUpdateCodConfig,
+  onUpdateCouriers,
 }) => {
   const { success: toastSuccess, error: toastError } = useToast();
   // Active merchant's store slug: prop (route/session) > logged-in session > legacy data.
@@ -90,6 +116,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   const subNavItems: { id: ProductSubTab; label: string; icon: React.ElementType }[] = [
     { id: 'all_products', label: 'All products', icon: Boxes },
     { id: 'categories', label: 'Categories', icon: FolderTree },
+    // Delivery Zones (shipping fees, base district and the sub-district tags)
+    // lives right after Categories, exactly where merchants look for it.
+    { id: 'delivery_zones', label: 'Delivery Zones', icon: Truck },
     { id: 'preorder_campaigns', label: 'Preorder campaigns', icon: Clock },
     { id: 'inventory', label: 'Inventory', icon: Warehouse },
     { id: 'stock_changes', label: 'Stock changes', icon: History },
@@ -421,6 +450,18 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
 
       {/* Render sub-views if sub-tab is not 'all_products' */}
       {activeSubTab === 'categories' && <CategoriesView products={products} storeSlug={merchant?.storeSlug || 'default'} onOpenSubscriptionModal={onOpenSubscriptionModal} />}
+      {/* Delivery Zones — the SAME LogisticsView the Logistics route renders, so
+          there is ONE shipping-settings form and ONE persistence path: the
+          values a merchant edits here are the values the checkout reads. */}
+      {activeSubTab === 'delivery_zones' && (
+        <LogisticsView
+          merchant={merchant as MerchantProfile}
+          couriers={couriers || []}
+          codConfig={codConfig || DEFAULT_DELIVERY_ZONE_CONFIG}
+          onUpdateCouriers={onUpdateCouriers || (() => {})}
+          onUpdateCodConfig={onUpdateCodConfig || (() => {})}
+        />
+      )}
       {activeSubTab === 'inventory' && <InventoryView products={products} onUpdateProducts={onUpdateProducts} />}
       {activeSubTab === 'preorder_campaigns' && <PreorderView products={products} />}
       {activeSubTab === 'stock_changes' && <StockChangesView />}

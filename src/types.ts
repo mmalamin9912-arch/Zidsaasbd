@@ -27,6 +27,9 @@ export type NavigationTab =
 export type ProductSubTab =
   | 'all_products'
   | 'categories'
+  // Shipping fees / base district / sub-district tags. Kept under Products,
+  // right after Categories.
+  | 'delivery_zones'
   | 'preorder_campaigns'
   | 'inventory'
   | 'stock_changes'

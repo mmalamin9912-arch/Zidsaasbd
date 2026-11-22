@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { resolveSrv } from 'node:dns/promises';
 
 /**
  * Robust MongoDB connection handler for serverless environments (Vercel).
@@ -129,6 +130,144 @@ export function isMongoConfigured(role?: MongoConnectionRole): boolean {
   // With a role → "is that specific URI set?" (unchanged behaviour).
   if (!role) return listMongoUriCandidates().length > 0;
   return Boolean(readMongoUri(role));
+}
+
+/*
+ * ── SRV LOOKUP RESILIENCE ────────────────────────────────────────────────────
+ *
+ * A `mongodb+srv://` URI needs an SRV DNS query (`_mongodb._tcp.<cluster>`).
+ * Node resolves it through the HOST's resolver, and on many Windows / ISP /
+ * corporate DNS setups that query is REFUSED (`querySrv ECONNREFUSED`) even
+ * though the cluster itself is perfectly reachable through a public resolver
+ * (8.8.8.8 / 1.1.1.1).
+ *
+ * When that happened, EVERY Mongo write failed quietly in `writeStoreConfig`
+ * (`console.warn` only) — so a merchant saved their delivery zones, the toast
+ * said "saved", and a reload showed defaults again. The values were never in
+ * any database at all.
+ *
+ * Recovery: if the host resolver fails for a `+srv` URI, look the SRV records up
+ * via a public DNS-over-HTTPS resolver (Cloudflare, then Google), rewrite the
+ * URI as a plain `mongodb://host1,host2,.../?ssl=true` seed list and use THAT.
+ * Ordinary DNS environments are untouched — the original URI is returned as-is.
+ */
+const DNS_OVER_HTTPS = [
+  // Google's JSON API first: it always answers `application/json`. Cloudflare's
+  // `/dns-query` speaks wireformat unless the request is exactly right, which
+  // makes it an unreliable first choice from a plain fetch.
+  'https://dns.google/resolve',
+  'https://cloudflare-dns.com/dns-query',
+];
+
+const resolvedUriCache = new Map<string, string>();
+
+function srvHostOf(uri: string): string {
+  const match = /^mongodb\+srv:\/\/[^@]*@([^/?]+)/i.exec(uri);
+  return match ? match[1] : '';
+}
+
+async function lookupSrvViaHttps(host: string): Promise<string[]> {
+  for (const endpoint of DNS_OVER_HTTPS) {
+    try {
+      const res = await fetch(`${endpoint}?name=${encodeURIComponent(`_mongodb._tcp.${host}`)}&type=SRV`, {
+        headers: { accept: 'application/dns-json' },
+        signal: AbortSignal.timeout ? AbortSignal.timeout(6000) : undefined,
+      });
+      if (!res.ok) continue;
+      const data: any = await res.json();
+      const hosts = (Array.isArray(data?.Answer) ? data.Answer : [])
+        // SRV = type 33. Some resolvers omit `type`; accept any answer that
+        // carries a target ending in the cluster host.
+        .filter((a: any) => (!a.type || a.type === 33) && typeof a.data === 'string')
+        .map((a: any) => {
+          const [priority, weight, port, target] = String(a.data).trim().split(/\s+/);
+          return { host: String(target || '').replace(/\.$/, ''), port: port || '27017', priority: Number(priority) || 0 };
+        })
+        .filter((h) => h.host.includes(host))
+        .sort((a: any, b: any) => a.priority - b.priority);
+      if (hosts.length) return hosts.map((h: any) => `${h.host}:${h.port}`);
+    } catch {
+      /* try the next resolver */
+    }
+  }
+
+  // Last resort: the OS resolver via `nslookup`, which does NOT go through
+  // Node's (refused) c-ares SRV path. This is what makes the fallback work on a
+  // Windows/ISP network where Node cannot look the records up at all.
+  return lookupSrvViaNslookup(host);
+}
+
+/** Parse `nslookup -type=SRV` output into `host:port` seeds. Never throws. */
+async function lookupSrvViaNslookup(host: string): Promise<string[]> {
+  try {
+    const { spawnSync } = await import('node:child_process');
+    // `spawnSync` (unlike `execFile`) captures the child's whole stdout on
+    // Windows; `execFile` truncated it to the first stderr warning.
+    const result = spawnSync(
+      process.platform === 'win32' ? 'nslookup.exe' : 'nslookup',
+      ['-type=SRV', `_mongodb._tcp.${host}`],
+      { timeout: 5000, windowsHide: true, encoding: 'utf8' },
+    );
+    const output = String(result.stdout || '');
+    if (!output) return [];
+    const seeds: string[] = [];
+    const nameRe = /svr hostname\s*=\s*([^\s,]+)/gi;
+    let match: RegExpExecArray | null;
+    while ((match = nameRe.exec(output)) !== null) {
+      const clean = match[1].replace(/\.$/, '');
+      // The port for this record sits in the text just before its hostname.
+      const before = output.slice(Math.max(0, match.index - 220), match.index);
+      // A NON-global regex here: a global one would carry `lastIndex` from this
+      // inner scan into the outer loop and skip every second record.
+      const portMatch = /port\s*=\s*(\d+)/i.exec(before);
+      const port = portMatch ? portMatch[1] : '27017';
+      // Keep every SRV target that looks like a hostname. Atlas returns its
+      // SHARD hosts (`ac-xxxx-shard-00-00.<zone>.mongodb.net`) — not the
+      // cluster label from the URI — so the check is deliberately generic:
+      // a dotted host is a host, a cluster label is not.
+      if (clean && /[a-z0-9-]+\.[a-z0-9.-]+$/i.test(clean)) seeds.push(`${clean}:${port}`);
+    }
+    return seeds;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The URI to hand to the driver, with `mongodb+srv` expanded when the host
+ * resolver refuses the SRV query. Never throws; an unusable URI is returned
+ * unchanged so the driver reports its own (clear) error.
+ */
+async function resolveMongoUriForDriver(uri: string): Promise<string> {
+  if (!/^mongodb\+srv:\/\//i.test(uri)) return uri;
+  const cached = resolvedUriCache.get(uri);
+  if (cached) return cached;
+
+  const host = srvHostOf(uri);
+  if (!host) return uri;
+
+  try {
+    const records = await resolveSrv(`_mongodb._tcp.${host}`);
+    if (records?.length) {
+      // The host resolver works — keep the original (supported) URI.
+      resolvedUriCache.set(uri, uri);
+      return uri;
+    }
+  } catch {
+    /* fall through to DoH */
+  }
+
+  const seeds = await lookupSrvViaHttps(host);
+  if (!seeds.length) return uri;
+
+  // mongodb+srv://user:pass@cluster/db?opts  →  mongodb://user:pass@h1:27017,h2:27017/db?opts&ssl=true
+  const replaced = uri.replace(/^mongodb\+srv:\/\//i, 'mongodb://').replace(`@${host}`, `@${seeds.join(',')}`);
+  const withTls = /[?&](ssl|tls)=/i.test(replaced)
+    ? replaced
+    : `${replaced}${replaced.includes('?') ? '&' : '?'}ssl=true&authSource=admin`;
+  console.log(`[MongoDB] SRV lookup for ${host} refused by the host resolver; using DNS-over-HTTPS seed list (${seeds.length} hosts).`);
+  resolvedUriCache.set(uri, withTls);
+  return withTls;
 }
 
 export const mongooseConnectionPromise: Promise<typeof mongoose> | null = null;
@@ -294,7 +433,7 @@ async function connectWithFailover(
   const failures: string[] = [];
 
   for (let i = 0; i < candidates.length; i += 1) {
-    const uri = candidates[i];
+    const uri = await resolveMongoUriForDriver(candidates[i]);
     const label = i === 0 ? 'primary' : 'secondary';
     console.log(`[MongoDB] Opening new connection pool via ${label} URI (dbName=${dbName}, host=${redactUri(uri)})`);
 
@@ -333,8 +472,8 @@ export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Prom
    * MONGODB_URI set used to throw here and every catalogue read silently
    * dropped to the file mirror; the primary is a perfectly good catalog
    * source, so it is the fallback rather than an error. */
-  const uri = readMongoUri('secondary') || readMongoUri('primary');
-  if (!uri) {
+  const uri = await resolveMongoUriForDriver(readMongoUri('secondary') || readMongoUri('primary'));
+  if (!uri || /^\s*$/.test(uri)) {
     throw new Error('[MongoDB] Neither MONGODB_URI_2 nor MONGODB_URI is set for the secondary database.');
   }
   if (secondaryCached.conn?.readyState === 1) return secondaryCached.conn;

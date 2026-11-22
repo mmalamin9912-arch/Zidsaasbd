@@ -13,6 +13,7 @@ import { type BasketLine, readPersistedBasket } from '../lib/marketplaceBasket';
 import { notifyOrdersChanged } from '../lib/orderSync';
 import { loadShippingConfig } from '../lib/logisticsApi';
 import type { ShippingConfig } from '../lib/logisticsApi';
+import { normalizeCityName } from '../../lib/deliveryZones';
 
 /**
  * The UNIFIED marketplace checkout — `/marketplace/checkout`.
@@ -518,7 +519,9 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     [lines],
   );
   // Per-vendor shipping configs (each merchant's store district + own rates),
-  // loaded once so every seller prices the basket from their own location.
+  // loaded fresh from the database on EVERY mount so a value the merchant
+  // saved in the dashboard / Delivery Zones page shows here immediately —
+  // no localStorage copy, no stale default.
   const [vendorConfigs, setVendorConfigs] = useState<Map<string, ShippingConfig | null>>(
     new Map()
   );
@@ -546,6 +549,34 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     };
   }, [vendors]);
 
+  // A merchant may save their Delivery Zone settings in another tab while this
+  // checkout is open. Re-hydrate when the tab becomes visible again or the
+  // page is restored from the back/forward cache, so the fee shown to the
+  // customer is never the one that applied before the save.
+  useEffect(() => {
+    const reload = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const map = new Map<string, ShippingConfig | null>();
+      void Promise.all(
+        vendors.map(async (v) => {
+          try {
+            map.set(v.vendorId, await loadShippingConfig(v.vendorSlug || v.vendorId || undefined));
+          } catch {
+            map.set(v.vendorId, null);
+          }
+        })
+      ).then(() => setVendorConfigs(map));
+    };
+    window.addEventListener('focus', reload);
+    window.addEventListener('pageshow', reload);
+    document.addEventListener('visibilitychange', reload);
+    return () => {
+      window.removeEventListener('focus', reload);
+      window.removeEventListener('pageshow', reload);
+      document.removeEventListener('visibilitychange', reload);
+    };
+  }, [vendors]);
+
   // The customer's chosen district drives everything — there is no manual zone
   // picker anymore, so a shopper can never tick the cheaper "Inside City"
   // option from a district they do not live in.
@@ -553,17 +584,22 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
   const customerArea = String(form.area || '').trim();
 
   // Alias-aware match of the customer's entered area against the merchant's own
-  // saved sub-districts (e.g. "Savar Sadar" matches "Savar"), so the checkout
-  // prices from the merchant's actual list, not just hardcoded defaults.
+  // saved sub-districts (e.g. "Savar Sadar" matches a saved "Savar", and
+  // "Keranigonj" matches "Keraniganj"), so the checkout prices from the
+  // merchant's actual list — including tags they added themselves — not just
+  // hardcoded defaults. Compared on the canonical key with a minimum length so
+  // a short tag ("sa") can never swallow an unrelated area.
   const areaIsMerchantSubDistrict = (areas: string[] | undefined) => {
     if (!areas || !customerArea) return false;
-    const needle = customerArea.toLowerCase();
-    return areas.some(
-      (a) =>
-        (a = String(a).toLowerCase()) === needle ||
-        needle.includes(a) ||
-        a.includes(needle),
-    );
+    const needle = normalizeCityName(customerArea);
+    if (!needle) return false;
+    return areas.some((a) => {
+      const key = normalizeCityName(a);
+      if (!key) return false;
+      return key === needle
+        || (key.length >= 4 && needle.includes(key))
+        || (needle.length >= 4 && key.includes(needle));
+    });
   };
 
   // Per-vendor delivery: each merchant charges by THEIR store district vs the
