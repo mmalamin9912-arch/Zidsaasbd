@@ -357,6 +357,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
   /** Anchors the fixed-position district menu so it is never clipped by the
    * delivery section's `overflow-hidden` and always sits above overlays. */
   const districtBtnRef = useRef<HTMLButtonElement>(null);
+  const districtMenuRef = useRef<HTMLDivElement>(null);
   const set = (key: keyof typeof form) => (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
   ) => setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -372,12 +373,17 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     }));
   }, [session]);
 
-  // Close the district menu when clicking outside, pressing Escape, or
-  // scrolling — so the crisp list never stays open over the page.
+  // Close the district menu when clicking outside it or pressing Escape.
+  // Clicking or scrolling *inside* the list does not close it, so a shopper
+  // can reach lower districts and select one reliably.
   useEffect(() => {
     if (!districtOpen) return;
     const onDoc = (e: MouseEvent) => {
-      if (districtBtnRef.current && !districtBtnRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const isInside =
+        (districtBtnRef.current && districtBtnRef.current.contains(target)) ||
+        (districtMenuRef.current && districtMenuRef.current.contains(target));
+      if (!isInside) {
         setDistrictOpen(false);
         setDistrictMenuRect(null);
       }
@@ -388,17 +394,11 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
         setDistrictMenuRect(null);
       }
     };
-    const onScroll = () => {
-      setDistrictOpen(false);
-      setDistrictMenuRect(null);
-    };
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onKey);
-    window.addEventListener('scroll', onScroll, true);
     return () => {
       document.removeEventListener('mousedown', onDoc);
       document.removeEventListener('keydown', onKey);
-      window.removeEventListener('scroll', onScroll, true);
     };
   }, [districtOpen]);
 
@@ -980,9 +980,17 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                         onClick={(e) => {
                           e.stopPropagation();
                           const rect = districtBtnRef.current!.getBoundingClientRect();
-                          setDistrictMenuRect({ left: rect.left, top: rect.bottom + 6, width: rect.width });
+                          // Position the menu flush against the trigger (no hover gap).
+                          setDistrictMenuRect({ left: rect.left, top: rect.bottom, width: rect.width });
                           setDistrictOpen((open) => !open);
                         }}
+                        // Click-based open state: the menu stays open while the
+                        // mouse moves from the trigger into the list, so there is
+                        // no hover-gap-driven premature close.
+                        // Click-based open state: the menu stays open while the
+                        // mouse moves from the trigger into the list (no hover
+                        // gap), so mouse-leave does not close it prematurely.
+                        onMouseLeave={() => {}}
                         aria-haspopup="listbox"
                         aria-expanded={districtOpen}
                         aria-label={t('Choose your district', 'আপনার জেলা বেছে নিন')}
@@ -997,18 +1005,21 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                       </button>
                       {districtOpen && districtMenuRect && (
                         <div
+                          ref={districtMenuRef}
                           role="listbox"
                           aria-label={t('Choose your district', 'আপনার জেলা বেছে নিন')}
-                          className="z-50 rounded-xl border bg-white py-1.5 shadow-2xl text-slate-900"
+                          className="z-50 rounded-xl border bg-white py-1.5 shadow-2xl text-slate-900 max-h-60 overflow-y-auto"
                           style={{
                             position: 'fixed',
                             left: districtMenuRect.left,
                             top: districtMenuRect.top,
                             minWidth: districtMenuRect.width,
-                            maxHeight: 260,
-                            overflowY: 'auto',
                             borderColor: THEME.line,
                           }}
+                          // Clicking/scrolling inside the list must not close it
+                          // before an option is selected.
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onScroll={(e) => e.stopPropagation()}
                         >
                           {DISTRICTS.map((d) => (
                             <button
@@ -1016,6 +1027,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                               type="button"
                               role="option"
                               aria-selected={form.district === d}
+                              onMouseDown={(e) => e.stopPropagation()}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setForm((f) => ({ ...f, district: d }));
