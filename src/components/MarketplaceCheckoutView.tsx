@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ChevronDown,
   ChevronLeft, Truck, Wallet, CreditCard, Banknote, ShieldCheck,
   Loader2, CheckCircle2, Package, Store, MapPin, User, Phone, Mail, Copy, Check,
   AlertCircle, ArrowRight,
@@ -347,6 +348,15 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
     address: '',
     note: '',
   });
+  const [districtOpen, setDistrictOpen] = useState(false);
+  const [districtMenuRect, setDistrictMenuRect] = useState<{
+    left: number;
+    top: number;
+    width: number;
+  } | null>(null);
+  /** Anchors the fixed-position district menu so it is never clipped by the
+   * delivery section's `overflow-hidden` and always sits above overlays. */
+  const districtBtnRef = useRef<HTMLButtonElement>(null);
   const set = (key: keyof typeof form) => (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
   ) => setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -361,6 +371,36 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
       email: f.email || session.email || '',
     }));
   }, [session]);
+
+  // Close the district menu when clicking outside, pressing Escape, or
+  // scrolling — so the crisp list never stays open over the page.
+  useEffect(() => {
+    if (!districtOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (districtBtnRef.current && !districtBtnRef.current.contains(e.target as Node)) {
+        setDistrictOpen(false);
+        setDistrictMenuRect(null);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setDistrictOpen(false);
+        setDistrictMenuRect(null);
+      }
+    };
+    const onScroll = () => {
+      setDistrictOpen(false);
+      setDistrictMenuRect(null);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [districtOpen]);
 
   /**
    * PAYMENT — same rails as the merchant storefront's own checkout.
@@ -933,16 +973,70 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                     <span className="mb-1 flex items-center gap-1 text-[11px] font-bold text-slate-600">
                       <MapPin className="h-3 w-3" /> {t('District', 'জেলা')} *
                     </span>
-                    <select
-                      value={form.district}
-                      onChange={set('district')}
-                      className="w-full rounded-lg border px-3 py-2.5 text-[13px] text-slate-800 focus:border-[#3b2fd6] focus:outline-none"
-                      style={{ borderColor: THEME.line }}
-                    >
-                      {DISTRICTS.map((d) => (
-                        <option key={d} value={d}>{d}</option>
-                      ))}
-                    </select>
+                    <div className="relative">
+                      <button
+                        ref={districtBtnRef}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const rect = districtBtnRef.current!.getBoundingClientRect();
+                          setDistrictMenuRect({ left: rect.left, top: rect.bottom + 6, width: rect.width });
+                          setDistrictOpen((open) => !open);
+                        }}
+                        aria-haspopup="listbox"
+                        aria-expanded={districtOpen}
+                        aria-label={t('Choose your district', 'আপনার জেলা বেছে নিন')}
+                        className="w-full flex items-center justify-between rounded-lg border px-3 py-2.5 text-[13px] text-slate-800 focus:border-[#3b2fd6] focus:outline-none transition"
+                        style={{ borderColor: THEME.line, backgroundColor: '#fff' }}
+                      >
+                        {form.district}
+                        <ChevronDown
+                          className="h-4 w-4 shrink-0 text-slate-400"
+                          style={{ transform: districtOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}
+                        />
+                      </button>
+                      {districtOpen && districtMenuRect && (
+                        <div
+                          role="listbox"
+                          aria-label={t('Choose your district', 'আপনার জেলা বেছে নিন')}
+                          className="z-50 rounded-xl border bg-white py-1.5 shadow-2xl text-slate-900"
+                          style={{
+                            position: 'fixed',
+                            left: districtMenuRect.left,
+                            top: districtMenuRect.top,
+                            minWidth: districtMenuRect.width,
+                            maxHeight: 260,
+                            overflowY: 'auto',
+                            borderColor: THEME.line,
+                          }}
+                        >
+                          {DISTRICTS.map((d) => (
+                            <button
+                              key={d}
+                              type="button"
+                              role="option"
+                              aria-selected={form.district === d}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setForm((f) => ({ ...f, district: d }));
+                                setDistrictOpen(false);
+                                setDistrictMenuRect(null);
+                              }}
+                              className={`relative w-full flex items-center justify-between px-3 py-2 text-[13px] text-left transition cursor-pointer ${
+                                form.district === d
+                                  ? 'font-bold bg-[#f4f5ff] text-[#3b2fd6]'
+                                  : 'text-slate-800 hover:bg-[#f4f5ff]'
+                              }`}
+                            >
+                              {d}
+                              {form.district === d && (
+                                <Check className="w-3.5 h-3.5 shrink-0 text-[#3b2fd6]" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </label>
                   {/* ── AUTO-DETECTED DELIVERY BREAKDOWN (read-only) ── */}
                   <label className="block">
