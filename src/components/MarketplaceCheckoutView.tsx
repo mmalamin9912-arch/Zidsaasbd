@@ -986,10 +986,7 @@ export const MarketplaceCheckoutView: React.FC<Props> = ({ onBack, onOrderPlaced
                         }}
                         // Click-based open state: the menu stays open while the
                         // mouse moves from the trigger into the list, so there is
-                        // no hover-gap-driven premature close.
-                        // Click-based open state: the menu stays open while the
-                        // mouse moves from the trigger into the list (no hover
-                        // gap), so mouse-leave does not close it prematurely.
+                        // no hover gap and mouse-leave does not close it.
                         onMouseLeave={() => {}}
                         aria-haspopup="listbox"
                         aria-expanded={districtOpen}
