@@ -131,9 +131,13 @@ import { pick, toNumber } from './hybridDb.js';
 import {
   resolveMerchantBaseCity,
   resolveDeliveryZoneForCity,
+  resolveSavedDistrict,
+  normalizeDistrictName,
   BANGLADESH_DISTRICTS,
   BANGLADESH_DISTRICT_AREAS,
   SUB_DHAKA_AREAS,
+  normalizeCityName,
+  findCityInText,
 } from './deliveryZones.js';
 import {
   resolveZoneRates,
@@ -7165,11 +7169,16 @@ app.get('/api/storefront/:slug?', async (req, res) => {
       // The merchant's own city/district. The checkout derives the delivery
       // zone from it: picking this city enables "Inside City", picking any
       // other district forces "Outside City" and blocks the cheaper option.
-      // The shipping settings are the FIRST source: the value the merchant
-      // saved on the Delivery Zones page must beat a stale `store_city`/address
-      // field, or a district change would silently revert on the checkout.
+      //
+      // Order of authority (a district change must always win over a stale
+      // address field, or it silently reverts on the checkout):
+      //   1. the district the merchant SAVED on the shipping settings;
+      //   2. the district saved on the store record (every spelling — the
+      //      Pickup Point step writes the same value under all of them);
+      //   3. the district named in the store's address.
       baseCity:
-        String((shippingConfig as any)?.baseCity ?? '').trim()
+        normalizeDistrictName((shippingConfig as any)?.baseCity)
+        || resolveSavedDistrict(merchantRecord, storefrontMerchant)
         || resolveMerchantBaseCity(merchantRecord, storefrontMerchant),
       // The district list the checkout's "District / জেলা" dropdown renders.
       districts: BANGLADESH_DISTRICTS,
@@ -8131,11 +8140,25 @@ app.post('/api/stores/update', async (req, res) => {
          if (key === 'id' && !/^\d+$/.test(String(cleanMerchant[key]))) continue;
          sbPayload[key] = cleanMerchant[key];
        }
+       // A blank district must NEVER erase a saved one on the Supabase mirror.
+       // A profile save that does not own the district fields came back with a
+       // fresh `{}` and PATCHed NULL over `base_city` / `base_district`; the
+       // next load then resolved an unrelated district (the “Bagerhat” symptom)
+       // and STEP 04 read as reset. Only a real district value is mirrored, and
+       // every spelling is normalised to ONE canonical name.
+       for (const districtKey of ['base_city', 'baseDistrict', 'storeDistrict', 'store_district']) {
+         if (!(districtKey in sbPayload)) continue;
+         const canonical = normalizeDistrictName(sbPayload[districtKey], { strict: false });
+         if (canonical) sbPayload[districtKey] = canonical;
+         else delete sbPayload[districtKey];
+       }
        // Carry the merchant's base city under its snake_case column name.
        const baseCity =
-         cleanMerchant.baseCity ?? cleanMerchant.base_city ?? cleanMerchant.storeCity ?? '';
+         cleanMerchant.baseCity ?? cleanMerchant.base_city ?? cleanMerchant.baseDistrict
+           ?? cleanMerchant.base_district ?? cleanMerchant.storeCity ?? '';
        if (baseCity !== '' && sbPayload.base_city === undefined) {
-         sbPayload.base_city = String(baseCity).trim();
+         const canonicalBaseCity = normalizeDistrictName(baseCity, { strict: false });
+         if (canonicalBaseCity) sbPayload.base_city = canonicalBaseCity;
        }
        // Carry the theme selection under its snake_case column names.
        if (cleanMerchant.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = cleanMerchant.activeThemeId;
@@ -8497,6 +8520,23 @@ app.post('/api/onboarding/complete-step', async (req, res) => {
       } catch (sbErr: any) {
         console.warn('[Server] complete-step Supabase warning:', sbErr?.message || sbErr);
       }
+
+      // The pickup point IS the store's base district, so the SAME district is
+      // written into the shipping settings in this one step. Without it the
+      // Delivery Zones form (which reads `shippingConfig.baseCity`) kept showing
+      // whatever district it found earlier — e.g. "Bagerhat" while STEP 04 said
+      // "Dhaka". `writeStoreConfig` normalises, cascades every spelling and
+      // mirrors Mongo + Supabase.
+      if (step === 'pickup_point' && patch.base_city) {
+        try {
+          await writeStoreConfig('shipping', storeRef, {
+            baseCity: patch.base_city,
+            baseDistrict: patch.base_city,
+          });
+        } catch (mirrorErr: any) {
+          console.warn('[Server] complete-step shipping base-city mirror warning:', mirrorErr?.message || mirrorErr);
+        }
+      }
     }
 
     // 2. Recompute from the stored data and stamp the flags.
@@ -8519,6 +8559,32 @@ app.post('/api/onboarding/complete-step', async (req, res) => {
     return res.status(200).json({ ok: false, error: err?.message || 'Could not update the onboarding step.' });
   }
 });
+
+/**
+ * Map an incoming step request onto the store fields that step is derived from.
+ * Accepts an explicit `value` plus the step's natural field names, so the client
+ * can post either `{ step, value }` or `{ step, phone }` / `{ step, logoUrl }`.
+ */
+/**
+ * The district a Pickup Point save should record on the store.
+ *
+ * Precedence — most explicit first:
+ *   1. an explicit district field in the request (`baseCity`, `baseDistrict`,
+ *      `district`, `storeDistrict`);
+ *   2. the district NAMED in the pickup value; but only when the value really
+ *      names one — an existing saved district is otherwise KEPT, never cleared.
+ *
+ * `normalizeDistrictName` lives in lib/deliveryZones.ts so the browser (the
+ * dashboard modal) and the server canonicalise a district the SAME way.
+ */
+function resolveDistrictFromPickup(location: string, body: Record<string, any>): string {
+  const explicit = normalizeDistrictName(
+    body.baseCity ?? body.base_city ?? body.baseDistrict ?? body.base_district
+      ?? body.district ?? body.storeDistrict ?? body.store_district,
+  );
+  if (explicit) return explicit;
+  return normalizeDistrictName(location);
+}
 
 /**
  * Map an incoming step request onto the store fields that step is derived from.
@@ -8549,10 +8615,44 @@ function buildOnboardingStepPatch(step: OnboardingStepId, body: Record<string, a
       patch.activeThemeId = String(theme);
     }
   } else if (step === 'pickup_point') {
-    const address = String(value ?? '').trim();
-    if (address) {
-      patch.pickup_address = address;
-      patch.pickupAddress = address;
+    // THE PICKUP POINT OWNS THE STORE'S BASE DISTRICT.
+    //
+    // This used to write ONLY `pickup_address` / `pickupAddress`. But the
+    // shipping settings and the checkout read `base_city` / `base_district`,
+    // and the Settings form canonicalises `baseCity` from whatever it finds —
+    // so a merchant could save their pickup point and still see an unrelated
+    // district in the Delivery Zones form. Every spelling is now written in
+    // ONE patch, from the value the merchant just chose, so the two can never
+    // disagree.
+    const location = String(value ?? '').trim();
+    if (location) {
+      patch.pickup_address = location;
+      patch.pickupAddress = location;
+      patch.pickup_point = location;
+      patch.pickupPoint = location;
+    }
+
+    // Only a single district NAME is copied onto the base district. A free
+    // text street address must never overwrite a district the merchant picked
+    // deliberately (that is how ‘Dhaka’ became ‘Bagerhat’).
+    //
+    // The district is written even when the address field is blank: the step is
+    // “Pickup Point”, and the district alone is what the checkout prices from.
+    // Previously this sat inside the `if (location)` block, so choosing a
+    // district with an empty address persisted NOTHING — the step stayed
+    // pending and the form fell back to whatever district it found earlier.
+    const district = resolveDistrictFromPickup(location, body);
+    if (district) {
+      patch.base_city = district;
+      patch.baseCity = district;
+      patch.base_district = district;
+      patch.baseDistrict = district;
+      patch.storeDistrict = district;
+      patch.store_district = district;
+      // The district the pickup step itself chose, read back by the dashboard
+      // modal so it never re-seeds from an unrelated leftover field.
+      patch.pickupDistrict = district;
+      patch.pickup_district = district;
     }
   } else if (step === 'payment_setup') {
     const config = body.payment_config ?? body.paymentConfig ?? body.value;
@@ -13387,8 +13487,13 @@ function normalizeShippingConfig(raw: any, fallback: Record<string, any> = {}) {
     // The merchant's base city. Read from the shipping config first, then
     // from the store record's own base-city field, so the checkout's zone
     // validation always has an anchor.
+    //
+    // `base_city` is listed BEFORE `base_district`: the Delivery Zones form and
+    // the Pickup Point step write BOTH, and `base_city` is the one they write
+    // last. Preferring the older `base_district` column is what made a freshly
+    // saved “Dhaka” come back as an unrelated leftover (e.g. “Bagerhat”).
     baseCity: cfgStr(
-      src.baseCity ?? src.base_city ?? src.baseDistrict ?? src.base_district ?? src.storeCity ?? src.store_city,
+      src.baseCity ?? src.baseDistrict ?? src.base_district ?? src.base_city ?? src.storeDistrict ?? src.storeCity ?? src.store_city,
       fallback.baseCity ?? fallback.base_city ?? fallback.baseDistrict ?? fallback.base_district ?? '',
     ).trim(),
     // Shipping instruction notes — accepted under every spelling the panels
@@ -14054,7 +14159,16 @@ async function writeStoreConfig(name: StoreConfigName, storeRef: string, patch: 
     const advanceAmountColumn = cfgNumOrNull(shippingNext.advanceDeliveryChargeAmount, undefined, { min: 0 });
     const advanceEnabledColumn = shippingNext.requestAdvanceDeliveryCharge === true;
     const codEnabledColumn = shippingNext.isEnabled !== false;
-    const baseDistrictColumn = String(shippingNext.baseCity ?? '').trim() || null;
+    // The merchant's saved district. When a form arrives WITHOUT one (e.g. a
+    // panel that does not own that field), the value already in the config is
+    // KEPT — writing null here used to NULL the Supabase `base_city` /
+    // `base_district` columns, so the next load fell back to an unrelated
+    // district (the “Bagerhat” symptom) and STEP 04 looked reset.
+    const baseDistrictColumn = normalizeDistrictName(shippingNext.baseCity)
+      || normalizeDistrictName(fallbackNum?.baseCity)
+      || normalizeDistrictName(fallbackNum?.base_city)
+      || normalizeDistrictName(fallbackNum?.baseDistrict)
+      || null;
     const notesColumn = String(shippingNext.notes ?? '');
     try {
       const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();

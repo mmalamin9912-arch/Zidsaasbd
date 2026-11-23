@@ -20,7 +20,7 @@
  *   add_product     → >= 1 row in `products` for this store_slug / store_id
  *   confirm_phone   → store.phone OR store.support_contact
  *   setup_branding  → store.logo_url OR store.theme / active_theme_id
- *   pickup_point    → store.pickup_address
+ *   pickup_point    → store.pickup_address (or the district saved on that step)
  *   payment_setup   → store.payment_config / adminPaymentConfig, else available
  *
  * The derived result is ALSO written back with an `onboarding` block
@@ -364,14 +364,35 @@ export function deriveOnboardingStatus(input: {
   const theme = firstValue(store, ['theme', 'active_theme_id', 'activeThemeId', 'theme_config', 'themeConfig', 'branding', 'banner_url', 'bannerUrl']);
   // Step 04 — Pickup Point. Covers the courier-setup pickup address
   // (`pickupAddress` / `pickup_address`), the LogisticsView courier entry,
-  // the generic `address`, the Settings → Constraints base district
-  // (`baseCity` / `base_city`, plus the requested `storeDistrict` spelling)
-  // and the store-address aliases.
-  const pickup = firstValue(store, [
-    'pickup_address', 'pickupAddress', 'pickup_point', 'pickupLocation',
-    'address', 'store_address', 'storeAddress', 'storeDistrict',
-    'store_district', 'baseCity', 'base_city',
+  // the generic `address`, and the district saved on the pickup step itself
+  // (`pickupDistrict`, or its `baseCity` / `storeDistrict` mirrors).
+  //
+  // AN UNRELATED DISTRICT IS NOT A PICKUP POINT.
+  // ---------------------------------------------
+  // A base district can arrive on the store record WITHOUT the merchant ever
+  // setting a pickup location — a signup default, a Settings draft, an older
+  // delivery-zone save. Counting that as STEP 04 let the checklist show 100%
+  // while the pickup point itself was empty, and after such a save the step
+  // kept reading the district the merchant never chose (e.g. "Bagerhat").
+  // So the step is completed by an ADDRESS-or-district the merchant actually
+  // saved on the pickup step, or by the store really having a pickup address.
+  const pickupAddress = firstValue(store, [
+    'pickup_address', 'pickupAddress', 'pickup_point', 'pickupPoint', 'pickupLocation',
+    'store_address', 'storeAddress', 'address',
   ]);
+  const savedPickupStep = storedFlags.pickup_point;
+  const pickupPointSaved = Boolean(savedPickupStep && typeof savedPickupStep === 'object' && savedPickupStep.at);
+  const pickupDistrict = pickupPointSaved
+    ? firstValue(store, [
+        'pickupDistrict', 'pickup_district', 'baseCity', 'base_city',
+        'baseDistrict', 'base_district', 'storeDistrict', 'store_district',
+      ])
+    : undefined;
+  const pickup = pickupAddress || pickupDistrict;
+  // The step's detail line names the district the pickup point sits in, so the
+  // checklist never shows an address from one city next to a different one.
+  const pickupDetailSource = pickupAddress || pickupDistrict
+    || firstValue(store, ['baseCity', 'base_city', 'baseDistrict', 'base_district']);
   // Step 05 — Payment & Finance. Checks BOTH the flat numeric fields and the
   // structured collections the Merchant Payment Accounts Setup writes
   // (`mobileBanking` — bKash/Nagad/Rocket wallets, `bankAccounts` — payout
@@ -420,7 +441,7 @@ export function deriveOnboardingStatus(input: {
       id: 'pickup_point',
       label: STEP_LABELS.pickup_point,
       completed: Boolean(pickup),
-      detail: pickup ? describe(pickup) : 'Pickup address not set',
+      detail: pickup ? describe(pickupDetailSource) : 'Pickup address not set',
       completedAt: completedAtFor('pickup_point'),
     },
     {
@@ -647,8 +668,10 @@ export const STEP_FIELD_MAP: Record<OnboardingStepId, string[]> = {
     'contactPhone', 'whatsappNumber', 'whatsapp_number',
   ],
   pickup_point: [
-    'pickup_address', 'pickupAddress', 'store_address', 'storeAddress',
-    'address', 'storeDistrict', 'baseCity', 'base_city',
+    'pickup_address', 'pickupAddress', 'pickup_point', 'pickupPoint',
+    'store_address', 'storeAddress', 'address',
+    'pickupDistrict', 'pickup_district', 'storeDistrict', 'store_district',
+    'baseCity', 'base_city', 'baseDistrict', 'base_district',
   ],
   payment_setup: [
     'payment_config', 'paymentConfig', 'payment_methods', 'paymentMethods',

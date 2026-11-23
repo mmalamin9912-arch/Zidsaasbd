@@ -293,6 +293,14 @@ export function findCityInText(value: unknown): string {
 const BASE_CITY_KEYS = [
   'baseCity',
   'base_city',
+  // The Pickup Point step writes the SAME district under every spelling, so
+  // these are peers of `baseCity` — NOT a weaker fallback. Listing only
+  // `storeCity` here is how a freshly saved "Dhaka" was replaced by whatever
+  // `store_city`/`city` the signup row carried (e.g. "Bagerhat").
+  'baseDistrict',
+  'base_district',
+  'storeDistrict',
+  'store_district',
   'storeCity',
   'store_city',
   'businessCity',
@@ -355,6 +363,83 @@ export function resolveMerchantBaseCity(
       const raw = source[key];
       if (raw === null || raw === undefined) continue;
       const found = findCityInText(raw);
+      if (found) return found;
+    }
+  }
+  return '';
+}
+
+/**
+ * The district NAMED in a free-text value, as a canonical district name.
+ *
+ *   'Dhaka'                        → 'Dhaka'
+ *   'Dhaka District'               → 'Dhaka'
+ *   'House 12, Banani, Dhaka-1211' → 'Dhaka'
+ *   'Warehouse 4, Road 9'          → ''      (no district named)
+ *
+ * Returns '' when the text names no district, so a free-text street address
+ * can never overwrite a district the merchant deliberately chose.
+ */
+export function districtFromText(raw: unknown): string {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+  const key = normalizeCityName(text);
+  if (!key) return '';
+  for (const district of BANGLADESH_DISTRICTS) {
+    if (normalizeCityName(district) === key) return district;
+  }
+  // A longer address — extract the district it mentions (longest name wins).
+  return findCityInText(text);
+}
+
+/**
+ * Reduce a value to ONE canonical Bangladesh district name — or ''.
+ *
+ * Accepts a district name, a full address, or a key in ANY of the spellings the
+ * store record / settings form / onboarding step use. `strict` (the default)
+ * returns '' unless the value really names a district;
+ * `strict: false` additionally accepts any plain single-word name the district
+ * list does not contain yet (so a merchant's own spelling is not discarded).
+ */
+export function normalizeDistrictName(raw: unknown, opts: { strict?: boolean } = {}): string {
+  const name = districtFromText(raw);
+  if (name) return name;
+  if (opts.strict === false) {
+    const text = String(raw ?? '').trim();
+    if (text && !/[,/|\d]/.test(text) && normalizeCityName(text)) return text;
+  }
+  return '';
+}
+
+/** Every spelling a store record may use for its base district. */
+export const DISTRICT_KEYS = [
+  'baseCity',
+  'base_city',
+  'baseDistrict',
+  'base_district',
+  'storeDistrict',
+  'store_district',
+  'storeCity',
+  'store_city',
+] as const;
+
+/**
+ * The merchant's SAVED base district, read from the store record itself.
+ *
+ * Every spelling the Settings form, the Pickup Point step and the Delivery
+ * Zones page write is checked, so whichever one holds the value wins. An
+ * address field is read LAST (and only when it literally names a district) —
+ * a free-text street address must never masquerade as the district.
+ */
+export function resolveSavedDistrict(...sources: Array<Record<string, any> | null | undefined>): string {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const key of DISTRICT_KEYS) {
+      const name = normalizeDistrictName((source as any)[key]);
+      if (name) return name;
+    }
+    for (const key of ['pickupAddress', 'pickup_address', 'storeAddress', 'store_address', 'address']) {
+      const found = districtFromText((source as any)[key]);
       if (found) return found;
     }
   }
@@ -674,6 +759,9 @@ export default {
   getDistrictAreas,
   normalizeCityName,
   findCityInText,
+  districtFromText,
+  normalizeDistrictName,
+  resolveSavedDistrict,
   resolveMerchantBaseCity,
   resolveDeliveryZoneForCity,
   buildDeliveryZoneOptions,

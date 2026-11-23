@@ -9,6 +9,7 @@ import {
   BANGLADESH_DISTRICTS,
   deliveryZoneLabels,
   deliveryZoneHints,
+  resolveSavedDistrict,
 } from '../../../lib/deliveryZones';
 import {
   loadShippingConfig,
@@ -244,7 +245,7 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
         // The merchant's base city anchors the checkout's zone validation, so
         // it must be restored from the database like every other fee field.
         // Only a store that never saved one falls back to the profile value.
-        baseCity: stored.baseCity || merchant?.baseCity || '',
+        baseCity: stored.baseCity || resolveSavedDistrict(merchant as any) || '',
         notes: stored.notes ?? prev.notes ?? '',
       }));
     })();
@@ -334,9 +335,22 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     // threshold, the advance charge, the instruction notes and the full
     // sub-district list (tags the merchant added AND removed via ×) — is
     // present in ONE write, so nothing is left to a stale default.
+    //
+    // A district is REQUIRED here: a save that omits it used to leave the
+    // shipping config with an empty `baseCity`, and the next load then fell
+    // back to whatever district it found on the profile (e.g. "Bagerhat") even
+    // though the merchant had just chosen "Dhaka".
+    const baseCityValue = String(shippingForm.baseCity ?? '').trim();
+    if (!baseCityValue) {
+      setIsSavingShipping(false);
+      toast.error('Please choose the Base City / District first.', {
+        description: 'The delivery zones and the checkout are priced from it.',
+      });
+      return;
+    }
     const payload = {
       isEnabled: shippingForm.isEnabled !== false,
-      baseCity: String(shippingForm.baseCity ?? '').trim(),
+      baseCity: baseCityValue,
       insideDhakaFee: shippingForm.insideDhakaFee ?? '',
       outsideDhakaFee: shippingForm.outsideDhakaFee ?? '',
       subDhakaFee: shippingForm.subDhakaFee ?? '',
@@ -351,6 +365,11 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     setIsSavingShipping(false);
 
     if (!saved) {
+      // An empty tag list / cleared fields are a REAL save, so a `null` echo can
+      // only mean the write was rejected. Drop the instant local copy so the
+      // panel does not keep showing a district/fee list the database never got
+      // — that silent local echo is what made the district look like it
+      // "reverted" on the next load.
       toast.error('Shipping settings could not be saved to the database.', {
         description: 'Your changes are kept locally. Please check the connection and try again.',
       });
@@ -363,7 +382,9 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
     setShippingForm((prev) => ({
       ...prev,
       isEnabled: saved.isEnabled,
-      baseCity: saved.baseCity ?? '',
+      // The district the merchant just chose is what the server stored; never
+      // let an empty echo blank the selector.
+      baseCity: saved.baseCity || prev.baseCity || '',
       insideDhakaFee: saved.insideDhakaFee ?? '',
       outsideDhakaFee: saved.outsideDhakaFee ?? '',
       subDhakaFee: saved.subDhakaFee ?? '',
@@ -740,6 +761,68 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
             </p>
           </div>
 
+          {/* ── Sub-District Tags ─────────────────────────────────────────────
+             Directly BELOW the Base City / District selector, because the tags
+             are meaningless without it: they are the areas around THAT city that
+             carry the Sub-District fee. Each tag can be removed with ×; new tags
+             are added with the input + Add (or Enter). Saved to the database on
+             "Save Shipping Settings" and re-hydrated on every load, so the
+             checkout always prices from the merchant's own list. */}
+          <div className="space-y-2 bg-[#181B26] border border-[#00D68F]/35 p-4 rounded-2xl">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="text-xs font-semibold text-slate-300 block">
+                Sub-Districts around {shippingForm.baseCity || 'your district'}
+              </label>
+              <span className="text-[10px] font-bold text-[#00D68F] bg-[#00D68F]/10 border border-[#00D68F]/25 px-2 py-0.5 rounded">
+                {shippingForm.subDhakaAreas.length} saved
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {shippingForm.subDhakaAreas.map((area) => (
+                <span
+                  key={area}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#202533] border border-[#3A435E] text-[10px] font-bold text-slate-200"
+                >
+                  {area}
+                  <button
+                    type="button"
+                    onClick={() => removeSubDistrict(area)}
+                    aria-label={`Remove ${area}`}
+                    className="w-4 h-4 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-600 transition"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={newSubDistrict}
+                  onChange={(e) => setNewSubDistrict(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addSubDistrict()}
+                  placeholder="e.g. Dumuria"
+                  className="bg-[#181B26] border border-[#3A435E] rounded-lg px-3 py-1.5 text-white text-[11px] focus:outline-none focus:border-[#00D68F] w-32"
+                />
+                <button
+                  type="button"
+                  onClick={addSubDistrict}
+                  disabled={
+                    !newSubDistrict.trim() ||
+                    shippingForm.subDhakaAreas.includes(newSubDistrict.trim())
+                  }
+                  className="px-3 py-1.5 rounded-lg bg-[#00D68F] hover:bg-[#00e699] text-slate-950 text-[11px] font-bold disabled:opacity-50 disabled:cursor-not-allowed transition"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+            <p className="mt-1 text-[10px] text-slate-500">
+              Sub-districts around your base city that carry the{' '}
+              {shippingZoneLabels.sub.toLowerCase()}. Leave blank to fall back to
+              the built-in suburb list.
+            </p>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-slate-300 block">{shippingZoneLabels.inside}</label>
@@ -843,62 +926,6 @@ export const LogisticsView: React.FC<LogisticsViewProps> = ({
                 className="w-full bg-[#181B26] border border-[#3A435E] rounded-xl p-3 text-white text-xs placeholder:text-slate-600 focus:outline-none focus:border-[#00D68F]"
               />
             </div>
-          </div>
-
-          {/* ── Sub-District Tags ─────────────────────────────────────────────
-             Merchant picks the areas around their base city that carry the
-             Sub-District fee. Each tag can be removed with ×; new tags are
-             added with the input + Add (or Enter). Saved to the database on
-             "Save Shipping Settings" and re-hydrated on every load, so the
-             checkout always prices from the merchant's own list. */}
-          <div className="space-y-2 pt-2 border-t border-[#2E3548]">
-            <label className="text-xs font-semibold text-slate-300 block">
-              Sub-Districts around {shippingForm.baseCity || 'your district'}
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {shippingForm.subDhakaAreas.map((area) => (
-                <span
-                  key={area}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#202533] border border-[#3A435E] text-[10px] font-bold text-slate-200"
-                >
-                  {area}
-                  <button
-                    type="button"
-                    onClick={() => removeSubDistrict(area)}
-                    aria-label={`Remove ${area}`}
-                    className="w-4 h-4 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-slate-600 transition"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </span>
-              ))}
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="text"
-                  value={newSubDistrict}
-                  onChange={(e) => setNewSubDistrict(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addSubDistrict()}
-                  placeholder="e.g. Dumuria"
-                  className="bg-[#181B26] border border-[#3A435E] rounded-lg px-3 py-1.5 text-white text-[11px] focus:outline-none focus:border-[#00D68F] w-32"
-                />
-                <button
-                  type="button"
-                  onClick={addSubDistrict}
-                  disabled={
-                    !newSubDistrict.trim() ||
-                    shippingForm.subDhakaAreas.includes(newSubDistrict.trim())
-                  }
-                  className="px-3 py-1.5 rounded-lg bg-[#00D68F] hover:bg-[#00e699] text-slate-950 text-[11px] font-bold disabled:opacity-50 disabled:cursor-not-allowed transition"
-                >
-                  Add
-                </button>
-              </div>
-            </div>
-            <p className="mt-1 text-[10px] text-slate-500">
-              Sub-districts around your base city that carry the{' '}
-              {shippingZoneLabels.sub.toLowerCase()}. Leave blank to fall back to
-              the built-in suburb list.
-            </p>
           </div>
 
           <div className="flex justify-end pt-2">

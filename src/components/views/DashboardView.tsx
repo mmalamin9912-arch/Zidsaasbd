@@ -3,6 +3,9 @@ import { MerchantProfile, Order, Product } from '../../types';
 import SafeImage from '../SafeImage';
 import { fetchOnboardingStatus, completeOnboardingStep } from '../../lib/onboardingApi';
 import type { OnboardingStatus } from '../../lib/onboardingApi';
+// The canonical district list — the SAME one the Delivery Zones page and the
+// checkout use, so the pickup point cannot save a district they do not know.
+import { BANGLADESH_DISTRICTS, resolveSavedDistrict } from '../../../lib/deliveryZones';
 import { 
   TrendingUp, 
   ShoppingBag, 
@@ -87,7 +90,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // reload instead of resetting to "Pending".
   const storeSlug = String(merchant?.storeSlug || '').trim().toLowerCase();
   const [supportPhone, setSupportPhone] = useState(String((merchant as any)?.phone || (merchant as any)?.supportPhone || ''));
-  const [pickupLocation, setPickupLocation] = useState(String((merchant as any)?.pickupAddress || ''));
+  const [pickupLocation, setPickupLocation] = useState(String(
+    (merchant as any)?.pickupAddress || (merchant as any)?.pickup_address
+      || (merchant as any)?.pickup_point || ''
+  ));
+  /**
+   * The district the merchant's pickup point sits in.
+   *
+   * Seeded from the SAVED store district under EVERY spelling this step and the
+   * settings form write, canonicalised to ONE district name (`resolveSavedDistrict`,
+   * the same helper the server uses). It is never defaulted — a hardcoded
+   * fallback here is how STEP 04 could save a district the merchant never chose —
+   * and a plain district (e.g. "Dhaka") is preferred over an address that only
+   * happens to mention a different one.
+   */
+  const savedDistrict = resolveSavedDistrict(merchant as any);
+  const [pickupDistrict, setPickupDistrict] = useState(savedDistrict);
   const [brandLogo, setBrandLogo] = useState(merchant?.logoUrl || '');
   const [onboarding, setOnboarding] = useState<OnboardingStatus | null>(null);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
@@ -131,7 +149,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const onboardingMerchantSignature = JSON.stringify([
     (merchant as any)?.supportPhone, (merchant as any)?.phone, (merchant as any)?.contactPhone,
     (merchant as any)?.whatsappNumber,
-    (merchant as any)?.pickupAddress, (merchant as any)?.address, (merchant as any)?.storeAddress,
+    (merchant as any)?.pickupAddress, (merchant as any)?.pickup_address,
+    (merchant as any)?.pickup_point, (merchant as any)?.pickupPoint,
+    (merchant as any)?.address, (merchant as any)?.storeAddress,
     (merchant as any)?.storeDistrict, (merchant as any)?.baseCity,
     ((merchant as any)?.mobileBanking || []).map((w: any) => w?.number || '').join(','),
     ((merchant as any)?.bankAccounts || []).map((b: any) => b?.accountNumber || '').join(','),
@@ -168,12 +188,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [storeSlug, refreshOnboarding]);
 
   /**
+   * Keep the pickup form in step with the SAVED store data.
+   *
+   * After a save (or on a fresh mount) the store record is the only truth: the
+   * address the step wrote (`pickup_address`) is what the field shows, so a
+   * reload no longer comes back with an empty address, and the district is
+   * never left pointing at whatever field happened to resolve first.
+   */
+  useEffect(() => {
+    if (savedDistrict) setPickupDistrict(savedDistrict);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedDistrict]);
+  useEffect(() => {
+    const savedLocation = String(
+      (merchant as any)?.pickupAddress || (merchant as any)?.pickup_address
+        || (merchant as any)?.pickup_point || ''
+    );
+    if (savedLocation) setPickupLocation(savedLocation);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [(merchant as any)?.pickupAddress, (merchant as any)?.pickup_address, (merchant as any)?.pickup_point]);
+
+  /**
    * Persist a step's value, then apply the recomputed status the server returns
    * (one authoritative response, rather than a guess at the new percentage).
    */
   const saveStep = useCallback(async (
     step: 'confirm_phone' | 'setup_branding' | 'pickup_point',
-    value: string
+    value: string,
+    extra: Record<string, unknown> = {}
   ) => {
     if (!storeSlug) return;
     setSavingStep(true);
@@ -186,6 +228,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         email: merchant?.email,
         store_id: (merchant as any)?.storeId,
         merchant_id: (merchant as any)?.merchantId || (merchant as any)?.id,
+        ...extra,
       });
       if (status?.ok) {
         setOnboarding(status);
@@ -229,9 +272,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const step3Complete = serverCompleted('confirm_phone') || hasPhone;
 
   const hasPickup = [
-    m?.pickupAddress, m?.address, m?.storeAddress, m?.storeDistrict,
-    m?.baseCity, m?.base_city,
+    m?.pickupAddress, m?.pickup_address, m?.pickup_point, m?.pickupPoint,
+    m?.storeAddress, m?.store_address, m?.address,
   ].some((v) => String(v || '').trim() !== '');
+  // A base district on its own is NOT a pickup point: it can be a signup
+  // default or a delivery-zone draft, and counting it marked STEP 04 complete
+  // while the pickup location was still empty (and later “reset” to a district
+  // the merchant never chose). The server applies the same rule.
   const step4Complete = serverCompleted('pickup_point') || hasPickup;
 
   const hasPaymentConfigured = (() => {
@@ -535,14 +582,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
             <button
               onClick={() => {
-                // Navigate to the EXACT settings section that owns the base
-                // district field (Settings → Shipping and payment constraints).
-                if (onNavigateToSettings) {
-                  onNavigateToSettings('settings_constraints');
-                } else {
-                  setTempInput(pickupLocation);
-                  setActiveModal('location');
-                }
+                // Always open this step's own district + address modal. It writes
+                // the SAME fields as the Delivery Zones form (`pickup_address`,
+                // `base_city`, `base_district`), so either entry point marks
+                // STEP 04 complete. Navigating to Settings as well used to leave
+                // two forms — one with the district, one without — writing over
+                // each other, which is how STEP 04 appeared to reset.
+                setTempInput(pickupLocation);
+                setPickupDistrict(savedDistrict);
+                setActiveModal('location');
               }}
               className={`mt-3 w-full py-2 px-3 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1.5 transition ${
                 step4Complete 
@@ -865,6 +913,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               Set the exact warehouse or store address where Steadfast & Paperfly couriers will pick up package parcels.
             </p>
             <div className="mb-4">
+              <label className="block text-xs font-semibold text-slate-300 mb-1">District / Base City</label>
+              <select
+                value={pickupDistrict}
+                onChange={(e) => setPickupDistrict(e.target.value)}
+                className="w-full bg-[#1C1814] border border-[#3E342B] rounded-xl px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
+              >
+                <option value="">Select the district your pickup point is in</option>
+                {BANGLADESH_DISTRICTS.map((district) => (
+                  <option key={district} value={district}>{district}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10px] text-slate-400">
+                This is the store&apos;s base district — it is the same one the Delivery Zones page and the
+                checkout use, so it is saved together with the pickup address.
+              </p>
+            </div>
+            <div className="mb-4">
               <label className="block text-xs font-semibold text-slate-300 mb-1">Pickup Address (Dhaka / BD)</label>
               <textarea
                 rows={3}
@@ -883,13 +948,36 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </button>
               <button
                 onClick={async () => {
-                  const location = tempInput || '';
+                  const location = tempInput.trim();
+                  // A district is REQUIRED: without one the checkout cannot pick
+                  // a delivery zone, and the step would be marked complete while
+                  // the store still shows an unrelated district.
+                  if (!pickupDistrict) {
+                    toast.error('Please choose the district your pickup point is in.');
+                    return;
+                  }
                   setPickupLocation(location);
                   setActiveModal('none');
-                  await saveStep('pickup_point', location);
-                  // Refresh onboarding status from server so UI reflects the saved step
-                  const status = await fetchOnboardingStatus(storeSlug);
-                  if (status) setOnboarding(status);
+                  // The district ALONE is enough to complete the step — the
+                  // server writes it even when the address box is empty, and
+                  // records it on the pickup fields too so a reload reads back
+                  // exactly what was chosen here.
+                  await saveStep('pickup_point', location, {
+                    // The district the merchant picked here is the ONE source of
+                    // truth for the store's base city / base district.
+                    baseDistrict: pickupDistrict,
+                    baseCity: pickupDistrict,
+                    district: pickupDistrict,
+                    pickupDistrict,
+                  });
+                  // Reload the authoritative status so the checklist reflects
+                  // the save even if the response was partial.
+                  await refreshOnboarding();
+                  toast.success('Pickup point saved', {
+                    description: location
+                      ? `${location} — ${pickupDistrict}`
+                      : `District saved: ${pickupDistrict}`,
+                  });
                 }}
                 disabled={savingStep}
                 className="px-4 py-2 bg-gradient-to-r from-[#BF953F] to-[#B38728] text-slate-950 rounded-xl text-xs font-extrabold flex items-center gap-1 disabled:opacity-60"

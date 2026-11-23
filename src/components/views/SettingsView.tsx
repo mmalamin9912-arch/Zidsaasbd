@@ -11,6 +11,7 @@ import {
   BANGLADESH_DISTRICTS,
   deliveryZoneLabels,
   deliveryZoneHints,
+  resolveSavedDistrict,
 } from '../../../lib/deliveryZones';
 import {
   Settings as SettingsIcon,
@@ -191,13 +192,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     // Account settings hydration (merchant profile fields)
     setAccountName((merchant as any)?.ownerName || merchant?.storeName || '');
     setAccountEmail(merchant?.email || '');
-    setAccountPhone(merchant?.phone || merchant?.whatsappNumber || '');
+    // The ACCOUNT phone is the login / personal number. `merchant.phone` is the
+    // SUPPORT contact (STEP 03), so reading it here made the two fields mirror
+    // each other: editing the account phone silently rewrote the support phone
+    // and vice-versa. A dedicated key is used now, falling back to the support
+    // number only for legacy rows that never had one.
+    setAccountPhone(
+      (merchant as any)?.ownerPhone || (merchant as any)?.accountPhone
+        || (merchant as any)?.owner_phone || merchant?.whatsappNumber || ''
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     merchant?.storeName, merchant?.storeSlug, merchant?.supportEmail, merchant?.supportPhone,
     merchant?.logoUrl, merchant?.storeTagline, merchant?.storeDescription, merchant?.whatsappNumber,
     merchant?.facebookUrl, merchant?.instagramUrl, merchant?.tiktokUrl,
     merchant?.email, merchant?.phone, merchant?.ownerName,
+    (merchant as any)?.ownerPhone, (merchant as any)?.accountPhone,
     (merchant as any)?.messengerHandle, (merchant as any)?.telegramHandle,
     (merchant as any)?.pickupAddress, (merchant as any)?.pickup_address,
     (merchant as any)?.storeAddress, (merchant as any)?.store_address,
@@ -360,13 +370,43 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [expressMobileBankingOnly, setExpressMobileBankingOnly] = useState(false);
   // The merchant's base city — the anchor for the checkout's delivery-zone
   // validation. Persisted with the fees in the shipping config.
-  const [baseCity, setBaseCity] = useState(merchant?.baseCity || 'Dhaka');
+  // NEVER default to "Dhaka": a hardcoded district here is how STEP 04 (and
+  // the Delivery Zones page) showed a district the merchant never chose, and
+  // how saving this form could overwrite a real one. The value is hydrated from
+  // the shipping config below; until then every district spelling on the store
+  // record is tried.
+  const [baseCity, setBaseCity] = useState(
+    () => resolveSavedDistrict(merchant as any) || String((merchant as any)?.baseCity || '')
+  );
   // Delivery-fee labels derived from the merchant's base city so the shipping
   // rates panel is never hardcoded to "Dhaka" (e.g. Khulna → "Inside Khulna Fee").
   const settingsZoneLabels = React.useMemo(() => deliveryZoneLabels(baseCity), [baseCity]);
   const settingsZoneHints = React.useMemo(() => deliveryZoneHints(baseCity), [baseCity]);
   const [constraintsSaving, setConstraintsSaving] = useState(false);
   const [constraintsNotice, setConstraintsNotice] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+
+  /**
+   * The merchant's OWN Sub-Districts around their base city (the areas priced
+   * with the sub-district fee). Edited with add/× right under the district
+   * selector and saved with the rest of the shipping config, so the checkout
+   * prices exactly this list.
+   */
+  const [subDhakaAreas, setSubDhakaAreas] = useState<string[]>([]);
+  /** Draft text for a new sub-district tag. */
+  const [newSubDistrict, setNewSubDistrict] = useState('');
+
+  const addSubDistrict = () => {
+    const name = newSubDistrict.trim();
+    if (!name) return;
+    setSubDhakaAreas((prev) =>
+      prev.some((a) => a.toLowerCase() === name.toLowerCase()) ? prev : [...prev, name]
+    );
+    setNewSubDistrict('');
+  };
+
+  const removeSubDistrict = (toRemove: string) => {
+    setSubDhakaAreas((prev) => prev.filter((a) => a !== toRemove));
+  };
 
   // Tax Tab State — seeded from the store record, saved via the API below.
   const taxCfg = merchant?.taxConfig;
@@ -1701,7 +1741,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       // Account settings fields
       ownerName: accountName,
       email: accountEmail,
-      phone: accountPhone,
+      // The account phone lives on its OWN keys — writing it to `phone` used to
+      // overwrite the support contact the dashboard's STEP 03 is derived from.
+      ownerPhone: accountPhone,
+      accountPhone,
     };
 
     // 1. Update in-memory merchant state (instant UI feedback).
@@ -1761,11 +1804,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setInsideCityFee(stored.insideDhakaFee != null ? String(stored.insideDhakaFee) : '');
       setOutsideCityFee(stored.outsideDhakaFee != null ? String(stored.outsideDhakaFee) : '');
       setFreeShippingThreshold(stored.freeShippingThreshold != null ? String(stored.freeShippingThreshold) : '');
-      setBaseCity(stored.baseCity || '');
+      // `''` (not the previous state) when neither the config nor the store
+      // record carries a district — the dropdown then shows its "not set"
+      // placeholder instead of a district the merchant never chose.
+      setBaseCity(stored.baseCity || resolveSavedDistrict(merchant as any) || '');
+      setSubDhakaAreas(Array.isArray(stored.subDhakaAreas) ? stored.subDhakaAreas : []);
     } catch (err) {
       console.warn('[SettingsView] COD constraints load warning:', err);
     }
-  }, [storeRef]);
+  }, [storeRef, merchant]);
 
   useEffect(() => {
     if (activeSubTab === 'settings_constraints') void loadConstraints();
@@ -1806,7 +1853,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         outsideDhakaFee: optionalFee(outsideCityFee),
         freeShippingThreshold: optionalFee(freeShippingThreshold),
         maxOrderLimit: optionalFee(maxCodValue),
+        // An EXPLICIT array (even an empty one) is written, so removing every
+        // tag with × really clears the merchant's list instead of leaving the
+        // previous one in the database.
+        subDhakaAreas,
+        // Written under BOTH spellings together: a reader that prefers
+        // `base_district` must see the SAME district as `base_city`, otherwise
+        // an old value in one column surfaced as a different district.
         baseCity,
+        baseDistrict: baseCity,
       });
       if (!saved) {
         setConstraintsNotice({ type: 'error', text: 'Delivery settings could not be saved to the database. Please try again.' });
@@ -3789,6 +3844,62 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
                       আপনার স্টোরের নিজের শহর। এই শহরের গ্রাহকরা শুধু &quot;{settingsZoneLabels.inside}&quot;
                       বেছে নিতে পারবে; অন্য জেলার গ্রাহকদের জন্য &quot;{settingsZoneLabels.outside}&quot; ফোরস করা হবে।
+                    </p>
+                  </div>
+
+                  {/* Sub-Districts around the base city — kept DIRECTLY under
+                      the Base City / District selector: the tags only mean
+                      something relative to that district, and this panel should
+                      be the one place the merchant sets the whole zone. */}
+                  <div className="bg-[#161B28] border border-[#2E3852] rounded-xl p-4 space-y-3 max-w-2xl">
+                    <label className="block text-slate-300 font-bold text-sm">
+                      Sub-Districts around your district
+                      {baseCity ? <span className="text-slate-500 font-normal"> — {baseCity}</span> : null}
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {subDhakaAreas.map((area) => (
+                        <span
+                          key={area}
+                          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1A2033] border border-[#2E3852] text-[11px] font-bold text-slate-200"
+                        >
+                          {area}
+                          <button
+                            type="button"
+                            onClick={() => removeSubDistrict(area)}
+                            aria-label={`Remove ${area}`}
+                            className="w-4 h-4 flex items-center justify-center rounded text-slate-400 hover:text-white hover:bg-rose-500/70 transition"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={newSubDistrict}
+                          onChange={(e) => setNewSubDistrict(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              addSubDistrict();
+                            }
+                          }}
+                          placeholder="e.g. Dumuria"
+                          className="w-32 bg-[#101420] border border-[#2E3852] rounded-lg px-2.5 py-1 text-white text-[11px] focus:border-[#00D68F] outline-none placeholder:text-slate-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={addSubDistrict}
+                          disabled={!newSubDistrict.trim()}
+                          className="px-3 py-1 rounded-lg bg-[#00D68F] hover:bg-[#00bf7f] text-slate-950 text-[11px] font-bold disabled:opacity-50 disabled:cursor-not-allowed transition"
+                        >
+                          Add
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                      আপনার জেলার আশেপাশের যে এলাকাগুলো &quot;{settingsZoneLabels.sub}&quot; হিসেবে
+                      চার্জ হবে (যেমন: Dumuria, Phultala, Rupsha)। × দিয়ে বাদ দেওয়া যাবে।
                     </p>
                   </div>
 
