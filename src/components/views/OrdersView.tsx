@@ -1532,8 +1532,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     }).sort((rawA, rawB) => {
       const a = rawA as Order;
       const b = rawB as Order;
-      if (sortBy === 'newest') return String(b.id ?? '').localeCompare(String(a.id ?? ''));
-      if (sortBy === 'oldest') return String(a.id ?? '').localeCompare(String(b.id ?? ''));
+      // Sort by creation timestamp so the most recently placed order always
+      // appears at the very top (newest first / oldest first).
+      if (sortBy === 'newest') return new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime();
+      if (sortBy === 'oldest') return new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime();
       if (sortBy === 'amount_high') return toNumber(b.totalBDT) - toNumber(a.totalBDT);
       if (sortBy === 'amount_low') return toNumber(a.totalBDT) - toNumber(b.totalBDT);
       return 0;
