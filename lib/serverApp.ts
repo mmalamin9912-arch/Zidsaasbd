@@ -6178,15 +6178,22 @@ app.get('/api/products', async (req, res) => {
 
     // Accept store_slug, storeSlug, store_id, store_code, or store domain
     // (domain / store_domain / custom_domain query params).
-    const rawSlug = (req.query.store_slug as string ||
-      req.query.storeSlug as string ||
-      req.query.store_id as string ||
-      req.query.storeId as string ||
-      req.query.store_code as string ||
-      req.query.storeCode as string ||
-      req.query.store_domain as string ||
-      req.query.custom_domain as string ||
-      req.query.domain as string ||
+    // Safely normalize each query param to a string (take first element if array,
+    // coerce safely otherwise) before calling .trim() to avoid:
+    // TypeError: ... trim is not a function when Express passes arrays.
+    const q = (k: string) => {
+      const v = req.query[k];
+      return typeof v === 'string' ? v : (Array.isArray(v) && v.length > 0 ? v[0] : '');
+    };
+    const rawSlug = (q('store_slug') ||
+      q('storeSlug') ||
+      q('store_id') ||
+      q('storeId') ||
+      q('store_code') ||
+      q('storeCode') ||
+      q('store_domain') ||
+      q('custom_domain') ||
+      q('domain') ||
       '').trim();
     // Preserve original for UUID/store_code/domain matching (before .toLowerCase())
     const rawSlugOriginal = rawSlug.trim();
