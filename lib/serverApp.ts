@@ -18305,6 +18305,122 @@ async function resolveTelegramAlertConfig(): Promise<{
   return { botToken, chatId, source };
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * NEW ORDER ALERT — TELEGRAM
+ *
+ * The payment-verification alert above only fires for a WALLET order that is
+ * waiting for manual approval. A plain Cash-on-Delivery / store order (e.g.
+ * `#ZID-455622737`) never triggered it, so “Telegram is not sending anything
+ * when an order is placed” was the expected behaviour of that code path.
+ *
+ * This alert is the missing piece: one message per order that was ACTUALLY
+ * written to the database, containing what a merchant needs to start packing.
+ *
+ * Rules:
+ *   • never blocks and never fails the checkout — the order is already saved
+ *     by the time this runs, so every failure is logged and swallowed;
+ *   • a duplicate submission idempotency already filtered out never reaches
+ *     here, so a retried click cannot send two messages.
+ * ──────────────────────────────────────────────────────────────────────────── */
+async function sendNewOrderTelegramAlert(args: {
+  botToken: string;
+  chatId: string;
+  orderNumber: string;
+  storeName: string;
+  storeSlug: string;
+  customerName: string;
+  customerPhone: string;
+  customerAddress: string;
+  totalBDT: number;
+  paymentMethod: string;
+  itemCount: number;
+  itemsSummary: string;
+  channel: string;
+  source: string;
+  receivedAt: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const botToken = normalizeTelegramToken(args.botToken);
+  const chatId = normalizeTelegramChatId(args.chatId);
+  if (!botToken || !chatId) {
+    console.warn('[Telegram][new-order] skipped — bot token or chat id not configured.', {
+      order: args.orderNumber,
+      botToken: botToken ? 'set' : 'MISSING',
+      chatId: chatId ? 'set' : 'MISSING',
+    });
+    return { ok: false, error: 'Telegram bot token or chat id is not configured.' };
+  }
+
+  const esc = (v: unknown) =>
+    String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const message = [
+    '🛒 <b>New order received</b>',
+    '',
+    `🧾 Order: <code>#${esc(args.orderNumber)}</code>`,
+    `🏪 Store: <b>${esc(args.storeName || args.storeSlug)}</b>`,
+    `👤 Customer: ${esc(args.customerName)}`,
+    `📞 Phone: <code>${esc(args.customerPhone)}</code>`,
+    ...(args.customerAddress ? [`📍 Address: ${esc(args.customerAddress)}`] : []),
+    `📦 Items: ${args.itemCount}`,
+    ...(args.itemsSummary ? [esc(args.itemsSummary)] : []),
+    `💳 Payment: <b>${esc(args.paymentMethod || '—')}</b>`,
+    `💰 Total: <b>৳${Number(args.totalBDT || 0).toLocaleString('en-US')}</b>`,
+    '',
+    `<i>${esc(args.channel)} · via ${esc(args.source)} · ${esc(args.receivedAt)}</i>`,
+  ].join('\n');
+
+  try {
+    console.log('[Telegram][new-order] sending:', {
+      order: args.orderNumber,
+      chatId,
+      tokenPrefix: `${botToken.slice(0, 6)}…`,
+      amountBDT: args.totalBDT,
+    });
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: message,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+      // A push channel must never hold the checkout response.
+      signal: AbortSignal.timeout(8000),
+    });
+    const data: any = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      const description = String(data?.description || `HTTP ${res.status}`);
+      // 404 = bad/malformed token, 401 = revoked token, 400 'chat not found' =
+      // bot never started / wrong chat id. Logged with the order so the
+      // failure is traceable instead of silently skipped.
+      console.warn('[Telegram][new-order] sendMessage rejected:', {
+        order: args.orderNumber,
+        chatId,
+        status: res.status,
+        description,
+      });
+      return { ok: false, error: description };
+    }
+    console.log('[Telegram][new-order] sent:', {
+      order: args.orderNumber,
+      chatId,
+      messageId: data?.result?.message_id,
+    });
+    return { ok: true };
+  } catch (err: any) {
+    const reason = err?.name === 'TimeoutError' || err?.name === 'AbortError'
+      ? 'request timed out after 8s'
+      : (err?.message || String(err));
+    console.warn('[Telegram][new-order] sendMessage failed:', {
+      order: args.orderNumber,
+      chatId,
+      name: err?.name,
+      message: reason,
+    });
+    return { ok: false, error: reason };
+  }
+}
+
 async function sendAdminPaymentAlertTelegram(args: {
   botToken: string;
   chatId: string;
@@ -23273,6 +23389,76 @@ app.post('/api/orders', async (req, res) => {
           // Never rethrow — the order is already saved.
           console.warn('[Telegram] admin payment alert threw (order already saved):', tgErr?.message || tgErr);
         }
+      }
+
+      /*
+       * ── NEW ORDER TELEGRAM PUSH (every order) ──────────────────────
+       *
+       * Runs for EVERY order that actually reached the database — not only a
+       * wallet payment awaiting verification (the block above) — so the
+       * merchant/admin chat gets a message the moment the order is placed.
+       *
+       * `persisted` is the read-back-verified result, so an order the database
+       * refused is never announced. Fire-and-forget with an internal try/catch:
+       * Telegram can be slow, rate-limited or misconfigured, and none of that
+       * may delay or fail the checkout response.
+       */
+      if (persisted) {
+        const items = Array.isArray(masterRecord.items) ? masterRecord.items : [];
+        const itemsSummary = items
+          .slice(0, 3)
+          .map((line: any) => {
+            const qty = Number(line?.quantity ?? line?.qty ?? 1) || 1;
+            const name = String(line?.title || line?.name || line?.product_name || '').trim();
+            return name ? `• ${qty}× ${name}` : '';
+          })
+          .filter(Boolean)
+          .join('\n');
+        void (async () => {
+          try {
+            const tg = await resolveTelegramAlertConfig();
+            if (tg.source === 'none') {
+              console.warn('[Telegram][new-order] skipped — no bot token / chat id configured (dashboard or env).', {
+                order: masterRecord.order_number,
+                envToken: telegramEnv('TELEGRAM_BOT_TOKEN') ? 'set' : 'MISSING',
+                envChat: (telegramEnv('TELEGRAM_ADMIN_CHAT_ID') || telegramEnv('TELEGRAM_CHAT_ID')) ? 'set' : 'MISSING',
+              });
+              return;
+            }
+            const result = await sendNewOrderTelegramAlert({
+              botToken: tg.botToken,
+              chatId: tg.chatId,
+              orderNumber: String(masterRecord.order_number || masterRecord.id || ''),
+              storeName: String(masterRecord.store_name || order.storeName || order.store_name || slug),
+              storeSlug: String(slug || masterRecord.store_slug || ''),
+              customerName: String(masterRecord.customer_name || ''),
+              customerPhone: String(masterRecord.customer_phone || ''),
+              customerAddress: String(
+                masterRecord.customer_address || masterRecord.shipping_address || masterRecord.address || ''
+              ),
+              totalBDT: Number(masterRecord.total_price || 0),
+              paymentMethod: String(masterRecord.payment_method || ''),
+              itemCount: items.length,
+              itemsSummary,
+              channel: String(masterRecord.channel || orderChannel || ''),
+              source: String(masterRecord.source || source || ''),
+              receivedAt: new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka' }),
+            });
+            console.log('[Telegram][new-order] result:', {
+              order: masterRecord.order_number,
+              source: tg.source,
+              ok: result.ok,
+              error: result.error,
+            });
+          } catch (tgErr: any) {
+            // Never rethrow — the order is already saved and the response is
+            // unaffected. The log names the order so a failure is traceable.
+            console.warn('[Telegram][new-order] alert threw (order already saved):', {
+              order: masterRecord.order_number,
+              message: tgErr?.message || String(tgErr),
+            });
+          }
+        })();
       }
 
       // Order confirmation SMS
