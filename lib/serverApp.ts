@@ -5375,7 +5375,12 @@ app.all('/api/categories', async (req, res) => {
 
     const categories = Array.isArray(req.body?.categories) ? req.body.categories : (req.body ? [req.body] : []);
 
-    await connectToMongoDB();
+    await connectToMongoDB().catch((dbErr: any) => {
+      // A transient connection failure must NOT abort the read: the in-memory /
+      // file mirror below is still a valid answer, and a thrown error here made
+      // the Categories tab empty even though the rows were stored.
+      console.warn('[Server] /api/categories MongoDB connection warning:', dbErr?.message || dbErr);
+    });
     const db = mongoose.connection.readyState === 1 ? mongoose.connection.db : null;
 
     if (req.method === 'POST' || req.method === 'PUT') {
@@ -6097,6 +6102,21 @@ app.get('/api/products', async (req, res) => {
         if (!productDb) productDb = await getMongoDb(DB_NAME, 'primary');
       } catch (dbErr: any) {
         console.error('[Server] GET /api/products MongoDB connection error:', dbErr?.message || dbErr);
+      }
+      /*
+       * ONE RETRY ON A TRANSIENT FAILURE — the same rule as GET /api/orders.
+       *
+       * A brief driver/Atlas blip made `getMongoDb` reject, the route then served
+       * the (empty) file/memory mirror, and the merchant's Products tab went
+       * blank although every product was in `products`. Retrying once converts a
+       * blip back into a normal, populated answer.
+       */
+      if (!productDb) {
+        try {
+          productDb = await getMongoDb(DB_NAME, 'primary');
+        } catch (retryErr: any) {
+          console.warn('[Server] GET /api/products MongoDB retry failed:', retryErr?.message || retryErr);
+        }
       }
     } else {
       console.warn('[Server] GET /api/products MongoDB URIs are not set — falling back to file/memory store.');
@@ -21325,12 +21345,28 @@ app.get('/api/orders', async (req, res) => {
 
     let dbConnected = false;
     if (isMongoConfigured()) {
-      try {
-        await connectToMongoDB();
-        dbConnected = mongoose.connection.readyState === 1;
-      } catch (dbErr: any) {
-        console.warn('[Server] GET /api/orders DB connection warning:', dbErr?.message || dbErr);
-        dbConnected = false;
+      /*
+       * ONE RETRY ON A TRANSIENT CONNECTION FAILURE.
+       *
+       * A brief Atlas/driver blip (server selection timeout, a dropped socket)
+       * used to be reported immediately as "degraded", so the dashboard kept its
+       * old (empty) list and the merchant saw no orders even though every row was
+       * stored. One short retry turns that blip into a normal, populated answer;
+       * a genuinely down database still fails fast (each attempt is bounded by
+       * serverSelectionTimeoutMS).
+       */
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await connectToMongoDB();
+          dbConnected = mongoose.connection.readyState === 1;
+          break;
+        } catch (dbErr: any) {
+          console.warn(
+            `[Server] GET /api/orders DB connection warning (attempt ${attempt + 1}/2):`,
+            dbErr?.message || dbErr,
+          );
+          dbConnected = false;
+        }
       }
     } else {
       console.warn('[Server] GET /api/orders MONGODB_URI is not set — falling back to in-memory cache store.');

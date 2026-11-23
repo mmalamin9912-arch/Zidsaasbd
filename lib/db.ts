@@ -432,14 +432,32 @@ async function connectWithFailover(
 ): Promise<typeof mongoose> {
   const failures: string[] = [];
 
+  // A REJECTED CREDENTIAL IS THE ONLY NON-RETRYABLE FAILURE.
+  //
+  // Every other failure (DNS, timeout, server selection) can be a TRANSIENT
+  // outage — an Atlas blip, an IP allow-list change, a cold pool. Those must be
+  // retried on the next request, never cached as "database is gone".
+  const isAuthRejection = (message: string) => /bad auth|authentication failed|auth failed/i.test(message);
+
   for (let i = 0; i < candidates.length; i += 1) {
     const uri = await resolveMongoUriForDriver(candidates[i]);
     const label = i === 0 ? 'primary' : 'secondary';
     console.log(`[MongoDB] Opening new connection pool via ${label} URI (dbName=${dbName}, host=${redactUri(uri)})`);
 
     try {
-      // Clear any socket/model state left behind by a previous failed attempt.
-      if (mongoose.connection.readyState !== 0) {
+      /*
+       * DO NOT TEAR DOWN A CONNECTION THAT IS MERELY RECONNECTING.
+       *
+       * `readyState !== 0` also matches 3 ("disconnected", which the driver
+       * reaches transiently and then retries on its own) and 2 ("connecting").
+       * Disconnecting in those states destroyed the shared global pool the
+       * mongoose models (`Order`, `Product`, …) are bound to, so a brief blip
+       * turned into a permanently dead database until the process restarted —
+       * exactly the "data exists but everything loads empty" state. Only a
+       * genuinely closed handle (0 = disconnected, never connected) needs the
+       * socket state cleared here.
+       */
+      if (mongoose.connection.readyState === 0) {
         await mongoose.disconnect().catch(() => undefined);
       }
       const connection = await mongoose.connect(uri, opts);
@@ -452,8 +470,26 @@ async function connectWithFailover(
 
       // A rejected credential is an operator error, not a dead cluster: trying
       // the other URI would mask a mistyped password behind an unrelated one.
-      if (/bad auth|authentication failed|auth failed/i.test(message)) {
+      if (isAuthRejection(message)) {
         throw new Error(`[MongoDB] Authentication failed for the ${label} URI. Check the username and password.`);
+      }
+
+      /*
+       * A TRANSIENT HANDSHAKE FAILURE ON AN ALREADY-CONNECTED POOL IS NOT FATAL.
+       *
+       * `mongoose.connect()` rejects when the driver briefly cannot reach a
+       * server. If another module already opened this shared connection and its
+       * readyState is still 1 (or the driver is reconnecting on its own), the
+       * existing pool is the one every model is bound to — keep using it
+       * instead of reporting the whole database as down.
+       */
+      const state = mongoose.connection.readyState as number;
+      if (state === 1 || state === 3) {
+        console.warn(
+          `[MongoDB] ${label} URI handshake failed but the shared connection is still ` +
+          `usable (readyState=${state}) — reusing it instead of failing the request.`,
+        );
+        return mongoose;
       }
       // Fall through to the next candidate.
     }
@@ -542,6 +578,13 @@ export async function getMongoDb(
     return connection.db ?? null;
   }
   await connectToDatabase(dbName);
+  // `readyState` 1 = connected. A handle is only usable in that state; returning
+  // `mongoose.connection.db` while the pool is connecting/reconnecting/disconnected
+  // handed callers a non-null object whose queries then failed (bufferCommands is
+  // off), which surfaced as "database unavailable" and an empty dashboard even
+  // though the data was there. Returning null lets each route use its explicit
+  // cache/fallback path instead.
+  if ((mongoose.connection.readyState as number) !== 1) return null;
   return mongoose.connection.db ?? null;
 }
 

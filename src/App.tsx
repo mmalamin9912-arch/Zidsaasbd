@@ -887,19 +887,31 @@ export default function App() {
       ordersQuery.append('merchant_id', value);
     }
     fetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`, { cache: 'no-store' })
-      .then(async res => {
-        // A SUPERSEDED REQUEST MUST NOT TOUCH STATE.
-        //
-        // This effect re-runs whenever the store identity changes, and the
-        // background session revalidation swaps `merchant` (a compact stored
-        // session has no `storeSlug`, then the server profile fills it in). The
-        // cleanup sets `isMounted = false`, but this `.then` still ran its
-        // `setOrders`/`setOrdersHydrated` because the original guard began with
-        // `!isMounted || !res.ok`: the late answer of the FIRST request (an empty
-        // list for the placeholder identity) could land last and leave the table
-        // showing 0 orders. Every branch below now bails on the request's own
-        // `isMounted` flag, not just the first one.
-        if (!isMounted || !res.ok) return;
+      .then(async (firstRes) => {
+        let res = firstRes;
+        if (!isMounted) return;
+        if (!res.ok) {
+          /*
+           * A FAILED READ IS RETRIED ONCE, AUTOMATICALLY.
+           *
+           * A transient 500 (server connection blip, cold start) used to leave
+           * the table empty until the merchant pressed Refresh. One short retry
+           * is enough to ride out a blip; a real outage still settles the gate
+           * below so the page is never stuck on "Loading your orders…".
+           */
+          console.warn(`[App] orders fetch returned ${res.status} — retrying once`);
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          if (!isMounted) return;
+          const retry = await fetch(
+            `/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`,
+            { cache: 'no-store' },
+          ).catch(() => null);
+          if (!isMounted) return;
+          // Still failing (or the server answers non-OK): fall through to the
+          // hydration gate in `finally` so the loader always stops.
+          if (!retry || !retry.ok) return;
+          res = retry;
+        }
         const data = await res.json().catch(() => null);
         if (!isMounted || !Array.isArray(data)) return;
         /*
@@ -915,6 +927,17 @@ export default function App() {
          */
         if (res.headers.get('X-Orders-Degraded') === 'true') {
           console.warn('[App] orders response was degraded — keeping the current list');
+          /*
+           * SETTLE THE HYDRATION GATE HERE TOO.
+           *
+           * Returning without touching `ordersHydrated` left the gate armed. A
+           * degraded answer (Mongo unreachable on this instance) therefore pinned
+           * the Orders page on "Loading your orders…" FOREVER, and hid the whole
+           * toolbar/table even when the list was already loaded. The degraded
+           * response only means "do not replace the current rows" — it is still
+           * a completed request, so the loader must stop.
+           */
+          setOrdersHydrated(true);
           return;
         }
         // API rows are raw Mongo documents (total_price / created_at / items as
