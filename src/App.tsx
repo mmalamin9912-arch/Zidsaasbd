@@ -788,9 +788,24 @@ export default function App() {
     };
 
     // Products
+    //
+    // Ask with every identity the profile carries, INCLUDING the canonical slug
+    // from the server. `merchant.storeSlug` can be an email-derived placeholder
+    // (`email.split('@')[0]`, e.g. "mmalamin9912") while the catalogue rows are
+    // stored under the store's real slug ("mystore"). Sending the slug first and
+    // falling back through the other identifiers is what makes existing products
+    // load again.
+    const productQuery = new URLSearchParams();
+    productQuery.set('store_slug', storeSlug);
+    for (const value of [merchant?.storeSlug, merchant?.storeCode, merchant?.store_code, merchantId]) {
+      const ref = String(value ?? '').trim();
+      if (ref && !productQuery.getAll('store_slug').includes(ref)) {
+        productQuery.append('store_slug', ref);
+      }
+    }
     const loadAppProducts = async () => {
       try {
-        const res = await fetch(`/api/products?store_slug=${encodeURIComponent(storeSlug)}`);
+        const res = await fetch(`/api/products?${productQuery.toString()}`);
         const data = await res.json().catch(() => null);
         if (isMounted && Array.isArray(data) && data.length > 0) {
           const { mapApiProduct } = await import('./utils/catalogPayload');
@@ -834,12 +849,31 @@ export default function App() {
 
     // Categories — only update merchant state when categories actually
     // changed, otherwise setMerchant re-triggers the auto-sync effect.
+    //
+    // Every identity is tried, canonical slug FIRST: a profile whose `storeSlug`
+    // is only the email local part ("mmalamin9912") would otherwise filter for
+    // categories under a slug no row carries, while they are stored under the
+    // store's real slug ("mystore"). The server also resolves the ref, but
+    // asking with the right value here avoids a needless empty first pass.
+    const categoryRefs = Array.from(new Set(
+      [storeSlug, merchant?.storeSlug, merchant?.storeCode, merchant?.store_code, merchantId]
+        .map((v) => String(v ?? '').trim())
+        .filter(Boolean),
+    ));
     const loadCategories = async () => {
-      let catsRes = await safeFetch(`/api/categories?store_slug=${encodeURIComponent(storeSlug)}`);
-      let cats = Array.isArray(catsRes) ? catsRes : (Array.isArray(catsRes?.categories) ? catsRes.categories : null);
+      let cats: any[] | null = null;
+      for (const ref of categoryRefs) {
+        const catsRes = await safeFetch(`/api/categories?store_slug=${encodeURIComponent(ref)}`);
+        const next = Array.isArray(catsRes) ? catsRes : (Array.isArray(catsRes?.categories) ? catsRes.categories : null);
+        if (Array.isArray(next) && next.length > 0) { cats = next; break; }
+        if (cats === null) cats = next;
+      }
       if (!Array.isArray(cats) || cats.length === 0) {
-        const bySlug = await safeFetch(`/api/categories-by-slug/${encodeURIComponent(storeSlug)}`);
-        cats = Array.isArray(bySlug) ? bySlug : (Array.isArray(bySlug?.categories) ? bySlug.categories : []);
+        for (const ref of categoryRefs) {
+          const bySlug = await safeFetch(`/api/categories-by-slug/${encodeURIComponent(ref)}`);
+          const next = Array.isArray(bySlug) ? bySlug : (Array.isArray(bySlug?.categories) ? bySlug.categories : []);
+          if (Array.isArray(next) && next.length > 0) { cats = next; break; }
+        }
       }
       if (isMounted && Array.isArray(cats) && cats.length > 0) {
         setMerchant(prev => {

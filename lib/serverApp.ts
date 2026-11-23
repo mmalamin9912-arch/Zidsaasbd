@@ -5372,6 +5372,19 @@ app.all('/api/categories', async (req, res) => {
         ? req.body.store_slug.trim().toLowerCase()
         : '';
     const storeSlug = String(rawSlug || '').split(':')[0].trim().toLowerCase();
+    /*
+     * RESOLVE THE CANONICAL SLUG BEFORE QUERYING.
+     *
+     * A dashboard can ask with an identity that is NOT the store's slug — the
+     * client falls back to `email.split('@')[0]` (`mmalamin9912`) when a profile
+     * has no slug, while every category row is stored under the real slug
+     * (`mystore`). Filtering on the literal value matched NOTHING, so an existing
+     * category list rendered empty. `resolveStoreRefs` maps a slug, store code,
+     * UUID, domain or EMAIL back to the store's real slug + id, and every
+     * spelling is queried below.
+     */
+    const refs = storeSlug ? await resolveStoreRefs(storeSlug) : { slug: '' };
+    const canonicalSlug = refs.slug || storeSlug;
 
     const categories = Array.isArray(req.body?.categories) ? req.body.categories : (req.body ? [req.body] : []);
 
@@ -5530,7 +5543,33 @@ app.all('/api/categories', async (req, res) => {
       let cats: any[] = [];
       if (db) {
         try {
-          const query: any = storeSlug ? { $or: [{ store_slug: storeSlug }, { storeSlug: storeSlug }] } : {};
+          /*
+           * Match EVERY identity the category rows may carry: the canonical slug
+           * (camel + snake, any casing), any alias the caller asked for, and the
+           * store's own id/code. A single exact `store_slug` compare is what made
+           * existing categories invisible when the request came in as an email
+           * local part or a differently-cased slug.
+           */
+          const slugAliases = Array.from(new Set([canonicalSlug, storeSlug].filter(Boolean)));
+          const or: any[] = [];
+          for (const alias of slugAliases) {
+            or.push(
+              { store_slug: alias },
+              { storeSlug: alias },
+              { store_slug: { $regex: `^${escapeStoreRefRegex(alias)}$`, $options: 'i' } },
+              { storeSlug: { $regex: `^${escapeStoreRefRegex(alias)}$`, $options: 'i' } },
+            );
+          }
+          const storeIds = [refs.storeId, refs.storeCode].filter(Boolean) as string[];
+          for (const idValue of storeIds) {
+            or.push(
+              { store_id: idValue },
+              { storeId: idValue },
+              { store_code: idValue },
+              { storeCode: idValue },
+            );
+          }
+          const query: any = or.length ? { $or: or } : {};
           const mongoCats = await db.collection('categories').find(query).toArray();
           if (Array.isArray(mongoCats) && mongoCats.length > 0) {
             cats = mongoCats.map((c: any) => ({
@@ -5538,16 +5577,16 @@ app.all('/api/categories', async (req, res) => {
               id: String(c.id || c._id || `cat-${Date.now()}`),
               parentId: c.parentId ?? c.parent_id ?? null,
             }));
-            categoryStore.set(storeSlug, cats);
+            if (canonicalSlug) categoryStore.set(canonicalSlug, cats);
           }
         } catch (mongoGetErr) {
           console.warn('[Server] /api/categories MongoDB query warning:', mongoGetErr);
         }
       }
       if (cats.length === 0) {
-        cats = categoryStore.get(storeSlug) || [];
+        cats = categoryStore.get(canonicalSlug) || categoryStore.get(storeSlug) || [];
       }
-      return res.status(200).json({ ok: true, store_slug: storeSlug, categories: cats });
+      return res.status(200).json({ ok: true, store_slug: canonicalSlug, categories: cats });
     }
 
     res.setHeader('Allow', 'GET, POST, PUT, DELETE');
@@ -5838,6 +5877,45 @@ async function resolveStoreIdentity(rawRef: string): Promise<StoreIdentity> {
     identity.storeSlug = ref.toLowerCase();
   }
 
+  /*
+   * MONGO FIRST, INCLUDING THE EMAIL ALIAS.
+   *
+   * The dashboard can ask with the merchant's EMAIL LOCAL PART
+   * (`emrezonx`-style value from `email.split('@')[0]`) rather than the store
+   * slug. An order/product/category row carries the real slug (`mystore`), so
+   * returning the raw value as `storeSlug` produced a filter that matched
+   * nothing and the merchant saw empty lists while the data sat in MongoDB.
+   * Resolving the ref through the `stores` collection — by slug (any casing),
+   * code, id, or EMAIL — maps it back to the store that actually owns the rows.
+   */
+  try {
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const lower = ref.toLowerCase();
+      const doc: any = await (mongoose.connection.db.collection('stores') as any).findOne({
+        $or: [
+          { store_slug: lower },
+          { storeSlug: lower },
+          { store_slug: { $regex: `^${escapeStoreRefRegex(lower)}$`, $options: 'i' } },
+          { storeSlug: { $regex: `^${escapeStoreRefRegex(lower)}$`, $options: 'i' } },
+          { store_code: { $in: [lower, lower.toUpperCase()] } },
+          { email: lower },
+          { email: { $regex: `^${escapeStoreRefRegex(lower)}@`, $options: 'i' } },
+          ...(isUuidLike(lower) ? [{ id: lower }, { _id: lower }, { store_id: lower }] : []),
+        ],
+      });
+      if (doc) {
+        if (doc.store_slug || doc.storeSlug) {
+          identity.storeSlug = String(doc.store_slug || doc.storeSlug).toLowerCase();
+        }
+        if (doc.store_code) identity.storeCode = String(doc.store_code).toUpperCase();
+        const docId = String(doc.id || doc._id || '');
+        if (isUuidLike(docId)) identity.storeId = docId;
+      }
+    }
+  } catch (e: any) {
+    console.warn('[Server] resolveStoreIdentity mongo warning:', e?.message || e);
+  }
+
   // Ask Supabase for the canonical row (id + store_slug + store_code) so both
   // the UUID and the slug are populated regardless of which one was supplied.
   try {
@@ -5938,13 +6016,24 @@ function getMergedProductsForStore(storeSlug: string, merchantId: string, payloa
 }
 
 /**
+ * Escape a store reference for safe use inside a RegExp.
+ *
+ * A slug / email local part is user data: an un-escaped `(` or `*` would throw
+ * and make the whole store lookup fail, which reads as "database unavailable".
+ */
+function escapeStoreRefRegex(value: string): string {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
  * Resolve ANY store reference to its canonical slug + identity, MongoDB-first.
  *
- * Accepts a store_slug, ZID-BD-XXXX store_code, stores.id UUID, or a custom
- * domain (mystore.com / shop.example.com). MongoDB `stores` is authoritative,
- * so a store that only exists there resolves correctly even when Supabase is
- * unreachable. Supabase is a secondary lookup and every failure is swallowed —
- * it can never fail the caller.
+ * Accepts a store_slug, ZID-BD-XXXX store_code, stores.id UUID, a custom
+ * domain (mystore.com / shop.example.com), or the merchant's EMAIL / email
+ * local part (`mmalamin9912`). MongoDB `stores` is authoritative, so a store
+ * that only exists there resolves correctly even when Supabase is unreachable.
+ * Supabase is a secondary lookup and every failure is swallowed — it can never
+ * fail the caller.
  */
 async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: string; storeCode?: string }> {
   const clean = String(ref || '').split(':')[0].trim().toLowerCase();
@@ -5956,17 +6045,43 @@ async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: 
 
   // 1. MongoDB stores collection (authoritative).
   try {
-    await connectToMongoDB();
+    await connectToMongoDB().catch(() => undefined);
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       const upper = clean.toUpperCase();
       const orClauses: any[] = [
         { store_slug: clean },
         { storeSlug: clean },
+        /*
+         * CASE-INSENSITIVE SLUG MATCH.
+         *
+         * Slugs are written by several callers and not all of them lowercase
+         * (`MyStore` vs `mystore`). A `$in`/equality compare is exact, so a store
+         * whose row carries `MyStore` resolved to the caller's raw string, which
+         * then matched no order/product/category row at all.
+         */
+        { store_slug: { $regex: `^${escapeStoreRefRegex(clean)}$`, $options: 'i' } },
+        { storeSlug: { $regex: `^${escapeStoreRefRegex(clean)}$`, $options: 'i' } },
         { store_code: { $in: [clean, upper] } },
         { customDomain: clean },
         { custom_domain: clean },
         { domain: clean },
         { 'domainConfig.customDomain': clean },
+        /*
+         * EMAIL — THE FIX FOR "data exists but nothing loads".
+         *
+         * The dashboard falls back to `email.split('@')[0]` when a profile has
+         * no usable slug, so a request can arrive as `mmalamin9912` — a value that
+         * is NOT a store slug, UUID or code. Every order/product/category row is
+         * stored under the store's real slug (`mystore`), so the literal
+         * `store_slug=mmalamin9912` filter matched NOTHING and the dashboard
+         * showed empty lists while MongoDB held the data. Resolving the ref (or
+         * the email local part) through `email` maps it back to the store the
+         * merchant actually owns.
+         */
+        { email: clean },
+        { email: { $regex: `^${escapeStoreRefRegex(clean)}@`, $options: 'i' } },
+        { merchant_email: clean },
+        { merchant_email: { $regex: `^${escapeStoreRefRegex(clean)}@`, $options: 'i' } },
       ];
       if (isUuidLike(clean)) orClauses.push({ id: clean }, { _id: clean }, { store_id: clean });
       const doc: any = await (mongoose.connection.db.collection('stores') as any).findOne({ $or: orClauses });
@@ -6126,7 +6241,21 @@ app.get('/api/products', async (req, res) => {
         const mongoOr: any[] = [
           { store_slug: storeSlug },
           { storeSlug: storeSlug },
+          // Legacy rows may carry the slug in a different casing (`MyStore`).
+          { store_slug: { $regex: `^${escapeStoreRefRegex(storeSlug)}$`, $options: 'i' } },
+          { storeSlug: { $regex: `^${escapeStoreRefRegex(storeSlug)}$`, $options: 'i' } },
         ];
+        // The ALIAS the caller sent (an email local part, an older slug, …) is
+        // queried too, so a row written before the store was renamed still loads.
+        const requestedAlias = rawSlugOriginal.toLowerCase();
+        if (requestedAlias && requestedAlias !== storeSlug) {
+          mongoOr.push(
+            { store_slug: requestedAlias },
+            { storeSlug: requestedAlias },
+            { store_slug: { $regex: `^${escapeStoreRefRegex(requestedAlias)}$`, $options: 'i' } },
+            { storeSlug: { $regex: `^${escapeStoreRefRegex(requestedAlias)}$`, $options: 'i' } },
+          );
+        }
         if (refs.storeId) mongoOr.push({ store_id: refs.storeId }, { storeId: refs.storeId });
         if (refs.storeCode) mongoOr.push({ store_code: refs.storeCode }, { storeCode: refs.storeCode });
         // If the original was a UUID or store_code, also match by those keys directly.
@@ -20589,6 +20718,17 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
       slugs.add(identity.storeSlug.toLowerCase());
       supplied.add(identity.storeSlug);
       supplied.add(identity.storeSlug.toLowerCase());
+      /*
+       * THE CANONICAL SLUG IS A FIRST-CLASS STORE IDENTITY.
+       *
+       * When the caller sent an email local part (or an older/renamed slug),
+       * `identity.storeSlug` is the store's REAL slug (`mystore`) — the value the
+       * orders are actually stored under. Registering it here is what makes
+       * `store_slug: 'mmalamin9912'` still return the merchant's orders.
+       */
+      if (!isUuidLike(identity.storeSlug) && !STORE_CODE_RE.test(identity.storeSlug)) {
+        slugs.add(identity.storeSlug.toLowerCase());
+      }
     }
     if (identity.storeCode) {
       canonical.add(identity.storeCode);
