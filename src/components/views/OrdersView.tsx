@@ -498,6 +498,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     // the filter memos — on every tick, which is what made the page look like
     // it was fetching endlessly even when the database had not changed.
     let lastSyncedSignature = '';
+    /*
+     * LATE ANSWERS FOR A PREVIOUS STORE MUST BE DISCARDED.
+     *
+     * The effect re-runs when `merchantId` / `storeSlug` change (a stored
+     * session has no slug until the server profile arrives), and the old
+     * request kept running. If its (empty, placeholder-identity) answer landed
+     * LAST it replaced the new store's rows — the table then showed 0 orders
+     * until a manual refresh. `stale` is set by the cleanup below and every
+     * state write in this function checks it.
+     */
+    let stale = false;
     // Exposed to the manual-refresh button (below) without re-running this
     // effect — calling `notifyOrdersChanged` from the same tab would just be a
     // slower way of invoking this function.
@@ -527,6 +538,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         // Express equivalent of force-dynamic) guarantee every poll reads the
         // live database — a cached EMPTY answer is what made orders disappear.
         const res = await fetch(`/api/orders${params.toString() ? `?${params.toString()}` : ''}`, { cache: 'no-store' });
+        if (stale) return;
         if (!res.ok) {
           // A real failure must be VISIBLE. The list is kept (stale-but-present
           // beats an empty table) but the merchant is told the table is not
@@ -536,6 +548,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           return;
         }
         const data = await res.json();
+        if (stale) return;
         // GET /api/orders returns a plain array; a degraded/failed shape carries
         // `{ ok: false, orders: [] }`. Read the array either way so the table is
         // never handed a non-array.
@@ -629,6 +642,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
         mergeServerOrders(uniqueFetched);
       } catch (err) {
+        if (stale) return;
         console.warn('Error fetching live orders:', err);
         setLiveSync({ state: 'error', at: Date.now(), message: err instanceof Error ? err.message : 'Network error' });
       }
@@ -657,6 +671,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     }, storeSlug || merchantId);
 
     return () => {
+      stale = true;
       unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

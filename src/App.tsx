@@ -888,6 +888,17 @@ export default function App() {
     }
     fetch(`/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`, { cache: 'no-store' })
       .then(async res => {
+        // A SUPERSEDED REQUEST MUST NOT TOUCH STATE.
+        //
+        // This effect re-runs whenever the store identity changes, and the
+        // background session revalidation swaps `merchant` (a compact stored
+        // session has no `storeSlug`, then the server profile fills it in). The
+        // cleanup sets `isMounted = false`, but this `.then` still ran its
+        // `setOrders`/`setOrdersHydrated` because the original guard began with
+        // `!isMounted || !res.ok`: the late answer of the FIRST request (an empty
+        // list for the placeholder identity) could land last and leave the table
+        // showing 0 orders. Every branch below now bails on the request's own
+        // `isMounted` flag, not just the first one.
         if (!isMounted || !res.ok) return;
         const data = await res.json().catch(() => null);
         if (!isMounted || !Array.isArray(data)) return;
@@ -921,7 +932,8 @@ export default function App() {
       .finally(() => {
         // Settle the hydration gate even when the request failed: an endless
         // pulsing placeholder would be worse than showing the last known /
-        // cached count on a network error.
+        // cached count on a network error. A SUPERSEDED effect must not settle
+        // it though — the newer request owns the gate.
         if (isMounted) setOrdersHydrated(true);
       });
 

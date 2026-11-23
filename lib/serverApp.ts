@@ -20450,13 +20450,13 @@ function sanitizeMongoPatch(patch: Record<string, any>): Record<string, any> {
  * back to "now" so the stored document ALWAYS has a renderable timestamp —
  * the dashboard renders this field and an undefined one used to crash it.
  */
-function toValidDate(value: unknown): Date {
+function toValidDate(value: unknown, fallback: Date = new Date()): Date {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
   if (value !== null && value !== undefined && value !== '') {
     const parsed = new Date(value as string);
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
-  return new Date();
+  return fallback;
 }
 
 /**
@@ -20470,7 +20470,16 @@ function toValidDate(value: unknown): Date {
  */
 function normalizeOrderRow(raw: Record<string, any> | null | undefined): Record<string, any> | null {
   if (!raw) return null;
-  const createdAt = toValidDate(raw.created_at ?? raw.createdAt ?? raw.date);
+  /*
+   * An order with NO usable timestamp is a legacy/partial row.
+   *
+   * `toValidDate` falls back to "now", which made every undated row claim it
+   * was placed THIS SECOND: the newest-first list then pushed those rows to the
+   * top (and re-ordered them on every read), so the table and its "All" count
+   * looked wrong. The fallback is now the epoch, i.e. such a row sorts LAST and
+   * never pretends to be the newest order.
+   */
+  const createdAt = toValidDate(raw.created_at ?? raw.createdAt ?? raw.date, new Date(0));
   const items = (() => {
     if (Array.isArray(raw.items)) return raw.items;
     if (typeof raw.items === 'string') {
