@@ -1519,14 +1519,36 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
 
       // 4. Modal filters
-      if (filterSource !== 'All' && (ord.source || 'Store') !== filterSource) return false;
+      //
+      // Every comparison here is CASE- and SPELLING-TOLERANT.
+      //
+      // These used to be strict `!==` against the raw row value, while the rows
+      // themselves are canonicalised elsewhere (`normalizeOrder` rewrites
+      // `paymentStatus` / `source` to their display spelling, and a Mongo row may
+      // hold `pending_verification`, `cash on delivery`, `steadfast courier`…).
+      // So choosing a value from the dropdown could match NOTHING — the table
+      // then showed “No orders found matching your active filters” even though
+      // the `All` tab counts proved the orders existed. Each filter now folds
+      // both sides to one comparable key.
+      const sameText = (a: unknown, b: unknown) =>
+        String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+      const sameKey = (a: unknown, b: unknown) =>
+        String(a ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') ===
+        String(b ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (filterSource !== 'All' && !sameText(ord.source || 'Store', filterSource)) return false;
       // Source type filter: Marketplace vs Store-link
       if (sourceTypeTab === 'Marketplace' && !isMarketplaceOrder(ord)) return false;
       if (sourceTypeTab === 'Store-link' && isMarketplaceOrder(ord)) return false;
-      if (filterPlatform !== 'All' && (ord.platform || 'Mobile web') !== filterPlatform) return false;
-      if (filterPaymentMethod !== 'All' && ord.paymentMethod !== filterPaymentMethod) return false;
-      if (filterPaymentStatus !== 'All' && ord.paymentStatus !== filterPaymentStatus) return false;
-      if (filterCourier !== 'All' && (ord.courierName || 'Unassigned') !== filterCourier) return false;
+      if (filterPlatform !== 'All' && !sameText(ord.platform || 'Mobile web', filterPlatform)) return false;
+      if (filterPaymentMethod !== 'All' && !sameKey(ord.paymentMethod, filterPaymentMethod)) return false;
+      // Canonicalised first, so a stored `pending_verification` / `partial_paid`
+      // matches the `Pending Verification` / `Partially paid` option.
+      if (
+        filterPaymentStatus !== 'All' &&
+        !sameText(ord.paymentStatus || (ord as any).payment_status || 'Unpaid', filterPaymentStatus) &&
+        !sameKey(ord.paymentStatus || (ord as any).payment_status || 'Unpaid', filterPaymentStatus)
+      ) return false;
+      if (filterCourier !== 'All' && !sameText(ord.courierName || 'Unassigned', filterCourier)) return false;
 
       return true;
     }).sort((rawA, rawB) => {

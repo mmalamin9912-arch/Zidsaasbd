@@ -8277,10 +8277,26 @@ app.post('/api/stores/update', async (req, res) => {
              sbResult.detail.slice(0, 300),
            );
          } else {
+           //
+           // A `dropped` list is NOT success for those fields: `postgrestWrite`
+           // removed them because the deployed `stores` table has no such
+           // column, so the value never reached Supabase. It is now printed as
+           // a WARNING with the fix named, instead of hiding inside an “OK” log
+           // where the merchant's support phone / pickup address silently
+           // vanished from the fallback store. Run
+           // supabase/migrations/0020_stores_contact_pickup_columns.sql.
+           const dropped = sbResult.droppedColumns || [];
+           if (dropped.length > 0) {
+             console.warn('[Server] /api/stores/update Supabase mirror DROPPED columns:', {
+               store_slug: storeSlug || null,
+               dropped,
+               hint: 'These columns are missing on public.stores — run supabase/migrations/0020_stores_contact_pickup_columns.sql, then NOTIFY pgrst.',
+             });
+           }
            console.log('[Server] /api/stores/update Supabase mirror OK:', {
              store_slug: storeSlug || null,
              updated_by: updateBy,
-             dropped: sbResult.droppedColumns,
+             dropped,
            });
          }
          supabaseMirror = {
