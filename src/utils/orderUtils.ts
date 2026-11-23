@@ -131,18 +131,15 @@ export function normalizeOrder(raw: any): Order {
   );
 
   // `created_at` is a Date from Mongo; `createdAt` is a display string from the
-  // UI. Prefer whichever is present.
-  //
-  // A row that carries NO usable timestamp used to fall back to `new Date()` —
-  // "now". Because the list is sorted by this field, every such row jumped to
-  // the TOP on load (and moved again on the next load), so the "Newest first"
-  // list looked randomly ordered. A missing timestamp now sorts to the BOTTOM
-  // (epoch 0) instead of pretending the order was just placed; the display
-  // string keeps a readable value.
+  // UI. Prefer whichever is present, and fall back to "now" so the column is
+  // never empty.
   const createdSource = order.createdAt ?? order.created_at ?? order.date ?? order.orderDate ?? null;
-  const parsedDate = createdSource ? new Date(createdSource as any) : null;
-  const hasValidDate = Boolean(parsedDate && !Number.isNaN(parsedDate.getTime()));
-  const safeParsedDate = hasValidDate ? (parsedDate as Date) : new Date(0);
+  const parsedDate = createdSource
+    ? createdSource instanceof Date
+      ? createdSource
+      : new Date(createdSource)
+    : new Date();
+  const safeParsedDate = Number.isNaN(parsedDate.getTime()) ? new Date() : parsedDate;
   const normalizedCreatedAt = safeDate(safeParsedDate, new Date().toLocaleString());
 
   return {
