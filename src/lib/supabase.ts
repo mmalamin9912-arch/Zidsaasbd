@@ -176,6 +176,12 @@ export interface SafeWriteResult {
   droppedColumns?: string[];
   /** True when the natural-key fallback (update → insert) was used. */
   fallbackUsed?: boolean;
+  /**
+   * True when the request was intentionally NOT sent — either the column set or
+   * a schema/permission failure is already known for this table (see the write
+   * failure guard), so retrying would only repeat a guaranteed 400/401.
+   */
+  skipped?: boolean;
 }
 
 export interface SafeAuthResult<T = any> {
@@ -206,6 +212,106 @@ function preDroppedColumns(table: string): string[] {
   const entry = droppedColumnCache.get(table);
   if (!entry || entry.expiresAt <= Date.now()) return [];
   return Array.from(entry.cols);
+}
+
+/* ── Write failure guard (circuit breaker) ──────────────────────────────────
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * A `400` on `subscriptions?on_conflict=merchant_email` (no unique index on the
+ * deployed table) or a `401` on `stores?on_conflict=email` (the anon key is not
+ * allowed to write, e.g. RLS enabled with no policy) is a SCHEMA / PERMISSION
+ * condition: the identical request can never start succeeding on its own. Yet
+ * every dashboard action re-ran the whole retry ladder, so the Network tab
+ * filled with the SAME failing URL — the "please retry" experience the merchant
+ * reported.
+ *
+ * Once a table+endpoint combination has failed this way, the next writes to it
+ * short-circuit for a few minutes and are reported as `skipped` instead of
+ * hitting the network again. The caller's write is already best-effort (MongoDB
+ * and the /api server are the authoritative paths), so skipping it costs
+ * nothing except a request that was guaranteed to fail.
+ *
+ * The guard is per TABLE and clears on its own, so a fixed schema (index added)
+ * starts writing again without a reload.
+ */
+const writeFailureCache = new Map<string, { reason: string; expiresAt: number }>();
+const WRITE_FAILURE_TTL_MS = 2 * 60 * 1000;
+
+/** Read the active block reason for `table`, or null when writing is allowed. */
+function blockedWriteReason(table: string): string | null {
+  const entry = writeFailureCache.get(table);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    writeFailureCache.delete(table);
+    return null;
+  }
+  return entry.reason;
+}
+
+/** Block further writes to `table` for the TTL window. */
+function blockWrites(table: string, reason: string): void {
+  writeFailureCache.set(table, { reason, expiresAt: Date.now() + WRITE_FAILURE_TTL_MS });
+}
+
+/*
+ * Rejected `on_conflict` TARGETS.
+ *
+ * SQLSTATE 42P10 means "there is no unique or exclusion constraint matching the
+ * ON CONFLICT specification" — the upsert will ALWAYS answer 400 on this table
+ * until the index is created. The natural-key fallback still saves the row, so
+ * the write succeeds, but the doomed `?on_conflict=…` request was re-sent on
+ * every save, which is exactly the repeated 400 in the Network tab.
+ *
+ * Remembering the target lets the next call skip that request and go straight to
+ * the fallback that works. Keyed per table+column and self-clearing, so adding
+ * the unique index restores the single-request upsert on its own.
+ */
+const rejectedConflictTargets = new Map<string, number>();
+
+function conflictTargetKey(table: string, onConflict: string): string {
+  return `${table}:${onConflict}`;
+}
+
+function conflictTargetRejected(table: string, onConflict?: string): boolean {
+  if (!onConflict) return false;
+  const key = conflictTargetKey(table, onConflict);
+  const expiresAt = rejectedConflictTargets.get(key);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    rejectedConflictTargets.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function rememberRejectedConflictTarget(table: string, onConflict?: string): void {
+  if (!onConflict) return;
+  rejectedConflictTargets.set(
+    conflictTargetKey(table, onConflict),
+    Date.now() + WRITE_FAILURE_TTL_MS,
+  );
+}
+
+/**
+ * Is this failure PERMANENT (schema / permission) rather than transient?
+ *
+ *  - 401 / 403 / 42501 : the key may not write at all (RLS, grants).
+ *  - 42P10            : `on_conflict` targets a column with no unique index.
+ *  - PGRST204 / 42703 : the column does not exist in the deployed table.
+ *
+ * A network timeout or a 5xx is deliberately NOT permanent — those recover.
+ */
+function isPermanentWriteFailure(status?: number, code?: string, message?: string): boolean {
+  if (status === 401 || status === 403) return true;
+  const normalized = String(code || '').toUpperCase();
+  if (normalized === '42P10' || normalized === '42501') return true;
+  if (normalized === 'PGRST204' || normalized === '42703') return true;
+  // 400 carrying a schema/permission hint in the body.
+  if (status === 400 && /on conflict|unique or exclusion constraint|permission denied|does not exist|row-level security/i.test(String(message || ''))) {
+    return true;
+  }
+  return false;
 }
 
 /** Extract the offending column name from a PostgREST/PG error message. */
@@ -389,6 +495,12 @@ export async function safeUpdateAuthPassword(
  *  6. On 42P10/409/unique-constraint rejection of `on_conflict` → fall back to
  *     `update().eq(matchColumn, …)` and insert only when nothing matched, so a
  *     missing unique constraint on `email` degrades gracefully instead of 400ing.
+ *     A 42P10 target is REMEMBERED, so later saves skip the doomed `on_conflict`
+ *     request and go straight to the fallback (no repeated 400).
+ *
+ * Permanent schema/permission failures (401/403/42P10/PGRST204) put the table in
+ * a short "paused" window, so a dashboard action cannot keep re-sending a
+ * request that is guaranteed to fail. Paused calls return `{ skipped: true }`.
  *
  * Never throws — callers get `{ ok, error, status }` and decide how loud to be.
  */
@@ -399,6 +511,23 @@ export async function safeUpsertRow(
   opts: { onConflict?: string; matchColumn?: string; maxRetries?: number } = {}
 ): Promise<SafeWriteResult> {
   if (!client) return { ok: false, error: 'Supabase client unavailable.', code: 'NO_CLIENT' };
+
+  /*
+   * CIRCUIT BREAKER — do not re-send a request that already failed for a
+   * schema / permission reason. The caller treats `skipped` exactly like the
+   * failure it would have received, so nothing in the UI changes; the only
+   * difference is that the Network tab stops filling with the same 400/401.
+   */
+  const blocked = blockedWriteReason(table);
+  if (blocked) {
+    return {
+      ok: false,
+      skipped: true,
+      code: 'WRITE_BLOCKED',
+      error: `${table} writes are paused for a moment (last error: ${blocked}).`,
+    };
+  }
+
   const row = sanitizeSupabaseRow(payload);
   for (const stale of preDroppedColumns(table)) delete row[stale];
   if (Object.keys(row).length === 0) {
@@ -407,6 +536,24 @@ export async function safeUpsertRow(
 
   const dropped = new Set<string>();
   const maxRetries = opts.maxRetries ?? 8;
+
+  /*
+   * SKIP A CONFLICT TARGET ALREADY PROVEN INVALID (42P10).
+   *
+   * The natural-key fallback below succeeds, so the previous write looked fine —
+   * but the `?on_conflict=…` request before it can never succeed without the
+   * unique index, and it was re-sent on every save. Going straight to the
+   * fallback keeps the write working and stops the repeated 400.
+   */
+  if (
+    conflictTargetRejected(table, opts.onConflict) &&
+    opts.matchColumn &&
+    row[opts.matchColumn] !== undefined &&
+    row[opts.matchColumn] !== null &&
+    String(row[opts.matchColumn]).trim() !== ''
+  ) {
+    return await upsertByNaturalKey(client, table, row, opts.matchColumn);
+  }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -462,6 +609,17 @@ export async function safeUpsertRow(
         row[matchColumn] !== null &&
         row[matchColumn] !== ''
       ) {
+        /*
+         * 42P10 = "no unique constraint matching ON CONFLICT". The fallback saves
+         * the row, so this is NOT a dead end — but the conflict target itself is
+         * unusable until the index exists, so remember it and stop re-sending
+         * the doomed `?on_conflict=…` request on every later save.
+         *
+         * A plain 23505/409 (a real duplicate) is data, not schema: not cached.
+         */
+        if (code === '42P10' || /no unique or exclusion constraint matching/i.test(message)) {
+          rememberRejectedConflictTarget(table, opts.onConflict);
+        }
         const fallback = await upsertByNaturalKey(client, table, row, matchColumn);
         return {
           ...fallback,
@@ -470,24 +628,33 @@ export async function safeUpsertRow(
         };
       }
 
+      // Remember a permanent rejection (schema / permission) so the next write
+      // short-circuits instead of repeating this exact request.
+      const permanent = isPermanentWriteFailure(status, code, message);
+      if (permanent) blockWrites(table, `${status || code} ${message || 'rejected'}`.trim());
+
       return {
         ok: false,
         status,
         code: code || undefined,
         error: message || 'Supabase upsert failed.',
         droppedColumns: dropped.size ? Array.from(dropped) : undefined,
+        ...(permanent ? { skipped: true } : {}),
       };
     } catch (err) {
       return { ok: false, error: supabaseErrorMessage(err, `Supabase ${table} upsert failed.`) };
     }
   }
 
+  // Retry budget exhausted (only reachable for repeated unknown-column drops).
+  blockWrites(table, 'PGRST204 columns still unknown after retries');
   return {
     ok: false,
     status: 400,
     code: 'PGRST204',
     error: `Payload still contains columns unknown to ${table} after ${maxRetries} retries.`,
     droppedColumns: dropped.size ? Array.from(dropped) : undefined,
+    skipped: true,
   };
 }
 
@@ -499,6 +666,23 @@ async function upsertByNaturalKey(
   matchColumn: string,
   depth = 0
 ): Promise<SafeWriteResult> {
+  /*
+   * The fallback issues up to three more requests (update → select → insert).
+   * When the table is already known to reject writes (401 on `stores` with a
+   * read-only key, for example) those three would each fail too — that triple
+   * is what made the Network tab look like a retry loop. Stop before sending.
+   */
+  const blocked = blockedWriteReason(table);
+  if (blocked) {
+    return {
+      ok: false,
+      skipped: true,
+      code: 'WRITE_BLOCKED',
+      fallbackUsed: true,
+      error: `${table} writes are paused for a moment (last error: ${blocked}).`,
+    };
+  }
+
   // A missing/empty natural key must NEVER be sent as `?col=eq.undefined` —
   // that is an invalid query parameter that would 400 on every attempt and
   // turn one bad payload into a stream of rapid failing retries.
@@ -536,11 +720,17 @@ async function upsertByNaturalKey(
         console.warn(`[supabase] Dropped unknown column "${unknownCol}" from ${table} fallback update.`);
         return upsertByNaturalKey(client, table, row, matchColumn, depth + 1);
       }
+      // A 401 here is the "read-only key / RLS" case: record it so the next
+      // save does not re-run update → select → insert against the same wall.
+      const permanentUpdate = isPermanentWriteFailure(status, String(updateError?.code ?? ''), message);
+      if (permanentUpdate) blockWrites(table, `${status || updateError?.code} ${message || 'rejected'}`.trim());
+
       return {
         ok: false,
         status,
         code: String(updateError?.code ?? '') || undefined,
         error: message || 'Fallback update failed.',
+        ...(permanentUpdate ? { skipped: true } : {}),
       };
     }
 
@@ -566,17 +756,32 @@ async function upsertByNaturalKey(
         console.warn(`[supabase] Dropped unknown column "${unknownCol}" from ${table} fallback insert.`);
         const retry = await client.from(table).insert(row);
         if (!retry.error) return { ok: true, fallbackUsed: true, droppedColumns: [unknownCol] };
+        const retryStatus = (retry.error as any)?.status;
+        const retryMessage = String(retry.error?.message || '');
+        // The retry itself may be the permanent failure (e.g. 401) — record it
+        // so the pattern does not repeat on the next save.
+        const permanentRetry = isPermanentWriteFailure(
+          retryStatus,
+          String((retry.error as any)?.code ?? ''),
+          retryMessage,
+        );
+        if (permanentRetry) blockWrites(table, `${retryStatus} ${retryMessage || 'rejected'}`.trim());
         return {
           ok: false,
-          status: (retry.error as any)?.status,
-          error: String(retry.error?.message || ''),
+          status: retryStatus,
+          error: retryMessage,
+          ...(permanentRetry ? { skipped: true } : {}),
         };
       }
+      const permanentInsert = isPermanentWriteFailure(status, String(insertError?.code ?? ''), message);
+      if (permanentInsert) blockWrites(table, `${status || insertError?.code} ${message || 'rejected'}`.trim());
+
       return {
         ok: false,
         status,
         code: String(insertError?.code ?? '') || undefined,
         error: message || 'Fallback insert failed.',
+        ...(permanentInsert ? { skipped: true } : {}),
       };
     }
     return { ok: true, fallbackUsed: true };
