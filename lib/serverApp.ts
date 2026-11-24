@@ -8260,41 +8260,74 @@ app.post('/api/stores/update', async (req, res) => {
    try {
      const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
      if (isConfigured && (storeSlug || email || storeId)) {
-       const allowed = [
-         'id', 'store_code', 'store_slug', 'store_name', 'owner_name', 'email', 'phone',
-         // Merchant contact fields (support_contact, support_phone, contactPhone, contact_phone_number, whatsappNumber, whatsapp_number) — mapped to 'phone' for compatibility
-         'support_contact', 'supportContact', 'support_phone', 'supportPhone',
-         'contactPhone', 'contact_phone', 'contact_phone_number',
-         'whatsappNumber', 'whatsapp_number',
-         'password', 'logo_url', 'subscription_plan', 'subscription_expiry', 'plan_started_at',
-         'expires_at', 'duration_days', 'trial_ends_at', 'trial_days_remaining',
-         'is_locked', 'status', 'active_theme_id', 'theme_config', 'created_at', 'updated_at',
+       /*
+        * ONLY REAL COLUMNS, AND EVERY VALUE UNDER ITS REAL COLUMN NAME.
+        *
+        * This list used to be a list of INPUT KEYS: it carried camelCase
+        * aliases (`storeSlug`, `storeName`, `subscriptionExpiry`, …) and keys
+        * the mirror never writes (`id`). PostgREST rejected each alias with
+        * PGRST204 and `postgrestWrite` deleted it and retried — one request per
+        * bad key, and the log filled with
+        *   [postgrestWrite] Dropped unknown column "subscriptionPlan" …
+        * while the value (the plan, the expiry, the store name) never reached
+        * Supabase at all.
+        *
+        * A plain key list cannot fix that: `storeName` is a different key from
+        * `store_name`, so copying the former into the payload writes nothing.
+        * The mapping below therefore reads EVERY spelling the dashboard posts
+        * and writes the ONE physical column of the deployed `stores` table.
+        */
+       const STORE_MIRROR_FIELDS: Array<[string, string[]]> = [
+         ['store_code', ['store_code', 'storeCode']],
+         ['store_slug', ['store_slug', 'storeSlug', 'slug']],
+         ['store_name', ['store_name', 'storeName', 'shopName']],
+         ['owner_name', ['owner_name', 'ownerName', 'accountName']],
+         ['email', ['email', 'supportEmail', 'accountEmail']],
+         // Support/contact/merchant/organisation numbers are ONE concept. A
+         // merchant who saved only `supportPhone` otherwise mirrored nothing
+         // and the storefront read a stale `phone`.
+         ['phone', ['phone', 'supportPhone', 'support_phone', 'merchantPhone', 'merchant_phone',
+           'ownerPhone', 'owner_phone', 'ownerMobile', 'pickupPhone', 'pickup_phone',
+           'accountPhone', 'supportContact', 'support_contact', 'whatsappNumber',
+           'whatsapp_number', 'contactPhone']],
+         ['password', ['password']],
+         ['logo_url', ['logo_url', 'logoUrl']],
+         ['subscription_plan', ['subscription_plan', 'subscriptionPlan', 'plan']],
+         ['subscription_expiry', ['subscription_expiry', 'subscriptionExpiry', 'expiryDate', 'expiry_date']],
+         ['plan_started_at', ['plan_started_at', 'planStartedAt']],
+         ['expires_at', ['expires_at', 'expiresAt', 'planExpiry', 'plan_expiry']],
+         ['duration_days', ['duration_days', 'durationDays', 'selectedPlanDays']],
+         ['trial_ends_at', ['trial_ends_at', 'trialEndsAt']],
+         ['trial_days_remaining', ['trial_days_remaining', 'trialDaysRemaining']],
+         ['is_locked', ['is_locked', 'isLocked']],
+         ['status', ['status', 'accountStatus', 'account_status']],
+         ['active_theme_id', ['active_theme_id', 'activeThemeId']],
+         ['theme_config', ['theme_config', 'themeConfig']],
+         ['created_at', ['created_at', 'createdAt']],
+         ['updated_at', ['updated_at', 'updatedAt']],
          // Delivery zone columns. The merchant's base city is what the
          // checkout's city → zone validation is derived from, and the fee
          // columns carry the merchant's real numbers so no reader ever has to
          // invent a fallback.
-         'base_city',
-         'inside_dhaka_fee',
-         'sub_dhaka_fee',
-         'outside_dhaka_fee',
-         'advance_amount',
-         'advance_delivery_charge_enabled',
-         'is_cod_enabled',
+         ['base_city', ['base_city', 'baseCity', 'base_district', 'baseDistrict',
+           'storeDistrict', 'store_district', 'district', 'storeCity']],
+         ['inside_dhaka_fee', ['inside_dhaka_fee', 'insideDhakaFee']],
+         ['sub_dhaka_fee', ['sub_dhaka_fee', 'subDhakaFee']],
+         ['outside_dhaka_fee', ['outside_dhaka_fee', 'outsideDhakaFee']],
+         ['advance_amount', ['advance_amount', 'advanceAmount']],
+         ['advance_delivery_charge_enabled', ['advance_delivery_charge_enabled', 'advanceDeliveryChargeEnabled']],
+         ['is_cod_enabled', ['is_cod_enabled', 'isCodEnabled']],
          // Pickup address and additional contact fields for comprehensive store profile
-         'pickup_address', 'pickupAddress', 'store_address', 'storeAddress',
-         'address', 'shop_address', 'shopAddress', 'business_address', 'businessAddress',
-         'storeDistrict', 'store_district', 'baseDistrict', 'pickuptime', 'shopName',
-         'merchant_phone', 'merchantPhone', 'owner_phone', 'ownerPhone', 'ownerMobile', 'pickup_phone', 'pickupPhone',
-         'whatsapp', 'whatsapp_number_formatted',
+         ['pickup_address', ['pickup_address', 'pickupAddress', 'pickup_point', 'pickupPoint']],
+         ['store_address', ['store_address', 'storeAddress', 'shop_address', 'shopAddress',
+           'business_address', 'businessAddress']],
+         ['address', ['address']],
        ];
        const sbPayload: Record<string, any> = {};
-       for (const key of allowed) {
-         if (cleanMerchant[key] === undefined) continue;
-         // Never send a non-numeric `id` to Supabase: the `stores` PK is bigint,
-         // and a MongoDB ObjectId (e.g. "65e8a...") raises 22P02. The `id` is
-         // not needed for the mirror — the row is matched by store_slug/email.
-         if (key === 'id' && !/^\d+$/.test(String(cleanMerchant[key]))) continue;
-         sbPayload[key] = cleanMerchant[key];
+       for (const [column, aliases] of STORE_MIRROR_FIELDS) {
+         const key = aliases.find((k) => cleanMerchant[k] !== undefined && cleanMerchant[k] !== null && cleanMerchant[k] !== '');
+         if (!key) continue;
+         sbPayload[column] = cleanMerchant[key];
        }
        // A blank district must NEVER erase a saved one on the Supabase mirror.
        // A profile save that does not own the district fields came back with a
@@ -8302,19 +8335,10 @@ app.post('/api/stores/update', async (req, res) => {
        // next load then resolved an unrelated district (the “Bagerhat” symptom)
        // and STEP 04 read as reset. Only a real district value is mirrored, and
        // every spelling is normalised to ONE canonical name.
-       for (const districtKey of ['base_city', 'baseDistrict', 'storeDistrict', 'store_district']) {
-         if (!(districtKey in sbPayload)) continue;
-         const canonical = normalizeDistrictName(sbPayload[districtKey], { strict: false });
-         if (canonical) sbPayload[districtKey] = canonical;
-         else delete sbPayload[districtKey];
-       }
-       // Carry the merchant's base city under its snake_case column name.
-       const baseCity =
-         cleanMerchant.baseCity ?? cleanMerchant.base_city ?? cleanMerchant.baseDistrict
-           ?? cleanMerchant.base_district ?? cleanMerchant.storeCity ?? '';
-       if (baseCity !== '' && sbPayload.base_city === undefined) {
-         const canonicalBaseCity = normalizeDistrictName(baseCity, { strict: false });
-         if (canonicalBaseCity) sbPayload.base_city = canonicalBaseCity;
+       if (sbPayload.base_city !== undefined) {
+         const canonical = normalizeDistrictName(sbPayload.base_city, { strict: false });
+         if (canonical) sbPayload.base_city = canonical;
+         else delete sbPayload.base_city;
        }
        // Carry the theme selection under its snake_case column names.
        if (cleanMerchant.activeThemeId && sbPayload.active_theme_id === undefined) sbPayload.active_theme_id = cleanMerchant.activeThemeId;
