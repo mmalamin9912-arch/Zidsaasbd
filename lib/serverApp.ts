@@ -8211,6 +8211,37 @@ app.post('/api/stores/update', async (req, res) => {
             const targetSlug = storeSlug || String(m.storeSlug || '').trim().toLowerCase();
 
             if (existing) {
+              /*
+               * THE STORE'S SLUG IS IMMUTABLE ON THIS ROUTE.
+               *
+               * Every product / category / order row is keyed by `store_slug`,
+               * so re-stamping it here silently detaches the merchant from their
+               * entire catalogue: the store is found by `email` (which matched
+               * fine) and then overwritten with whatever slug the browser had in
+               * its in-memory profile. That is exactly how `mystore` became
+               * `mmalamin9912store` and the dashboard dropped to 0 products /
+               * 0 categories / 0 orders — the rows were never touched, only the
+               * pointer to them.
+               *
+               * A genuine rename is an explicit operation with its own endpoint
+               * (`PATCH /api/admin/merchants/:ref/slug`). This route is the
+               * automatic profile auto-sync, so it must never rename a store.
+               */
+              const existingSlug = String(
+                existing.store_slug || existing.storeSlug || '',
+              ).trim().toLowerCase();
+              if (existingSlug && targetSlug && existingSlug !== targetSlug) {
+                console.warn('[Server] /api/stores/update: keeping the existing slug', {
+                  kept: existingSlug,
+                  ignored: targetSlug,
+                  email: email || null,
+                });
+              }
+              if (existingSlug) {
+                delete setDoc.store_slug;
+                delete setDoc.storeSlug;
+              }
+
               await mongoose.connection.db.collection('stores').updateOne(
                 { _id: existing._id },
                 { $set: setDoc },
@@ -8223,9 +8254,24 @@ app.post('/api/stores/update', async (req, res) => {
                 $or: [{ store_slug: targetSlug }, { storeSlug: targetSlug }],
               });
               if (slugOwner) {
+                /*
+                 * Same rule as the branch above: this row was found BY its slug,
+                 * so re-stamping that slug is a no-op at best and a corruption at
+                 * worst (it is already `targetSlug`). Dropping the key keeps the
+                 * write from touching a value the caller cannot legitimately set
+                 * on this route.
+                 */
+                const ownerSlug = String(
+                  slugOwner.store_slug || slugOwner.storeSlug || '',
+                ).trim().toLowerCase();
+                const ownerSetDoc: Record<string, any> = { ...setDoc };
+                if (ownerSlug) {
+                  delete ownerSetDoc.store_slug;
+                  delete ownerSetDoc.storeSlug;
+                }
                 await mongoose.connection.db.collection('stores').updateOne(
                   { _id: slugOwner._id },
-                  { $set: setDoc },
+                  { $set: ownerSetDoc },
                 );
               } else {
                 const insertDoc: Record<string, any> = {
