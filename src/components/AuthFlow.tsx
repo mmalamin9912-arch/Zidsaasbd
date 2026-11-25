@@ -42,6 +42,7 @@ import {
 import { safeParseJson } from '../lib/safeFetch';
 import { generateStoreCode, resolveStoreRef, withPermanentStoreId } from '../lib/storeId';
 import { fetchStoreByRef } from '../lib/storeApi';
+import { fetchKnownColumns } from '../../lib/supabaseSchema';
 import { readAndDownscaleImage } from '../utils/imageUtils';
 import { isValidEmail } from '../utils/validation';
 import { toast } from './ToastProvider';
@@ -404,6 +405,11 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const supabaseStoreByExactEmail = async (cleanEmail: string): Promise<any | null> => {
     if (!supabase) return null;
     try {
+      // Only reach for a column that exists: the whole projection 400s
+      // (`42703`) otherwise, and this runs on every login / signup attempt.
+      const { supabaseUrl, supabaseAnonKey } = await import('../lib/supabase');
+      const storesColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'stores');
+      if (storesColumns && !storesColumns.some((c) => c.toLowerCase() === 'email')) return null;
       const { data } = await supabase.from('stores').select('*').eq('email', cleanEmail).maybeSingle();
       return data || null;
     } catch (err) {

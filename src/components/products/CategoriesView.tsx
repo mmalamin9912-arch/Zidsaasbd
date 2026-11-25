@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Product } from '../../types';
 import { readZidStoreData, writeZidStoreData } from '../../lib/storeData';
 import { upsertCategoryToSupabase, toSafeBigIntId } from '../../utils/catalogPayload';
+import { fetchKnownColumns, mirrorWriteRefusedReason } from '../../../lib/supabaseSchema';
 import { readAndDownscaleImage } from '../../utils/imageUtils';
 import SafeImage from '../SafeImage';
 import {  useToast } from '../ToastProvider';
@@ -448,19 +449,32 @@ export const CategoriesView: React.FC<CategoriesViewProps> = ({
     }
 
     try {
-      const { supabase } = await import('../../lib/supabase');
-      if (supabase) {
-        const safeNumericId = toSafeBigIntId(catId);
-        if (safeNumericId !== null) {
-          try {
-            await supabase.from('categories').update({ parent_id: null }).eq('parent_id', safeNumericId);
-          } catch (updateErr) {
-            console.warn('Supabase category parent_id reset skipped (non-blocking):', updateErr);
-          }
-          try {
-            await supabase.from('categories').delete().eq('id', safeNumericId);
-          } catch (delErr) {
-            console.warn('Supabase category direct delete skipped (non-blocking):', delErr);
+      // Supabase mirror, gated exactly like the category mirror:
+      //   • the deployed `categories` table has no `parent_id` column at all, so
+      //     that reset could only ever answer 400 (`42703`);
+      //   • RLS refuses the browser key every write, so the delete answered 401.
+      // MongoDB `/api/categories` above is the authoritative delete, so the
+      // mirror only runs when the columns exist AND the table is not already
+      // known to refuse writes.
+      if (!mirrorWriteRefusedReason('categories')) {
+        const { supabase, supabaseUrl, supabaseAnonKey } = await import('../../lib/supabase');
+        if (supabase) {
+          const columns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'categories');
+          const hasParentId = !columns || columns.some((c) => c.toLowerCase() === 'parent_id');
+          const safeNumericId = toSafeBigIntId(catId);
+          if (safeNumericId !== null && hasParentId) {
+            try {
+              const { error: updateErr } = await supabase.from('categories').update({ parent_id: null }).eq('parent_id', safeNumericId);
+              if (updateErr) console.warn('Supabase category parent_id reset skipped (non-blocking):', updateErr.message);
+            } catch (updateErr) {
+              console.warn('Supabase category parent_id reset skipped (non-blocking):', updateErr);
+            }
+            try {
+              const { error: delErr } = await supabase.from('categories').delete().eq('id', safeNumericId);
+              if (delErr) console.warn('Supabase category direct delete skipped (non-blocking):', delErr.message);
+            } catch (delErr) {
+              console.warn('Supabase category direct delete skipped (non-blocking):', delErr);
+            }
           }
         }
       }

@@ -4,7 +4,8 @@
  * Reads marketplace products and categories DIRECTLY from Supabase tables.
  */
 
-import { getSupabaseClient, isSupabaseConfigured, supabaseErrorMessage } from './supabase';
+import { getSupabaseClient, isSupabaseConfigured, supabaseErrorMessage, supabaseUrl, supabaseAnonKey } from './supabase';
+import { buildSafeSelect, fetchKnownColumns } from '../../lib/supabaseSchema';
 import { createMarketplaceOrderInSupabase } from './marketplaceOrderSupabase';
 import { resolveProductImage } from '../utils/imageFallback';
 import type { MarketplaceProduct } from '../types';
@@ -19,21 +20,48 @@ export async function fetchSupabaseNativeProducts(
   const page = Math.max(1, Number(filters.page) || 1);
   const limit = Math.min(200, Math.max(1, Number(filters.limit) || 100));
   const offset = (page - 1) * limit;
+  /*
+   * The projection and the filters below are trimmed to columns the deployed
+   * `products` table really has (`id, name, store_slug, price, stock_quantity,
+   * category, image_url, created_at`). PostgREST answers 400 / `42703` for the
+   * WHOLE request when one select name or one filter column is missing, which is
+   * what turned this single call into a burst of red console rows.
+   */
+  const productColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'products');
+  const hasColumn = (name: string) =>
+    !productColumns || productColumns.some((c) => c.toLowerCase() === name.toLowerCase());
   const w: string[] = [];
-  if (filters.q) w.push(`title ILIKE '%${filters.q}%'`, `description ILIKE '%${filters.q}%'`, `sku ILIKE '%${filters.q}%'`);
-  if (filters.category) w.push(`category ILIKE '%${filters.category}%'`);
-  if (filters.minPrice !== null && filters.minPrice !== undefined) w.push(`priceBDT >= ${filters.minPrice}`);
-  if (filters.maxPrice !== null && filters.maxPrice !== undefined) w.push(`priceBDT <= ${filters.maxPrice}`);
-  w.push(`status ILIKE 'active' OR status ILIKE 'published'`, `is_published = true`);
-  const q = client.from('products').select(`id, title, description, sku, priceBDT, compareAtPriceBDT, stock, status, is_published, category, category_id, sub_category, sub_category_id, image, image_url, imageUrl, thumbnail, images, variantsCount, salesCount, createdAt, updatedAt, brand, vendor_id, vendor_name, vendor_slug, store_id, store_slug, store_slugs`);
+  if (filters.q && hasColumn('name')) {
+    const safeQ = String(filters.q).replace(/[%,()]/g, ' ').trim();
+    if (safeQ) w.push(`name ILIKE '%${safeQ}%'`);
+  }
+  if (filters.category && hasColumn('category')) {
+    const safeCategory = String(filters.category).replace(/[%(),.]/g, ' ').trim();
+    // A comma would read as PostgREST's `in.(a,b)` list operator — only % and *
+    // are wanted as wildcards here.
+    if (safeCategory) w.push(`category ILIKE '%${safeCategory}%'`);
+  }
+  if (filters.minPrice !== null && filters.minPrice !== undefined && hasColumn('price')) w.push(`price >= ${Number(filters.minPrice)}`);
+  if (filters.maxPrice !== null && filters.maxPrice !== undefined && hasColumn('price')) w.push(`price <= ${Number(filters.maxPrice)}`);
+  const q = client.from('products').select(
+    productColumns
+      ? buildSafeSelect(
+          [
+            'id', 'name', 'title', 'description', 'sku', 'price', 'priceBDT', 'stock', 'status',
+            'category', 'image_url', 'image', 'images', 'store_slug', 'created_at',
+          ],
+          productColumns
+        )
+      : '*'
+  );
   if (w.length > 0) q.or(w.join(' OR '));
-  const { data, error } = await q.order('created_at', { ascending: false }).range(offset, offset + limit - 1);
+  const { data, error } = await q.order(hasColumn('created_at') ? 'created_at' : 'id', { ascending: false }).range(offset, offset + limit - 1);
   if (error) {
     console.warn('[supabaseNative] fetchSupabaseNativeProducts error:', supabaseErrorMessage(error));
     return { ok: false, products: [], total: 0, page, limit, pages: 0, price_range: null, error: error.message || 'Marketplace catalogue unavailable.' };
   }
   const products = Array.isArray(data)
-    ? (data as any[]).map((row) => ({ id: String(row.id || ''), title: String(row.title || 'Untitled'), description: row.description || '', sku: row.sku || '', priceBDT: Number(row.priceBDT || 0) || 0, compareAtPriceBDT: row.compareAtPriceBDT != null ? Number(row.compareAtPriceBDT) : undefined, stock: Number(row.stock ?? 0) || 0, status: row.status || 'active', is_published: Boolean(row.is_published), category: row.category || '', category_id: row.category_id || '', sub_category: row.sub_category || undefined, sub_category_id: row.sub_category_id || undefined, /*
+    ? (data as any[]).map((row) => ({ id: String(row.id || ''), title: String(row.title || row.name || 'Untitled'), description: row.description || '', sku: row.sku || '', priceBDT: Number(row.priceBDT ?? row.price ?? 0) || 0, compareAtPriceBDT: row.compareAtPriceBDT != null ? Number(row.compareAtPriceBDT) : undefined, stock: Number(row.stock ?? 0) || 0, status: row.status || 'active', is_published: Boolean(row.is_published), category: row.category || '', category_id: row.category_id || '', sub_category: row.sub_category || undefined, sub_category_id: row.sub_category_id || undefined, /*
      * ONE resolved, normalised image for every spelling the row may use —
      * `image`, `image_url`, `imageUrl`, `thumbnail`, `images[]` (string OR
      * `{ url }`) — with a relative storage path turned into a loadable URL.
@@ -52,7 +80,18 @@ export async function fetchSupabaseNativeCategories(): Promise<any[]> {
   if (!isSupabaseConfigured) throw new Error('[supabaseNative] Supabase not configured.');
   const client = getSupabaseClient();
   if (!client) return [];
-  const { data, error } = await client.from('categories').select('*').eq('is_published', true).eq('is_active', true).order('sort_order', { ascending: true });
+  const categoryColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'categories');
+  const present = categoryColumns ? new Set(categoryColumns.map((c) => c.toLowerCase())) : null;
+  let categoryQuery = client.from('categories').select('*');
+  /*
+   * Filter and sort ONLY on columns the table is known to have. When the schema
+   * is unknown (`null`) no filter is applied at all: a wrong column name would
+   * 400 the request, and an unfiltered read still returns the rows.
+   */
+  if (present?.has('is_published')) categoryQuery = categoryQuery.eq('is_published', true);
+  if (present?.has('is_active')) categoryQuery = categoryQuery.eq('is_active', true);
+  if (present?.has('sort_order')) categoryQuery = categoryQuery.order('sort_order', { ascending: true });
+  const { data, error } = await categoryQuery;
   if (error) { console.warn('[supabaseNative] fetchSupabaseNativeCategories error:', supabaseErrorMessage(error)); return []; }
   return Array.isArray(data) ? data : [];
 }

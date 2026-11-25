@@ -226,7 +226,7 @@ import {
   MESSAGE_LOGS_COLLECTION,
   RECOVERY_TEMPLATE_PLACEHOLDERS,
 } from './abandonedCarts.js';
-import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId, postgrestWrite } from './supabaseSchema.js';
+import { buildCategoryMirrorPayload, buildProductMirrorPayload, fetchTableColumns, toSafeBigIntId, postgrestWrite } from './supabaseSchema.js';
 // Multi-vendor marketplace: global product search, per-vendor order splitting,
 // commission rates and the vendor_payouts ledger. See lib/marketplace.ts.
 import {
@@ -7507,28 +7507,47 @@ app.post('/api/storefront', async (req, res) => {
         // Mirror products
         if (products.length > 0) {
           try {
-            const productRecords = products.map((p: any) => ({
-              id: String(p.id || p._id || `prod-${Date.now()}`),
-              name: String(p.name || p.title || 'Product'),
-              title: String(p.name || p.title || 'Product'),
-              price: Number(p.price || p.priceBDT || 0),
-              stock_quantity: Number(p.stock || p.stock_quantity || 0),
-              category: String(p.category || 'General'),
-              image_url: normalizeStoredImageUrl(p.image || p.imageUrl || p.image_url || ''),
-              image: normalizeStoredImageUrl(p.image || p.imageUrl || p.image_url || ''),
-              store_slug: storeSlug,
-            }));
+            /*
+             * ONLY the columns the deployed `products` table has.
+             *
+             * The body used to carry every dashboard field (`title`, `image`,
+             * `priceBDT`, `status`, …). PostgREST rejects the ENTIRE batch with
+             * 400 / PGRST204 as soon as one key is not a column, so this mirror
+             * never wrote a single product. One cached `select=*` read tells us
+             * the real column set, and `buildProductMirrorPayload` maps the values
+             * onto it.
+             */
+            const productColumns = await fetchTableColumns(supabaseUrl, supabaseKey, 'products');
+            const productRecords = products
+              .map((p: any) =>
+                buildProductMirrorPayload(
+                  {
+                    id: String(p.id || p._id || ''),
+                    name: String(p.name || p.title || 'Product'),
+                    price: Number(p.price || p.priceBDT || 0),
+                    stock_quantity: Number(p.stock || p.stock_quantity || 0),
+                    category: String(p.category || 'General'),
+                    image_url: normalizeStoredImageUrl(p.image || p.imageUrl || p.image_url || ''),
+                    store_slug: storeSlug,
+                  },
+                  productColumns
+                )
+              )
+              .filter((r: Record<string, any>) => r && Object.keys(r).length > 0)
+              .map((r: Record<string, any>) => sanitizeImagePayload(r).value as Record<string, any>);
 
-            await fetch(`${supabaseUrl}/rest/v1/products`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'apikey': supabaseKey,
-                'Authorization': `Bearer ${supabaseKey}`,
-                'Prefer': 'resolution=merge-duplicates',
-              },
-              body: JSON.stringify(productRecords),
-            });
+            if (productRecords.length > 0) {
+              await fetch(`${supabaseUrl}/rest/v1/products`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'apikey': supabaseKey,
+                  'Authorization': `Bearer ${supabaseKey}`,
+                  'Prefer': 'resolution=merge-duplicates',
+                },
+                body: JSON.stringify(productRecords),
+              });
+            }
           } catch (sbProdErr: any) {
             console.warn('[Server] POST /api/storefront Supabase products mirror warning:', sbProdErr?.message || sbProdErr);
           }

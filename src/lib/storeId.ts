@@ -13,6 +13,8 @@
 // break order/product/session resolution.
 // =============================================================================
 
+import { buildSafeSelect, fetchKnownColumns } from '../../lib/supabaseSchema';
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
 
@@ -66,11 +68,26 @@ export async function resolveStoreRef(
   const clean = String(ref || '').trim();
   if (!clean || !supabase) return null;
 
+  /*
+   * READ ONLY THE COLUMNS THE DEPLOYED `stores` TABLE HAS.
+   *
+   * PostgREST rejects the WHOLE projection with HTTP 400 (`42703 column
+   * stores.store_slug does not exist`) when a single name is absent, and this
+   * helper is called from the login / registration path on the dashboard. The
+   * column set is read once per session (cached) and the projection is trimmed
+   * to it; on a table whose shape is unknown the original list is kept.
+   */
+  const { supabaseUrl, supabaseAnonKey } = await import('./supabase');
+  const storesColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'stores');
+  const select = buildSafeSelect(['id', 'store_code', 'store_slug'], storesColumns);
+  const hasColumn = (name: string) =>
+    !storesColumns || storesColumns.some((c) => c.toLowerCase() === name.toLowerCase());
+
   // 1) Permanent store code (ZID-BD-XXXX) — most stable lookup.
-  if (isStoreCode(clean)) {
+  if (isStoreCode(clean) && hasColumn('store_code')) {
     const { data } = await supabase
       .from('stores')
-      .select('id, store_code, store_slug')
+      .select(select)
       .ilike('store_code', clean)
       .maybeSingle();
     if (data?.id) {
@@ -82,7 +99,7 @@ export async function resolveStoreRef(
   if (isUuid(clean)) {
     const { data } = await supabase
       .from('stores')
-      .select('id, store_code, store_slug')
+      .select(select)
       .eq('id', clean)
       .maybeSingle();
     if (data?.id) {
@@ -93,10 +110,10 @@ export async function resolveStoreRef(
   // 3) Slug fallback (display reference only — renamed slugs still resolve
   //    here until callers persist the permanent id/code).
   const slug = clean.split(':')[0].trim().toLowerCase();
-  if (slug) {
+  if (slug && hasColumn('store_slug')) {
     const { data } = await supabase
       .from('stores')
-      .select('id, store_code, store_slug')
+      .select(select)
       .eq('store_slug', slug)
       .maybeSingle();
     if (data?.id) {

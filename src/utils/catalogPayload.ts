@@ -1,4 +1,12 @@
-import { buildCategoryMirrorPayload, fetchTableColumns, toSafeBigIntId } from '../../lib/supabaseSchema';
+import {
+  buildCategoryMirrorPayload,
+  buildProductMirrorPayload,
+  fetchKnownColumns,
+  mirrorWriteRefusedReason,
+  rememberMirrorWriteRefusal,
+  restrictToKnownColumns,
+  toSafeBigIntId,
+} from '../../lib/supabaseSchema';
 
 export { toSafeBigIntId };
 
@@ -295,8 +303,13 @@ export async function upsertProductToSupabase(productData: any, storeSlugInput?:
   const category = productData.category || 'General';
   const image_url = String(productData.image || productData.imageUrl || productData.image_url || '');
 
-  // 1. Explicit fallback schema mapping requested
-  const payload = {
+  // Minimal row, restricted to the columns the deployed `products` table
+  // actually has (`id, name, store_slug, price, stock_quantity, category,
+  // image_url, created_at`). It used to carry `title`, `priceBDT`, `status`,
+  // `sku`, `category_id`, … — every one of those is absent, and PostgREST
+  // rejects the WHOLE request with a 400 (PGRST204) for a single unknown key.
+  const source = {
+    id: productData.id ? String(productData.id) : newCatalogId(),
     name,
     price,
     stock_quantity,
@@ -305,71 +318,31 @@ export async function upsertProductToSupabase(productData: any, storeSlugInput?:
     store_slug: storeSlug || 'bd'
   };
 
-  const baseRecord = {
-    id: String(productData.id || newCatalogId()),
-    title: name,
-    name,
-    price,
-    price_bdt: price,
-    image_url,
-    image: image_url,
-    category_id: String(productData.categoryId || productData.category_id || category || ''),
-    category,
-    status: productData.status || 'active',
-    is_published: true,
-    description: String(productData.description || productData.descriptionEn || ''),
-    sku: String(productData.sku || ''),
-    stock: stock_quantity,
-    stock_quantity,
-    store_slug: storeSlug || 'bd',
-    // Permanent store identity — attached to every product create so queries
-    // never depend on the (mutable) display slug.
-    ...(productData.storeId || productData.store_id ? { store_id: String(productData.storeId || productData.store_id) } : {}),
-    ...(productData.storeCode || productData.store_code ? { store_code: String(productData.storeCode || productData.store_code) } : {}),
-  };
+  // Ask the table for its REAL column set first (ONE request, cached) and keep
+  // only the keys it has, so the mirror can never 400 on an unknown column.
+  // A table that already answered 401 is not asked again (see
+  // `rememberMirrorWriteRefusal`).
+  const { supabaseUrl, supabaseAnonKey, supabase } = await import('../lib/supabase');
+  const refused = mirrorWriteRefusedReason('products');
+  if (refused) return { ok: false, error: refused };
 
-  let clientError: string | undefined = undefined;
+  const columns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'products');
+  const record = buildProductMirrorPayload(restrictToKnownColumns(source, columns), columns);
+  if (Object.keys(record).length === 0) {
+    return { ok: false, error: 'Supabase products mirror skipped: nothing to write.' };
+  }
 
   try {
-    const { supabase } = await import('../lib/supabase');
-    if (supabase) {
-      // First attempt: upsert complete record with conflict resolution
-      const { error: upsertErr } = await supabase.from('products').upsert(baseRecord, { onConflict: 'id' });
-      if (upsertErr) {
-        console.warn('[catalogPayload] Supabase upsert notice, trying explicit insert with fallback schema mapping:', upsertErr.message);
-        // Second attempt: explicit insert with fallback schema mapping
-        const { error: insertErr } = await supabase.from('products').insert([payload]);
-        if (insertErr) {
-          console.error('[catalogPayload] Supabase insert with fallback schema failed:', insertErr.message);
-          clientError = insertErr.message || upsertErr.message;
-        }
-      }
-    }
+    if (!supabase) return { ok: false, error: 'Supabase client unavailable.' };
+    const { error } = await supabase.from('products').insert([record]);
+    if (!error) return { ok: true };
+    console.warn('[catalogPayload] Supabase product mirror skipped:', error.message);
+    const status = (error as any)?.status;
+    if (status === 401 || status === 403) rememberMirrorWriteRefusal('products', status, error.message);
+    return { ok: false, error: error.message };
   } catch (e: any) {
-    console.error('[catalogPayload] Supabase client exception:', e);
-    clientError = e?.message || 'Supabase client error';
+    return { ok: false, error: e?.message || 'Supabase client error' };
   }
-
-  // REST fallback
-  try {
-    const { supabaseUrl, supabaseAnonKey } = await import('../lib/supabase');
-    if (supabaseUrl && supabaseAnonKey) {
-      await fetch(`${supabaseUrl}/rest/v1/products`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': supabaseAnonKey,
-          'Authorization': `Bearer ${supabaseAnonKey}`,
-          'Prefer': 'resolution=merge-duplicates',
-        },
-        body: JSON.stringify(baseRecord),
-      }).catch(err => console.warn('[catalogPayload] Supabase REST upsert warning:', err));
-    }
-  } catch (e) {
-    console.warn('[catalogPayload] Supabase REST error:', e);
-  }
-
-  return { ok: !clientError, error: clientError };
 }
 
 export async function upsertCategoryToSupabase(category: any, storeSlugInput?: string): Promise<void> {
@@ -377,57 +350,39 @@ export async function upsertCategoryToSupabase(category: any, storeSlugInput?: s
 
   // Only the ACTIVE tenant slug is written. MongoDB `/api/categories` remains the
   // authoritative write; this is a best-effort mirror that MUST NEVER block or reject.
-
+  //
+  // Two conditions made this mirror unusable on the deployed project and filled
+  // the browser console on every `/dashboard/<store>` load:
+  //   1. Introspection probed ~20 candidate columns in parallel; the table only
+  //      has id/name/slug/store_slug/created_at, so 17 of them answered 400.
+  //   2. The upsert targeted `on_conflict=id`. Row Level Security denies ALL
+  //      inserts for the browser key, so the request could only ever answer 401 —
+  //      once for EVERY category, on EVERY reorder/render.
+  // Both are avoided now: the column set comes from ONE read, and the write is
+  // not attempted again while the table is known to refuse it.
   try {
-    const { supabase, supabaseUrl, supabaseAnonKey } = await import('../lib/supabase');
-    if (!supabase) return;
+    const refused = mirrorWriteRefusedReason('categories');
+    if (refused) return;
 
-    // Ask the table what columns it REALLY has, so we never send a key that does not exist.
-    let columns: string[] | null = null;
-    if (supabaseUrl && supabaseAnonKey) {
-      try {
-        columns = await fetchTableColumns(supabaseUrl, supabaseAnonKey, 'categories');
-      } catch {
-        columns = null; // fall back to conservative core payload
-      }
-    }
+    const { supabaseUrl, supabaseAnonKey, supabase } = await import('../lib/supabase');
 
+    // Build the row ONLY from columns the table REALLY has — an unknown key
+    // rejects the whole request with a 400 (PGRST204).
+    const columns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'categories');
     const payload = buildCategoryMirrorPayload(category, slug, columns);
     if (!payload.id) {
       // Missing or invalid ID — skip Supabase mirror silently
       return;
     }
+    const record = restrictToKnownColumns(payload, columns);
+    if (Object.keys(record).length === 0) return;
 
-    try {
-      const { error } = await supabase
-        .from('categories')
-        .upsert(payload, { onConflict: 'id' });
-
-      if (error) {
-        // If introspection was unavailable and the conservative core got rejected,
-        // retry with the absolute minimum a categories table needs with safe numeric ID.
-        if (columns === null && /PGRST204|could not find the/i.test(error.message)) {
-          const safeId = toSafeBigIntId(category?._id ?? category?.id);
-          if (safeId !== null) {
-            const minimal = { id: safeId, name: String(category?.name || category?.title || 'Category') };
-            try {
-              const { error: retryErr } = await supabase
-                .from('categories')
-                .upsert(minimal, { onConflict: 'id' });
-              if (!retryErr) return;
-              console.warn('Supabase category mirror skipped (minimal retry failed):', retryErr.message);
-              return;
-            } catch (retryEx) {
-              console.warn('Supabase category minimal retry exception:', retryEx);
-              return;
-            }
-          }
-        }
-        console.warn('Supabase category mirror skipped:', error.message);
-      }
-    } catch (upsertErr) {
-      console.warn('Supabase category upsert exception (non-blocking):', upsertErr);
-    }
+    if (!supabase) return;
+    const { error } = await supabase.from('categories').insert([record]);
+    if (!error) return;
+    const status = (error as any)?.status;
+    if (status === 401 || status === 403) rememberMirrorWriteRefusal('categories', status, error.message);
+    console.warn('Supabase category mirror skipped:', error.message);
   } catch (e) {
     console.warn('Supabase category mirror unavailable (non-blocking):', e);
   }

@@ -61,36 +61,80 @@ const columnCache = new Map<string, { columns: string[] | null; expiresAt: numbe
 const COLUMN_CACHE_TTL_MS = 5 * 60 * 1000;
 
 /**
- * Ask PostgREST which columns a table actually has.
+ * Is this key a JWT (legacy `anon` key) rather than a `sb_publishable_…` key?
  *
- * We deliberately do NOT use a `select=*` probe: that returns rows, and returns
- * nothing (not an error) for a table the anon key cannot read. Instead a request
- * for a column that does not exist is guaranteed to fail with a `PGRST204`,
- * which is the signal we want.
+ * Supabase's new publishable keys are opaque strings; the REST gateway cannot
+ * read a role from them, so cross-checks that rely on a per-role request are
+ * meaningless and would only add a rejected row to the console.
+ */
+function isJwt(key: string): boolean {
+  return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(String(key || '').trim());
+}
+
+/**
+ * Read the table's columns without dumping a rejected request per absent column.
+ *
+ * WHY THE OLD PROBING WAS THE "400 SPAM"
+ * --------------------------------------
+ * The previous version fired ~20 `?select=<column>&limit=1` requests for EVERY
+ * table it introspected. On the deployed project the `categories` table only has
+ * `id`, `name`, `slug`, `store_slug` — every other candidate necessarily answered
+ * HTTP 400 (`42703 column categories.parent_id does not exist`), so ONE dashboard
+ * load printed 17-18 red rows, and every save probed again.
+ *
+ * ONLY THE FIRST DISCOVERY COSTS A 400
+ * ------------------------------------
+ * PostgREST cannot report a table's columns to a public key (`GET /rest/v1/`
+ * needs a secret key, and an empty table returns `[]`, not a shape), so the
+ * column set can only be learned by asking. The probing here is:
+ *   • `select=*&limit=1` — when the table has a row, its keys ARE the columns
+ *     (a single 200, no error).
+ *   • otherwise each candidate is probed as a FILTER (`?select=id&<col>=is.null`),
+ *     projected on `id`, the one column every mirrored table has. This only runs
+ *     when the public key is a legacy JWT — see `isJwt`.
+ *   • the answer is cached for 5 minutes, so a discovery costs at most one
+ *     `select=*` per table per window instead of on every render / every save.
+ *
+ * `null` means "unknown", and every caller then falls back to its documented
+ * core payload, which is guaranteed valid for that table.
  */
 export async function fetchTableColumns(
   supabaseUrl: string,
   supabaseKey: string,
-  table: string
+  table: string,
+  candidateColumns?: string[]
 ): Promise<string[] | null> {
   const now = Date.now();
   const cached = columnCache.get(table);
   if (cached && cached.expiresAt > now) return cached.columns;
 
-  // Probe every candidate column in parallel. A 2xx proves the column exists; a
-  // PGRST204 proves it does not. Anything else is inconclusive and simply does
-  // not count towards a positive result.
-  const candidates = Array.from(
-    new Set(Object.values(CATEGORY_COLUMN_FALLBACKS).flat())
-  );
-  const results = await Promise.all(
-    candidates.map((col) => probeColumn(supabaseUrl, supabaseKey, table, col))
-  );
+  let columns: string[] = [];
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/${table}?select=*&limit=1`, {
+      headers: {
+        apikey: supabaseKey,
+        Authorization: `Bearer ${supabaseKey}`,
+        Accept: 'application/json',
+        Prefer: 'count=none',
+      },
+    });
+    if (!res.ok) {
+      columnCache.set(table, { columns: null, expiresAt: now + COLUMN_CACHE_TTL_MS });
+      return null;
+    }
 
-  const columns: string[] = [];
-  candidates.forEach((col, i) => {
-    if (results[i] && !columns.includes(col)) columns.push(col);
-  });
+    const body: any = await res.json().catch(() => null);
+    const row = Array.isArray(body) ? body[0] : body;
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      columns = Object.keys(row);
+    }
+  } catch {
+    columns = [];
+  }
+
+  if (columns.length === 0 && candidateColumns && candidateColumns.length > 0) {
+    columns = await probeColumnsByFilter(supabaseUrl, supabaseKey, table, candidateColumns);
+  }
 
   // A table we could not read a single column from is not usable for mirroring;
   // report `null` so the caller falls back to the conservative core.
@@ -100,48 +144,231 @@ export async function fetchTableColumns(
 }
 
 /**
- * Does `column` exist on `table`?
+ * The columns a dashboard update needs to know about, per table, in the
+ * documented order (preferred spelling first, legacy aliases after — this is the
+ * same order `buildCategoryMirrorPayload` maps values into).
  *
- * `limit=1` (NOT `limit=0`) is the cheapest request PostgREST accepts. `limit=0`
- * is rejected with a 400 Bad Request, so every probe failed and introspection
- * always reported "no columns" — silently forcing the mirror onto the
- * conservative fallback payload.
- *
- * PostgREST validates the selected column against its schema cache BEFORE it
- * returns any row, so a 2xx with a zero-or-one-row body still proves the column
- * exists. `limit=1` keeps that guarantee at the smallest possible cost.
+ * Only used when a table is EMPTY and a row therefore cannot reveal its columns.
  */
-export async function probeColumn(
+export const CANDIDATE_COLUMNS: Record<string, string[]> = {
+  categories: Array.from(new Set(Object.values(CATEGORY_COLUMN_FALLBACKS).flat())),
+  products: ['id', 'name', 'title', 'store_slug', 'storeSlug', 'price', 'price_bdt', 'priceBDT', 'stock_quantity', 'stock', 'category', 'image_url', 'image', 'created_at'],
+  stores: ['id', 'store_code', 'store_slug', 'storeSlug', 'email', 'status', 'created_at'],
+};
+
+/** Resolve a table's columns, probing `CANDIDATE_COLUMNS[table]` when it is empty. */
+export async function fetchKnownColumns(
+  supabaseUrl: string,
+  supabaseKey: string,
+  table: string
+): Promise<string[] | null> {
+  return fetchTableColumns(supabaseUrl, supabaseKey, table, CANDIDATE_COLUMNS[table]);
+}
+
+/**
+ * Ask PostgREST whether each candidate column exists, using a FILTER instead of
+ * a projection: `?select=<required column>&<col>=is.null&limit=1`.
+ *
+ * The projection names only a column the caller has established is required, so
+ * an existing column returns 200 / `[]` and only a genuinely absent column
+ * answers 400 (`42703`). Sequential on purpose — a burst of parallel requests is
+ * what made the console look like a failing endpoint.
+ */
+async function probeColumnsByFilter(
   supabaseUrl: string,
   supabaseKey: string,
   table: string,
-  column: string
-): Promise<boolean> {
-  try {
-    const res = await fetch(
-      `${supabaseUrl}/rest/v1/${table}?select=${encodeURIComponent(column)}&limit=1`,
-      {
-        headers: {
-          apikey: supabaseKey,
-          Authorization: `Bearer ${supabaseKey}`,
-        },
-      }
-    );
-    if (res.ok) return true;
+  candidates: string[]
+): Promise<string[]> {
+  // A public (publishable) key is not a JWT, so PostgREST cannot derive a role
+  // from it and answers 401 to EVERY request — including the probing below. Skip
+  // the whole pass in that case: `null` ("unknown") makes every caller use its
+  // documented core payload, which is what worked before.
+  if (!isJwt(supabaseKey)) return [];
 
-    const text = await res.text().catch(() => '');
-    // PGRST204 = column genuinely absent. Any other status is inconclusive
-    // (auth, network, missing table) and must not be reported as "absent".
-    if (/PGRST204|could not find the .* column/i.test(text)) return false;
-    return false;
-  } catch {
-    return false;
+  const headers = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    Accept: 'application/json',
+    Prefer: 'count=none',
+  };
+
+  const found: string[] = [];
+  for (const column of candidates) {
+    /*
+     * `select=id` is the projection every mirrored table has. When a column is
+     * present the filter is valid and returns 200; when it is absent PostgREST
+     * reports the FILTER column, so the status alone tells us what we need.
+     */
+    try {
+      const res = await fetch(
+        `${supabaseUrl}/rest/v1/${table}?select=id&${encodeURIComponent(column)}=is.null&limit=1`,
+        { headers }
+      );
+      if (res.ok) found.push(column);
+    } catch {
+      /* inconclusive — the column is simply not reported as present */
+    }
   }
+  return found;
 }
 
 /** Clear the cached column sets (used by tests and after a schema change). */
 export function clearColumnCache(): void {
   columnCache.clear();
+}
+
+/* ──────────────── Browser mirror writability (circuit breaker) ──────────────── */
+
+/**
+ * A dashboard mirror into Supabase must not keep re-sending a write that the
+ * database has already refused with 401 / 403.
+ *
+ * Migration 0016 enables RLS on every table with NO client policy, so the public
+ * key that ships in the browser may not INSERT into `categories` — PostgREST
+ * answers HTTP 401 (`42501 new row violates row-level security policy`). MongoDB
+ * (`/api/*`) stays authoritative and the server mirrors with the service-role
+ * key, which bypasses RLS. The mirror is therefore best-effort by design.
+ *
+ * The bug was repetition: `CategoriesView` mirrors EVERY category on every load
+ * and every reorder, so one page view produced a 401 for each row, on each
+ * render, plus the same doomed `?on_conflict=id` upsert — the "220 errors".
+ *
+ * So the FIRST refusal is remembered per table for a few minutes and later
+ * attempts are not sent at all. It is not a write: nothing is ever inserted to
+ * "test" permission, and the guard clears itself, so a table whose policy is
+ * later opened starts mirroring again without a reload.
+ */
+const mirrorWriteRefused = new Map<string, { status: number; message: string; expiresAt: number }>();
+const MIRROR_REFUSAL_TTL_MS = 10 * 60 * 1000;
+
+/** Why `table` is currently known to refuse writes, or `null` when allowed. */
+export function mirrorWriteRefusedReason(table: string): string | null {
+  const entry = mirrorWriteRefused.get(table);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    mirrorWriteRefused.delete(table);
+    return null;
+  }
+  return `The ${table} table rejected the last write (${entry.status}).`;
+}
+
+/** Remember a 401/403 so the next mirror attempt short-circuits. */
+export function rememberMirrorWriteRefusal(table: string, status: number, message: string): void {
+  mirrorWriteRefused.set(table, {
+    status,
+    message: String(message || '').slice(0, 200),
+    expiresAt: Date.now() + MIRROR_REFUSAL_TTL_MS,
+  });
+}
+
+/** Clear the refusal record (used by tests and after a policy change). */
+export function clearMirrorWriteRefusals(): void {
+  mirrorWriteRefused.clear();
+}
+
+/**
+ * Build a `select=` list that only names columns the table really has.
+ *
+ * PostgREST answers 400 / `42703` when ANY name in the projection is missing,
+ * and the aliases come back under the names the table uses (`store_slug`, …).
+ * When the schema is unknown the caller's preferred list is returned unchanged
+ * so behaviour on a fully-migrated table is identical.
+ */
+export function buildSafeSelect(preferred: string[], knownColumns: string[] | null): string {
+  if (!knownColumns || knownColumns.length === 0) return preferred.join(', ');
+  const present = new Set(knownColumns.map((c) => c.toLowerCase()));
+  const kept = preferred.filter((c) => present.has(c.toLowerCase()));
+  return kept.length > 0 ? kept.join(', ') : '*';
+}
+
+/** Keep only the keys the table REALLY has (camelCase aliases included). */
+export function restrictToKnownColumns(
+  row: Record<string, any>,
+  knownColumns: string[] | null
+): Record<string, any> {
+  if (!knownColumns || knownColumns.length === 0) return { ...row };
+  const present = new Set(knownColumns.map((c) => c.toLowerCase()));
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (present.has(key.toLowerCase())) out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Map a product row onto the columns the deployed `products` table actually has.
+ *
+ * The live table is `id, name, store_slug, price, stock_quantity, category,
+ * image_url, created_at`; the dashboard's product object is much wider. Writing
+ * the wide object (with `title`, `priceBDT`, `status`, `sku`, …) made PostgREST
+ * reject the request with PGRST204 for the first unknown key, so nothing was
+ * ever mirrored. Here the value is renamed into whichever spelling the table
+ * uses and unknown keys simply never leave the browser.
+ */
+export function buildProductMirrorPayload(
+  product: Record<string, any>,
+  knownColumns: string[] | null
+): Record<string, any> {
+  const columns =
+    knownColumns && knownColumns.length > 0
+      ? knownColumns
+      : ['id', 'name', 'store_slug', 'price', 'stock_quantity', 'category', 'image_url', 'created_at'];
+  const present = new Set(columns.map((c) => c.toLowerCase()));
+
+  const wanted: Record<string, unknown> = {
+    id: product.id,
+    name: product.name,
+    title: product.name,
+    store_slug: product.store_slug,
+    storeSlug: product.store_slug,
+    price: product.price,
+    price_bdt: product.price,
+    priceBDT: product.price,
+    stock_quantity: product.stock_quantity,
+    stock: product.stock_quantity,
+    category: product.category,
+    image_url: product.image_url,
+    image: product.image_url,
+    created_at: new Date().toISOString(),
+  };
+
+  const aliases: Array<[string[], unknown]> = [
+    [['id'], wanted.id],
+    [['name', 'title'], wanted.name],
+    [['store_slug', 'storeSlug'], wanted.store_slug],
+    [['price', 'price_bdt', 'priceBDT'], wanted.price],
+    [['stock_quantity', 'stock'], wanted.stock_quantity],
+    [['category'], wanted.category],
+    [['image_url', 'image'], wanted.image_url],
+    [['created_at'], wanted.created_at],
+  ];
+
+  const out: Record<string, any> = {};
+  for (const [keys, value] of aliases) {
+    if (value === undefined || value === null) continue;
+    const column = keys.find((k) => present.has(k.toLowerCase()));
+    if (column) out[column] = value;
+  }
+  /*
+   * `id` is a bigint column on the deployed tables, so a UUID / `MP-…` string
+   * answers 22P02 ("invalid input syntax for type bigint") and the row is lost.
+   * The dashboard's own ids are mapped to the stable numeric form the category
+   * mirror already uses, so the same product always lands on the same row.
+   *
+   * Only DROP the key when there is no usable id at all — a row then gets the
+   * column default instead of losing its whole insert.
+   */
+  if ('id' in out && out.id !== null && out.id !== undefined && out.id !== '') {
+    // A non-numeric id cannot be cast to bigint — omit it and let the column
+    // default apply instead of losing the whole row.
+    const numericId = toSafeBigIntId(out.id);
+    if (numericId === null) delete out.id;
+    else out.id = numericId;
+  } else {
+    delete out.id;
+  }
+  return out;
 }
 
 /**
@@ -525,8 +752,15 @@ export async function postgrestWrite(
 
 export default {
   buildCategoryMirrorPayload,
+  buildProductMirrorPayload,
+  restrictToKnownColumns,
+  buildSafeSelect,
+  fetchKnownColumns,
+  CANDIDATE_COLUMNS,
+  mirrorWriteRefusedReason,
+  rememberMirrorWriteRefusal,
+  clearMirrorWriteRefusals,
   toSafeBigIntId,
   fetchTableColumns,
-  probeColumn,
   clearColumnCache,
 };

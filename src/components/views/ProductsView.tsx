@@ -137,38 +137,15 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
     { id: 'bundle', label: 'Dynamic Bundle' },
   ];
 
-  // 3. Initial Data Fetch: Directly fetch existing items from Supabase products table
-  // for the ACTIVE merchant's store_slug on page load
-  useEffect(() => {
-    let isMounted = true;
-    const fetchExistingProducts = async () => {
-      // 1. Direct Supabase load scoped to the active store slug
-      try {
-        const { supabase } = await import('../../lib/supabase');
-        if (supabase) {
-          const { data, error } = await supabase
-            .from('products')
-            .select('*')
-            .eq('store_slug', activeStoreSlug);
-
-          if (error) {
-            console.error('[ProductsView] Supabase initial products load error:', error.message);
-          } else if (isMounted && Array.isArray(data) && data.length > 0) {
-            onUpdateProducts(data.map((p: any) => mapApiProduct(p)));
-            return;
-          }
-        }
-      } catch (sbErr) {
-        console.error('[ProductsView] Direct Supabase fetch exception:', sbErr);
-      }
-
-    };
-
-    fetchExistingProducts();
-    return () => {
-      isMounted = false;
-    };
-  }, [activeStoreSlug]);
+  // 3. Initial Data Fetch: products come from MongoDB through `/api/products`
+  // (see `App.tsx` → `loadAppProducts`).
+  //
+  // There used to be a direct `supabase.from('products').select('*')` here as
+  // well. Migration 0016 enables Row Level Security on `products` with NO client
+  // policy, so under RLS that request returns `[]` and, on a project without a
+  // matching shape, 401s — a red console row on every load that never could
+  // contribute a product. The authoritative load is the API call, and the write
+  // path below still mirrors new products into Supabase server-side.
 
   // Filter & Sort Products logic
   const filteredProducts = products.filter((p) => {
@@ -321,20 +298,15 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
       // was pure added latency on the merchant's critical path: the modal stayed
       // open while a mirror they never asked for finished. Kicking it off without
       // awaiting lets the success toast and list update land immediately.
-      void (async () => {
-        try {
-          const { supabase } = await import('../../lib/supabase');
-          if (!supabase) return;
-          const { data, error } = await supabase.from('products').insert([payload]).select();
-          if (error) {
-            console.warn('[ProductsView] Supabase mirror rejected the product:', error.message);
-          } else if (data && data[0]) {
-            payload.id = (data[0] as any).id;
-          }
-        } catch (e: any) {
-          console.warn('[ProductsView] Supabase mirror error:', e?.message || e);
-        }
-      })();
+      //
+      // The mirror goes through `upsertProductToSupabase`, which sends ONLY the
+      // columns the deployed `products` table has and skips the write entirely
+      // while Row Level Security makes the public key read-only. The previous
+      // inline `insert([payload])` sent the whole dashboard payload (`title`,
+      // `priceBDT`, `status`, …) and answered 400 PGRST204 on every save.
+      void upsertProductToSupabase(payload, activeStoreSlug).catch((e: any) => {
+        console.warn('[ProductsView] Supabase mirror skipped:', e?.message || e);
+      });
 
       // 4. Update UI State immediately after the authoritative write.
       const updatedProduct = mapApiProduct({
