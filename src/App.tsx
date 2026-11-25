@@ -202,6 +202,54 @@ function storeSlugFromHost(hostname: string): string {
   return sub;
 }
 
+const STORE_IDENTITY_REFS = new Set<string>(['', 'default', 'undefined', 'null']);
+
+/**
+ * The slug a dashboard fetch may be keyed on, or `null` when there is none.
+ *
+ * `'default'` is the placeholder used when a request carries NO identity at all.
+ * It must never be sent to `/api/categories` / `/api/products` / `/api/orders` as
+ * if it were a store: those routes answer with an empty list, so the dashboard
+ * would faithfully render "no categories, no products, no orders" for a store
+ * that actually has them.
+ */
+function usableStoreSlug(value: unknown): string | null {
+  const slug = String(value ?? '').split(':')[0].trim().toLowerCase();
+  return STORE_IDENTITY_REFS.has(slug) ? null : slug;
+}
+
+/**
+ * Reads the stock `zid_auth_session` slug (localStorage, then cookie).
+ *
+ * Used when the in-memory profile has no usable slug — the store's real slug is
+ * still recoverable from the session instead of being replaced by `'default'`.
+ */
+function readSessionStoreSlug(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem('zid_auth_session');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const profile = parsed?.userProfile || parsed?.merchant || {};
+      const slug = usableStoreSlug(profile.storeSlug || profile.store_slug);
+      if (slug) return slug;
+    }
+  } catch {
+    /* ignore — fall through to the cookie */
+  }
+  try {
+    const match = document.cookie.match(/(?:^|; )zid_auth_session=([^;]*)/);
+    if (match) {
+      const parsed = JSON.parse(decodeURIComponent(match[1]));
+      const profile = parsed?.userProfile || parsed?.merchant || {};
+      return usableStoreSlug(profile.storeSlug || profile.store_slug);
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 export default function App() {
   React.useEffect(() => {
     purgeApiOnlyStorage();
@@ -748,8 +796,25 @@ export default function App() {
     if (storeIdentityKey.current === pendingIdentity) return;
     storeIdentityKey.current = pendingIdentity;
 
-    const merchantId = merchant?.id || merchant?.storeCode || merchant?.storeSlug || 'default';
-    const storeSlug = merchant?.storeSlug || merchant?.id || 'default';
+    const merchantId = merchant?.id || merchant?.storeCode || merchant?.store_code || merchant?.storeSlug || 'default';
+    /*
+     * THE SLUG IS RESOLVED, NEVER GUESSED.
+     *
+     * `merchant?.storeSlug || merchant?.id || 'default'` turned a profile whose
+     * slug lived only on the snake_case key (`store_slug`) into `storeSlug =
+     * undefined`, then into `'default'`. Every request below was then keyed on
+     * `store_slug=default`, the server answered `[]`, and the dashboard cleared
+     * the categories and showed an empty products/orders table.
+     *
+     * Order of preference: the profile (either spelling) → the persisted auth
+     * session → the permanent id. An unusable value (`''`, `default`) is treated
+     * as absent, and no request is keyed on it at all.
+     */
+    const storeSlug =
+      usableStoreSlug(merchant?.storeSlug || merchant?.store_slug) ||
+      usableStoreSlug(readSessionStoreSlug()) ||
+      usableStoreSlug(merchant?.id) ||
+      '';
     let isMounted = true;
 
     // ── Orders hydration gate ─────────────────────────────────────────────
@@ -796,10 +861,10 @@ export default function App() {
     // falling back through the other identifiers is what makes existing products
     // load again.
     const productQuery = new URLSearchParams();
-    productQuery.set('store_slug', storeSlug);
-    for (const value of [merchant?.storeSlug, merchant?.storeCode, merchant?.store_code, merchantId]) {
+    if (storeSlug) productQuery.set('store_slug', storeSlug);
+    for (const value of [merchant?.storeSlug, merchant?.store_slug, merchant?.storeCode, merchant?.store_code, merchantId]) {
       const ref = String(value ?? '').trim();
-      if (ref && !productQuery.getAll('store_slug').includes(ref)) {
+      if (ref && ref !== 'default' && !productQuery.getAll('store_slug').includes(ref)) {
         productQuery.append('store_slug', ref);
       }
     }
@@ -827,8 +892,8 @@ export default function App() {
     loadAppProducts();
 
     // Merchant Settings & Profile by storeSlug
-    if (merchant?.storeSlug) {
-      safeFetch(`/api/stores/slug/${encodeURIComponent(merchant.storeSlug)}`).then(res => {
+    if (storeSlug) {
+      safeFetch(`/api/stores/slug/${encodeURIComponent(storeSlug)}`).then(res => {
         // The route answers `{ ok, store_slug, merchant }` — the envelope is NOT
         // the store record. Spreading it used to pollute the profile with
         // `ok`/`store_slug`/`merchant` keys and left `themeConfig` on the stale
@@ -837,17 +902,40 @@ export default function App() {
         // theme-config spelling the DB returns.
         const dbMerchant: any = res?.merchant || null;
         if (isMounted && dbMerchant) {
-          const resolvedSlug = String(
-            dbMerchant.storeSlug || dbMerchant.store_slug || prev.storeSlug || 'mystore'
-          ).trim().toLowerCase();
-          setMerchant(prev => ({
-            ...prev,
-            ...dbMerchant,
-            storeSlug: resolvedSlug,
-            store_slug: resolvedSlug,
-            themeConfig: dbMerchant.themeConfig || dbMerchant.theme_config || prev.themeConfig,
-            theme_config: dbMerchant.themeConfig || dbMerchant.theme_config || prev.themeConfig,
-          }));
+          setMerchant(prev => {
+            /*
+             * THE DB ROW DECIDES EVERYTHING EXCEPT THE SLUG IT DOES NOT CARRY.
+             *
+             * `...dbMerchant` can set `merchant.storeSlug` to `undefined` when the
+             * record only has the snake_case key (`store_slug`), and a record with
+             * NEITHER key used to leave the whole profile without a slug. Either
+             * way `storeSlug` — the value every data fetch is keyed on — was lost,
+             * which is how the dashboard ended up asking for `store_slug=default`.
+             *
+             * The slug is therefore resolved from the DB record (both spellings),
+             * then the profile already in state, then the store this effect was
+             * keyed on, then the persisted session — and always written back on
+             * BOTH spellings so neither the camelCase nor the snake_case reader
+             * can see a hole again.
+             */
+            const resolvedSlug =
+              usableStoreSlug(dbMerchant.storeSlug) ||
+              usableStoreSlug(dbMerchant.store_slug) ||
+              usableStoreSlug(prev?.storeSlug) ||
+              usableStoreSlug(prev?.store_slug) ||
+              usableStoreSlug(storeSlug) ||
+              usableStoreSlug(readSessionStoreSlug()) ||
+              '';
+            const nextThemeConfig =
+              dbMerchant.themeConfig || dbMerchant.theme_config || prev?.themeConfig;
+            return {
+              ...prev,
+              ...dbMerchant,
+              ...(resolvedSlug ? { storeSlug: resolvedSlug, store_slug: resolvedSlug } : {}),
+              themeConfig: nextThemeConfig,
+              theme_config: nextThemeConfig,
+            };
+          });
         }
       });
     }
@@ -861,11 +949,19 @@ export default function App() {
     // store's real slug ("mystore"). The server also resolves the ref, but
     // asking with the right value here avoids a needless empty first pass.
     const categoryRefs = Array.from(new Set(
-      [storeSlug, merchant?.storeSlug, merchant?.storeCode, merchant?.store_code, merchantId]
+      [storeSlug, merchant?.storeSlug, merchant?.store_slug, merchant?.storeCode, merchant?.store_code, merchantId]
         .map((v) => String(v ?? '').trim())
-        .filter(Boolean),
+        .filter((v) => v && v.toLowerCase() !== 'default'),
     ));
     const loadCategories = async () => {
+      /*
+       * NOTHING TO ASK WITH → NOTHING IS ASKED.
+       *
+       * The previous code fell through to `store_slug=default`. The server treats
+       * that as a real (empty) store, so the response was `[]`, the categories
+       * list stayed empty and the dashboard looked cleared. With no usable ref
+       * the loop below simply does not run and the last known list is kept.
+       */
       let cats: any[] | null = null;
       for (const ref of categoryRefs) {
         const catsRes = await safeFetch(`/api/categories?store_slug=${encodeURIComponent(ref)}`);
@@ -881,22 +977,22 @@ export default function App() {
         }
       }
       if (isMounted && Array.isArray(cats) && cats.length > 0) {
-        setMerchant(prev => {
-          const existing = prev?.themeConfig?.categoriesList;
+        setMerchant(prevState => {
+          const existing = prevState?.themeConfig?.categoriesList;
           // Avoid a no-op state update (same reference / same length) that would
           // retrigger downstream effects and the auto-sync loop.
-          if (Array.isArray(existing) && existing.length === cats.length) return prev;
+          if (Array.isArray(existing) && existing.length === cats.length) return prevState;
           return {
-            ...prev,
+            ...prevState,
             themeConfig: {
-              ...(prev.themeConfig || {}),
+              ...(prevState.themeConfig || {}),
               categoriesList: cats
             }
           };
         });
       }
     };
-    loadCategories();
+    if (categoryRefs.length > 0) loadCategories();
 
     // Customers
     safeFetch(`/api/customers/${merchantId}`).then(data => {
@@ -916,9 +1012,11 @@ export default function App() {
     // store CODE resolved on one path and not the other, so the table rendered
     // rows and then the poll replaced them with `[]` ("orders disappear").
     const identityRefs = new Set(
-      [merchant?.id, merchant?.storeCode, merchant?.store_code, merchant?.storeSlug, merchantId]
+      [merchant?.id, merchant?.storeCode, merchant?.store_code, storeSlug, merchant?.storeSlug, merchantId]
         .map((v) => String(v ?? '').trim())
-        .filter(Boolean)
+        // `default` / empty are placeholders, not store identities: sending them
+        // only widens the query with a slug no order was ever written under.
+        .filter((v) => v && v.toLowerCase() !== 'default')
     );
     for (const value of identityRefs) {
       ordersQuery.append('storeRef', value);
@@ -1007,8 +1105,12 @@ export default function App() {
     // effect and re-fetched into a fresh closure — the list visibly reset, then
     // repopulated, which read as "orders randomly disappearing". The identity
     // fields below are exactly what the orders query depends on.
+    //
+    // `store_slug` is included because a profile can carry the real slug on the
+    // snake_case key ONLY; without it the first hydration would never resolve the
+    // store and every request would be keyed on `default` again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [merchant?.id, merchant?.storeCode, merchant?.store_code, merchant?.storeSlug]);
+  }, [merchant?.id, merchant?.storeCode, merchant?.store_code, merchant?.storeSlug, (merchant as any)?.store_slug]);
 
   // Auto-sync merchant settings and categories to Supabase on change.
   // Skip the very first run (initial hydration) and only sync when a field we
