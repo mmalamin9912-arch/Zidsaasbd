@@ -837,9 +837,14 @@ export default function App() {
         // theme-config spelling the DB returns.
         const dbMerchant: any = res?.merchant || null;
         if (isMounted && dbMerchant) {
+          const resolvedSlug = String(
+            dbMerchant.storeSlug || dbMerchant.store_slug || prev.storeSlug || 'mystore'
+          ).trim().toLowerCase();
           setMerchant(prev => ({
             ...prev,
             ...dbMerchant,
+            storeSlug: resolvedSlug,
+            store_slug: resolvedSlug,
             themeConfig: dbMerchant.themeConfig || dbMerchant.theme_config || prev.themeConfig,
             theme_config: dbMerchant.themeConfig || dbMerchant.theme_config || prev.themeConfig,
           }));
