@@ -305,6 +305,29 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * The slug to use for an EXISTING account.
+   *
+   * A local cache entry (`zid_registered_users`) and a `defaultMerchant` used to
+   * fill this in from `storeName` and then from `cleanEmail.split('@')[0]` — the
+   * second one is what turned a real store into `mmalamin9912`. Neither the email
+   * local part nor the display name is an identity: the store's slug lives in the
+   * database. When a caller has no stored slug, the value stays EMPTY so the
+   * server's `store_slug` is used instead of a synthetic one being written.
+   */
+  const resolveStoredStoreSlug = (...candidates: unknown[]): string => {
+    for (const value of candidates) {
+      const slug = String(value ?? '')
+        .split(':')[0]
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+      // `defaultMerchant.storeSlug` is the placeholder 'store' — never a real slug.
+      if (slug && slug !== 'store') return slug;
+    }
+    return '';
+  };
+
   // Auth state listener for magic link / session
   useEffect(() => {
     if (!supabase) return;
@@ -329,7 +352,9 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
             ownerName: session.user.user_metadata?.full_name || existingUser.ownerName || 'Merchant Owner',
             storeName: session.user.user_metadata?.store_name || existingUser.storeName || 'My Store',
             phone: existingUser.phone || '',
-            storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : cleanEmail.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '') || 'store',
+            // Never the email local part: keep whatever slug the cache really has,
+            // otherwise leave it empty for the DB slug to fill in.
+            storeSlug: resolveStoredStoreSlug((existingUser as any).storeSlug, (existingUser as any).store_slug),
             logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
           };
           finishLogin(userProfile);
@@ -840,7 +865,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
         if (attempt.ok && (data?.user || data?.session)) {
           setIsLoading(false);
           const derivedName = (cleanEmail.split('@')[0] || 'My Store').replace(/[^a-zA-Z0-9]/g, ' ');
-          const derivedSlug = (cleanEmail.split('@')[0] || 'store').replace(/[^a-z0-9]/g, '');
           const userProfile: MerchantProfile = existingProfile
             ? normalizeMerchantRecord(existingProfile, cleanEmail)
             : resolveMerchantSubscription({
@@ -849,7 +873,18 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
                 ownerName: data?.user?.user_metadata?.full_name || cleanEmail.split('@')[0] || 'Store Owner',
                 storeName: data?.user?.user_metadata?.store_name || `${derivedName} Store`,
                 phone: defaultMerchant.phone || '',
-                storeSlug: derivedSlug,
+                /*
+                 * NO SLUG IS INVENTED HERE.
+                 *
+                 * This branch runs when `/api/stores/check` did not return a
+                 * profile. It used to fill `storeSlug` with the email local part
+                 * (`mmalamin9912`), which then travelled into the store record via
+                 * the login sync and replaced the merchant's real slug. The slug
+                 * stays empty; `resolveActiveStoreSlug()` and the dashboard's own
+                 * session/DB lookup supply the real one, and the server keeps the
+                 * slug already stored for this account.
+                 */
+                storeSlug: '',
                 subscriptionPlan: 'free_trial',
                 logoUrl: defaultMerchant.logoUrl || '',
               });
@@ -910,7 +945,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     setIsLoading(false);
     const verifiedMerchant = verifyResult?.merchant;
     const derivedName = (cleanEmail.split('@')[0] || 'My Store').replace(/[^a-zA-Z0-9]/g, ' ');
-    const derivedSlug = (cleanEmail.split('@')[0] || 'store').replace(/[^a-z0-9]/g, '');
     const userProfile: MerchantProfile = existingProfile
       ? normalizeMerchantRecord(existingProfile, cleanEmail)
       : verifiedMerchant
@@ -921,7 +955,8 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           ownerName: cleanEmail.split('@')[0] || 'Store Owner',
           storeName: `${derivedName} Store`,
           phone: defaultMerchant.phone || '',
-          storeSlug: derivedSlug,
+          // Empty, never the email local part — see the note in the Supabase path.
+          storeSlug: '',
           subscriptionPlan: 'free_trial',
           logoUrl: defaultMerchant.logoUrl || '',
         });
@@ -1086,7 +1121,6 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const registeredList = getRegisteredUsers();
     const existingUser = registeredList.find((u) => u.email.toLowerCase() === cleanEmail);
     const derivedName = (cleanEmail.split('@')[0] || 'My Store').replace(/[^a-zA-Z0-9]/g, ' ');
-    const derivedSlug = (cleanEmail.split('@')[0] || 'store').replace(/[^a-z0-9]/g, '');
 
     const userProfile: MerchantProfile = existingProfile
       ? normalizeMerchantRecord(existingProfile, cleanEmail)
@@ -1097,7 +1131,8 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           ownerName: existingUser.ownerName || cleanEmail.split('@')[0] || 'Store Owner',
           storeName: existingUser.storeName || `${derivedName} Store`,
           phone: existingUser.phone || '',
-          storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : derivedSlug,
+          // Never derived from the store name or the email local part.
+          storeSlug: resolveStoredStoreSlug((existingUser as any).storeSlug, (existingUser as any).store_slug),
           subscriptionPlan: 'free_trial',
           logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
         })
@@ -1107,7 +1142,8 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           ownerName: cleanEmail.split('@')[0] || 'Store Owner',
           storeName: `${derivedName} Store`,
           phone: defaultMerchant.phone || '',
-          storeSlug: derivedSlug,
+          // Empty, never the email local part.
+          storeSlug: '',
           subscriptionPlan: 'free_trial',
         });
 
@@ -1522,7 +1558,8 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           ownerName: data.user?.user_metadata?.full_name || existingUser.ownerName || 'Merchant Owner',
           storeName: data.user?.user_metadata?.store_name || existingUser.storeName || 'My Store',
           phone: existingUser.phone || '',
-          storeSlug: existingUser.storeName ? existingUser.storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : existingUser.email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '') || 'store',
+          // Never derived from the name or the email local part.
+          storeSlug: resolveStoredStoreSlug((existingUser as any).storeSlug, (existingUser as any).store_slug),
           logoUrl: existingUser.logoUrl || defaultMerchant.logoUrl,
         };
 
@@ -1591,9 +1628,17 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
     const formattedPhone = formatFullPhoneNumber(phone);
     const fullBusinessAddress = `${streetAddress.trim()}, ${cityUpazila.trim()}, ${district} - ${postCode.trim()}`;
     const cleanEmail = email.trim().toLowerCase();
-    const slug = storeName.toLowerCase().replace(/[^a-z0-9]/g, '')
-      || cleanEmail.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '')
-      || 'store';
+    /*
+     * A SLUG FOR A BRAND-NEW STORE ONLY — NEVER THE EMAIL LOCAL PART.
+     *
+     * The name-derived slug is fine when this really is a first registration,
+     * but the form also runs for a merchant whose account already exists, and
+     * `|| cleanEmail.split('@')[0]` then handed the server `mmalamin9912` for a
+     * store whose DB slug is `mystore`. The email fallback is gone; if the name
+     * yields nothing, the field stays empty and the server derives/keeps its own
+     * slug (`authenticateMerchant` never invents one from the email either).
+     */
+    const slug = storeName.toLowerCase().replace(/[^a-z0-9]/g, '');
     const cleanPassword = password.trim();
 
     inFlightRef.current = true;
@@ -1611,7 +1656,9 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
           storeName: storeName.trim(),
           phone: formattedPhone,
           address: fullBusinessAddress,
-          storeSlug: slug,
+          // Omitted when the store name produced no slug — the server keeps the
+          // slug this account already has instead of receiving a synthetic one.
+          ...(slug ? { storeSlug: slug } : {}),
           logoUrl: storeLogo || '',
           subscriptionPlan: 'free_trial',
         }),

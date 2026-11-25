@@ -385,6 +385,27 @@ export async function authenticateMerchant(input: {
   }
 
   // ── 3. New registration: write to BOTH providers ──
+  /*
+   * NEVER FABRICATE AN ACCOUNT FROM A SESSION LOOKUP.
+   *
+   * This step used to run for ANY caller whose email matched nothing — and the
+   * session validator calls it on every page load (`GET /api/auth/session`) with
+   * only an email. So a merchant whose `stores` row was not reachable at that
+   * moment had a BRAND-NEW store row created for them, slugged from the email
+   * local part (`mmalamin9912`), and that row then answered every later lookup.
+   * The account was not lost — a second, wrong one shadowed it.
+   *
+   * Creating an account is now explicit: a caller must pass the store name it
+   * was just given by the registration form. Plain lookups (`{ email }` only)
+   * return `null` and the caller treats it as "unknown", exactly like a miss.
+   */
+  const signupStoreName = String(input.storeName || '').trim();
+  const signupSlug = String(input.storeSlug || '').trim();
+  if (!signupStoreName && !signupSlug) {
+    console.warn('[authService] No store record for this email and no registration input — not creating one.');
+    return null;
+  }
+
   const plan = String(input.subscriptionPlan || 'free_trial').toLowerCase();
   const durationDays = getPlanDurationInDays(plan);
   const now = new Date();
@@ -392,9 +413,26 @@ export async function authenticateMerchant(input: {
   const expiresAt = now.getTime() + durationDays * 86400000;
   const expiresAtIso = new Date(expiresAt).toISOString();
 
-  const storeSlug = input.storeSlug || input.storeName
-    ? String(input.storeSlug || input.storeName || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9]/g, '')
-    : email.split('@')[0];
+  /*
+   * THE SLUG COMES FROM THE STORE, NEVER FROM THE EMAIL ADDRESS.
+   *
+   * This used to end in `email.split('@')[0]`, so any signup that arrived
+   * without an explicit slug created the store as `mmalamin9912` — the Gmail
+   * local part. That is a DIFFERENT store from the one the merchant already owns
+   * (`mystore`), and because every product/category/order is found by the slug,
+   * the merchant was detached from their own catalogue.
+   *
+   * Priority: the explicit slug from the form → the slugified store NAME. The
+   * email local part is never used. (The guard above already returned when BOTH
+   * are missing, so this expression can never be empty in practice.)
+   */
+  const explicitSlug = String(input.storeSlug || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  const nameSlug = String(input.storeName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  const storeSlug = explicitSlug || nameSlug;
   const storeCode = input.storeCode || `ZID-BD-${String(Math.floor(1000 + Math.random() * 9000))}`;
   const storeId = input.storeId || `store-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 

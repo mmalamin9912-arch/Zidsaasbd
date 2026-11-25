@@ -143,8 +143,26 @@ export function resolveMerchantSubscription(
 
   const storeName = merged.store_name || merged.storeName || initialMerchant.storeName;
   const email = (merged.email || initialMerchant.email || '').toLowerCase().trim();
-  const emailSlug = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
-  const storeSlug = merged.store_slug || merged.storeSlug || (storeName ? storeName.toLowerCase().replace(/[^a-z0-9]/g, '') : emailSlug || 'store');
+  /*
+   * THE STORED SLUG WINS; NOTHING IS GUESSED FROM THE EMAIL OR THE NAME.
+   *
+   * This used to fall through `store_slug → storeSlug → slugify(storeName) →
+   * email local part → 'store'`. Whenever the DB row carried only ONE of the two
+   * spellings (or the name/email won because both were blank), the profile was
+   * handed a synthetic slug that did not point at the merchant's real store —
+   * `mmalamin9912` instead of `mystore`. Every fetch is keyed on this value, so
+   * the dashboard showed an empty catalogue.
+   *
+   * Now: DB `store_slug` → DB `storeSlug` → the slug already on the passed-in
+   * profile. If none exists, the slug stays empty rather than being invented;
+   * callers treat an empty slug as "unknown" and do not query with it.
+   */
+  const storeSlug =
+    String(merged.store_slug || '').trim().toLowerCase() ||
+    String(merged.storeSlug || '').trim().toLowerCase() ||
+    String((rawMerchant as any)?.store_slug || (rawMerchant as any)?.storeSlug || '').trim().toLowerCase() ||
+    String((rawSubRecord as any)?.store_slug || (rawSubRecord as any)?.storeSlug || '').trim().toLowerCase() ||
+    '';
   const ownerName = merged.owner_name || merged.ownerName || merged.full_name || initialMerchant.ownerName;
   const phone = merged.phone || initialMerchant.phone;
   const logoUrl = merged.logo_url || merged.logoUrl || initialMerchant.logoUrl;
@@ -292,7 +310,21 @@ export async function syncMerchantSubscription(
   };
 
   const cleanEmail = (updatedProfile.email || '').trim().toLowerCase();
-  const cleanSlug = updatedProfile.storeSlug || updatedProfile.storeName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  /*
+   * ONLY A REAL, STORED SLUG IS PROPAGATED.
+   *
+   * `storeSlug || slugify(storeName)` invented a value from the display name
+   * whenever the profile had no slug — and this runs on EVERY login, writing
+   * `store_slug` into the Supabase `stores` row. That is the second route by
+   * which a real slug got replaced by a synthetic one. When nothing usable is
+   * known the slug is left EMPTY, and the writes below omit the column entirely
+   * so the store keeps whatever it already has (a blank one is never written over
+   * a good one either).
+   */
+  const cleanSlug = String(updatedProfile.storeSlug || (updatedProfile as any).store_slug || '')
+    .split(':')[0]
+    .trim()
+    .toLowerCase();
 
   // 1. Sync to Supabase `stores` and `subscriptions`.
   //
@@ -311,7 +343,9 @@ export async function syncMerchantSubscription(
       const storesResult = await safeUpsertRow(sbClient, 'stores', {
         email: cleanEmail,
         store_name: updatedProfile.storeName,
-        store_slug: cleanSlug,
+        // Only sent when a REAL slug is known: omitting the column keeps the
+        // value already stored, instead of blanking or replacing it.
+        ...(cleanSlug ? { store_slug: cleanSlug } : {}),
         // Permanent identity — survives any slug/name change.
         ...(updatedProfile.storeCode ? { store_code: updatedProfile.storeCode } : {}),
         owner_name: updatedProfile.ownerName,
@@ -339,7 +373,7 @@ export async function syncMerchantSubscription(
     try {
       const subsResult = await safeUpsertRow(sbClient, 'subscriptions', {
         merchant_email: cleanEmail,
-        store_slug: cleanSlug,
+        ...(cleanSlug ? { store_slug: cleanSlug } : {}),
         subscription_plan: planId,
         plan_started_at,
         expires_at,
@@ -369,7 +403,9 @@ export async function syncMerchantSubscription(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         storeName: updatedProfile.storeName,
-        storeSlug: cleanSlug,
+        // Omitted when unknown, so the server records the request against the
+        // store's own slug instead of a blank/synthetic one.
+        ...(cleanSlug ? { storeSlug: cleanSlug } : {}),
         email: cleanEmail,
         planId,
         planName: planName || undefined,
@@ -408,7 +444,9 @@ export async function syncMerchantSubscription(
     userProfile: updatedProfile
   });
 
-  writeZidStoreData({ merchant: updatedProfile }, cleanSlug);
+  // Only scope the cache to a REAL slug — `''` would write/overwrite the
+  // unscoped global key that every other store shares.
+  writeZidStoreData({ merchant: updatedProfile }, cleanSlug || undefined);
 
   // Update registered users registry
   const registered = safeGetItem('zid_registered_users');

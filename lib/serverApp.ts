@@ -1972,6 +1972,16 @@ app.get(['/api/auth/session', '/api/auth/me'], async (req, res) => {
       return res.status(200).json({ ok: false, authenticated: false });
     }
 
+    /*
+     * A SESSION CHECK MUST NEVER CREATE AN ACCOUNT.
+     *
+     * `authenticateMerchant({ email })` also performs the find-or-create flow,
+     * and this route runs on every page load. When the store row was not
+     * reachable, the "create" branch made a second store slugged from the email
+     * local part — which then shadowed the merchant's real store. Passing no
+     * store name/slug makes that branch decline (see `authService`), so this is
+     * a pure lookup: a miss answers `authenticated: false`, nothing is written.
+     */
     const merchant = await authenticateMerchant({ email });
     if (!merchant) {
       return res.status(200).json({ ok: false, authenticated: false });
@@ -7452,12 +7462,63 @@ app.post('/api/storefront', async (req, res) => {
         }
 
         // Upsert merchant/store record
+        //
+        // THE SLUG IS ONLY EVER SET WHEN THE STORE HAS NONE.
+        //
+        // This block used to write `store_slug`/`storeSlug` from the request on
+        // EVERY call, with `upsert: true`. `CategoriesView` posts here after
+        // every categories load, so whatever slug the browser happened to hold
+        // at that moment became the store's slug — an email-derived
+        // `mmalamin9912` replaced `mystore` even though the merchant never
+        // renamed anything. Every product / category / order is found BY that
+        // slug, so the catalogue looked wiped (nothing was deleted, the pointer
+        // moved). A store that already has a slug keeps it; the keys are removed
+        // from the `$set` and `$setOnInsert` can then only seed a brand-new row.
         if (merchant && Object.keys(merchant).length > 0) {
           const storeId = String(merchant.id || merchant.storeId || storeSlug);
+          const merchantSlug = String(merchant.store_slug || merchant.storeSlug || '').trim().toLowerCase();
+          // Locate the row by id OR by either slug spelling, so an existing
+          // store is found even when the browser only knows its slug.
+          const storeFilterOr: Record<string, any>[] = [{ id: storeId }];
+          for (const candidate of [storeId, storeSlug, merchantSlug]) {
+            if (!candidate) continue;
+            storeFilterOr.push({ store_slug: candidate }, { storeSlug: candidate });
+          }
+
+          const existingStore = await db.collection('stores').findOne({ $or: storeFilterOr });
+          const existingStoreSlug = String(
+            existingStore?.store_slug || existingStore?.storeSlug || '',
+          ).trim().toLowerCase();
+
+          const storePatch: Record<string, any> = { ...merchant, id: storeId, updated_at: now };
+          const seedSlug = merchantSlug || storeSlug;
+
+          if (existingStore && existingStoreSlug) {
+            // Protect an existing slug. A genuine rename is a separate, explicit
+            // admin operation, never a side effect of an auto-sync POST.
+            if (seedSlug && seedSlug !== existingStoreSlug) {
+              console.warn('[Server] POST /api/storefront: keeping the existing slug', {
+                kept: existingStoreSlug,
+                ignored: seedSlug,
+              });
+            }
+            delete storePatch.store_slug;
+            delete storePatch.storeSlug;
+          } else {
+            storePatch.store_slug = seedSlug;
+            storePatch.storeSlug = seedSlug;
+          }
+
           await db.collection('stores').updateOne(
-            { id: storeId },
-            { $set: { ...merchant, id: storeId, store_slug: storeSlug, storeSlug, updated_at: now } },
-            { upsert: true }
+            existingStore ? { _id: existingStore._id } : { $or: storeFilterOr },
+            {
+              $set: storePatch,
+              // Never re-stamp a slug that already exists — only fill a blank one.
+              ...(seedSlug && !existingStoreSlug
+                ? { $setOnInsert: { store_slug: seedSlug, storeSlug: seedSlug } }
+                : {}),
+            },
+            { upsert: true },
           );
         }
       } catch (mongoErr: any) {
