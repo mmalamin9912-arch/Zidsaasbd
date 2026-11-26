@@ -784,16 +784,39 @@ export default function App() {
   // placeholder when the merchant actually switches stores (see the hydration
   // gate inside the data-load effect below).
   const lastOrdersStoreKeyRef = React.useRef<string>('');
+  // The store identity whose ORDERS have actually been loaded (not merely
+  // requested). Lets a skipped effect pass release the "Loading your orders…"
+  // gate instead of leaving it armed forever.
+  const lastOrdersLoadedKeyRef = React.useRef<string>('');
+  // Exactly the identities `GET /api/orders` is keyed on — NOT `activeTab`.
+  const ordersIdentityKey = [merchant?.id, merchant?.storeCode, merchant?.store_code, merchant?.storeSlug, (merchant as any)?.store_slug].join('|');
   const pendingIdentity = [merchant?.id, merchant?.storeCode, merchant?.storeSlug, activeTab].join('|');
 
   // Fetch data from DB on mount, storeSlug change, or tab switch.
   // Data loads are keyed on the PERMANENT store identity (UUID / store_code);
   // the slug is only a fallback, so renaming a store never breaks lookups.
   React.useEffect(() => {
+    /*
+     * THE HYDRATION GATE IS RELEASED ON EVERY EXIT PATH.
+     *
+     * `setOrdersHydrated(false)` used to run only further down, so on the very
+     * first pass — where the skip-guard below returns immediately — nothing was
+     * armed, and a later short-circuit could leave `OrdersView` on "Loading your
+     * orders…" with no request in flight. The skip branch now releases the gate
+     * whenever the current identity has already been loaded.
+     */
     // Skip re-run if the permanent identity + active tab haven't changed.
     // This breaks the loop: setMerchant()/setProducts() inside this effect
     // change `merchant`, but the identity key stays the same.
-    if (storeIdentityKey.current === pendingIdentity) return;
+    if (storeIdentityKey.current === pendingIdentity) {
+      /*
+       * The data for this identity was already loaded once. A RE-RUN that is
+       * skipped must still release the loader — otherwise a merchant who lands
+       * on the Orders tab after a skipped pass waits forever.
+       */
+      if (lastOrdersLoadedKeyRef.current === ordersIdentityKey) setOrdersHydrated(true);
+      return;
+    }
     storeIdentityKey.current = pendingIdentity;
 
     const merchantId = merchant?.id || merchant?.storeCode || merchant?.store_code || merchant?.storeSlug || 'default';
@@ -869,11 +892,11 @@ export default function App() {
       }
     }
     const loadAppProducts = async () => {
+      const { mapApiProduct } = await import('./utils/catalogPayload');
       try {
         const res = await fetch(`/api/products?${productQuery.toString()}`);
         const data = await res.json().catch(() => null);
         if (isMounted && Array.isArray(data) && data.length > 0) {
-          const { mapApiProduct } = await import('./utils/catalogPayload');
           setProducts(data.map((p: any) => mapApiProduct(p)));
           return;
         }
@@ -881,10 +904,17 @@ export default function App() {
         console.warn('[App] Product load warning:', err);
       }
 
+      /*
+       * The fallback used to call `setProducts(data)` with the RAW rows, while
+       * the primary path set MAPPED products (`mapApiProduct`). `ProductsView`
+       * filters on `p.title` / `p.sku` / `p.category`, and a raw Mongo row can
+       * lack them, so those rows could render as "No products found". Both paths
+       * now map exactly the same way.
+       */
       safeFetch(`/api/products-by-slug/${encodeURIComponent(storeSlug)}`).then(data => {
         if (isMounted && Array.isArray(data)) {
           if (data.length > 0 || products.length === 0) {
-            setProducts(data);
+            setProducts(data.map((p: any) => mapApiProduct(p)));
           }
         }
       });
@@ -1055,8 +1085,24 @@ export default function App() {
           if (!retry || !retry.ok) return;
           res = retry;
         }
-        const data = await res.json().catch(() => null);
-        if (!isMounted || !Array.isArray(data)) return;
+        const body = await res.json().catch(() => null);
+        if (!isMounted) return;
+        /*
+         * A NON-ARRAY BODY IS STILL A COMPLETED REQUEST.
+         *
+         * `if (!Array.isArray(data)) return;` previously fell straight to
+         * `finally` — fine — but the raw-body case is what produced "Loading
+         * your orders…" with a valid payload behind it when an older deploy
+         * answered `{ ok, orders: [...] }`. Accept the envelope as well.
+         */
+        const rows = Array.isArray(body)
+          ? body
+          : (Array.isArray((body as any)?.orders) ? (body as any).orders : null);
+        if (!rows) {
+          console.warn('[App] orders response was not a list — keeping the current orders');
+          return;
+        }
+        const data = rows;
         /*
          * ── DEGRADED RESPONSES ARE REJECTED; GENUINE EMPTIES ARE ACCEPTED ──
          *
@@ -1100,7 +1146,12 @@ export default function App() {
         // pulsing placeholder would be worse than showing the last known /
         // cached count on a network error. A SUPERSEDED effect must not settle
         // it though — the newer request owns the gate.
-        if (isMounted) setOrdersHydrated(true);
+        if (isMounted) {
+          // Remember that THIS identity is no longer waiting, so a later skipped
+          // effect pass can release the gate instead of re-arming it.
+          lastOrdersLoadedKeyRef.current = ordersIdentityKey;
+          setOrdersHydrated(true);
+        }
       });
 
     return () => {

@@ -6195,26 +6195,81 @@ app.get('/api/products', async (req, res) => {
       const v = req.query[k];
       return typeof v === 'string' ? v : (Array.isArray(v) && v.length > 0 ? v[0] : '');
     };
-    const rawSlug = (q('store_slug') ||
-      q('storeSlug') ||
-      q('store_id') ||
-      q('storeId') ||
-      q('store_code') ||
-      q('storeCode') ||
-      q('store_domain') ||
-      q('custom_domain') ||
-      q('domain') ||
-      '').trim();
+    /*
+     * REPEATED `store_slug` PARAMS ARE HONOURED — EXACTLY LIKE /api/orders.
+     *
+     * The dashboard sends EVERY identity the profile carries
+     * (`store_slug=mystore&store_slug=ZID-BD-5150&store_slug=6acfd031…`), and
+     * Express turns a repeated key into an ARRAY. This route only ever read the
+     * FIRST element, so the remaining identities were silently dropped, while
+     * the dashboard's fallback (`/api/products-by-slug/<slug>`) reads the local
+     * file/memory mirror — which on Vercel is empty.
+     *
+     * The Categories tab did not have this problem: `/api/categories` resolves
+     * the single ref it receives through `resolveStoreRefs()` first. Products
+     * now do the same for every ref it receives, so a profile whose slug is an
+     * email local part still finds the catalogue stored under the real slug.
+     */
+    const allStoreRefs = Array.from(
+      new Set(
+        [
+          ...(Array.isArray(req.query.store_slug) ? req.query.store_slug : [req.query.store_slug]),
+          ...(Array.isArray(req.query.storeSlug) ? req.query.storeSlug : [req.query.storeSlug]),
+          ...(Array.isArray(req.query.store_id) ? req.query.store_id : [req.query.store_id]),
+          ...(Array.isArray(req.query.storeId) ? req.query.storeId : [req.query.storeId]),
+          ...(Array.isArray(req.query.store_code) ? req.query.store_code : [req.query.store_code]),
+          ...(Array.isArray(req.query.storeCode) ? req.query.storeCode : [req.query.storeCode]),
+          ...(Array.isArray(req.query.merchant_id) ? req.query.merchant_id : [req.query.merchant_id]),
+          ...(Array.isArray(req.query.merchantId) ? req.query.merchantId : [req.query.merchantId]),
+        ]
+          .map((v) => (typeof v === 'string' ? v.trim() : ''))
+          .filter(Boolean),
+      ),
+    );
+    const firstRef = (...keys: string[]): string => keys.map((k) => q(k) as string).find(Boolean) || '';
+    const rawSlug = firstRef(
+      'store_slug',
+      'storeSlug',
+      'store_id',
+      'storeId',
+      'store_code',
+      'storeCode',
+      'store_domain',
+      'custom_domain',
+      'domain',
+    ).trim();
     // Preserve original for UUID/store_code/domain matching (before .toLowerCase())
     const rawSlugOriginal = rawSlug.trim();
 
     const merchantId = (req.query.merchant_id as string || req.query.merchantId as string || '').trim();
+
+    /*
+     * RESOLVE EVERY SUPPLIED IDENTITY, NOT JUST THE FIRST.
+     *
+     * Each ref is mapped through `resolveStoreRefs()` (slug / store code /
+     * UUID / email local part → canonical slug + id + code), and every resulting
+     * spelling joins the Mongo `$or` below. This is the Products equivalent of
+     * what `/api/categories` already did — and it is why the Categories tab
+     * worked while Products stayed empty.
+     */
+    const resolvedRefs = new Set<string>([rawSlugOriginal.toLowerCase()].filter(Boolean));
+    const resolvedStoreIds = new Set<string>();
+    const resolvedStoreCodes = new Set<string>();
+    for (const candidate of allStoreRefs) {
+      const r = await resolveStoreRefs(candidate);
+      if (r.slug) resolvedRefs.add(String(r.slug).toLowerCase());
+      if (r.storeId) resolvedStoreIds.add(String(r.storeId));
+      if (r.storeCode) resolvedStoreCodes.add(String(r.storeCode));
+    }
 
     // Resolve UUID / store_code / custom domain to the canonical slug.
     // MongoDB-first with a safely wrapped Supabase fallback, so a slow or
     // misconfigured Supabase can never fail this route.
     const refs = await resolveStoreRefs(rawSlugOriginal);
     const storeSlug = refs.slug || 'bd';
+    resolvedRefs.add(storeSlug);
+    if (refs.storeId) resolvedStoreIds.add(String(refs.storeId));
+    if (refs.storeCode) resolvedStoreCodes.add(String(refs.storeCode));
 
     // 1. MongoDB `products` collection — the AUTHORITATIVE source. Query it
     //    first so a stale local-store.json mirror can never mask real products.
@@ -6275,6 +6330,27 @@ app.get('/api/products', async (req, res) => {
         }
         if (refs.storeId) mongoOr.push({ store_id: refs.storeId }, { storeId: refs.storeId });
         if (refs.storeCode) mongoOr.push({ store_code: refs.storeCode }, { storeCode: refs.storeCode });
+        /*
+         * EVERY RESOLVED IDENTITY — one per repeated `store_slug` the dashboard
+         * sent, plus each one's canonical slug / UUID / store code. Only the
+         * first ref used to be honoured, which is why a profile carrying several
+         * identities could still match none of its own rows.
+         */
+        for (const slugRef of resolvedRefs) {
+          if (!slugRef || slugRef === 'default') continue;
+          mongoOr.push(
+            { store_slug: slugRef },
+            { storeSlug: slugRef },
+            { store_slug: { $regex: `^${escapeStoreRefRegex(slugRef)}$`, $options: 'i' } },
+            { storeSlug: { $regex: `^${escapeStoreRefRegex(slugRef)}$`, $options: 'i' } },
+          );
+        }
+        for (const idRef of resolvedStoreIds) {
+          mongoOr.push({ store_id: idRef }, { storeId: idRef }, { merchant_id: idRef }, { merchantId: idRef });
+        }
+        for (const codeRef of resolvedStoreCodes) {
+          mongoOr.push({ store_code: codeRef }, { storeCode: codeRef });
+        }
         // If the original was a UUID or store_code, also match by those keys directly.
         if (isUuidLike(rawSlugOriginal)) mongoOr.push({ store_id: rawSlugOriginal }, { storeId: rawSlugOriginal });
         if (STORE_CODE_RE.test(rawSlugOriginal)) mongoOr.push({ store_code: rawSlugOriginal }, { storeCode: rawSlugOriginal });
@@ -6300,8 +6376,30 @@ app.get('/api/products', async (req, res) => {
       try {
         const primaryDb = await getMongoDb(DB_NAME, 'primary');
         if (primaryDb) {
+          /*
+           * The fallback used `{ store_slug: storeSlug }` only — one exact key,
+           * one exact casing. It now uses every identity the request resolved,
+           * so a row written under the store code or a capitalised slug is still
+           * found on the primary pool.
+           */
+          const primaryOr: any[] = [];
+          for (const slugRef of resolvedRefs) {
+            if (!slugRef || slugRef === 'default') continue;
+            primaryOr.push(
+              { store_slug: slugRef },
+              { storeSlug: slugRef },
+              { store_slug: { $regex: `^${escapeStoreRefRegex(slugRef)}$`, $options: 'i' } },
+              { storeSlug: { $regex: `^${escapeStoreRefRegex(slugRef)}$`, $options: 'i' } },
+            );
+          }
+          for (const idRef of resolvedStoreIds) {
+            primaryOr.push({ store_id: idRef }, { storeId: idRef }, { merchant_id: idRef }, { merchantId: idRef });
+          }
+          for (const codeRef of resolvedStoreCodes) {
+            primaryOr.push({ store_code: codeRef }, { storeCode: codeRef });
+          }
           const mongoProds = await (primaryDb.collection('products') as any)
-            .find({ store_slug: storeSlug })
+            .find(primaryOr.length > 0 ? { $or: primaryOr } : { store_slug: storeSlug })
             .toArray();
           prods = Array.isArray(mongoProds) ? mongoProds.map(normalizeMongoProduct) : [];
         }

@@ -252,6 +252,30 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   facebookPageId,
   ordersHydrated = true,
 }) => {
+  /*
+   * THE LOADER MUST NEVER BECOME A PERMANENT STATE.
+   *
+   * `ordersHydrated` is driven by the parent's /api/orders request. If that
+   * request is skipped, aborted or never starts (a superseded effect, an
+   * identity that resolved after the effect guard ran, a cold start that never
+   * answers), the flag stays `false` and this view renders
+   * "Loading your orders…" forever with no way out.
+   *
+   * A bounded watchdog releases it after ORDER_HYDRATION_TIMEOUT_MS — well past
+   * any real response — so the table (and any already-cached rows) is shown
+   * instead of a spinner that never stops.
+   */
+  const ORDER_HYDRATION_TIMEOUT_MS = 20000;
+  const [hydrationTimedOut, setHydrationTimedOut] = useState(false);
+  useEffect(() => {
+    if (ordersHydrated) {
+      setHydrationTimedOut(false);
+      return;
+    }
+    const timer = setTimeout(() => setHydrationTimedOut(true), ORDER_HYDRATION_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [ordersHydrated]);
+  const showOrders = ordersHydrated || hydrationTimedOut;
   const toast = useToast();
   const channelRef = useRef<any>(null);
 
@@ -2759,13 +2783,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       )}
       {/* While the first /api/orders request is in flight (ordersHydrated === false),
           show a loader so the merchant isn't left with an empty orders table. */}
-      {!ordersHydrated && (
+      {!showOrders && (
         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
           <Loader2 className="w-10 h-10 animate-spin mb-3 text-slate-400" />
           <p className="font-medium">Loading your orders…</p>
         </div>
       )}
-      {!ordersHydrated ? null : (
+      {!showOrders ? null : (
         <>
           {/* 1. Header & Orders Sub-menu */}
       <div className="bg-[#202533] border border-[#2E3548] p-5 sm:p-6 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -2925,8 +2949,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <span>{tab}</span>
                     <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                       isActive ? 'bg-slate-950/20 text-slate-950' : 'bg-[#181B26] text-slate-400 border border-[#2E3548]'
-                    }${ordersHydrated ? '' : ' animate-pulse'}`}>
-                      {ordersHydrated ? count : '…'}
+                    }${showOrders ? '' : ' animate-pulse'}`}>
+                      {showOrders ? count : '…'}
                     </span>
                   </button>
                 );
