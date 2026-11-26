@@ -883,9 +883,21 @@ export async function getMongoDb(dbName: string = DB_NAME, role: 'primary' | 'se
         if (client) return client.db(dbName);
       }
     } catch {}
-    if (mongoose.connection.db) {
-      return mongoose.connection.db;
-    }
+    /*
+     * NEVER RETURN A HANDLE FOR THE WRONG DATABASE.
+     *
+     * `mongoose.connection.db` is whatever database the FIRST connection in
+     * this process opened. When only MONGODB_URI_2 is configured the connection
+     * is opened against that cluster and the fallback handed out `admin` for a
+     * request that asked for `zidbdsaas` — the route then found zero stores /
+     * products / orders and the dashboard rendered empty although the data
+     * existed. The requested name is now enforced.
+     */
+    try {
+      if ((mongoose.connection as any).name === dbName && mongoose.connection.db) {
+        return mongoose.connection.db;
+      }
+    } catch { /* ignore */ }
   }
   return null;
 }
@@ -1460,7 +1472,7 @@ const exportHistoryCache = new Map<string, any>();
  * invocations.
  */
 async function connectToMongoDB() {
-  const uri = readMongoUri();
+  const uri = readMongoUri() || readMongoUri(SECONDARY_DB_ROLE);
   if (!uri) return;
   if ((mongoose.connection.readyState as number) === 1) return;
   // ONE attempt. `connectToDatabase` already fail-overs between both URIs and
@@ -6053,10 +6065,25 @@ async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: 
   let storeId: string | undefined;
   let storeCode: string | undefined;
 
-  // 1. MongoDB stores collection (authoritative).
+  // 1. MongoDB stores collection (authoritative) — EVERY configured cluster.
+  //
+  //    WHY NOT JUST `mongoose.connection.db`: the app fails over
+  //    MONGODB_URI → MONGODB_URI_2, and the two clusters hold different data.
+  //    `mystore` exists only on the PRIMARY (`zidbdsaas`), while the SECONDARY
+  //    has a `zidbdsaas` database with empty `products`/`orders`/`stores`.
+  //    When the shared connection happened to be attached to the secondary, a
+  //    store looked up here resolved to NOTHING and the whole dashboard went
+  //    blank although every row was present on the primary. Both clusters are
+  //    therefore consulted, primary first.
   try {
     await connectToMongoDB().catch(() => undefined);
-    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+    const storeDbs: any[] = [];
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) storeDbs.push(mongoose.connection.db);
+    for (const tenantDb of await getAllTenantDbs()) {
+      if (!storeDbs.includes(tenantDb)) storeDbs.push(tenantDb);
+    }
+
+    if (storeDbs.length > 0) {
       const upper = clean.toUpperCase();
       const orClauses: any[] = [
         { store_slug: clean },
@@ -6092,10 +6119,24 @@ async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: 
         { email: { $regex: `^${escapeStoreRefRegex(clean)}@`, $options: 'i' } },
         { merchant_email: clean },
         { merchant_email: { $regex: `^${escapeStoreRefRegex(clean)}@`, $options: 'i' } },
+        /*
+         * EMAIL EXACT AND STORE-ID — the two identities that must never be lost.
+         * `clean` is lower-cased above; a store row may store the email with any
+         * casing, and `id` / `_id` carry the canonical UUID.
+         */
+        { email: { $regex: `^${escapeStoreRefRegex(clean)}$`, $options: 'i' } },
+        { id: clean },
+        { _id: clean },
       ];
       if (isUuidLike(clean)) orClauses.push({ id: clean }, { _id: clean }, { store_id: clean });
-      const doc: any = await (mongoose.connection.db.collection('stores') as any).findOne({ $or: orClauses });
-      if (doc) {
+      for (const storeDb of storeDbs) {
+        let doc: any = null;
+        try {
+          doc = await (storeDb.collection('stores') as any).findOne({ $or: orClauses });
+        } catch (lookupErr: any) {
+          console.warn('[Server] resolveStoreRefs store lookup warning:', lookupErr?.message || lookupErr);
+        }
+        if (!doc) continue;
         slug = String(doc.store_slug || doc.storeSlug || clean).toLowerCase();
         if (isUuidLike(String(doc.id || doc._id || ''))) storeId = String(doc.id || doc._id);
         if (doc.store_code) storeCode = String(doc.store_code);
@@ -6115,6 +6156,67 @@ async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: 
   }
 
   return { slug, storeId, storeCode };
+}
+
+/**
+ * Every MongoDB database a tenant read must consider.
+ *
+ * WHY BOTH CLUSTERS
+ * -----------------
+ * The deployment configures MONGODB_URI (primary) AND MONGODB_URI_2
+ * (secondary), and the two are DIFFERENT clusters:
+ *
+ *   • primary  → zidbdsaas  : the live merchant data (`mystore`: 4 products,
+ *                             3 orders, its `stores` row)
+ *   • secondary → a second `zidbdsaas` database that is EMPTY (no stores, no
+ *                 products, no orders) — it only hosts an unrelated sample DB.
+ *
+ * Catalogue/order routes preferred the SECONDARY pool and the shared failover
+ * connection could also attach to it, so the dashboard queried the empty
+ * cluster and legitimately found nothing while every row sat on the primary.
+ * Reading both and taking whichever answers keeps a single-cluster deployment
+ * working unchanged while an empty second cluster can no longer mask the data.
+ */
+export async function getAllTenantDbs(dbName: string = DB_NAME): Promise<any[]> {
+  const dbs: any[] = [];
+  const push = (db: any, label: string) => {
+    if (!db) return;
+    if (dbs.some((existing) => String(existing?.databaseName) === String(db.databaseName) && existing?.__cluster === label)) return;
+    // Tagged so the SAME database name on TWO DIFFERENT clusters is kept twice.
+    try { Object.defineProperty(db, '__cluster', { value: label, enumerable: false }); } catch { /* frozen handle */ }
+    dbs.push(db);
+  };
+
+  /*
+   * SHARED PRIMARY POOL FIRST — THE SAME HANDLE `/api/categories` USES.
+   *
+   * `connectToDatabase()` is what the categories route (which works on the live
+   * dashboard) calls, and its global connection is the one the mongoose models
+   * are bound to. Products and orders used the SECONDARY pool instead, so they
+   * were answered by the other cluster and found nothing. Reading the shared
+   * pool first makes every dashboard tab ask the same database.
+   */
+  try {
+    await connectToDatabase(dbName);
+    if (mongoose.connection.readyState === 1) {
+      const shared = await getMongoDb(dbName, 'primary');
+      if (shared) push(shared, 'primary');
+    }
+  } catch (err: any) {
+    console.warn('[Server] tenant db (shared primary) warning:', err?.message || err);
+  }
+
+  // A dedicated pool for MONGODB_URI_2, only when it is a DIFFERENT cluster.
+  const secondaryUri = readMongoUri(SECONDARY_DB_ROLE);
+  if (secondaryUri && secondaryUri !== readMongoUri('primary')) {
+    try {
+      push(await getMongoDb(dbName, SECONDARY_DB_ROLE), 'secondary');
+    } catch (err: any) {
+      console.warn('[Server] tenant db (secondary) warning:', err?.message || err);
+    }
+  }
+
+  return dbs;
 }
 
 /** Keep only products a public storefront may show: active and published. */
@@ -6279,14 +6381,20 @@ app.get('/api/products', async (req, res) => {
     // not set on Vercel, which causes mongoose.connect() to throw "MissingUri"
     // and surface as HTTP 500.
     const mongoUri = readMongoUri();
+    /*
+     * EVERY CONFIGURED CLUSTER IS A CANDIDATE.
+     *
+     * MONGODB_URI_2 points at a DIFFERENT cluster whose `zidbdsaas` database is
+     * empty (no stores / products / orders). The catalogue used to be read from
+     * the secondary pool FIRST, so `mystore` — whose 4 products live on the
+     * PRIMARY — was answered from an empty collection and the Products tab said
+     * "No products found". Both pools are read below and the rows are unioned.
+     */
     let productDb: any = null;
     if (mongoUri || readMongoUri(SECONDARY_DB_ROLE)) {
       try {
-        // Catalog reads use the secondary pool when configured. If the
-        // secondary cluster is unavailable or has no matching rows, fall back
-        // to the primary pool so a partial deployment never hides products.
-        productDb = await getMongoDb(DB_NAME, SECONDARY_DB_ROLE).catch(() => null);
-        if (!productDb) productDb = await getMongoDb(DB_NAME, 'primary');
+        const pooled = await getAllTenantDbs();
+        if (pooled.length > 0) productDb = pooled[0];
       } catch (dbErr: any) {
         console.error('[Server] GET /api/products MongoDB connection error:', dbErr?.message || dbErr);
       }
@@ -6309,6 +6417,23 @@ app.get('/api/products', async (req, res) => {
       console.warn('[Server] GET /api/products MongoDB URIs are not set — falling back to file/memory store.');
     }
     if (productDb) {
+      /*
+       * READ EVERY CONFIGURED CLUSTER AND UNION THE ROWS.
+       *
+       * MONGODB_URI_2 points at a second cluster whose `zidbdsaas` database has
+       * an EMPTY `products` collection. A merchant whose catalogue lives on the
+       * PRIMARY (`mystore`: 4 products) was therefore read against an empty
+       * collection and the Products tab rendered "No products found". Results
+       * are now unioned by product id, so whichever cluster holds the catalogue
+       * wins and the empty one can no longer mask it.
+       */
+      const catalogDbs: any[] = [];
+      try {
+        for (const tenantDb of await getAllTenantDbs()) {
+          if (tenantDb && !catalogDbs.includes(tenantDb)) catalogDbs.push(tenantDb);
+        }
+      } catch { /* fall back to the single pool resolved above */ }
+      if (catalogDbs.length === 0) catalogDbs.push(productDb);
       try {
         const mongoOr: any[] = [
           { store_slug: storeSlug },
@@ -6359,10 +6484,24 @@ app.get('/api/products', async (req, res) => {
         if (lowerOrig.includes('.')) {
           mongoOr.push({ store_domain: lowerOrig }, { domain: lowerOrig }, { customDomain: lowerOrig }, { custom_domain: lowerOrig });
         }
-        const mongoProds = await (productDb.collection('products') as any)
-          .find({ $or: mongoOr })
-          .toArray();
-        if (Array.isArray(mongoProds) && mongoProds.length > 0) {
+        const mongoProds: any[] = [];
+        const seenProductIds = new Set<string>();
+        for (const catalogDb of catalogDbs) {
+          let rows: any[] = [];
+          try {
+            rows = await (catalogDb.collection('products') as any).find({ $or: mongoOr }).toArray();
+          } catch (dbReadErr: any) {
+            console.warn('[Server] GET /api/products cluster read warning:', dbReadErr?.message || dbReadErr);
+            continue;
+          }
+          for (const row of Array.isArray(rows) ? rows : []) {
+            const key = String(row?.id ?? row?._id ?? '');
+            if (key && seenProductIds.has(key)) continue;
+            if (key) seenProductIds.add(key);
+            mongoProds.push(row);
+          }
+        }
+        if (mongoProds.length > 0) {
           prods = mongoProds.map(normalizeMongoProduct);
         }
       } catch (mongoErr) {
@@ -21794,21 +21933,56 @@ app.get('/api/orders', async (req, res) => {
     let orders: any[] = [];
     let queryFailed = false;
     if (dbConnected) {
+      /*
+       * READ EVERY CONFIGURED CLUSTER, NOT JUST THE ONE THE MODEL IS BOUND TO.
+       *
+       * `Order` is bound to whatever database the first connection opened. With
+       * MONGODB_URI and MONGODB_URI_2 both set, that could be the SECONDARY
+       * cluster, whose `zidbdsaas` has NO orders at all — while `mystore`'s 3
+       * orders live on the PRIMARY. The query therefore answered `[]` (and
+       * `X-Orders-Degraded` stayed false, so the client accepted the empty
+       * list as truth). Both clusters are queried now and the rows are
+       * unioned by order id; the identical filter, sort and limit are kept.
+       */
+      const seenOrderKeys = new Set<string>();
+      const readDatabases: any[] = [ORDERS_DB_NAME];
       try {
-        // @ts-ignore — query is a plain Mongo filter object.
-        orders = await (Order as any)
-          .find(query || {})
-          // `_id` is the tie-breaker: it is monotonic for a freshly inserted
-          // document, so two orders created in the SAME millisecond still sort
-          // with the newest last-read-first. Without it the newest transaction
-          // could fall off the end of a capped list.
-          .sort({ created_at: -1, updated_at: -1, _id: -1 })
-          .limit(limit)
-          .lean();
-      } catch (queryErr: any) {
-        console.warn('[Server] GET /api/orders query warning:', queryErr?.message || queryErr);
-        orders = [];
-        queryFailed = true;
+        for (const tenantDb of await getAllTenantDbs()) {
+          if (tenantDb) readDatabases.push(tenantDb);
+        }
+      } catch (clusterErr: any) {
+        console.warn('[Server] GET /api/orders cluster enumeration warning:', clusterErr?.message || clusterErr);
+      }
+
+      for (const target of readDatabases) {
+        try {
+          // A database NAME is queried through the model (shared pool); a `Db`
+          // handle (a different cluster) is queried natively with the SAME
+          // filter, so the matching semantics never diverge.
+          const rows = typeof target === 'string'
+            // @ts-ignore — query is a plain Mongo filter object.
+            ? await (Order as any)
+                .find(query || {})
+                .sort({ created_at: -1, updated_at: -1, _id: -1 })
+                .limit(limit)
+                .lean()
+            : await target.collection(ORDERS_COLLECTION)
+                .find(query || {})
+                .sort({ created_at: -1, updated_at: -1, _id: -1 })
+                .limit(limit)
+                .toArray();
+          for (const row of Array.isArray(rows) ? rows : []) {
+            const key = String((row as any)?.id ?? (row as any)?._id ?? '');
+            if (key && seenOrderKeys.has(key)) continue;
+            if (key) seenOrderKeys.add(key);
+            orders.push(row);
+          }
+        } catch (queryErr: any) {
+          console.warn('[Server] GET /api/orders query warning:', queryErr?.message || queryErr);
+          // Only a TOTAL failure is reported as degraded; another cluster may
+          // still have answered.
+          if (orders.length === 0) queryFailed = true;
+        }
       }
     }
 

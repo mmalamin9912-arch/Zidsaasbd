@@ -441,7 +441,10 @@ async function connectWithFailover(
 
   for (let i = 0; i < candidates.length; i += 1) {
     const uri = await resolveMongoUriForDriver(candidates[i]);
-    const label = i === 0 ? 'primary' : 'secondary';
+    // Label the URI by its ACTUAL role, not by loop position: `listMongoUriCandidates()`
+    // can yield only one entry (the secondary) when MONGODB_URI is unset, and that
+    // entry used to be reported as "primary" in every log and error message.
+    const label = candidates[i] === readMongoUri('primary') ? 'primary' : 'secondary';
     console.log(`[MongoDB] Opening new connection pool via ${label} URI (dbName=${dbName}, host=${redactUri(uri)})`);
 
     try {
