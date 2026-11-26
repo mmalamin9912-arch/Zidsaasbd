@@ -57,6 +57,27 @@ type SupabaseLike = {
 };
 
 /**
+ * May this browser send a direct `SELECT` to Supabase at all?
+ *
+ * The deployed project protects `stores` (and every other mirrored table) with
+ * Row Level Security and ships the PUBLIC key to the browser, so a direct read
+ * is answered with HTTP 401 (`Unauthorized`) — one red console row per lookup.
+ * A legacy anon JWT may still be readable, so those deployments keep working.
+ * The backend (`/api/stores/by-slug`) is asked FIRST either way.
+ */
+async function supabaseSelectAllowed(): Promise<boolean> {
+  try {
+    const { isSupabaseConfigured, supabaseAnonKey } = await import('./supabase');
+    if (!isSupabaseConfigured) return false;
+    // Legacy anon key = JWT (`aaa.bbb.ccc`). A `sb_publishable_…` key is opaque
+    // to PostgREST and answers 401 to every direct table request.
+    return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(String(supabaseAnonKey || '').trim());
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolves ANY store reference (permanent code, UUID, or slug) to the
  * canonical store record. The returned `id` UUID is what must be attached
  * to every product create, customer session and order insert.
@@ -82,6 +103,48 @@ export async function resolveStoreRef(
   const select = buildSafeSelect(['id', 'store_code', 'store_slug'], storesColumns);
   const hasColumn = (name: string) =>
     !storesColumns || storesColumns.some((c) => c.toLowerCase() === name.toLowerCase());
+
+  /*
+   * BACKEND FIRST — NEVER A BARE CLIENT-SIDE SUPABASE `store_slug` QUERY.
+   *
+   * Every `stores` request below used the public key straight from the browser.
+   * RLS protects the `stores` table with no client SELECT policy, so each one
+   * answered `401 Unauthorized` on `*.supabase.co/rest/v1/stores?...store_slug=eq.…`
+   * — the exact red rows reported on the live dashboard — and the returned
+   * `null` then made login fall back to a synthetic store identity.
+   *
+   * `GET /api/stores/by-slug?slug=…` resolves the SAME store server-side (MongoDB
+   * first, Supabase with the service-role key as a fallback) and answers
+   * `{ ok, store_slug, merchant }`. The canonical `id`, `store_code` and
+   * `store_slug` are read from `merchant`, whatever spelling the row carries.
+   */
+  try {
+    const res = await fetch(`/api/stores/by-slug?slug=${encodeURIComponent(clean)}`, {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
+    if (res.ok) {
+      const body: any = await res.json().catch(() => null);
+      const record: any = body?.merchant || null;
+      const id = record?.id || record?._id || record?.store_id || '';
+      if (id) {
+        return {
+          id: String(id),
+          storeCode: record.store_code || record.storeCode,
+          storeSlug: record.store_slug || record.storeSlug || body?.store_slug,
+        };
+      }
+    }
+  } catch (err: any) {
+    console.warn('[storeId] /api/stores/by-slug lookup warning:', err?.message || err);
+  }
+
+  // Supplemental client-side lookups below only run when the backend could not
+  // answer AND Supabase is actually usable from this browser: `fetchKnownColumns`
+  // returns `null` in the browser, `select` then stays the documented core list,
+  // and a project whose RLS denies the public key is never queried (see
+  // `supabaseSelectAllowed`).
+  if (!(await supabaseSelectAllowed())) return null;
 
   // 1) Permanent store code (ZID-BD-XXXX) — most stable lookup.
   if (isStoreCode(clean) && hasColumn('store_code')) {

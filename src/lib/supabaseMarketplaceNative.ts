@@ -11,6 +11,11 @@ import { resolveProductImage } from '../utils/imageFallback';
 import type { MarketplaceProduct } from '../types';
 import type { MarketplaceFilters } from './marketplaceApi';
 
+/** True when running inside a web browser (client bundle). */
+function isBrowserRuntime(): boolean {
+  return typeof window !== 'undefined' && typeof document !== 'undefined';
+}
+
 export async function fetchSupabaseNativeProducts(
   filters: MarketplaceFilters = {},
 ): Promise<{ ok: boolean; products: MarketplaceProduct[]; total: number; page: number; limit: number; pages: number; price_range: { min: number; max: number } | null; error?: string }> {
@@ -20,6 +25,28 @@ export async function fetchSupabaseNativeProducts(
   const page = Math.max(1, Number(filters.page) || 1);
   const limit = Math.min(200, Math.max(1, Number(filters.limit) || 100));
   const offset = (page - 1) * limit;
+  /*
+   * BROWSER = NO DIRECT SUPABASE READ.
+   *
+   * With Row Level Security enabled on `products` and the public key in the
+   * bundle, `GET /rest/v1/products?select=…&store_slug=eq.…` answers HTTP 401
+   * on the live project. The marketplace reads the same catalogue through the
+   * backend (`GET /api/marketplace/products`), which uses the service-role key
+   * server-side. Answer with an explicit, non-throwing empty result so the
+   * console stays clean instead of repeating a request that cannot succeed.
+   */
+  if (isBrowserRuntime()) {
+    return {
+      ok: false,
+      products: [],
+      total: 0,
+      page,
+      limit,
+      pages: 0,
+      price_range: null,
+      error: 'Supabase catalogue reads are served by /api/marketplace/products.',
+    };
+  }
   /*
    * The projection and the filters below are trimmed to columns the deployed
    * `products` table really has (`id, name, store_slug, price, stock_quantity,
@@ -82,6 +109,14 @@ export async function fetchSupabaseNativeCategories(): Promise<any[]> {
   if (!client) return [];
   const categoryColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'categories');
   const present = categoryColumns ? new Set(categoryColumns.map((c) => c.toLowerCase())) : null;
+  /*
+   * This is a CLIENT read (the browser key), and the deployed `categories`
+   * table has no client SELECT policy — PostgREST answers it with HTTP 401.
+   * MongoDB via `GET /api/marketplace/...` is authoritative and is what the
+   * marketplace views call, so skip the doomed request instead of printing a
+   * `401 Unauthorized` per render. Callers already treat `[]` as "no rows".
+   */
+  if (isBrowserRuntime()) return [];
   let categoryQuery = client.from('categories').select('*');
   /*
    * Filter and sort ONLY on columns the table is known to have. When the schema

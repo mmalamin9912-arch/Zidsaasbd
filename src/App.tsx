@@ -892,8 +892,14 @@ export default function App() {
     loadAppProducts();
 
     // Merchant Settings & Profile by storeSlug
+    //
+    // The path form (`/api/stores/slug/<slug>`) resolves through a
+    // cross-provider lookup that asks Supabase BEFORE MongoDB, so every dashboard
+    // load waited on that round-trip before falling back. The query-string form
+    // below answers from the backend's own store cache without the detour, and
+    // the envelope (`{ ok, store_slug, merchant }`) is identical.
     if (storeSlug) {
-      safeFetch(`/api/stores/slug/${encodeURIComponent(storeSlug)}`).then(res => {
+      safeFetch(`/api/stores/by-slug?slug=${encodeURIComponent(storeSlug)}`).then(res => {
         // The route answers `{ ok, store_slug, merchant }` — the envelope is NOT
         // the store record. Spreading it used to pollute the profile with
         // `ok`/`store_slug`/`merchant` keys and left `themeConfig` on the stale

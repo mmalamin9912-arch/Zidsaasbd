@@ -1,4 +1,4 @@
-import { getSupabaseClient, safeUpsertRow } from './supabase';
+import { getSupabaseClient, isSupabaseConfigured, supabaseAnonKey, safeUpsertRow } from './supabase';
 import { MerchantProfile, SubscriptionPlanId } from '../types';
 import {
   getPlanDurationInDays,
@@ -14,6 +14,20 @@ import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 // Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts) — one
 // rule for every read of a saved `themeConfig`, browser or server.
 import { sanitizeStoredThemeConfig } from '../../lib/galleryDefaults';
+
+const ANON_JWT_RE = /^[\w-]+\.[\w-]+\.[\w-]+$/;
+
+/**
+ * May the browser read `stores` directly?
+ *
+ * Only when the shipped key is a legacy anon JWT. A project protected by RLS
+ * (or shipping a `sb_publishable_…` key) answers every direct table read with
+ * HTTP 401, and the lookup below would just add a red console row before the
+ * backend profile fetch — which is the authoritative path — runs anyway.
+ */
+function publicStoreSelectAllowed(): boolean {
+  return Boolean(isSupabaseConfigured && ANON_JWT_RE.test(String(supabaseAnonKey || '').trim()));
+}
 
 export interface SubscriptionSyncOptions {
   merchant: MerchantProfile;
@@ -214,8 +228,15 @@ export async function fetchMerchantSubscriptionFromSupabase(
 
   // Stores are the canonical tenant record. Try every supported ownership/contact
   // column independently because older projects may only have a subset of them.
+  //
+  // The browser must NOT read `stores` directly: the deployed table is protected
+  // by RLS and the key in the bundle is public, so each attempt answered
+  // `401 Unauthorized` on `*.supabase.co/rest/v1/stores?store_slug=eq.…` on every
+  // dashboard hydrate. MongoDB does not carry `store_slug` in this lookup either
+  // — the backend resolves the profile below — so the direct read is skipped
+  // outright instead of failing first and warning on each column.
   const sbReadClient = getSupabaseClient();
-  if (sbReadClient) {
+  if (sbReadClient && publicStoreSelectAllowed()) {
     const storeQueries: Array<{ column: string; value: string }> = [
       ...(userId ? [{ column: 'user_id', value: userId }, { column: 'auth_user_id', value: userId }] : []),
       ...(cleanEmail ? [{ column: 'email', value: cleanEmail }] : []),

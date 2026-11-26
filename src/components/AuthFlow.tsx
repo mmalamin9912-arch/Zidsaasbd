@@ -430,9 +430,15 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   const supabaseStoreByExactEmail = async (cleanEmail: string): Promise<any | null> => {
     if (!supabase) return null;
     try {
+      // The backend is authoritative and already asked above (`/api/stores/check`,
+      // `/api/stores/check-email`). A direct browser read of `stores` is answered
+      // with HTTP 401 by RLS on the deployed project, so it is only attempted when
+      // the project actually allows a public SELECT (legacy anon JWT).
+      const { supabaseUrl, supabaseAnonKey, isSupabaseConfigured } = await import('../lib/supabase');
+      if (!isSupabaseConfigured) return null;
+      if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(String(supabaseAnonKey || '').trim())) return null;
       // Only reach for a column that exists: the whole projection 400s
       // (`42703`) otherwise, and this runs on every login / signup attempt.
-      const { supabaseUrl, supabaseAnonKey } = await import('../lib/supabase');
       const storesColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'stores');
       if (storesColumns && !storesColumns.some((c) => c.toLowerCase() === 'email')) return null;
       const { data } = await supabase.from('stores').select('*').eq('email', cleanEmail).maybeSingle();

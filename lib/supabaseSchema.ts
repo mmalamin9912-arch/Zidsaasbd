@@ -60,6 +60,11 @@ const CATEGORY_COLUMN_FALLBACKS: Record<string, string[]> = {
 const columnCache = new Map<string, { columns: string[] | null; expiresAt: number }>();
 const COLUMN_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/** True when this module is running inside a web browser (client bundle). */
+function isBrowserRuntime(): boolean {
+  return typeof window !== 'undefined' && typeof document !== 'undefined';
+}
+
 /**
  * Is this key a JWT (legacy `anon` key) rather than a `sb_publishable_…` key?
  *
@@ -104,6 +109,28 @@ export async function fetchTableColumns(
   table: string,
   candidateColumns?: string[]
 ): Promise<string[] | null> {
+  /*
+   * NEVER INTROSPECT FROM THE BROWSER.
+   *
+   * The columns of a table are schema information. The key that ships in the
+   * client bundle is the public one, and the deployed project protects every
+   * mirrored table with Row Level Security: `GET /rest/v1/<table>` answers
+   * HTTP 401 there. That single request is what filled the live dashboard's
+   * console with `401 Unauthorized` on `*.supabase.co/rest/v1/...` on every
+   * load, long before any data was read.
+   *
+   * Two callers live in the browser bundle (`src/lib/storeId.ts`,
+   * `src/lib/supabaseMarketplaceNative.ts`, `src/utils/catalogPayload.ts`,
+   * `src/components/AuthFlow.tsx`). Neither needs the introspection:
+   * reporting `null` means "unknown schema", and every caller then uses its
+   * small documented core payload, which is valid for that table. Dashboard
+   * data itself is read from the backend MongoDB API (`/api/...`), which
+   * introspects server-side with the service-role key.
+   *
+   * The server bundle keeps the real introspection (it holds the elevated key).
+   */
+  if (isBrowserRuntime()) return null;
+
   const now = Date.now();
   const cached = columnCache.get(table);
   if (cached && cached.expiresAt > now) return cached.columns;
