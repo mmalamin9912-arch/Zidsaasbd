@@ -1,4 +1,4 @@
-import { getSupabaseClient, isSupabaseConfigured, supabaseAnonKey, safeUpsertRow } from './supabase';
+import { getSupabaseClient, safeUpsertRow } from './supabase';
 import { MerchantProfile, SubscriptionPlanId } from '../types';
 import {
   getPlanDurationInDays,
@@ -14,20 +14,6 @@ import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 // Shared gallery defaults + the Unsplash purge (lib/galleryDefaults.ts) — one
 // rule for every read of a saved `themeConfig`, browser or server.
 import { sanitizeStoredThemeConfig } from '../../lib/galleryDefaults';
-
-const ANON_JWT_RE = /^[\w-]+\.[\w-]+\.[\w-]+$/;
-
-/**
- * May the browser read `stores` directly?
- *
- * Only when the shipped key is a legacy anon JWT. A project protected by RLS
- * (or shipping a `sb_publishable_…` key) answers every direct table read with
- * HTTP 401, and the lookup below would just add a red console row before the
- * backend profile fetch — which is the authoritative path — runs anyway.
- */
-function publicStoreSelectAllowed(): boolean {
-  return Boolean(isSupabaseConfigured && ANON_JWT_RE.test(String(supabaseAnonKey || '').trim()));
-}
 
 export interface SubscriptionSyncOptions {
   merchant: MerchantProfile;
@@ -220,41 +206,23 @@ export async function fetchMerchantSubscriptionFromSupabase(
 ): Promise<MerchantProfile | null> {
   const cleanEmail = identifier.email ? identifier.email.trim().toLowerCase() : '';
   const cleanSlug = identifier.slug ? identifier.slug.trim().toLowerCase() : '';
-  const cleanPhone = identifier.phone ? identifier.phone.trim() : '';
-  const userId = identifier.userId ? identifier.userId.trim() : '';
+  void cleanSlug;
 
   let dbMerchant: any = null;
   let dbSubscription: any = null;
 
-  // Stores are the canonical tenant record. Try every supported ownership/contact
-  // column independently because older projects may only have a subset of them.
+  // NO BROWSER-SIDE `stores` READ.
   //
-  // The browser must NOT read `stores` directly: the deployed table is protected
-  // by RLS and the key in the bundle is public, so each attempt answered
-  // `401 Unauthorized` on `*.supabase.co/rest/v1/stores?store_slug=eq.…` on every
-  // dashboard hydrate. MongoDB does not carry `store_slug` in this lookup either
-  // — the backend resolves the profile below — so the direct read is skipped
-  // outright instead of failing first and warning on each column.
-  const sbReadClient = getSupabaseClient();
-  if (sbReadClient && publicStoreSelectAllowed()) {
-    const storeQueries: Array<{ column: string; value: string }> = [
-      ...(userId ? [{ column: 'user_id', value: userId }, { column: 'auth_user_id', value: userId }] : []),
-      ...(cleanEmail ? [{ column: 'email', value: cleanEmail }] : []),
-      ...(cleanPhone ? [{ column: 'phone_number', value: cleanPhone }, { column: 'phone', value: cleanPhone }] : [])
-    ];
-    for (const query of storeQueries) {
-      try {
-        const { data } = await sbReadClient.from('stores').select('*').eq(query.column, query.value).maybeSingle();
-        if (data) {
-          dbMerchant = data;
-          break;
-        }
-      } catch (error) {
-        // A missing legacy column/table should not prevent the next lookup strategy.
-        console.warn(`[SubscriptionService] Store lookup by ${query.column} skipped:`, error);
-      }
-    }
-  }
+  // This block used to run up to FOUR per-column Supabase queries
+  // (`user_id`, `auth_user_id`, `email`, `phone`) against the public key. The
+  // deployed `stores` table is protected by RLS with no client SELECT policy, so
+  // each one answered `401 Unauthorized` on every dashboard hydrate — a large
+  // part of the recurring red block in the console.
+  //
+  // The authoritative profile is fetched from the backend immediately below
+  // (`/api/stores/check/…` or `/api/stores/by-slug?slug=…`), which reads
+  // MongoDB first and Supabase with the service-role key. Nothing is lost by
+  // removing the direct read — it could never succeed.
 
   // Legacy `subscriptions` Supabase reads are intentionally disabled. The
   // deployed PostgREST schema does not contain `merchant_email` (SQLSTATE

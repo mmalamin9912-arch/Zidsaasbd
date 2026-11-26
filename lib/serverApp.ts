@@ -479,13 +479,34 @@ export const DB_NAME = 'zidbdsaas';
 export const SECONDARY_DB_ROLE = 'secondary' as const;
 
 export function readMongoUri(role: 'primary' | 'secondary' = 'primary'): string {
-  if (role === SECONDARY_DB_ROLE) return (process.env.MONGODB_URI_2 || '').trim();
-  return (
+  /*
+   * STRIP SURROUNDING QUOTES.
+   *
+   * Dashboard environment editors (Render, Vercel, Heroku) and `.env` files
+   * very often store the value as `"mongodb+srv://…"`. Node passes the QUOTES
+   * through, so the URI the driver received was
+   *
+   *     "mongodb+srv://user:pass@cluster/db"      ← literal quote characters
+   *
+   * and every authentication attempt failed with `bad auth`. The app then marked
+   * the primary unusable and fell back to MONGODB_URI_2 — a DIFFERENT cluster
+   * whose `zidbdsaas` database is empty. That is exactly why the dashboard
+   * showed no products and no orders while the data sat on the primary.
+   *
+   * Quotes, backticks, backslashes and whitespace around the value are removed.
+   */
+  const clean = (value: string | undefined): string =>
+    String(value ?? '')
+      .trim()
+      .replace(/^["'`\\]+|["'`\\]+$/g, '')
+      .trim();
+
+  if (role === 'secondary') return clean(process.env.MONGODB_URI_2);
+  return clean(
     process.env.MONGODB_URI ||
     process.env.MONGODB_URL ||
-    process.env.DATABASE_URL ||
-    ''
-  ).trim();
+    process.env.DATABASE_URL,
+  );
 }
 
 /**
@@ -581,13 +602,43 @@ async function lookupMongoSrvSeeds(host: string): Promise<string[]> {
       });
       if (!res.ok) continue;
       const data: any = await res.json();
+      /*
+       * MATCH THE SRV DOMAIN, NOT THE CLUSTER LABEL.
+       *
+       * Atlas answers `_mongodb._tcp.cluster0.abcde.mongodb.net` with SHARD
+       * targets such as `ac-xxxx-shard-00-00.abcde.mongodb.net`. Those do NOT
+       * contain the string `cluster0.abcde.mongodb.net`, so the old
+       * `h.host.includes(host)` filter discarded EVERY record and returned an
+       * empty seed list. The caller then built `mongodb://user:pass@/zidbdsaas`
+       * — a URI with NO HOST — which the driver rejects as `bad auth`. That is
+       * why the primary looked permanently unusable and every dashboard read
+       * fell back to the empty second cluster.
+       *
+       * The parent domain (`abcde.mongodb.net`) is the correct suffix test.
+       */
+      const srvDomain = host.split('.').slice(1).join('.').toLowerCase();
       const seeds = (Array.isArray(data?.Answer) ? data.Answer : [])
         .filter((a: any) => (!a.type || a.type === 33) && typeof a.data === 'string')
         .map((a: any) => {
           const [priority, , port, target] = String(a.data).trim().split(/\s+/);
-          return { host: String(target || '').replace(/\.$/, ''), port: port || '27017', priority: Number(priority) || 0 };
+          /*
+           * ALWAYS STRIP THE TRAILING DOT.
+           *
+           * An SRV answer is a fully-qualified name: `ac-xxxx-shard-00-00.zone
+           * .mongodb.net.` — WITH a trailing dot. Joining it to a port produced
+           * `….mongodb.net.:27017` … and when the dot was simply kept the seed
+           * became `….mongodb.net.27017`, an INVALID host that the driver could
+           * not authenticate against (`bad auth`). The port must be appended to
+           * a dot-free host, and the filter below must see the dot-free name too.
+           */
+          const cleanHost = String(target || '').replace(/\.+$/, '');
+          return { host: cleanHost, port: port || '27017', priority: Number(priority) || 0 };
         })
-        .filter((h: any) => h.host.includes(host))
+        .filter((h: any) => {
+          const target = String(h.host).toLowerCase();
+          if (!target) return false;
+          return srvDomain ? target.endsWith(srvDomain) : target.includes(host.toLowerCase());
+        })
         .sort((a: any, b: any) => a.priority - b.priority)
         .map((h: any) => `${h.host}:${h.port}`);
       if (seeds.length) return seeds;
@@ -659,15 +710,44 @@ async function resolveMongoUriForDriver(uri: string): Promise<string> {
   const seeds = await lookupMongoSrvSeeds(host);
   if (!seeds.length) {
     // Nothing could expand it — remember that, so each retry does not pay for
-    // the lookups again. The driver then reports its own connection error.
+    // the lookups again. The driver re-resolves the `+srv` URI itself.
     resolvedMongoUriCache.set(uri, uri);
     return uri;
   }
 
-  const replaced = uri.replace(/^mongodb\+srv:\/\//i, 'mongodb://').replace(`@${host}`, `@${seeds.join(',')}`);
+  /*
+   * A SEED LIST OF ZERO MUST NEVER REACH THIS LINE.
+   *
+   * `replace('@…', '@')` on an empty list produced `mongodb://user:pass@/db` —
+   * a URI with NO HOST — which the driver rejects as `bad auth`. That silent
+   * corruption is what made the primary look unobtainable and sent every read
+   * to the empty second cluster. Guarded explicitly.
+   */
+  const usableSeeds = seeds.filter((s) => /:\d+$/.test(String(s)));
+  if (!usableSeeds.length) {
+    resolvedMongoUriCache.set(uri, uri);
+    return uri;
+  }
+
+  const replaced = uri.replace(/^mongodb\+srv:\/\//i, 'mongodb://').replace(`@${host}`, `@${usableSeeds.join(',')}`);
+  /*
+   * NEVER INVENT `authSource`.
+   *
+   * `mongodb+srv://` defaults `authSource` to the URI's database (or `admin`
+   * when none is given) and Atlas users usually live in `admin` — but some
+   * clusters authenticate against the DATABASE ITSELF. Forcing
+   * `authSource=admin` here broke exactly those clusters: every expanded
+   * connection answered `Authentication failed`, the app marked the primary
+   * "rejected" and skipped it for two minutes, and every dashboard read fell
+   * back to the OTHER cluster — which holds no merchant data. That is the
+   * "data exists but the dashboard is empty" symptom.
+   *
+   * The expanded URI therefore carries only the TLS flag; authentication is left
+   * to the driver's own defaults, identical to the original `+srv` URI.
+   */
   const withTls = /[?&](ssl|tls)=/i.test(replaced)
     ? replaced
-    : `${replaced}${replaced.includes('?') ? '&' : '?'}ssl=true&authSource=admin`;
+    : `${replaced}${replaced.includes('?') ? '&' : '?'}ssl=true`;
   console.log(
     `[MongoDB] SRV lookup for ${host} was refused by Node's resolver; using an expanded seed list (${seeds.length} hosts).`,
   );
@@ -857,6 +937,48 @@ export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Prom
       });
   }
   return secondaryCached.promise;
+}
+
+/**
+ * A DEDICATED pool for MONGODB_URI, independent of the shared failover pool.
+ *
+ * `connectToDatabase()` picks whichever URI answers, so a transient primary
+ * failure can leave the process pinned to MONGODB_URI_2 — a DIFFERENT cluster
+ * whose `zidbdsaas` database is empty. Every tenant read was then answered by
+ * that empty cluster ("No products found"), even after the primary recovered.
+ * Opening the primary URI directly guarantees the data-bearing cluster is always
+ * a candidate.
+ */
+export async function connectToPrimaryDirectDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
+  const uri = await resolveMongoUriForDriver(readMongoUri('primary'));
+  if (!uri || !uri.trim()) throw new Error('[MongoDB] MONGODB_URI is not set for the primary database.');
+  const globalAny = global as any;
+  const cache: SecondaryCache = globalAny.__mongoosePrimaryDirectCache ?? (globalAny.__mongoosePrimaryDirectCache = { conn: null, promise: null });
+  if (cache.conn?.readyState === 1) return cache.conn;
+  if (!cache.promise) {
+    console.log(`[Server] Opening dedicated primary connection pool (dbName=${dbName})`);
+    cache.promise = mongoose
+      .createConnection(uri, {
+        dbName,
+        bufferCommands: false,
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 45000,
+        connectTimeoutMS: 5000,
+      })
+      .asPromise()
+      .then((connection) => {
+        cache.conn = connection;
+        return connection;
+      })
+      .catch((err) => {
+        cache.promise = null;
+        cache.conn = null;
+        throw new Error(`[MongoDB] Dedicated primary connection failed: ${err?.message || err}`);
+      });
+  }
+  return cache.promise;
 }
 
 /**
@@ -1576,6 +1698,28 @@ function supabaseRecentlyUnreachable(): boolean {
 }
 
 const SUPABASE_TIMEOUT_MS = 2000;
+
+/**
+ * Hard ceiling for resolving the caller's store identities inside a data route.
+ *
+ * Resolution is a convenience (it maps an email local part or an old slug to the
+ * canonical slug). The dashboard always sends the real slug among its repeated
+ * `store_slug` params, so the raw values alone are enough to query. Without a
+ * cap, a slow Supabase probe / a dead cluster multiplied across several refs
+ * delayed `/api/products` and `/api/orders` by minutes.
+ */
+const STORE_RESOLVE_BUDGET_MS = 900;
+
+/**
+ * Ceiling for the courier-ledger ENRICHMENT on `/api/orders`.
+ *
+ * The ledger only adds courier status / tracking / label fields to orders that
+ * already exist; it never decides which orders are returned. Reading up to 2000
+ * ledger rows from Supabase (two REST calls) plus MongoDB used to block the
+ * response for minutes when either source was slow. Past this budget the
+ * enrichment is skipped and the orders answer immediately.
+ */
+const COURIER_LEDGER_MERGE_BUDGET_MS = 1200;
 
 /** `fetch` against Supabase with the shared timeout + circuit breaker. */
 async function supabaseFetch(url: string, key: string, extraHeaders: Record<string, string> = {}) {
@@ -5940,9 +6084,15 @@ async function resolveStoreIdentity(rawRef: string): Promise<StoreIdentity> {
 
   // Ask Supabase for the canonical row (id + store_slug + store_code) so both
   // the UUID and the slug are populated regardless of which one was supplied.
+  //
+  // ONLY when MongoDB could not identify the store. The Mongo row above already
+  // supplies slug/id/code; probing Supabase anyway added a full REST round-trip
+  // PER REF on every orders/products request — the repeated `store_slug` params
+  // from the dashboard turned that into the multi-minute stall.
+  const mongoResolved = Boolean(identity.storeId || identity.storeCode || identity.storeSlug !== ref.toLowerCase());
   try {
     const { supabaseUrl, supabaseKey, isConfigured } = getServerSupabaseConfig();
-    if (isConfigured) {
+    if (isConfigured && !mongoResolved) {
       const filter = isUuidLike(ref)
         ? `id=eq.${encodeURIComponent(ref)}`
         : STORE_CODE_RE.test(ref)
@@ -6148,11 +6298,17 @@ async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: 
   }
 
   // 2. Secondary Supabase resolution — best effort, must never fail or hang the request.
-  try {
-    const resolved = await resolveStoreSlugByRef(ref);
-    if (resolved) slug = String(resolved).toLowerCase();
-  } catch (e: any) {
-    console.warn('[Server] resolveStoreRefs supabase warning:', e?.message || e);
+  //
+  //    Skipped entirely when MongoDB already recognised the store: the row it
+  //    returned carries the canonical slug / id / code, so a cross-provider probe
+  //    only added latency (and a second 401-prone REST call server-side).
+  if (!(storeId || storeCode || slug !== clean)) {
+    try {
+      const resolved = await resolveStoreSlugByRef(ref);
+      if (resolved) slug = String(resolved).toLowerCase();
+    } catch (e: any) {
+      console.warn('[Server] resolveStoreRefs supabase warning:', e?.message || e);
+    }
   }
 
   return { slug, storeId, storeCode };
@@ -6178,45 +6334,101 @@ async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: 
  * working unchanged while an empty second cluster can no longer mask the data.
  */
 export async function getAllTenantDbs(dbName: string = DB_NAME): Promise<any[]> {
-  const dbs: any[] = [];
-  const push = (db: any, label: string) => {
-    if (!db) return;
-    if (dbs.some((existing) => String(existing?.databaseName) === String(db.databaseName) && existing?.__cluster === label)) return;
-    // Tagged so the SAME database name on TWO DIFFERENT clusters is kept twice.
-    try { Object.defineProperty(db, '__cluster', { value: label, enumerable: false }); } catch { /* frozen handle */ }
-    dbs.push(db);
-  };
-
   /*
-   * SHARED PRIMARY POOL FIRST — THE SAME HANDLE `/api/categories` USES.
+   * MEMOISED FOR THE LIFE OF THE PROCESS.
    *
-   * `connectToDatabase()` is what the categories route (which works on the live
-   * dashboard) calls, and its global connection is the one the mongoose models
-   * are bound to. Products and orders used the SECONDARY pool instead, so they
-   * were answered by the other cluster and found nothing. Reading the shared
-   * pool first makes every dashboard tab ask the same database.
+   * Opening the pools takes ~5s on a cold start (SRV resolution + TLS
+   * handshakes). Doing it on EVERY products/orders/stores call added that cost
+   * repeatedly — the slow dashboard. The set of databases does not change while
+   * the process runs, so the promise is cached per database name.
    */
-  try {
-    await connectToDatabase(dbName);
-    if (mongoose.connection.readyState === 1) {
-      const shared = await getMongoDb(dbName, 'primary');
-      if (shared) push(shared, 'primary');
-    }
-  } catch (err: any) {
-    console.warn('[Server] tenant db (shared primary) warning:', err?.message || err);
-  }
+  const globalAny = global as any;
+  const cache: Map<string, Promise<any[]>> = globalAny.__tenantDbCache ?? (globalAny.__tenantDbCache = new Map());
+  const existing = cache.get(dbName);
+  if (existing) return existing;
 
-  // A dedicated pool for MONGODB_URI_2, only when it is a DIFFERENT cluster.
-  const secondaryUri = readMongoUri(SECONDARY_DB_ROLE);
-  if (secondaryUri && secondaryUri !== readMongoUri('primary')) {
-    try {
-      push(await getMongoDb(dbName, SECONDARY_DB_ROLE), 'secondary');
-    } catch (err: any) {
-      console.warn('[Server] tenant db (secondary) warning:', err?.message || err);
-    }
-  }
+  const built = (async () => {
+    const dbs: any[] = [];
+    const seenClusters = new Set<string>();
+    /** A cluster+db key so the SAME cluster is never read twice. */
+    const clusterKey = (db: any): string => {
+      try {
+        const hosts = (db?.client?.options?.hosts || db?.client?.s?.options?.hosts || [])
+          .map((h: any) => String(h).toLowerCase())
+          .sort()
+          .join(',');
+        return `${hosts}|${db?.databaseName || ''}`;
+      } catch {
+        return '';
+      }
+    };
+    const push = (db: any, label: string) => {
+      if (!db) return;
+      if (dbs.some((entry) => entry.db === db)) return;
+      /*
+       * THE SHARED POOL AND THE DEDICATED POOL USUALLY POINT AT THE SAME
+       * CLUSTER. Reading both ran EVERY products/orders query twice — doubling
+       * the latency for an identical result. A cluster+db key removes that.
+       */
+      const key = clusterKey(db);
+      if (key && seenClusters.has(key)) return;
+      if (key) seenClusters.add(key);
+      // Tagged so the SAME database name on TWO DIFFERENT clusters is kept twice.
+      dbs.push({ db, label });
+    };
 
-  return dbs;
+    /*
+     * OPEN THE SECONDARY ONLY WHEN THE PRIMARY DID NOT ANSWER.
+     *
+     * The secondary cluster holds NO merchant data (its `zidbdsaas` database is
+     * empty). Opening it on every cold start cost ~2s of TLS handshakes and, on
+     * a slow/hostile network, it could stall the whole request. The primary is
+     * checked first and the secondary is used purely as a fallback.
+     */
+    const primaryResults = await Promise.allSettled([
+      (async () => {
+        await connectToDatabase(dbName);
+        return mongoose.connection.readyState === 1 ? getMongoDb(dbName, 'primary') : null;
+      })(),
+      connectToPrimaryDirectDatabase(dbName).then((connection) => connection?.db ?? null),
+    ]);
+
+    for (const [result, label] of [[primaryResults[0], 'primary'], [primaryResults[1], 'primary-direct']] as const) {
+      if (result.status === 'fulfilled') push(result.value, label);
+      else console.warn(`[Server] tenant db (${label}) warning:`, (result.reason as any)?.message || result.reason);
+    }
+
+    if (dbs.length === 0) {
+      if (readMongoUri(SECONDARY_DB_ROLE) && readMongoUri(SECONDARY_DB_ROLE) !== readMongoUri('primary')) {
+        try {
+          push(await getMongoDb(dbName, SECONDARY_DB_ROLE), 'secondary');
+        } catch (err: any) {
+          console.warn('[Server] tenant db (secondary) warning:', err?.message || err);
+        }
+      }
+    }
+
+    /*
+     * PRIMARY FIRST. If the shared pool failed over to the SECONDARY, its handle
+     * must not win: the real merchant data is on the primary cluster.
+     */
+    const ordered = [
+      ...dbs.filter((entry) => entry.label !== 'secondary'),
+      ...dbs.filter((entry) => entry.label === 'secondary'),
+    ];
+    const handles = ordered.map((entry) => {
+      try { Object.defineProperty(entry.db, '__cluster', { value: entry.label, enumerable: false }); } catch { /* frozen */ }
+      return entry.db;
+    });
+    console.log('[Server] tenant dbs:', handles.map((h) => `${h.databaseName}/${(h as any).__cluster}`).join(', ') || '(none)');
+    return handles;
+  })().catch((err) => {
+    cache.delete(dbName);
+    throw err;
+  });
+
+  cache.set(dbName, built);
+  return built;
 }
 
 /** Keep only products a public storefront may show: active and published. */
@@ -6346,32 +6558,58 @@ app.get('/api/products', async (req, res) => {
     const merchantId = (req.query.merchant_id as string || req.query.merchantId as string || '').trim();
 
     /*
-     * RESOLVE EVERY SUPPLIED IDENTITY, NOT JUST THE FIRST.
+     * REGISTER EVERY SUPPLIED REF IMMEDIATELY.
      *
-     * Each ref is mapped through `resolveStoreRefs()` (slug / store code /
-     * UUID / email local part → canonical slug + id + code), and every resulting
-     * spelling joins the Mongo `$or` below. This is the Products equivalent of
-     * what `/api/categories` already did — and it is why the Categories tab
-     * worked while Products stayed empty.
+     * The dashboard sends the same store under several identities. Each one is
+     * usable as a slug filter AS-IS, so they are added to the query BEFORE the
+     * (bounded) canonical resolution below. Previously a slow/failing resolution
+     * could leave only the FIRST ref in the filter even though the row was
+     * stored under another spelling.
      */
     const resolvedRefs = new Set<string>([rawSlugOriginal.toLowerCase()].filter(Boolean));
+    for (const supplied of allStoreRefs) {
+      const lower = supplied.toLowerCase();
+      if (lower && lower !== 'default') resolvedRefs.add(lower);
+    }
     const resolvedStoreIds = new Set<string>();
     const resolvedStoreCodes = new Set<string>();
-    for (const candidate of allStoreRefs) {
-      const r = await resolveStoreRefs(candidate);
-      if (r.slug) resolvedRefs.add(String(r.slug).toLowerCase());
-      if (r.storeId) resolvedStoreIds.add(String(r.storeId));
-      if (r.storeCode) resolvedStoreCodes.add(String(r.storeCode));
+
+    /*
+     * CANONICAL RESOLUTION — BOUNDED AND PARALLEL.
+     *
+     * `resolveStoreRefs()` performs a store lookup per ref (MongoDB across both
+     * clusters plus a Supabase probe). Calling it SEQUENTIALLY for every repeated
+     * `store_slug` multiplied the dashboard's Products latency, so the refs are
+     * resolved together and the WHOLE step is capped: a slow lookup can no longer
+     * delay the products response (the raw refs above already cover the common
+     * case where the caller sent the real slug).
+     */
+    const refCandidates = Array.from(new Set([
+      rawSlugOriginal,
+      ...allStoreRefs,
+    ].map((v) => String(v || '').trim()).filter(Boolean)));
+
+    try {
+      const resolvedList = await Promise.race([
+        Promise.all(refCandidates.map((candidate) => resolveStoreRefs(candidate).catch(() => null))),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), STORE_RESOLVE_BUDGET_MS)),
+      ]);
+      for (const r of Array.isArray(resolvedList) ? resolvedList : []) {
+        if (!r) continue;
+        if (r.slug) resolvedRefs.add(String(r.slug).toLowerCase());
+        if (r.storeId) resolvedStoreIds.add(String(r.storeId));
+        if (r.storeCode) resolvedStoreCodes.add(String(r.storeCode));
+      }
+    } catch (resolveErr: any) {
+      console.warn('[Server] GET /api/products store resolution warning:', resolveErr?.message || resolveErr);
     }
 
-    // Resolve UUID / store_code / custom domain to the canonical slug.
-    // MongoDB-first with a safely wrapped Supabase fallback, so a slow or
-    // misconfigured Supabase can never fail this route.
-    const refs = await resolveStoreRefs(rawSlugOriginal);
-    const storeSlug = refs.slug || 'bd';
-    resolvedRefs.add(storeSlug);
-    if (refs.storeId) resolvedStoreIds.add(String(refs.storeId));
-    if (refs.storeCode) resolvedStoreCodes.add(String(refs.storeCode));
+    // The canonical slug decides which rows are "this store"; fall back to the
+    // caller's own first ref rather than the placeholder 'bd'.
+    const storeSlug = Array.from(resolvedRefs).find((s) => s && s !== 'default') || 'bd';
+    if (process.env.PRODUCTS_DEBUG === '1') {
+      console.log('[PRODUCTS-DEBUG] resolvedRefs=', JSON.stringify([...resolvedRefs]), 'storeSlug=', storeSlug, 'raw=', rawSlugOriginal, 'allStoreRefs=', JSON.stringify(allStoreRefs));
+    }
 
     // 1. MongoDB `products` collection — the AUTHORITATIVE source. Query it
     //    first so a stale local-store.json mirror can never mask real products.
@@ -6453,8 +6691,8 @@ app.get('/api/products', async (req, res) => {
             { storeSlug: { $regex: `^${escapeStoreRefRegex(requestedAlias)}$`, $options: 'i' } },
           );
         }
-        if (refs.storeId) mongoOr.push({ store_id: refs.storeId }, { storeId: refs.storeId });
-        if (refs.storeCode) mongoOr.push({ store_code: refs.storeCode }, { storeCode: refs.storeCode });
+        if (resolvedStoreIds.size > 0) mongoOr.push({ store_id: { $in: Array.from(resolvedStoreIds) } }, { storeId: { $in: Array.from(resolvedStoreIds) } });
+        if (resolvedStoreCodes.size > 0) mongoOr.push({ store_code: { $in: Array.from(resolvedStoreCodes) } }, { storeCode: { $in: Array.from(resolvedStoreCodes) } });
         /*
          * EVERY RESOLVED IDENTITY — one per repeated `store_slug` the dashboard
          * sent, plus each one's canonical slug / UUID / store code. Only the
@@ -8234,31 +8472,48 @@ async function resolveStoreRecordFlexible(ref: string): Promise<Record<string, u
     console.warn('[Server] resolveStoreRecordFlexible lookup warning:', e?.message || e);
   }
 
-  // 3. MongoDB `stores` collection — the same table the products/orders flow
-  //    resolves against, so a store that exists only there is still found.
+  /*
+   * 3. MONGODB — EVERY CONFIGURED CLUSTER, BEFORE ANY IDENTITY GUESS.
+   *
+   * This step previously read only `mongoose.connection.db` (whichever cluster
+   * the first connection opened) and accepted only `store_slug` / `storeSlug` /
+   * `store_code`. `mystore` lives on the PRIMARY with its identity on `_id`,
+   * so when the shared handle was attached to the empty SECONDARY this returned
+   * nothing — and `/api/stores/by-slug` answered `merchant: null`. The client
+   * then fell through to a raw browser-side Supabase `store_slug` query, which
+   * RLS rejects with 401: the exact console errors reported.
+   */
   try {
-    await connectToMongoDB();
-    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-      const lower = clean.toLowerCase();
-      const orClauses: any[] = [
-        { store_slug: lower },
-        { storeSlug: lower },
-        { store_code: { $in: [clean, clean.toUpperCase()] } },
-      ];
-      if (isUuidLike(clean)) orClauses.push({ id: clean }, { _id: clean });
-      const storeDoc = await (mongoose.connection.db.collection('stores') as any)
-        .findOne({ $or: orClauses });
-      if (storeDoc) return canonicalizeThemeConfig(storeDoc as Record<string, unknown>);
+    await connectToMongoDB().catch(() => undefined);
+    const lower = clean.toLowerCase();
+    const orClauses: any[] = [
+      { store_slug: lower },
+      { storeSlug: lower },
+      { store_slug: { $regex: `^${escapeStoreRefRegex(lower)}$`, $options: 'i' } },
+      { storeSlug: { $regex: `^${escapeStoreRefRegex(lower)}$`, $options: 'i' } },
+      { store_code: { $in: [clean, clean.toUpperCase()] } },
+      { storeCode: { $in: [clean, clean.toUpperCase()] } },
+      { email: lower },
+      { email: { $regex: `^${escapeStoreRefRegex(lower)}@`, $options: 'i' } },
+    ];
+    if (isUuidLike(clean)) orClauses.push({ id: clean }, { _id: clean }, { store_id: clean });
 
-      const merchDoc = await (mongoose.connection.db.collection('merchants') as any)
-        .findOne({ $or: [{ store_slug: lower }, { storeSlug: lower }] });
-      if (merchDoc) return canonicalizeThemeConfig(merchDoc as Record<string, unknown>);
+    const storeDbs = await getAllTenantDbs().catch(() => [] as any[]);
+    for (const storeDb of storeDbs) {
+      try {
+        const storeDoc = await (storeDb.collection('stores') as any).findOne({ $or: orClauses });
+        if (storeDoc) return canonicalizeThemeConfig(storeDoc as Record<string, unknown>);
+        const merchDoc = await (storeDb.collection('merchants') as any).findOne({ $or: orClauses });
+        if (merchDoc) return canonicalizeThemeConfig(merchDoc as Record<string, unknown>);
+      } catch (lookupErr: any) {
+        console.warn('[Server] resolveStoreRecordFlexible mongo cluster warning:', lookupErr?.message || lookupErr);
+      }
     }
   } catch (e: any) {
     console.warn('[Server] resolveStoreRecordFlexible mongo warning:', e?.message || e);
   }
 
-  // 3. Last resort — return the resolved identity envelope so the client still
+  // 4. Last resort — return the resolved identity envelope so the client still
   //    learns the canonical slug/code instead of receiving a bare `null`.
   try {
     const identity = await resolveStoreIdentity(clean);
@@ -21083,7 +21338,28 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
   for (const raw of refs) {
     supplied.add(raw);
     supplied.add(raw.toLowerCase());
-    const identity = await resolveStoreIdentity(raw);
+    /*
+     * The caller's own ref is a first-class slug identity even before any
+     * resolution — that is what the merchant's rows are keyed on in practice.
+     * Registering it here means the query is always usable, no matter how a
+     * later store lookup behaves.
+     */
+    if (!isUuidLike(raw) && !STORE_CODE_RE.test(raw)) {
+      slugs.add(raw.toLowerCase());
+      canonical.add(raw.toLowerCase());
+    }
+    /*
+     * BOUNDED IDENTITY RESOLUTION.
+     *
+     * Each resolution is a store lookup. The dashboard repeats `store_slug` /
+     * `merchant_id` / `storeRef`, so a slow probe per ref was the main cause of
+     * the 1–3 minute order load. The budget keeps the route responsive; the raw
+     * refs registered above still match the real data.
+     */
+    const identity: StoreIdentity = await Promise.race([
+      resolveStoreIdentity(raw).catch(() => ({} as StoreIdentity)),
+      new Promise<StoreIdentity>((resolve) => setTimeout(() => resolve({} as StoreIdentity), STORE_RESOLVE_BUDGET_MS)),
+    ]);
 
     /*
      * THE SLUG THE CALLER SENT IS ALWAYS A CANDIDATE SLUG.
@@ -21771,7 +22047,22 @@ async function mergeCourierLedgerIntoOrders(
       new Set(refValues.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)),
     );
 
-    const ledger = await loadCourierLedgerRows(2000);
+    /*
+     * THE LEDGER LOOKUP IS A BOUNDED BONUS, NOT A PREREQUISITE.
+     *
+     * `loadCourierLedgerRows()` reads up to 2000 rows from Supabase (two REST
+     * calls) AND MongoDB before the merchant's orders are ever sent. It only
+     * ENRICHES an existing order with courier status/tracking, so a slow or
+     * unreachable ledger made `/api/orders` take 1–3 minutes with no benefit.
+     * A short budget keeps the enrichment when the source is fast and skips it
+     * entirely when it is not; the orders (and their status) are unaffected.
+     */
+    const ledger = await Promise.race([
+      loadCourierLedgerRows(2000).catch(() => ({ rows: [] as Record<string, any>[], sources: [] as string[] })),
+      new Promise<{ rows: Record<string, any>[]; sources: string[] }>((resolve) =>
+        setTimeout(() => resolve({ rows: [], sources: [] }), COURIER_LEDGER_MERGE_BUDGET_MS),
+      ),
+    ]);
     if (ledger.rows.length === 0) return;
 
     const byKey = new Map<string, Record<string, any>>();
@@ -21954,36 +22245,49 @@ app.get('/api/orders', async (req, res) => {
         console.warn('[Server] GET /api/orders cluster enumeration warning:', clusterErr?.message || clusterErr);
       }
 
-      for (const target of readDatabases) {
-        try {
+      /*
+       * ALL CLUSTERS IN PARALLEL.
+       *
+       * These reads used to run SEQUENTIALLY, so every order load waited for the
+       * slow cluster (and its 45s socket timeout) before the second one was even
+       * tried — the multi-minute stall. They are independent, so they are issued
+       * together and the fastest (usually the one holding the data) answers first.
+       */
+      const results = await Promise.allSettled(
+        readDatabases.map((target) =>
           // A database NAME is queried through the model (shared pool); a `Db`
           // handle (a different cluster) is queried natively with the SAME
           // filter, so the matching semantics never diverge.
-          const rows = typeof target === 'string'
+          typeof target === 'string'
             // @ts-ignore — query is a plain Mongo filter object.
-            ? await (Order as any)
+            ? (Order as any)
                 .find(query || {})
                 .sort({ created_at: -1, updated_at: -1, _id: -1 })
                 .limit(limit)
                 .lean()
-            : await target.collection(ORDERS_COLLECTION)
+            : target.collection(ORDERS_COLLECTION)
                 .find(query || {})
                 .sort({ created_at: -1, updated_at: -1, _id: -1 })
                 .limit(limit)
-                .toArray();
-          for (const row of Array.isArray(rows) ? rows : []) {
-            const key = String((row as any)?.id ?? (row as any)?._id ?? '');
-            if (key && seenOrderKeys.has(key)) continue;
-            if (key) seenOrderKeys.add(key);
-            orders.push(row);
-          }
-        } catch (queryErr: any) {
-          console.warn('[Server] GET /api/orders query warning:', queryErr?.message || queryErr);
-          // Only a TOTAL failure is reported as degraded; another cluster may
-          // still have answered.
-          if (orders.length === 0) queryFailed = true;
+                .toArray(),
+        ),
+      );
+
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          console.warn('[Server] GET /api/orders query warning:', (result.reason as any)?.message || result.reason);
+          continue;
+        }
+        for (const row of Array.isArray(result.value) ? result.value : []) {
+          const key = String((row as any)?.id ?? (row as any)?._id ?? '');
+          if (key && seenOrderKeys.has(key)) continue;
+          if (key) seenOrderKeys.add(key);
+          orders.push(row);
         }
       }
+      // Only a TOTAL failure is reported as degraded; another cluster may still
+      // have answered.
+      if (orders.length === 0 && results.every((r) => r.status === 'rejected')) queryFailed = true;
     }
 
     const cachedOrders = getMatchingCachedOrdersForVendor(refValues);

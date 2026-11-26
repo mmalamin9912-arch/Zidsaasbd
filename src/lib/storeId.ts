@@ -13,8 +13,6 @@
 // break order/product/session resolution.
 // =============================================================================
 
-import { buildSafeSelect, fetchKnownColumns } from '../../lib/supabaseSchema';
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STORE_CODE_RE = /^ZID-BD-\d{4,}$/i;
 
@@ -57,27 +55,6 @@ type SupabaseLike = {
 };
 
 /**
- * May this browser send a direct `SELECT` to Supabase at all?
- *
- * The deployed project protects `stores` (and every other mirrored table) with
- * Row Level Security and ships the PUBLIC key to the browser, so a direct read
- * is answered with HTTP 401 (`Unauthorized`) — one red console row per lookup.
- * A legacy anon JWT may still be readable, so those deployments keep working.
- * The backend (`/api/stores/by-slug`) is asked FIRST either way.
- */
-async function supabaseSelectAllowed(): Promise<boolean> {
-  try {
-    const { isSupabaseConfigured, supabaseAnonKey } = await import('./supabase');
-    if (!isSupabaseConfigured) return false;
-    // Legacy anon key = JWT (`aaa.bbb.ccc`). A `sb_publishable_…` key is opaque
-    // to PostgREST and answers 401 to every direct table request.
-    return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(String(supabaseAnonKey || '').trim());
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Resolves ANY store reference (permanent code, UUID, or slug) to the
  * canonical store record. The returned `id` UUID is what must be attached
  * to every product create, customer session and order insert.
@@ -88,21 +65,6 @@ export async function resolveStoreRef(
 ): Promise<StoreRef | null> {
   const clean = String(ref || '').trim();
   if (!clean || !supabase) return null;
-
-  /*
-   * READ ONLY THE COLUMNS THE DEPLOYED `stores` TABLE HAS.
-   *
-   * PostgREST rejects the WHOLE projection with HTTP 400 (`42703 column
-   * stores.store_slug does not exist`) when a single name is absent, and this
-   * helper is called from the login / registration path on the dashboard. The
-   * column set is read once per session (cached) and the projection is trimmed
-   * to it; on a table whose shape is unknown the original list is kept.
-   */
-  const { supabaseUrl, supabaseAnonKey } = await import('./supabase');
-  const storesColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'stores');
-  const select = buildSafeSelect(['id', 'store_code', 'store_slug'], storesColumns);
-  const hasColumn = (name: string) =>
-    !storesColumns || storesColumns.some((c) => c.toLowerCase() === name.toLowerCase());
 
   /*
    * BACKEND FIRST — NEVER A BARE CLIENT-SIDE SUPABASE `store_slug` QUERY.
@@ -126,12 +88,25 @@ export async function resolveStoreRef(
     if (res.ok) {
       const body: any = await res.json().catch(() => null);
       const record: any = body?.merchant || null;
-      const id = record?.id || record?._id || record?.store_id || '';
-      if (id) {
+      /*
+       * ACCEPT A ROW WITHOUT `id`.
+       *
+       * The old test was `const id = record?.id || … ; if (id) return …`, so a
+       * store document that carries its identity in `_id` only (as MongoDB has
+       * always done) fell through to the raw browser-side Supabase query below —
+       * which RLS answers with `401 Unauthorized` on
+       * `*.supabase.co/rest/v1/stores?…store_slug=eq.mystore`.
+       *
+       * Any recognised store identity is a successful resolution now.
+       */
+      const id = record?.id || record?._id || record?.store_id || record?.storeId || '';
+      const slug = record?.store_slug || record?.storeSlug || body?.store_slug || '';
+      const code = record?.store_code || record?.storeCode || '';
+      if (id || slug || code) {
         return {
-          id: String(id),
-          storeCode: record.store_code || record.storeCode,
-          storeSlug: record.store_slug || record.storeSlug || body?.store_slug,
+          id: String(id || slug || code),
+          storeCode: code || undefined,
+          storeSlug: slug || undefined,
         };
       }
     }
@@ -139,51 +114,18 @@ export async function resolveStoreRef(
     console.warn('[storeId] /api/stores/by-slug lookup warning:', err?.message || err);
   }
 
-  // Supplemental client-side lookups below only run when the backend could not
-  // answer AND Supabase is actually usable from this browser: `fetchKnownColumns`
-  // returns `null` in the browser, `select` then stays the documented core list,
-  // and a project whose RLS denies the public key is never queried (see
-  // `supabaseSelectAllowed`).
-  if (!(await supabaseSelectAllowed())) return null;
-
-  // 1) Permanent store code (ZID-BD-XXXX) — most stable lookup.
-  if (isStoreCode(clean) && hasColumn('store_code')) {
-    const { data } = await supabase
-      .from('stores')
-      .select(select)
-      .ilike('store_code', clean)
-      .maybeSingle();
-    if (data?.id) {
-      return { id: String(data.id), storeCode: data.store_code, storeSlug: data.store_slug };
-    }
-  }
-
-  // 2) Canonical UUID.
-  if (isUuid(clean)) {
-    const { data } = await supabase
-      .from('stores')
-      .select(select)
-      .eq('id', clean)
-      .maybeSingle();
-    if (data?.id) {
-      return { id: String(data.id), storeCode: data.store_code, storeSlug: data.store_slug };
-    }
-  }
-
-  // 3) Slug fallback (display reference only — renamed slugs still resolve
-  //    here until callers persist the permanent id/code).
-  const slug = clean.split(':')[0].trim().toLowerCase();
-  if (slug && hasColumn('store_slug')) {
-    const { data } = await supabase
-      .from('stores')
-      .select(select)
-      .eq('store_slug', slug)
-      .maybeSingle();
-    if (data?.id) {
-      return { id: String(data.id), storeCode: data.store_code, storeSlug: data.store_slug };
-    }
-  }
-
+  /*
+   * NO CLIENT-SIDE `stores` QUERY, EVER.
+   *
+   * This function used to fall back to `supabase.from('stores').eq('store_slug', …)`
+   * — THREE separate requests (store_code, id, store_slug) fired from the browser
+   * with the public key. The deployed project protects `stores` with RLS and no
+   * client SELECT policy, so every one answered `401 Unauthorized`; with three
+   * callers per dashboard load that is the recurring block of red rows reported
+   * in the console. The backend above owns the whole lookup (MongoDB across both
+   * clusters, then Supabase with the service-role key), so the browser never
+   * needs to read the table directly.
+   */
   return null;
 }
 

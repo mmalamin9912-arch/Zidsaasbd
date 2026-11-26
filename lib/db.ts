@@ -31,15 +31,28 @@ export type MongoConnectionRole = (typeof MongoConnectionRole)[keyof typeof Mong
  * in Vercel.
  */
 function readMongoUri(role: MongoConnectionRole = 'primary'): string {
-  if (role === 'secondary') {
-    return (process.env.MONGODB_URI_2 || '').trim();
-  }
-  return (
+  /*
+   * STRIP SURROUNDING QUOTES.
+   *
+   * Render / Vercel / Heroku env editors and many `.env` files store the value
+   * as `"mongodb+srv://…"`, and Node passes those quote characters straight
+   * through. The driver then received `"mongodb+srv://…"` and answered
+   * `bad auth` on EVERY attempt, so the app failed over to MONGODB_URI_2 — a
+   * different cluster whose database is empty — and the whole dashboard loaded
+   * blank while the data sat on the primary.
+   */
+  const clean = (value: string | undefined): string =>
+    String(value ?? '')
+      .trim()
+      .replace(/^["'`\\]+|["'`\\]+$/g, '')
+      .trim();
+
+  if (role === 'secondary') return clean(process.env.MONGODB_URI_2);
+  return clean(
     process.env.MONGODB_URI ||
     process.env.MONGODB_URL ||
-    process.env.DATABASE_URL ||
-    ''
-  ).trim();
+    process.env.DATABASE_URL,
+  );
 }
 
 /**
@@ -89,6 +102,7 @@ declare global {
   // eslint-disable-next-line no-var
   var __mongooseCache: MongooseCache | undefined;
   var __mongooseSecondaryCache: SecondaryCache | undefined;
+  var __mongoosePrimaryDirectCache: SecondaryCache | undefined;
 }
 
 const cached: MongooseCache =
@@ -99,6 +113,12 @@ const cached: MongooseCache =
 
 const secondaryCached: SecondaryCache =
   global.__mongooseSecondaryCache ?? (global.__mongooseSecondaryCache = {
+    conn: null,
+    promise: null,
+  });
+
+const primaryDirectCached: SecondaryCache =
+  global.__mongoosePrimaryDirectCache ?? (global.__mongoosePrimaryDirectCache = {
     conn: null,
     promise: null,
   });
@@ -175,15 +195,30 @@ async function lookupSrvViaHttps(host: string): Promise<string[]> {
       });
       if (!res.ok) continue;
       const data: any = await res.json();
+      // Atlas answers with SHARD targets (`ac-xxxx-shard-00-00.<zone>.mongodb.net`)
+      // which do NOT contain the cluster label from the URI. Comparing the PARENT
+      // domain is the only correct suffix test; `includes(host)` matched nothing
+      // and produced an empty seed list → a URI with no host → `bad auth`.
+      const srvDomain = host.split('.').slice(1).join('.').toLowerCase();
       const hosts = (Array.isArray(data?.Answer) ? data.Answer : [])
         // SRV = type 33. Some resolvers omit `type`; accept any answer that
-        // carries a target ending in the cluster host.
+        // carries a target inside the cluster's parent domain.
         .filter((a: any) => (!a.type || a.type === 33) && typeof a.data === 'string')
         .map((a: any) => {
           const [priority, weight, port, target] = String(a.data).trim().split(/\s+/);
-          return { host: String(target || '').replace(/\.$/, ''), port: port || '27017', priority: Number(priority) || 0 };
+          /*
+           * STRIP THE TRAILING DOT — an SRV target is a fully-qualified name
+           * (`ac-xxxx-shard-00-00.zone.mongodb.net.`). Joining the port to a name
+           * that still ends in `.` yields `….mongodb.net.27017`, an invalid host
+           * the driver answers with `bad auth`.
+           */
+          return { host: String(target || '').replace(/\.+$/, ''), port: port || '27017', priority: Number(priority) || 0 };
         })
-        .filter((h) => h.host.includes(host))
+        .filter((h: any) => {
+          const target = String(h.host).toLowerCase();
+          if (!target) return false;
+          return srvDomain ? target.endsWith(srvDomain) : target.includes(host.toLowerCase());
+        })
         .sort((a: any, b: any) => a.priority - b.priority);
       if (hosts.length) return hosts.map((h: any) => `${h.host}:${h.port}`);
     } catch {
@@ -258,13 +293,25 @@ async function resolveMongoUriForDriver(uri: string): Promise<string> {
   }
 
   const seeds = await lookupSrvViaHttps(host);
-  if (!seeds.length) return uri;
+  // An empty list must never be used to rewrite the URI: `replace('@…','@')`
+  // yields `mongodb://user:pass@/db` (NO HOST), which the driver reports as
+  // `bad auth`. Keep the original `+srv` URI instead and let the driver try.
+  const usableSeeds = seeds.filter((s) => /:\d+$/.test(String(s)));
+  if (!usableSeeds.length) return uri;
 
   // mongodb+srv://user:pass@cluster/db?opts  →  mongodb://user:pass@h1:27017,h2:27017/db?opts&ssl=true
-  const replaced = uri.replace(/^mongodb\+srv:\/\//i, 'mongodb://').replace(`@${host}`, `@${seeds.join(',')}`);
+  //
+  // NEVER INVENT `authSource`. `+srv` defaults it to the URI's database (or
+  // `admin`), and Atlas users normally live in `admin` — but a cluster that
+  // authenticates against the DATABASE ITSELF rejects `authSource=admin` with
+  // "Authentication failed". Forcing it here made the primary look permanently
+  // unusable, so every dashboard read silently fell back to the second cluster
+  // (which holds no merchant data). Only the TLS flag is added now; the
+  // driver's own default applies, exactly as for the original `+srv` URI.
+  const replaced = uri.replace(/^mongodb\+srv:\/\//i, 'mongodb://').replace(`@${host}`, `@${usableSeeds.join(',')}`);
   const withTls = /[?&](ssl|tls)=/i.test(replaced)
     ? replaced
-    : `${replaced}${replaced.includes('?') ? '&' : '?'}ssl=true&authSource=admin`;
+    : `${replaced}${replaced.includes('?') ? '&' : '?'}ssl=true`;
   console.log(`[MongoDB] SRV lookup for ${host} refused by the host resolver; using DNS-over-HTTPS seed list (${seeds.length} hosts).`);
   resolvedUriCache.set(uri, withTls);
   return withTls;
@@ -506,35 +553,95 @@ async function connectWithFailover(
  * This is intentionally a separate `Connection`: switching URI 2 must never
  * replace the models and transactions used by core order/auth routes.
  */
+/**
+ * The database named in a connection URI, or '' when it names none.
+ *
+ * `mongodb+srv://…/?opts` (no path) and `mongodb://…/` both name no database;
+ * a reader must then fall back to the explicit `dbName` it was asked for
+ * instead of the driver's default.
+ */
+export function uriDatabaseName(uri: string): string {
+  try {
+    const withoutScheme = String(uri || '').replace(/^mongodb(\+srv)?:\/\//i, '');
+    const afterHosts = withoutScheme.slice(withoutScheme.indexOf('/') + 1);
+    if (withoutScheme.indexOf('/') === -1) return '';
+    const name = afterHosts.split('?')[0];
+    return decodeURIComponent(name || '').trim();
+  } catch {
+    return '';
+  }
+}
+
 export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
   /* SECONDARY is a preference, not a requirement. A deployment with only
    * MONGODB_URI set used to throw here and every catalogue read silently
    * dropped to the file mirror; the primary is a perfectly good catalog
    * source, so it is the fallback rather than an error. */
-  const uri = await resolveMongoUriForDriver(readMongoUri('secondary') || readMongoUri('primary'));
+  return connectNamedPool('secondary', readMongoUri('secondary') || readMongoUri('primary'), secondaryCached, dbName);
+}
+
+/**
+ * A DEDICATED pool for the PRIMARY URI, independent of the shared connection.
+ *
+ * The shared `mongoose.connect()` pool is chosen by failover: when the primary
+ * briefly fails to authenticate, the app settles on MONGODB_URI_2 — a DIFFERENT
+ * cluster whose `zidbdsaas` database has no stores / products / orders. From
+then on every tenant read is answered by the empty cluster and the dashboard
+ * renders "No products found" indefinitely, even after the primary recovers.
+ *
+ * This pool is opened directly against MONGODB_URI, so the data-bearing cluster
+ * is always among the candidates a route reads (see `getAllTenantDbs`).
+ */
+export async function connectToPrimaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
+  const uri = readMongoUri('primary');
+  if (!uri) throw new Error('[MongoDB] MONGODB_URI is not set for the primary database.');
+  return connectNamedPool('primary-direct', uri, primaryDirectCached, dbName);
+}
+
+/** Shared implementation for the named, non-default connection pools. */
+async function connectNamedPool(
+  label: string,
+  rawUri: string,
+  cache: SecondaryCache,
+  dbName: string,
+): Promise<mongoose.Connection> {
+  const uri = await resolveMongoUriForDriver(rawUri);
   if (!uri || /^\s*$/.test(uri)) {
-    throw new Error('[MongoDB] Neither MONGODB_URI_2 nor MONGODB_URI is set for the secondary database.');
+    throw new Error(`[MongoDB] No URI configured for the ${label} database.`);
   }
-  if (secondaryCached.conn?.readyState === 1) return secondaryCached.conn;
-  if (!secondaryCached.promise) {
-    const opts = getConnectionOpts(dbName);
-    console.log(`[MongoDB] Opening secondary connection pool (dbName=${dbName})`);
-    secondaryCached.promise = mongoose
+  if (cache.conn?.readyState === 1) return cache.conn;
+  if (!cache.promise) {
+    /*
+     * ALWAYS TARGET AN EXPLICIT DATABASE.
+     *
+     * `opts.dbName` only sets the default database of a connection that has NO
+     * database path. MONGODB_URI_2 is configured as `…/?compressors=zlib` (no
+     * path), so reads could land on whatever the driver defaults to instead of
+     * `zidbdsaas`. When the URI names a database, that name wins.
+     */
+    const targetDb = uriDatabaseName(uri) || dbName;
+    const opts = getConnectionOpts(targetDb);
+    console.log(`[MongoDB] Opening ${label} connection pool (dbName=${targetDb})`);
+    cache.promise = mongoose
       .createConnection(uri, opts)
       .asPromise()
       .then((connection) => {
-        secondaryCached.conn = connection;
-        console.log('[MongoDB] Secondary connection established');
+        cache.conn = connection;
+        console.log(`[MongoDB] ${label} connection established`);
         return connection;
       })
       .catch((err) => {
-        secondaryCached.promise = null;
-        secondaryCached.conn = null;
-        console.error('[MongoDB] Secondary connection failed:', err?.message || err);
-        throw new Error(`[MongoDB] Secondary connection failed: ${err?.message || err}`);
+        cache.promise = null;
+        cache.conn = null;
+        console.error(`[MongoDB] ${label} connection failed:`, err?.message || err);
+        throw new Error(`[MongoDB] ${label} connection failed: ${err?.message || err}`);
       });
   }
-  return secondaryCached.promise;
+  return cache.promise;
+}
+
+async function connectToSecondaryDatabaseLegacy(dbName: string = DB_NAME): Promise<mongoose.Connection> {
+  return connectToSecondaryDatabase(dbName);
 }
 
 /**

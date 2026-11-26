@@ -418,35 +418,18 @@ export const AuthFlow: React.FC<AuthFlowProps> = ({ onLoginSuccess, defaultMerch
   };
 
   /**
-   * Supplemental Supabase `stores` lookup by email.
+   * NO BROWSER-SIDE `stores` READ.
    *
-   * Uses `.eq()` (exact) and NOT `.ilike()`. PostgREST `ilike` is SQL LIKE: its
-   * `_` and `%` are WILDCARDS, so `a_b@gmail.com` would also match `axb@gmail.com`
-   * — and Gmail local parts routinely contain `_`/`.`, which is why gmail
-   * addresses in particular produced false "account already exists" hits.
-   * Our regex/`eq` path escapes those characters, so only an identical address
-   * can match.
+   * This helper used to run `supabase.from('stores').select('*').eq('email', …)`
+   * against the PUBLIC key. The deployed project protects `stores` with RLS and
+   * no client SELECT policy, so it answered `401 Unauthorized` on every login /
+   * signup, and the login path already asks the authoritative backend
+   * (`/api/stores/check`, `/api/stores/check-email`) before reaching here.
+   *
+   * The function is kept (callers unchanged) but never sends a request.
    */
-  const supabaseStoreByExactEmail = async (cleanEmail: string): Promise<any | null> => {
-    if (!supabase) return null;
-    try {
-      // The backend is authoritative and already asked above (`/api/stores/check`,
-      // `/api/stores/check-email`). A direct browser read of `stores` is answered
-      // with HTTP 401 by RLS on the deployed project, so it is only attempted when
-      // the project actually allows a public SELECT (legacy anon JWT).
-      const { supabaseUrl, supabaseAnonKey, isSupabaseConfigured } = await import('../lib/supabase');
-      if (!isSupabaseConfigured) return null;
-      if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(String(supabaseAnonKey || '').trim())) return null;
-      // Only reach for a column that exists: the whole projection 400s
-      // (`42703`) otherwise, and this runs on every login / signup attempt.
-      const storesColumns = await fetchKnownColumns(supabaseUrl, supabaseAnonKey, 'stores');
-      if (storesColumns && !storesColumns.some((c) => c.toLowerCase() === 'email')) return null;
-      const { data } = await supabase.from('stores').select('*').eq('email', cleanEmail).maybeSingle();
-      return data || null;
-    } catch (err) {
-      console.warn('Supabase client check:', err);
-      return null;
-    }
+  const supabaseStoreByExactEmail = async (_cleanEmail: string): Promise<any | null> => {
+    return null;
   };
 
   // Retrieve saved registered users from localStorage

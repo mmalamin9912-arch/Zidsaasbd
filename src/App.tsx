@@ -1068,12 +1068,17 @@ export default function App() {
            * A FAILED READ IS RETRIED ONCE, AUTOMATICALLY.
            *
            * A transient 500 (server connection blip, cold start) used to leave
-           * the table empty until the merchant pressed Refresh. One short retry
-           * is enough to ride out a blip; a real outage still settles the gate
-           * below so the page is never stuck on "Loading your orders…".
+           * the table empty until the merchant pressed Refresh. One quick retry
+           * rides out a blip; a real outage still settles the gate below so the
+           * page is never stuck on "Loading your orders…".
+           *
+           * The wait is short on purpose: a 1.2s sleep before the retry added a
+           * full extra second to every cold start on top of the server's own
+           * work, and the request is already `no-store`, so there is nothing to
+           * wait for.
            */
           console.warn(`[App] orders fetch returned ${res.status} — retrying once`);
-          await new Promise((resolve) => setTimeout(resolve, 1200));
+          await new Promise((resolve) => setTimeout(resolve, 250));
           if (!isMounted) return;
           const retry = await fetch(
             `/api/orders${ordersQuery.toString() ? `?${ordersQuery.toString()}` : ''}`,
