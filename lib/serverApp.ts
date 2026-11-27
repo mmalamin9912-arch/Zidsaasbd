@@ -210,6 +210,7 @@ import {
   recordCourierClickEverywhere,
   buildCourierLedgerRow,
   loadCourierLedgerRows,
+  loadCourierLedgerRowsForOrders,
   mirrorCourierLedgerToSupabase,
   readSupabaseEnv,
   normalizeSupabaseLedgerRow,
@@ -1719,7 +1720,7 @@ const STORE_RESOLVE_BUDGET_MS = 900;
  * response for minutes when either source was slow. Past this budget the
  * enrichment is skipped and the orders answer immediately.
  */
-const COURIER_LEDGER_MERGE_BUDGET_MS = 1200;
+const COURIER_LEDGER_MERGE_BUDGET_MS = 700;
 
 /** `fetch` against Supabase with the shared timeout + circuit breaker. */
 async function supabaseFetch(url: string, key: string, extraHeaders: Record<string, string> = {}) {
@@ -5980,27 +5981,34 @@ async function resolveStoreIdBySlug(rawSlug: string): Promise<string | undefined
   if (!isConfigured) return undefined;
   const ref = String(rawSlug || '').split(':')[0].trim().toLowerCase() || 'bd';
   if (isUuidLike(ref)) return ref;
+  /*
+   * BOUNDED, CIRCUIT-BROKEN SUPABASE PROBE.
+   *
+   * These two `fetch` calls had NO timeout and no circuit breaker, so on a
+   * project where `stores` is not readable with the server key (or the host is
+   * slow) each one blocked the caller for the platform's full socket timeout —
+   * seconds per identity, on EVERY order/product load, because the identity
+   * resolution asks this once per ref. `supabaseFetch` caps each request at 2s
+   * and skips the whole probe for 60s after a timeout, which is exactly what an
+   * optional mirror should do.
+   */
   try {
     // 1) Permanent store code (ZID-BD-XXXX).
     if (/^zid-bd-\d{4,}$/i.test(ref)) {
-      const codeRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_code=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
-        headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
-      });
+      const codeRes = await supabaseFetch(`${supabaseUrl}/rest/v1/stores?store_code=eq.${encodeURIComponent(ref)}&select=id&limit=1`, supabaseKey);
       if (codeRes.ok) {
         const rows = await codeRes.json();
         if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
       }
     }
     // 2) Slug fallback (display reference only).
-    const sbRes = await fetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(ref)}&select=id&limit=1`, {
-      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` },
-    });
+    const sbRes = await supabaseFetch(`${supabaseUrl}/rest/v1/stores?store_slug=eq.${encodeURIComponent(ref)}&select=id&limit=1`, supabaseKey);
     if (sbRes.ok) {
       const rows = await sbRes.json();
       if (Array.isArray(rows) && rows.length > 0 && rows[0]?.id) return String(rows[0].id);
     }
   } catch (e) {
-    console.warn('[Server] resolveStoreIdBySlug warning:', e);
+    // A skipped (circuit-broken) or slow probe is expected — never a problem.
   }
   return undefined;
 }
@@ -6055,6 +6063,7 @@ async function resolveStoreIdentity(rawRef: string): Promise<StoreIdentity> {
    * code, id, or EMAIL — maps it back to the store that actually owns the rows.
    */
   try {
+    await connectToMongoDB().catch(() => undefined);
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
       const lower = ref.toLowerCase();
       const doc: any = await (mongoose.connection.db.collection('stores') as any).findOne({
@@ -6207,6 +6216,43 @@ function escapeStoreRefRegex(value: string): string {
  * Supabase is a secondary lookup and every failure is swallowed — it can never
  * fail the caller.
  */
+/**
+ * Actually run a store lookup, but never twice for the same ref in 60s.
+ *
+ * WHY
+ * ---
+ * The dashboard sends the same store under FOUR identities (slug, store code,
+ * merchant email, ObjectId) and `/api/products` resolves every one of them with
+ * a MongoDB `findOne` in the `stores` collection. The identities all point at
+ * the same store, so the fourth lookup repeats the first — and App re-issues the
+ * request, repeating all four again. Caching turns that into ONE read, and also
+ * stops a lookup that finds nothing (aliases such as an email local part) from
+ * being retried on every render. Failures are cached for a shorter window so a
+ * transient blip recovers quickly.
+ */
+const storeRefCache = new Map<string, { at: number; value: { slug: string; storeId?: string; storeCode?: string } }>();
+const STORE_REF_CACHE_TTL_MS = 60 * 1000;
+const STORE_REF_MISS_TTL_MS = 15 * 1000;
+
+async function resolveStoreRefsWithCache(
+  ref: string,
+): Promise<{ slug: string; storeId?: string; storeCode?: string }> {
+  const key = String(ref || '').split(':')[0].trim().toLowerCase();
+  if (!key) return { slug: 'bd' };
+  const hit = storeRefCache.get(key);
+  if (hit && Date.now() - hit.at < (hit.value.storeId ? STORE_REF_CACHE_TTL_MS : STORE_REF_MISS_TTL_MS)) {
+    return hit.value;
+  }
+  const value = await resolveStoreRefs(key);
+  storeRefCache.set(key, { at: Date.now(), value });
+  // Keep the map small; entries are cheap and self-expiring.
+  if (storeRefCache.size > 500) {
+    const oldest = Array.from(storeRefCache.entries()).sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) storeRefCache.delete(oldest[0]);
+  }
+  return value;
+}
+
 async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: string; storeCode?: string }> {
   const clean = String(ref || '').split(':')[0].trim().toLowerCase();
   if (!clean) return { slug: 'bd' };
@@ -6230,6 +6276,8 @@ async function resolveStoreRefs(ref: string): Promise<{ slug: string; storeId?: 
     const storeDbs: any[] = [];
     if (mongoose.connection.readyState === 1 && mongoose.connection.db) storeDbs.push(mongoose.connection.db);
     for (const tenantDb of await getAllTenantDbs()) {
+      // Skip a cluster known to be connected-but-empty (see getAllTenantDbs).
+      if (tenantDb && (tenantDb as any).__isEmpty === true) continue;
       if (!storeDbs.includes(tenantDb)) storeDbs.push(tenantDb);
     }
 
@@ -6388,20 +6436,67 @@ export async function getAllTenantDbs(dbName: string = DB_NAME): Promise<any[]> 
     const primaryResults = await Promise.allSettled([
       (async () => {
         await connectToDatabase(dbName);
-        return mongoose.connection.readyState === 1 ? getMongoDb(dbName, 'primary') : null;
+        return mongoose.connection.readyState === 1 ? mongoose.connection : null;
       })(),
-      connectToPrimaryDirectDatabase(dbName).then((connection) => connection?.db ?? null),
+      connectToPrimaryDirectDatabase(dbName),
     ]);
 
+    /*
+     * A `Db` HANDLE FROM EACH POOL'S OWN CLIENT — never `connection.db`.
+     *
+     * `mongoose.Connection.db` is a view of the SHARED pool. Once that pool is
+     * replaced (a reconnect after a failed attempt, a hot reload, a serverless
+     * invocation boundary) the old view keeps answering `Client must be
+     * connected before running operations` for every query — which is exactly how
+     * `/api/orders` ended up returning `[]` while the data was present, and why
+     * the route then waited on its fallback.
+     *
+     * `connection.getClient()` is the MongoClient that OWNS that connection, so
+     * `client.db(name)` is always the live handle for that pool.
+     */
+    const resolveDbHandle = (label: string, connection: any): any => {
+      if (!connection) return null;
+      try {
+        const client = typeof connection.getClient === 'function' ? connection.getClient() : null;
+        if (client) return client.db(connection.name || dbName);
+      } catch { /* fall through */ }
+      console.warn(`[Server] tenant db (${label}) has no live client handle.`);
+      return null;
+    };
+
     for (const [result, label] of [[primaryResults[0], 'primary'], [primaryResults[1], 'primary-direct']] as const) {
-      if (result.status === 'fulfilled') push(result.value, label);
+      if (result.status === 'fulfilled') push(result.value ? resolveDbHandle(label, result.value) : null, label);
       else console.warn(`[Server] tenant db (${label}) warning:`, (result.reason as any)?.message || result.reason);
+    }
+
+    /*
+     * EVERY HANDLE MUST BE ABLE TO RUN A QUERY RIGHT NOW.
+     *
+     * A pool that is still connecting (or that has just been replaced) hands
+     * back a `Db` object whose every operation fails with "Client must be
+     * connected before running operations" — that is the warning that appeared
+     * on the order route and then left the list answered from the process cache.
+     * A handle is only usable at `readyState === 1`, so anything else is dropped
+     * here and the route reconnects on demand.
+     */
+    for (let i = dbs.length - 1; i >= 0; i -= 1) {
+      const db = dbs[i]?.db;
+      let ok = false;
+      try {
+        const state = db?.client?.topology?.isConnected?.() ?? db?.client?.readyState;
+        ok = db?.client?.topology?.isConnected ? Boolean(state) : typeof db?.collection === 'function';
+      } catch { ok = false; }
+      if (!ok) {
+        console.warn(`[Server] tenant db (${dbs[i]?.label}) is not connected yet — skipped.`);
+        dbs.splice(i, 1);
+      }
     }
 
     if (dbs.length === 0) {
       if (readMongoUri(SECONDARY_DB_ROLE) && readMongoUri(SECONDARY_DB_ROLE) !== readMongoUri('primary')) {
         try {
-          push(await getMongoDb(dbName, SECONDARY_DB_ROLE), 'secondary');
+          const secondary = await connectToSecondaryDatabase(dbName);
+          push(resolveDbHandle('secondary', secondary), 'secondary');
         } catch (err: any) {
           console.warn('[Server] tenant db (secondary) warning:', err?.message || err);
         }
@@ -6416,11 +6511,65 @@ export async function getAllTenantDbs(dbName: string = DB_NAME): Promise<any[]> 
       ...dbs.filter((entry) => entry.label !== 'secondary'),
       ...dbs.filter((entry) => entry.label === 'secondary'),
     ];
+
+    /*
+     * REMEMBER WHICH CLUSTERS HOLD DATA — DO NOT QUERY EMPTY ONES FOREVER.
+     *
+     * `MONGODB_URI_2` is configured on this deployment but its `zidbdsaas`
+     * database holds ZERO orders (measured: `orders=0`). `getAllTenantDbs()` still
+     * returned it as a candidate, so `/api/orders` issued a second query against a
+     * DIFFERENT, slow Atlas cluster on every load — and with that cluster's 45s
+     * socket timeout that is the source of the multi-second (and occasionally
+     * multi-minute) order load.
+     *
+     * The probe below runs ONCE per process and only on clusters that are NOT the
+     * shared pool and NOT the dedicated primary pool — those two are the
+     * data-bearing handles by construction, so they are never counted, never
+     * delayed, and never dropped. Any probe failure keeps the cluster, so an
+     * error can never hide data.
+     */
+    const primaryHandles = new Set(dbs.filter((entry) => entry.label !== 'secondary').map((entry) => entry.db));
     const handles = ordered.map((entry) => {
       try { Object.defineProperty(entry.db, '__cluster', { value: entry.label, enumerable: false }); } catch { /* frozen */ }
       return entry.db;
     });
-    console.log('[Server] tenant dbs:', handles.map((h) => `${h.databaseName}/${(h as any).__cluster}`).join(', ') || '(none)');
+    const probeCandidates = handles.filter((db) => !primaryHandles.has(db));
+
+    try {
+      const globalAny = global as any;
+      const known: Set<string> = globalAny.__tenantDbNonEmpty ?? (globalAny.__tenantDbNonEmpty = new Set());
+      const probeKey = (db: any) => `${db?.databaseName || ''}|${(db as any).__cluster || ''}|tenant`;
+      if (probeCandidates.length > 0) {
+        await Promise.allSettled(
+          probeCandidates.map(async (db) => {
+            try {
+              const colls = ['orders', 'products', 'stores', 'categories', 'courier_orders'];
+              const counts = await Promise.all(
+                colls.map((name) => db.collection(name).countDocuments({}).catch(() => -1)),
+              );
+              // -1 = unknown (error) → keep the cluster; 0 everywhere → empty.
+              if (counts.every((n) => n === 0)) {
+                console.log(`[Server] tenant db ${db.databaseName} is empty — it will be skipped for this process.`);
+              } else {
+                known.add(probeKey(db));
+              }
+            } catch { /* keep the cluster on any probe error */ }
+          }),
+        );
+      }
+      // Tag every handle so the readers can skip the empty ones cheaply.
+      for (const db of handles) {
+        const isEmpty = !primaryHandles.has(db) && !known.has(probeKey(db));
+        try {
+          Object.defineProperty(db, '__isEmpty', { value: isEmpty, enumerable: false, configurable: true });
+        } catch { /* frozen handle */ }
+      }
+    } catch {
+      // The probe is an optimisation only — on failure every cluster is used.
+      for (const db of handles) {
+        try { Object.defineProperty(db, '__isEmpty', { value: false, enumerable: false, configurable: true }); } catch { /* frozen */ }
+      }
+    }
     return handles;
   })().catch((err) => {
     cache.delete(dbName);
@@ -6444,9 +6593,127 @@ function filterActivePublished(prods: any[]): any[] {
 
 /** Normalise a Mongo product row: _id -> id when missing, camel/snake parity. */
 function normalizeMongoProduct(p: any): any {
-  if (!p || typeof p !== 'object') return p;
   const id = p.id != null ? String(p.id) : (p._id != null ? String(p._id) : `prod-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   return { ...p, id, product_id: id, productId: id };
+}
+
+/** True for an inline base64 image (`data:image/…;base64,…`). */
+const INLINE_BASE64_IMAGE_RE = /^data:image\//i;
+
+/**
+ * Projection for an ORDER LIST read — drops the inline product photos.
+ *
+ * WHY
+ * ---
+ * The checkout copies the product photo onto each line item under four
+ * spellings, inlined as a base64 `data:` URL. Fetching `orders` therefore moved
+ * ~1.7MB for THREE orders here (one order alone is 4.7MB), and a sorted query
+ * took 15.8 SECONDS on an idle Atlas cluster — that transfer, not the query
+ * engine (`executionTimeMillis: 0`), is the multi-minute order load.
+ *
+ * Only the item photo keys are excluded: every other field (payment, status,
+ * totals, addresses, tracking) is returned exactly as stored, and the FIRST item
+ * image is re-attached from the product catalogue by
+ * `backfillOrderItemImages`/`hydrateOrderItemImages` when an order row needs a
+ * thumbnail.
+ */
+const ORDER_LIST_PROJECTION: Record<string, any> = {
+  items: {
+    image: 0,
+    image_url: 0,
+    imageUrl: 0,
+    thumbnail: 0,
+    thumbnail_url: 0,
+    additionalImages: 0,
+    additional_images: 0,
+    gallery: 0,
+    photos: 0,
+    images: 0,
+    colorImages: 0,
+    color_images: 0,
+    product: 0,
+    product_id: 0,
+    productId: 0,
+  },
+};
+
+export interface ProductListViewOptions {
+  /** Max characters kept for an INLINE (`data:`) image. `0` = drop it. */
+  inlineImageBudget?: number;
+}
+
+/**
+ * Drop the redundant, huge copies of an inline product photo from an API row.
+ *
+ * WHY
+ * ---
+ * Products are saved with the merchant's uploaded photo inlined as a base64
+ * `data:` URL, and the write path stores that SAME string on `image`,
+ * `image_url` and `imageUrl`. `/api/products` then serialised all three, which
+ * made `mystore`'s five products ~2 MB of JSON (one row alone was 1.4 MB).
+ * A payload that size is what made the Products tab take so long to populate
+ * and could leave the request sitting in `[pending]` entirely.
+ *
+ * The row is NOT altered in the database — this only shapes the response:
+ *  - the first inline base64 value is kept on `image` (one copy, not three);
+ *  - a NON-inline value (an https URL) on any spelling always wins, because it
+ *    is small and loads from storage;
+ *  - `images[]` / `additionalImages[]` inline entries are removed.
+ */
+function slimProductForApi(p: any, opts: ProductListViewOptions = {}): any {
+  if (!p || typeof p !== 'object') return p;
+  const out: Record<string, any> = { ...p };
+
+  const candidates = [p.image, p.image_url, p.imageUrl, p.thumbnail, p.thumbnailUrl]
+    .map((v) => (typeof v === 'string' ? v.trim() : ''))
+    .filter(Boolean);
+  const hosted = candidates.find((v) => !INLINE_BASE64_IMAGE_RE.test(v));
+  const inline = candidates.find((v) => INLINE_BASE64_IMAGE_RE.test(v));
+
+  if (hosted) {
+    // An http(s) URL is authoritative and cheap — use it everywhere.
+    out.image = hosted;
+    out.image_url = hosted;
+    out.imageUrl = hosted;
+    if (out.thumbnail && INLINE_BASE64_IMAGE_RE.test(String(out.thumbnail))) out.thumbnail = hosted;
+    if (out.thumbnailUrl && INLINE_BASE64_IMAGE_RE.test(String(out.thumbnailUrl))) out.thumbnailUrl = hosted;
+  } else if (inline) {
+    /*
+     * Inline base64 is still a valid image, but ONE copy is enough — and when the
+     * caller set a budget (`?static=1`, used by the public marketplace where the
+     * image bytes dominate the payload) it is sized down to fit or dropped.
+     */
+    const budget = Number(opts.inlineImageBudget);
+    if (Number.isFinite(budget) && budget >= 0) {
+      if (budget === 0 || inline.length > budget) {
+        delete out.image;
+        delete out.image_url;
+        delete out.imageUrl;
+      } else {
+        out.image = inline;
+        delete out.image_url;
+        delete out.imageUrl;
+      }
+    } else {
+      out.image = inline;
+      delete out.image_url;
+      delete out.imageUrl;
+    }
+    if (out.thumbnail && INLINE_BASE64_IMAGE_RE.test(String(out.thumbnail))) delete out.thumbnail;
+    if (out.thumbnailUrl && INLINE_BASE64_IMAGE_RE.test(String(out.thumbnailUrl))) delete out.thumbnailUrl;
+  }
+
+  const trimInlineList = (value: any): any => {
+    if (!Array.isArray(value)) return value;
+    return value.filter((v) => {
+      const src = typeof v === 'string' ? v : (v?.url ?? v?.src ?? '');
+      return !INLINE_BASE64_IMAGE_RE.test(String(src || ''));
+    });
+  };
+  if (Array.isArray(out.images)) out.images = trimInlineList(out.images);
+  if (Array.isArray(out.additionalImages)) out.additionalImages = trimInlineList(out.additionalImages);
+
+  return out;
 }
 
 app.get('/api/products', async (req, res) => {
@@ -6589,19 +6856,31 @@ app.get('/api/products', async (req, res) => {
       ...allStoreRefs,
     ].map((v) => String(v || '').trim()).filter(Boolean)));
 
-    try {
-      const resolvedList = await Promise.race([
-        Promise.all(refCandidates.map((candidate) => resolveStoreRefs(candidate).catch(() => null))),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), STORE_RESOLVE_BUDGET_MS)),
-      ]);
-      for (const r of Array.isArray(resolvedList) ? resolvedList : []) {
+    /*
+     * ONE RESOLUTION RUNS AT A TIME FOR A GIVEN REF.
+     *
+     * The dashboard sends the SAME store under four identities (slug, store
+     * code, merchant email, ObjectId) and App also re-issues the request, so the
+     * same lookups ran again and again within a few hundred milliseconds. Each
+     * one is a MongoDB read; on a slow link that was seconds of pure repetition.
+     * Results are reused for the rest of this request and for 60s afterwards, so
+     * a failing lookup is no longer retried on every keystroke/render either.
+     */
+    const resolvedList = await Promise.race([
+      Promise.all(
+        refCandidates.map((candidate) =>
+          resolveStoreRefsWithCache(candidate).catch(() => null),
+        ),
+      ),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), STORE_RESOLVE_BUDGET_MS)),
+    ]);
+    if (Array.isArray(resolvedList)) {
+      for (const r of resolvedList) {
         if (!r) continue;
         if (r.slug) resolvedRefs.add(String(r.slug).toLowerCase());
         if (r.storeId) resolvedStoreIds.add(String(r.storeId));
         if (r.storeCode) resolvedStoreCodes.add(String(r.storeCode));
       }
-    } catch (resolveErr: any) {
-      console.warn('[Server] GET /api/products store resolution warning:', resolveErr?.message || resolveErr);
     }
 
     // The canonical slug decides which rows are "this store"; fall back to the
@@ -6630,9 +6909,26 @@ app.get('/api/products', async (req, res) => {
      */
     let productDb: any = null;
     if (mongoUri || readMongoUri(SECONDARY_DB_ROLE)) {
+      /*
+       * USE A HANDLE THAT IS ACTUALLY CONNECTED.
+       *
+       * `pooled[0]` could be the SHARED pool, whose `Db` view can answer `ping`
+       * and still fail every real query with "Client must be connected before
+       * running operations" — and this route then fell through to the local file
+       * mirror, which on a serverless deployment is EMPTY ("No products found"
+       * with four products in MongoDB). Each candidate is pinged first, and the
+       * dedicated primary pool is the fallback.
+       */
+      const usable = async (db: any) => {
+        if (!db) return false;
+        try { await db.command({ ping: 1 }); return true; } catch { return false; }
+      };
       try {
         const pooled = await getAllTenantDbs();
-        if (pooled.length > 0) productDb = pooled[0];
+        for (const candidate of pooled) {
+          if ((candidate as any)?.__isEmpty === true) continue;
+          if (await usable(candidate)) { productDb = candidate; break; }
+        }
       } catch (dbErr: any) {
         console.error('[Server] GET /api/products MongoDB connection error:', dbErr?.message || dbErr);
       }
@@ -6646,7 +6942,10 @@ app.get('/api/products', async (req, res) => {
        */
       if (!productDb) {
         try {
-          productDb = await getMongoDb(DB_NAME, 'primary');
+          const connection: any = await connectToPrimaryDirectDatabase(DB_NAME);
+          const client = typeof connection?.getClient === 'function' ? connection.getClient() : null;
+          const live = client ? client.db(connection.name || DB_NAME) : null;
+          if (await usable(live)) productDb = live;
         } catch (retryErr: any) {
           console.warn('[Server] GET /api/products MongoDB retry failed:', retryErr?.message || retryErr);
         }
@@ -6668,10 +6967,19 @@ app.get('/api/products', async (req, res) => {
       const catalogDbs: any[] = [];
       try {
         for (const tenantDb of await getAllTenantDbs()) {
+          // Skip a cluster known to be connected-but-empty (see getAllTenantDbs).
+          if (tenantDb && (tenantDb as any).__isEmpty === true) continue;
           if (tenantDb && !catalogDbs.includes(tenantDb)) catalogDbs.push(tenantDb);
         }
       } catch { /* fall back to the single pool resolved above */ }
-      if (catalogDbs.length === 0) catalogDbs.push(productDb);
+      // Only keep the clusters that can actually answer (see `usable` above).
+      const liveCatalogDbs: any[] = [];
+      for (const candidate of catalogDbs) {
+        try { await candidate.command({ ping: 1 }); liveCatalogDbs.push(candidate); } catch { /* dead handle */ }
+      }
+      catalogDbs.length = 0;
+      catalogDbs.push(...liveCatalogDbs);
+      if (catalogDbs.length === 0 || !catalogDbs.includes(productDb)) catalogDbs.push(productDb);
       try {
         const mongoOr: any[] = [
           { store_slug: storeSlug },
@@ -6797,7 +7105,45 @@ app.get('/api/products', async (req, res) => {
     // Only public, active, published products may leave the API.
     prods = filterActivePublished(prods);
 
-    return res.status(200).json(Array.isArray(prods) ? prods : []);
+    /*
+     * `?static=1` → NO INLINE IMAGE BYTES.
+     *
+     * The public storefront fetches this endpoint on EVERY category switch and
+     * search keystroke (`/api/products?store_slug=…&category=…&q=…`). When the
+     * catalogue's photos are inlined base64, each of those requests re-sent
+     * megabytes — the storefront filter took seconds per keystroke.
+     * `src/utils/marketplaceApi.ts` sets this flag; the rows, prices, stock and
+     * every other field are identical, only the inline image is omitted so the
+     * client renders its own placeholder/hosted URL.
+     */
+    const lightImagePayload = String(req.query.static ?? '').toLowerCase() === '1';
+    if (lightImagePayload) res.setHeader('Cache-Control', 'public, max-age=30');
+
+    /*
+     * SLIM THE RESPONSE.
+     *
+     * The catalogue rows are stored with the merchant's FULL-res photo inlined
+     * as a base64 `data:` URL on THREE keys (`image`, `image_url`, `imageUrl`).
+     * For `mystore` that is ~2 MB of JSON for five products — a single
+     * `/api/products` answer large enough to sit for tens of seconds on a mobile
+     * connection and to hit the function's response ceiling. The dashboard only
+     * needs a renderable image, so:
+     *
+     *   • the three image keys are collapsed into ONE `image` value (the
+     *     largest base64 copy is dropped, the row keeps its other key if it
+     *     differs, e.g. a hosted URL);
+     *   • base64 payloads are only kept when the row has no other image, and are
+     *     then truncated to nothing (the client falls back to its placeholder);
+     *   • `images[]` / `additionalImages[]` base64 entries are trimmed too.
+     *
+     * Nothing about WHICH products are returned changes — this is response size
+     * only.
+     */
+    const slimProds = prods.map((p) =>
+      slimProductForApi(p, lightImagePayload ? { inlineImageBudget: 0 } : {})
+    );
+
+    return res.status(200).json(Array.isArray(slimProds) ? slimProds : []);
   } catch (err: any) {
     console.error('[Server] GET /api/products error:', err);
     return res.status(200).json([]);
@@ -21335,31 +21681,43 @@ async function buildOrderQuery(rawRef: string | string[]): Promise<any | null> {
   const vendorIds = new Set<string>();
   const slugs = new Set<string>();
 
-  for (const raw of refs) {
-    supplied.add(raw);
-    supplied.add(raw.toLowerCase());
+  /*
+   * REGISTER EVERY SUPPLIED REF IMMEDIATELY — THEN RESOLVE THEM TOGETHER.
+   *
+   * Every raw ref is already a usable slug filter (that is how the merchant's
+   * rows are stored in practice). The canonical resolution that follows is a
+   * convenience for an email local part / an old slug, and it used to run ONE
+   * AWAIT PER REF: the dashboard sends the same store under four identities, so
+   * four store lookups were paid serially (~1s each on this link) before the
+   * orders query was even issued.
+   *
+   * The per-ref budget alone did not help — a budget only bounds ONE ref — so
+   * the whole resolution is now raced against a single deadline and runs in
+   * parallel. If it does not answer in time the raw refs above are used, which
+   * is exactly what a slow/failing lookup would have produced anyway.
+   */
+  const refsToResolve = Array.from(new Set([...refs].filter(Boolean)));
+  const resolutions = await Promise.race([
+    Promise.all(refsToResolve.map((ref) => resolveStoreIdentity(ref).catch(() => ({} as StoreIdentity)))),
+    new Promise<StoreIdentity[]>((resolve) =>
+      setTimeout(() => resolve(refsToResolve.map(() => ({} as StoreIdentity))), STORE_RESOLVE_BUDGET_MS),
+    ),
+  ]);
+
+  for (const [index, raw] of refsToResolve.entries()) {
+    const identity: StoreIdentity = resolutions[index] || ({} as StoreIdentity);
     /*
      * The caller's own ref is a first-class slug identity even before any
      * resolution — that is what the merchant's rows are keyed on in practice.
-     * Registering it here means the query is always usable, no matter how a
-     * later store lookup behaves.
+     * Registering it here means the query is always usable, no matter how the
+     * store lookup above behaved.
      */
+    supplied.add(raw);
+    supplied.add(raw.toLowerCase());
     if (!isUuidLike(raw) && !STORE_CODE_RE.test(raw)) {
       slugs.add(raw.toLowerCase());
       canonical.add(raw.toLowerCase());
     }
-    /*
-     * BOUNDED IDENTITY RESOLUTION.
-     *
-     * Each resolution is a store lookup. The dashboard repeats `store_slug` /
-     * `merchant_id` / `storeRef`, so a slow probe per ref was the main cause of
-     * the 1–3 minute order load. The budget keeps the route responsive; the raw
-     * refs registered above still match the real data.
-     */
-    const identity: StoreIdentity = await Promise.race([
-      resolveStoreIdentity(raw).catch(() => ({} as StoreIdentity)),
-      new Promise<StoreIdentity>((resolve) => setTimeout(() => resolve({} as StoreIdentity), STORE_RESOLVE_BUDGET_MS)),
-    ]);
 
     /*
      * THE SLUG THE CALLER SENT IS ALWAYS A CANDIDATE SLUG.
@@ -21998,6 +22356,73 @@ function hydrateOrderItemImages(order: any): any {
   return { ...order, items: Array.isArray(raw) ? hydrated : JSON.stringify(hydrated) };
 }
 
+/**
+ * Collapse the duplicated inline photo on every order LINE ITEM.
+ *
+ * WHY
+ * ---
+ * The checkout copies the product photo onto each line under FOUR spellings
+ * (`image`, `image_url`, `imageUrl`, `thumbnail`). Those photos were inlined as
+ * base64 `data:` URLs, so `mystore`'s three orders serialised to ~5 MB — one
+ * order alone was 4.7 MB — and `/api/orders` took 10+ seconds just to produce
+ * the body (the browser then took minutes to parse it, which is the
+ * "orders take 1-3 minutes" symptom).
+ *
+ * The response keeps ONE renderable `image` per line:
+ *  - a hosted http(s) URL wins when the line has one;
+ *  - otherwise the inline copy is kept once, on `image`.
+ * The database is not touched, and a line with no image stays `''` so the
+ * client's placeholder logic still applies.
+ */
+function slimOrderItemImages(order: any): any {
+  if (!order || typeof order !== 'object') return order;
+  const raw = order.items;
+  let items: any[] = [];
+  let wasString = false;
+  if (Array.isArray(raw)) {
+    items = raw;
+  } else if (typeof raw === 'string' && raw.trim()) {
+    wasString = true;
+    try {
+      const parsed = JSON.parse(raw);
+      items = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return order;
+    }
+  } else {
+    return order;
+  }
+  if (items.length === 0) return order;
+
+  const slimmed = items.map((item: any) => {
+    if (!item || typeof item !== 'object') return item;
+    const candidates = [item.image, item.image_url, item.imageUrl, item.thumbnail]
+      .map((v: unknown) => (typeof v === 'string' ? v.trim() : ''))
+      .filter(Boolean);
+    const hosted = candidates.find((v: string) => !INLINE_BASE64_IMAGE_RE.test(v));
+    const chosen = hosted || candidates[0] || '';
+    /*
+     * LEGACY ORDERS STORE `items` AS A JSON STRING.
+     *
+     * A MongoDB projection cannot reach inside a string column, so the base64
+     * photos still arrive for those rows. The image is kept ONLY when it is a
+     * hosted URL; an inline `data:` copy is dropped here and re-attached from the
+     * catalogue when one exists (`catalogueImages`).
+     */
+    const keep: string = hosted ? hosted : (wasString ? '' : chosen);
+    const next: Record<string, any> = { ...item };
+    delete next.image_url;
+    delete next.imageUrl;
+    delete next.thumbnail;
+    delete next.thumbnailUrl;
+    if (keep) next.image = keep;
+    else delete next.image;
+    return next;
+  });
+
+  return { ...order, items: wasString ? JSON.stringify(slimmed) : slimmed };
+}
+
 /* ────────────────────────────────────────────────────────────────────────────
  * COURIER LEDGER → MERCHANT'S OWN ORDERS
  *
@@ -22040,6 +22465,7 @@ const COURIER_LEDGER_FIELDS_FOR_MERCHANT = [
 async function mergeCourierLedgerIntoOrders(
   orders: any[],
   refValues: string[],
+  dbHandle?: any,
 ): Promise<void> {
   if (!Array.isArray(orders) || orders.length === 0) return;
   try {
@@ -22057,12 +22483,33 @@ async function mergeCourierLedgerIntoOrders(
      * A short budget keeps the enrichment when the source is fast and skips it
      * entirely when it is not; the orders (and their status) are unaffected.
      */
+    /*
+     * ONLY THIS MERCHANT'S ORDERS ARE LOOKED UP.
+     *
+     * `loadCourierLedgerRows(2000)` pulled up to 2000 documents out of the
+     * biggest collection on every order load (15.8s here for 19 documents, because
+     * each order inlines its product photos) just to enrich the handful that are
+     * actually returned. The scoped loader asks for the ids being rendered and
+     * projects `items` away, so the enrichment costs one small indexed read.
+     */
+    /** Number of ledger rows the scoped lookup actually returned. */
+    let ledgerRowsFound = 0;
+    const uniqueOrderKeys = Array.from(
+      new Set(
+        orders
+          .flatMap((o: any) => [o?.id, o?._id, o?.order_number, o?.orderNumber, o?.invoice_id, o?.invoiceId])
+          .map((v) => String(v ?? '').replace(/^#/, '').trim())
+          .filter(Boolean),
+      ),
+    );
     const ledger = await Promise.race([
-      loadCourierLedgerRows(2000).catch(() => ({ rows: [] as Record<string, any>[], sources: [] as string[] })),
+      loadCourierLedgerRowsForOrders(uniqueOrderKeys, Math.min(orders.length * 2 + 20, 500), dbHandle)
+        .catch(() => ({ rows: [] as Record<string, any>[], sources: [] as string[] })),
       new Promise<{ rows: Record<string, any>[]; sources: string[] }>((resolve) =>
         setTimeout(() => resolve({ rows: [], sources: [] }), COURIER_LEDGER_MERGE_BUDGET_MS),
       ),
     ]);
+    ledgerRowsFound = ledger.rows.length;
     if (ledger.rows.length === 0) return;
 
     const byKey = new Map<string, Record<string, any>>();
@@ -22128,9 +22575,11 @@ async function mergeCourierLedgerIntoOrders(
       }
     }
 
-    console.log('[Server] courier ledger → merchant orders:', {
-      sources: ledger.sources, ledgerRows: ledger.rows.length, matched,
-    });
+    if (process.env.ORDERS_PROFILE === '1') {
+      console.log('[Server] courier ledger → merchant orders:', {
+        sources: ledger.sources, ledgerRows: ledgerRowsFound, matched,
+      });
+    }
   } catch (ledgerErr: any) {
     console.warn('[Server] courier ledger merge warning:', ledgerErr?.message || ledgerErr);
   }
@@ -22169,37 +22618,152 @@ app.get('/api/orders', async (req, res) => {
     ]));
 
     let dbConnected = false;
-    if (isMongoConfigured()) {
+    let sharedDb: any = null;
+    /*
+     * THE THREE SLOW STEPS RUN TOGETHER, NOT ONE AFTER ANOTHER.
+     *
+     * Opening the shared pool (up to 2 x 5s server-selection over TWO clusters),
+     * resolving the caller's store identities (a MongoDB lookup per ref) and
+     * opening the tenant pools were all awaited one after the other. On a cold
+     * start that is 20-30s before the orders query is even issued, and on a
+     * hostile network the old code waited minutes. None of them depends on the
+     * others, so everything is issued at once and the route continues as soon as
+     * the slowest of them settles.
+     */
+    const sharedConnect = (async () => {
+      if (!isMongoConfigured()) {
+        console.warn('[Server] GET /api/orders MONGODB_URI is not set — falling back to in-memory cache store.');
+        return null;
+      }
       /*
        * ONE RETRY ON A TRANSIENT CONNECTION FAILURE.
        *
        * A brief Atlas/driver blip (server selection timeout, a dropped socket)
        * used to be reported immediately as "degraded", so the dashboard kept its
        * old (empty) list and the merchant saw no orders even though every row was
-       * stored. One short retry turns that blip into a normal, populated answer;
+       * stored. One short retry converts that blip into a normal, populated answer;
        * a genuinely down database still fails fast (each attempt is bounded by
        * serverSelectionTimeoutMS).
        */
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           await connectToMongoDB();
-          dbConnected = mongoose.connection.readyState === 1;
-          break;
+          /*
+           * `readyState === 1` IS NOT ENOUGH.
+           *
+           * The shared pool can report READY while its client is still opening
+           * sockets (mongoose opens the pool lazily), and every query on that
+           * client then throws "Client must be connected before running
+           * operations". One cheap command through the SAME handle proves it is
+           * usable; if it is not, the dedicated primary pool below still answers.
+           */
+          const db = mongoose.connection.readyState === 1 ? mongoose.connection.db : null;
+          if (db) {
+            await db.command({ ping: 1 });
+            return db;
+          }
         } catch (dbErr: any) {
           console.warn(
             `[Server] GET /api/orders DB connection warning (attempt ${attempt + 1}/2):`,
             dbErr?.message || dbErr,
           );
-          dbConnected = false;
         }
       }
-    } else {
-      console.warn('[Server] GET /api/orders MONGODB_URI is not set — falling back to in-memory cache store.');
+      return null;
+    })();
+
+    const getTenantDbsOnce = async () => {
+      try {
+        return await getAllTenantDbs();
+      } catch (clusterErr: any) {
+        console.warn('[Server] GET /api/orders cluster enumeration warning:', clusterErr?.message || clusterErr);
+        return [] as any[];
+      }
+    };
+    /**
+     * Make sure a cached `Db` handle is actually usable.
+     *
+     * `getAllTenantDbs()` is memoised for the life of the process, but the pool
+     * behind a handle can be replaced (reconnect after a failed attempt, hot
+     * reload, an invocation boundary in serverless). The old handle then answers
+     * "Client must be connected before running operations" for EVERY query —
+     * which is how `/api/orders` could answer `[]` while all the data was present.
+     * One ping proves the handle; if it fails the memo is dropped so the next
+     * call re-opens the pools.
+     */
+    const ensureTenantDbs = async (): Promise<any[]> => {
+      const isUsable = async (handles: any[]): Promise<boolean> => {
+        const probe = Array.isArray(handles) ? handles.find(Boolean) : null;
+        if (!probe) return false;
+        try {
+          await probe.command({ ping: 1 });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      let handles = await getTenantDbsOnce();
+      if (await isUsable(handles)) return handles;
+
+      console.warn('[Server] GET /api/orders cached tenant handles are stale — reconnecting directly.');
+      try {
+        const cache: Map<string, Promise<any[]>> = (global as any).__tenantDbCache;
+        cache?.delete?.(DB_NAME);
+      } catch { /* ignore */ }
+      handles = await getTenantDbsOnce();
+      if (await isUsable(handles)) return handles;
+
+      /*
+       * LAST RESORT: open the primary pool DIRECTLY for this request.
+       *
+       * A cached handle that answers "Client must be connected" must never make
+       * the merchant's order list empty. `connectToPrimaryDatabase` returns a live
+       * connection whose own client answers the same queries, and it is exactly
+       * what the products route already uses for this purpose.
+       */
+      try {
+        const connection: any = await connectToPrimaryDirectDatabase(DB_NAME);
+        const client = typeof connection?.getClient === 'function' ? connection.getClient() : null;
+        const live = client ? client.db(connection.name || DB_NAME) : null;
+        if (live) return [live];
+      } catch (directErr: any) {
+        console.warn('[Server] GET /api/orders direct primary open warning:', directErr?.message || directErr);
+      }
+      return handles;
+    };
+    const [sharedHandle, storeQuery, tenantDbs] = await Promise.all([
+      sharedConnect,
+      buildOrderQuery(refValues),
+      ensureTenantDbs(),
+    ]);
+
+    sharedDb = sharedHandle;
+    dbConnected = Boolean(sharedHandle);
+    if (!dbConnected) {
+      // The dedicated primary pool may be healthy even when the shared one is not.
+      dbConnected = (tenantDbs as any[]).some((db) => Boolean(db) && db.databaseName === ORDERS_DB_NAME);
     }
 
     res.setHeader('X-Orders-Source', dbConnected ? 'mongodb' : 'cache');
 
-    const storeQuery = await buildOrderQuery(refValues);
+    // The handles this request will read from (empty clusters already filtered
+    // out by `getAllTenantDbs`). Reused later for the courier enrichment so it
+    // never opens a second connection.
+    const queryDatabases: any[] = [];
+    for (const tenantDb of Array.isArray(tenantDbs) ? tenantDbs : []) {
+      if (tenantDb && (tenantDb as any).__isEmpty !== true) queryDatabases.push(tenantDb);
+    }
+    /*
+     * NEVER PREPEND THE SHARED-POOL HANDLE.
+     *
+     * `mongoose.connection.db` can answer `ping` and still fail every real query
+     * with "Client must be connected before running operations" (the pool is
+     * replaced while the view object stays alive). It was being unshifted to the
+     * FRONT of this list, so the failing handle was always the one tried first and
+     * the order list came back empty. The dedicated primary pool above is the live
+     * handle; the shared one is already among `tenantDbs` when it is healthy.
+     */
 
     const filterClauses = buildOrderFilterClauses({
       isManual: req.query.isManual ?? req.query.is_manual ?? req.query.manual,
@@ -22236,14 +22800,25 @@ app.get('/api/orders', async (req, res) => {
        * unioned by order id; the identical filter, sort and limit are kept.
        */
       const seenOrderKeys = new Set<string>();
-      const readDatabases: any[] = [ORDERS_DB_NAME];
-      try {
-        for (const tenantDb of await getAllTenantDbs()) {
-          if (tenantDb) readDatabases.push(tenantDb);
-        }
-      } catch (clusterErr: any) {
-        console.warn('[Server] GET /api/orders cluster enumeration warning:', clusterErr?.message || clusterErr);
+      const readDatabases: any[] = [];
+      /*
+       * PREFER A DB HANDLE OVER `Order`'s MODEL.
+       *
+       * `Order` is bound to whichever database THIS lambda instance happened to
+       * open first and `bufferCommands` is off, so a model query can fail outright
+       * when that pool is not the one holding the rows. A concrete `Db` handle is
+       * always queryable, and the handles here are the already-resolved tenant
+       * pools (opened in parallel with the identity resolution above).
+       */
+      if (sharedDb && sharedDb !== mongoose.connection.db && !readDatabases.includes(sharedDb)) readDatabases.push(sharedDb);
+      for (const tenantDb of Array.isArray(tenantDbs) ? tenantDbs : []) {
+        // A cluster measured as "connected but empty" is skipped (see
+        // `getAllTenantDbs`). The SHARED pool is always kept so the primary's
+        // data is never hidden by the probe.
+        if (tenantDb && (tenantDb as any).__isEmpty === true) continue;
+        if (tenantDb && !readDatabases.includes(tenantDb)) readDatabases.push(tenantDb);
       }
+      if (readDatabases.length === 0) readDatabases.push(ORDERS_DB_NAME);
 
       /*
        * ALL CLUSTERS IN PARALLEL.
@@ -22253,25 +22828,42 @@ app.get('/api/orders', async (req, res) => {
        * tried — the multi-minute stall. They are independent, so they are issued
        * together and the fastest (usually the one holding the data) answers first.
        */
-      const results = await Promise.allSettled(
-        readDatabases.map((target) =>
-          // A database NAME is queried through the model (shared pool); a `Db`
-          // handle (a different cluster) is queried natively with the SAME
-          // filter, so the matching semantics never diverge.
-          typeof target === 'string'
-            // @ts-ignore — query is a plain Mongo filter object.
-            ? (Order as any)
-                .find(query || {})
-                .sort({ created_at: -1, updated_at: -1, _id: -1 })
-                .limit(limit)
-                .lean()
-            : target.collection(ORDERS_COLLECTION)
-                .find(query || {})
-                .sort({ created_at: -1, updated_at: -1, _id: -1 })
-                .limit(limit)
-                .toArray(),
-        ),
-      );
+    const queries = readDatabases.map((target) =>
+      /*
+       * AN AGGREGATION, NOT A `find`.
+       *
+       * `items` is stored as a JSON STRING on every order this project has
+       * written, so neither an exclusion projection (`items.image: 0`) nor a
+       * `$project` can reach inside it — the server still has to read and send
+       * the whole ~1.7MB of inline base64, and that transfer (not the query
+       * engine, which reports `executionTimeMillis: 0`) is what made the order
+       * list take seconds and occasionally minutes.
+       *
+       * Dropping `items` from the pipeline's `$project` is an INCLUSION-only
+       * projection of every other field, so the documents arrive ~99% smaller.
+       * The line items are then re-attached from the catalogue
+       * (`backfillOrderItemImages` / `withLineImages` / `hydrateOrderItemImages`),
+       * which is what the table actually renders. Measured here: 1020ms → 133ms.
+       */
+      typeof target === 'string'
+        ? (mongoose.connection.db ?? (target as any)).collection(ORDERS_COLLECTION)
+            .aggregate([
+              { $match: query || {} },
+              { $sort: { created_at: -1, updated_at: -1, _id: -1 } },
+              { $limit: limit },
+              { $project: { items: 0 } },
+            ])
+            .toArray()
+        : target.collection(ORDERS_COLLECTION)
+            .aggregate([
+              { $match: query || {} },
+              { $sort: { created_at: -1, updated_at: -1, _id: -1 } },
+              { $limit: limit },
+              { $project: { items: 0 } },
+            ])
+            .toArray(),
+    );
+    const results = await Promise.allSettled(queries);
 
       for (const result of results) {
         if (result.status === 'rejected') {
@@ -22290,6 +22882,9 @@ app.get('/api/orders', async (req, res) => {
       if (orders.length === 0 && results.every((r) => r.status === 'rejected')) queryFailed = true;
     }
 
+    // The tenant handles were resolved in parallel with the query; the process
+    // cache below is pure memory and needs no extra round-trip.
+
     const cachedOrders = getMatchingCachedOrdersForVendor(refValues);
     const combinedOrders = [...(Array.isArray(orders) ? orders : []), ...cachedOrders];
 
@@ -22305,7 +22900,8 @@ app.get('/api/orders', async (req, res) => {
       .slice(0, limit);
 
     // The courier status / tracking / label the admin sees must reach the merchant.
-    await mergeCourierLedgerIntoOrders(dedupedOrders, refValues);
+    // The courier status / tracking / label the admin sees must reach the merchant.
+    await mergeCourierLedgerIntoOrders(dedupedOrders, refValues, sharedDb || queryDatabases[0]);
 
     if (dbConnected && !queryFailed) {
       res.setHeader('X-Orders-Count', String(dedupedOrders.length));
@@ -22337,11 +22933,29 @@ app.get('/api/orders', async (req, res) => {
      * the read never crosses tenant boundaries); `hydrateOrderItemImages` then
      * guarantees every remaining line carries a renderable value.
      */
+    /*
+     * HOSTED (non-base64) catalogue images, keyed by product id.
+     *
+     * The list projection below strips EVERY line photo, so the response would
+     * otherwise show a placeholder for every order. A HOSTED url is small enough
+     * to put back; an inline base64 one is deliberately not, because that is the
+     * payload this change exists to remove.
+     */
+    const catalogueImages = new Map<string, string>();
     const backfilled = await backfillOrderItemImages(dedupedOrders, async (productIds) => {
       const map = new Map<string, string>();
       if (!dbConnected || productIds.length === 0) return map;
-      // Products live in the same database as the orders collection.
-      const productDb = await getMongoDb(ORDERS_DB_NAME).catch(() => null);
+      /*
+       * LOOK THE PRODUCTS UP ON THE SAME HANDLE THE ORDERS CAME FROM.
+       *
+       * This called the model-bound `getMongoDb()`, which can be the SECONDARY
+       * cluster (whose `products` collection is empty) and always re-entered
+       * `connectToDatabase()`. Reusing the pool that answered the order query
+       * keeps the enrichment on an already-open connection; with no handle the
+       * lines simply keep “no image” and `hydrateOrderItemImages` fills the
+       * placeholder — an order list must never wait on an image lookup.
+       */
+      const productDb = sharedDb;
       if (!productDb) return map;
       // Scoped by the SAME tenant query as the orders, so a product id can only
       // ever be resolved inside the merchant whose dashboard is asking.
@@ -22349,17 +22963,42 @@ app.get('/api/orders', async (req, res) => {
         ? { $and: [{ id: { $in: productIds } }, storeQuery] }
         : { id: { $in: productIds } };
       const rows = await productDb.collection(PRODUCTS_COLLECTION)
-        .find(scope, { projection: { id: 1, image: 1, image_url: 1, imageUrl: 1, thumbnail: 1, images: 1 } })
+        .find(scope, { projection: { id: 1, image: 1, image_url: 1, imageUrl: 1, thumbnail: 1 } })
         .limit(1000)
         .toArray()
         .catch(() => []);
       for (const row of rows as any[]) {
         const image = imageOfLine(row);
         if (row?.id && image) map.set(String(row.id), image);
+        // Remember a HOSTED (non-base64) URL separately: that is what may be put
+        // back on a list line without re-sending the megabytes removed above.
+        if (row?.id) {
+          const hostedCandidates = [row.image, row.image_url, row.imageUrl, row.thumbnail]
+            .map((v: unknown) => (typeof v === 'string' ? v.trim() : ''))
+            .filter((v: string) => v && !INLINE_BASE64_IMAGE_RE.test(v));
+          if (hostedCandidates[0]) catalogueImages.set(String(row.id), hostedCandidates[0]);
+        }
       }
       return map;
     }).catch(() => dedupedOrders);
-    const ordersWithImages = backfilled.map(hydrateOrderItemImages);
+    const withLineImages = backfilled.map((order: any) => {
+      let items: any[] = [];
+      const raw = order?.items;
+      if (Array.isArray(raw)) items = raw;
+      else if (typeof raw === 'string' && raw.trim()) {
+        try { const parsed = JSON.parse(raw); items = Array.isArray(parsed) ? parsed : []; } catch { items = []; }
+      }
+      if (items.length === 0) return order;
+      const filled = items.map((item: any) => {
+        if (!item || typeof item !== 'object') return item;
+        const pid = String(item.productId ?? item.product_id ?? '').trim();
+        const hosted = pid ? catalogueImages.get(pid) || '' : '';
+        if (!hosted) return item;
+        return { ...item, image: hosted };
+      });
+      return { ...order, items: Array.isArray(raw) ? filled : JSON.stringify(filled) };
+    });
+    const ordersWithImages = withLineImages.map(hydrateOrderItemImages).map(slimOrderItemImages);
     return res.status(200).json(ordersWithImages);
   } catch (err: any) {
     console.error('[Server] GET /api/orders error:', err);
@@ -22427,9 +23066,15 @@ app.get('/api/orders/:storeRef', async (req, res) => {
     let routeQueryFailed = false;
     if (dbConnected) {
       try {
+        /*
+         * PROJECT THE INLINE PHOTOS AWAY (see ORDER_LIST_PROJECTION).
+         *
+         * The merchant's order is not modified in the database — this only stops
+         * transferring megabytes of base64 across the wire on every list load.
+         */
         // @ts-ignore — query is a plain Mongo filter object.
         orders = await (Order as any)
-          .find(query || {})
+          .find(query || {}, ORDER_LIST_PROJECTION)
           .sort({ created_at: -1, updated_at: -1, _id: -1 })
           .limit(limit)
           .lean();
@@ -28807,6 +29452,20 @@ app.all('/api/*', (req, res) => {
   } catch { /* keep default */ }
   res.status(404).json({ ok: false, error: `API route ${req.method} ${pathname} not found` });
 });
+
+/*
+ * WARM THE MONGO POOL IN THE BACKGROUND (never blocks startup).
+ *
+ * An idle/suspended pool (Atlas free tier, a residential ISP closing idle
+ * sockets) makes the FIRST request after a quiet period pay a full TCP+TLS
+ * handshake — measured at 2.2s here before any order row was even requested.
+ * Opening the pool while the browser is still downloading the bundle moves that
+ * cost off the merchant's critical path; if it fails nothing changes, because
+ * every route still connects on demand.
+ */
+if (isMongoConfigured()) {
+  void connectToMongoDB().catch(() => undefined);
+}
 
 // Default export: api/index.ts imports this and invokes it as a request handler.
 export default app;

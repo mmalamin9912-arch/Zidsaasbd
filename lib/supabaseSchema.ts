@@ -131,6 +131,14 @@ export async function fetchTableColumns(
    */
   if (isBrowserRuntime()) return null;
 
+  /*
+   * The `stores` table is only ever needed for the identity lookups that already
+   * live on the backend, and its column set never drives a payload here. Asking
+   * for it spent one request (and, on a project where the service key is a
+   * publishable key, one 401) per 5-minute window for nothing.
+   */
+  if (String(table || '').toLowerCase() === 'stores') return null;
+
   const now = Date.now();
   const cached = columnCache.get(table);
   if (cached && cached.expiresAt > now) return cached.columns;
@@ -211,7 +219,8 @@ async function probeColumnsByFilter(
   // from it and answers 401 to EVERY request — including the probing below. Skip
   // the whole pass in that case: `null` ("unknown") makes every caller use its
   // documented core payload, which is what worked before.
-  if (!isJwt(supabaseKey)) return [];
+  if (isBrowserRuntime()) return null;
+  if (/^sb_(publishable|secret|temp)_/.test(String(supabaseKey || ''))) return null;
 
   const headers = {
     apikey: supabaseKey,

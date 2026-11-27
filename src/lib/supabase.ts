@@ -67,6 +67,80 @@ const rawSupabaseAnonKey =
 export const supabaseUrl = cleanEnvUrl(rawSupabaseUrl);
 export const supabaseAnonKey = cleanEnvKey(rawSupabaseAnonKey);
 
+/** True inside the BROWSER bundle (Vite client), false on the Node server. */
+const isBrowserRuntimeGlobal = typeof window !== 'undefined' && typeof document !== 'undefined';
+
+/**
+ * TABLES THAT MUST NEVER BE READ FROM THE BROWSER WITH THE PUBLIC KEY.
+ *
+ * Every one is protected by Row Level Security with no client SELECT policy, so
+ * `GET <url>/rest/v1/<table>?store_slug=eq.…` answers `401 Unauthorized`. Those
+ * were the red rows on the live dashboard console, and not one of them could
+ * ever return data. The authoritative read for all of them is the backend
+ * (`/api/products`, `/api/orders`, `/api/categories`, `/api/stores/…`), which
+ * uses the service-role key server-side.
+ *
+ * Guarding at the CLIENT level (rather than at each call site) means a future
+ * `supabase.from('products')` somewhere cannot bring those 401s back.
+ */
+const BROWSER_BLOCKED_TABLES = new Set([
+  'stores',
+  'products',
+  'orders',
+  'categories',
+  'courier_orders',
+  'subscriptions',
+  'subscription_plans',
+]);
+
+/** A PostgREST-like result for a browser read that is refused WITHOUT a request. */
+function blockedTableResult(table: string, method: string) {
+  const message =
+    `[supabase] ${method} on "${table}" is served by the backend API, not the browser ` +
+    `(the public key cannot read this RLS-protected table).`;
+  return { data: null, error: { message, code: 'BROWSER_READ_BLOCKED', status: 401 } };
+}
+
+/**
+ * Wrap a Supabase client so BROWSER reads of {@link BROWSER_BLOCKED_TABLES}
+ * short-circuit instead of sending a request that is guaranteed to answer 401.
+ *
+ * Only `select` is intercepted: the mirror WRITES those call sites already do
+ * (each guarded by its own circuit breaker) keep their present behaviour, and
+ * nothing that used to succeed changes — these tables never returned rows to the
+ * browser in the first place.
+ */
+function guardBrowserTableReads<T extends SupabaseClient>(client: T): T {
+  if (!isBrowserRuntimeGlobal) return client;
+  const originalFrom = (client as any).from.bind(client);
+  (client as any).from = (table: string) => {
+    const query = originalFrom(table as any);
+    if (!BROWSER_BLOCKED_TABLES.has(String(table || '').toLowerCase())) return query;
+    const originalSelect = (query as any).select;
+    if (typeof originalSelect !== 'function') return query;
+    (query as any).select = () => {
+      const result = blockedTableResult(table, 'SELECT');
+      // Chainable terminal: `…select(…).eq(…).limit(1)` resolves to `result`.
+      const terminal: any = {
+        ...result,
+        eq: () => terminal,
+        neq: () => terminal,
+        in: () => terminal,
+        or: () => terminal,
+        order: () => terminal,
+        limit: () => terminal,
+        range: () => terminal,
+        maybeSingle: async () => result,
+        single: async () => result,
+        then: (resolve: any, reject: any) => Promise.resolve(result).then(resolve, reject),
+      };
+      return terminal;
+    };
+    return query;
+  };
+  return client;
+}
+
 /*
  * Fail loudly (in dev) if a privileged key reached the browser bundle. A
  * service-role JWT carries `"role":"service_role"` in its payload, so it is
@@ -127,6 +201,14 @@ export function getSupabaseClient(): SupabaseClient | null {
         params: { eventsPerSecond: 10 },
       },
     });
+    /*
+     * LAST LINE OF DEFENCE AGAINST THE 401 STORM.
+     *
+     * A `select` on `stores` / `products` / `orders` / `categories` from this
+     * bundle can only ever answer `401 Unauthorized` (RLS, no client policy), so
+     * the client is wrapped to answer those reads locally and never send them.
+     */
+    _client = guardBrowserTableReads(_client);
     return _client;
   } catch (err) {
     console.error('[supabase] createClient failed:', err);

@@ -163,9 +163,18 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
     // Search Query
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      const matchTitle = p.title.toLowerCase().includes(q);
-      const matchSku = p.sku.toLowerCase().includes(q);
-      const matchCat = p.category.toLowerCase().includes(q);
+      /*
+       * NEVER CALL `.toLowerCase()` ON A FIELD THAT MAY BE MISSING.
+       *
+       * A Mongo row can arrive without `sku` / `category` / `title` (older
+       * products, a partial save). `undefined.toLowerCase()` threw inside the
+       * filter, React then rendered the guard's fallback for the WHOLE table, and
+       * the merchant saw "No products found matching your search criteria" —
+       * with four products sitting in the database. Every field is coerced first.
+       */
+      const matchTitle = String(p.title ?? (p as any).name ?? '').toLowerCase().includes(q);
+      const matchSku = String(p.sku ?? '').toLowerCase().includes(q);
+      const matchCat = String(p.category ?? '').toLowerCase().includes(q);
       return matchTitle || matchSku || matchCat;
     }
 
@@ -605,7 +614,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                     {filteredProducts.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="p-8 text-center text-slate-400 text-xs">
-                          No products found matching your search criteria.
+                          {products.length === 0
+                            ? 'No products found for this store yet. Add your first product to see it here.'
+                            : 'No products found matching your search criteria.'}
                         </td>
                       </tr>
                     ) : (

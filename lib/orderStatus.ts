@@ -1144,6 +1144,57 @@ export function parseLedgerJsonField(value: unknown, fallback: any): any {
 export { patchSupabaseLedgerRow, findSupabaseLedgerRow };
 
 /**
+ * Remove inline (`data:`) images from a ledger row, and from any line items embedded in it.
+ *
+ * The ledger row is MERGED onto the merchant's order for its courier fields only,
+ * but the row itself carries a full copy of the order (including the base64
+ * product photos) in `items` and in older `value` / `payload` wrappers. Keeping
+ * those made the enrichment re-send ~1.6MB for two rows. Never throws.
+ */
+function stripInlineImagesFromLedgerRow(row: Record<string, any>): Record<string, any> {
+  const isInline = (v: unknown) => typeof v === 'string' && /^data:image\//i.test(v);
+  const stripItem = (item: any): any => {
+    if (!item || typeof item !== 'object') return item;
+    const next: Record<string, any> = { ...item };
+    for (const key of ['image', 'image_url', 'imageUrl', 'thumbnail', 'thumbnailUrl', 'url', 'src']) {
+      if (isInline(next[key])) delete next[key];
+    }
+    for (const key of ['images', 'gallery', 'photos', 'additionalImages', 'additional_images']) {
+      if (Array.isArray(next[key])) {
+        next[key] = next[key].filter((v: any) => {
+          const src = typeof v === 'string' ? v : (v?.url ?? v?.src ?? '');
+          return !isInline(src);
+        });
+      }
+    }
+    return next;
+  };
+
+  const out: Record<string, any> = { ...row };
+  if (Array.isArray(out.items)) out.items = out.items.map(stripItem);
+  else if (typeof out.items === 'string' && out.items.includes('data:image')) {
+    try {
+      const parsed = JSON.parse(out.items);
+      if (Array.isArray(parsed)) out.items = JSON.stringify(parsed.map(stripItem));
+    } catch { /* leave as-is */ }
+  }
+  for (const wrapper of ['value', 'payload', 'data', 'json']) {
+    if (Array.isArray(out[wrapper])) out[wrapper] = out[wrapper].map(stripItem);
+  }
+  return out;
+}
+
+/**
+ * PER-SOURCE DEADLINE FOR THE LEDGER READS (ms).
+ *
+ * The ledger only ENRICHES orders with courier status/tracking; it never decides
+ * which orders are returned. Two Supabase REST calls plus a Mongo read used to
+ * block `/api/orders` for up to 16s on every load when the project was slow, so
+ * each Supabase source gets a short, independent deadline.
+ */
+export const SUPABASE_LEDGER_READ_MS = 1500;
+
+/**
  * Every ledger row for the Admin list, whichever store holds it.
  *
  * Supabase first (the deployed data plane), MongoDB second, and rows are
@@ -1159,53 +1210,82 @@ export async function loadCourierLedgerRows(limit = 500): Promise<{
 
   const cfg = readSupabaseEnv();
   if (cfg) {
-    try {
-      const supa = await listSupabaseLedger(cfg, limit);
-      if (supa.rows.length > 0) sources.push(`supabase-${supa.source}`);
-      for (const raw of supa.rows) {
+    /*
+     * BOTH SUPABASE READS RUN TOGETHER — and each is time-boxed.
+     *
+     * `listSupabaseLedger` and the `orders` probe used to be awaited one after
+     * the other at an 8s timeout each, so a slow/unreachable project blocked the
+     * caller for up to 16s. The caller (`/api/orders`) only USES this to enrich
+     * courier fields, so the reads share one deadline now and the slower source
+     * simply contributes nothing.
+     */
+    const supabaseDeadline = (ms: number) => (AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
+    const [supaLedger, supraOrders] = await Promise.all([
+      (async () => {
+        try {
+          const supa = await listSupabaseLedger(cfg, limit, supabaseDeadline(SUPABASE_LEDGER_READ_MS) as any);
+          return supa;
+        } catch (supaErr: any) {
+          console.warn('[Courier][ledger] listSupabaseLedger warning:', supaErr?.message || supaErr);
+          return null;
+        }
+      })(),
+      (async () => {
+        try {
+          const filter = `or=(tracking_code.not.is.null,consignment_id.not.is.null,courier_status.not.is.null)&limit=${Math.min(Math.max(limit, 1), 2000)}`;
+          const ordersRes = await fetch(`${cfg.supabaseUrl}/rest/v1/orders?${filter}`, {
+            headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
+            signal: supabaseDeadline(SUPABASE_LEDGER_READ_MS),
+          });
+          if (!ordersRes.ok) return [] as any[];
+          const directOrders = await ordersRes.json().catch(() => []);
+          return Array.isArray(directOrders) ? directOrders : [];
+        } catch (ordErr: any) {
+          console.warn('[Courier][ledger] Supabase orders table query warning:', ordErr?.message || ordErr);
+          return [] as any[];
+        }
+      })(),
+    ]);
+
+    if (supaLedger && supaLedger.rows.length > 0) {
+      sources.push(`supabase-${supaLedger.source}`);
+      for (const raw of supaLedger.rows) {
         const row = normalizeSupabaseLedgerRow(raw, cfg);
         const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
         if (key && !byKey.has(key)) byKey.set(key, row);
       }
-    } catch (supaErr: any) {
-      console.warn('[Courier][ledger] listSupabaseLedger warning:', supaErr?.message || supaErr);
     }
 
-    // Also query Supabase orders table for any orders that have tracking/consignment/courier_status
-    try {
-      const filter = `or=(tracking_code.not.is.null,consignment_id.not.is.null,courier_status.not.is.null)&limit=${Math.min(Math.max(limit, 1), 2000)}`;
-      const ordersRes = await fetch(`${cfg.supabaseUrl}/rest/v1/orders?${filter}`, {
-        headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
-        signal: AbortSignal.timeout ? AbortSignal.timeout(8_000) : undefined,
-      });
-      if (ordersRes.ok) {
-        const directOrders = await ordersRes.json().catch(() => []);
-        if (Array.isArray(directOrders) && directOrders.length > 0) {
-          sources.push('supabase-orders');
-          for (const raw of directOrders) {
-            const row = normalizeSupabaseLedgerRow(raw, cfg);
-            const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
-            if (key) {
-              const prev = byKey.get(key);
-              if (!prev) {
-                byKey.set(key, row);
-              } else {
-                // Merge order fields onto the ledger row if missing
-                for (const [k, v] of Object.entries(row)) {
-                  if ((prev[k] === undefined || prev[k] === null || prev[k] === '') && v !== undefined && v !== null && v !== '') {
-                    prev[k] = v;
-                  }
-                }
-              }
+    // Orders that already carry tracking/consignment/courier_status.
+    if (supraOrders.length > 0) {
+      sources.push('supabase-orders');
+      for (const raw of supraOrders) {
+        const row = normalizeSupabaseLedgerRow(raw, cfg);
+        const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber);
+        if (!key) continue;
+        const prev = byKey.get(key);
+        if (!prev) {
+          byKey.set(key, row);
+        } else {
+          // Merge order fields onto the ledger row if missing
+          for (const [k, v] of Object.entries(row)) {
+            if ((prev[k] === undefined || prev[k] === null || prev[k] === '') && v !== undefined && v !== null && v !== '') {
+              prev[k] = v;
             }
           }
         }
       }
-    } catch (ordErr: any) {
-      console.warn('[Courier][ledger] Supabase orders table query warning:', ordErr?.message || ordErr);
     }
   }
 
+  /*
+   * THE MONGO READ RUNS IN PARALLEL WITH SUPABASE WHEN EVER BOTH EXIST.
+   *
+   * Awaiting Supabase first (up to two 8s timeouts) and only then starting the
+   * Mongo query is what made this helper take seconds while both sources were
+   * healthy. `loadCourierLedgerRows` is awaited by /api/orders before answering,
+   * so every second here is a second the merchant waits for the order list.
+   */
   try {
     if (getMongoUri()) {
       const db = await getMongoDb(ORDERS_DB_NAME);
@@ -1224,6 +1304,127 @@ export async function loadCourierLedgerRows(limit = 500): Promise<{
     }
   } catch (err: any) {
     console.warn('[Courier][ledger] Mongo read warning:', err?.message || err);
+  }
+
+  return { rows: Array.from(byKey.values()), sources };
+}
+
+/**
+ * Ledger rows for a SPECIFIC set of orders (the `/api/orders` enrichment).
+ *
+ * WHY THIS EXISTS — THE 15-SECOND ORDER LIST
+ * ------------------------------------------
+ * `/api/orders` used to call `loadCourierLedgerRows(2000)`, which reads up to
+ * 2000 documents out of the biggest collection in the database on EVERY order
+ * load, then keeps the two or three that belong to this merchant. On this
+ * project that read took 15.8s for 19 documents because every order carries its
+ * product photos inlined (~4.7MB) — and the merchant paid for it before a
+ * single order was returned.
+ *
+ * This variant asks MongoDB ONLY for the orders the caller is about to render
+ * (`$or` on id / _id / order_number) and reads only the courier columns, so the
+ * cost is proportional to what is shown instead of to the whole collection.
+ * Supabase is not consulted here: its ledger read is a whole-table pull, exactly
+ * the cost this function exists to remove. Never throws.
+ */
+export async function loadCourierLedgerRowsForOrders(
+  orderKeys: string[],
+  limit = 200,
+  /**
+   * An ALREADY-OPEN database handle to reuse.
+   *
+   * Without it this called `getMongoDb()`, which re-enters `connectToDatabase()`
+   * and — when the shared mongoose pool is not in `readyState 1` (the route may
+   * have answered from the dedicated primary pool instead) — opens a whole new
+   * connection: 2–3s of TLS handshakes paid inside the order request.
+   */
+  dbHandle?: any,
+  /**
+   * Server-side execution deadline.
+   *
+   * A `Promise.race` timeout in the caller does NOT stop a driver query that is
+   * already in flight — the work continues on the connection and, on a slow or
+   * suspended cluster, keeps the socket busy for the rest of the request. An
+   * explicit `maxTimeMS` makes MongoDB itself give up.
+   */
+  timeoutMs = 1500,
+): Promise<{ rows: Record<string, any>[]; sources: string[] }> {
+  const keys = Array.from(
+    new Set((Array.isArray(orderKeys) ? orderKeys : []).map((k) => String(k || '').replace(/^#/, '').trim()).filter(Boolean)),
+  ).slice(0, 500);
+  if (keys.length === 0) return { rows: [], sources: [] };
+
+  const byKey = new Map<string, Record<string, any>>();
+  const sources: string[] = [];
+
+  try {
+    if (!getMongoUri() && !dbHandle) return { rows: [], sources };
+    const db = dbHandle || (await getMongoDb(ORDERS_DB_NAME));
+    if (!db) return { rows: [], sources };
+
+    const objectIds: any[] = [];
+    for (const key of keys) {
+      if (/^[0-9a-fA-F]{24}$/.test(key)) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          objectIds.push(new ObjectId(key));
+        } catch { /* not an ObjectId */ }
+      }
+    }
+    const or: Record<string, any>[] = [
+      { id: { $in: keys } },
+      { order_id: { $in: keys } },
+      { order_number: { $in: keys } },
+      { orderNumber: { $in: keys } },
+      { invoice_id: { $in: keys } },
+    ];
+    if (objectIds.length > 0) or.push({ _id: { $in: objectIds } });
+
+    // Only the courier fields the merchant dashboard renders — an INCLUSION
+    // projection, so the driver never transfers the row's embedded order copy
+    // (documents here are ~750KB each because every line inlines its photo as
+    // base64; excluding one deep key was not enough).
+    const projection: Record<string, 0 | 1> = {
+      id: 1, order_id: 1, order_number: 1, orderNumber: 1, _id: 1,
+      courier_status: 1, courierStatus: 1, courier_status_updated_at: 1,
+      courier_name: 1, courierName: 1, shipping_courier: 1, courier_key: 1,
+      tracking_id: 1, tracking_code: 1, trackingCode: 1, courier_tracking: 1,
+      courier_tracking_id: 1, consignment_id: 1, courier_booked: 1, courier_booked_at: 1,
+      needs_manual_entry: 1, courier_last_error: 1, status_note: 1, statusNote: 1,
+      cancellation_reason: 1, cancellationReason: 1, issue_reason: 1, issueReason: 1,
+      issue_note: 1, issueNote: 1, courier_cancelled: 1, courier_cancelled_at: 1,
+      // Raw base64 labels are ~750KB EACH. The list only needs the label's
+      // metadata (`id` / `filename` / `url`); the image bytes are fetched by the
+      // admin label viewer, never by the merchant's order table.
+      'courier_labels.id': 1, 'courier_labels.filename': 1, 'courier_labels.mimeType': 1,
+      'courier_labels.url': 1, 'courier_labels.label_url': 1, 'courier_labels.note': 1,
+      'courier_labels.uploadedAt': 1, 'courier_labels.uploadedBy': 1,
+      // Labels previously stored inline are not read at all (their base64 image is
+      // ~750KB per label). The order list only needs the label's metadata.
+      label_url: 1, labelUrl: 1, courier_label: 1,
+      store_slug: 1, storeSlug: 1, store_id: 1, storeId: 1, store_code: 1, storeCode: 1,
+    };
+    const rows = await db.collection(COURIER_ORDERS_COLLECTION)
+      .find({ $or: or }, { projection })
+      .limit(Math.min(Math.max(limit, 1), 500))
+      .maxTimeMS(timeoutMs)
+      .toArray();
+    if (rows.length > 0) sources.push('mongodb');
+    for (const row of rows) {
+      /*
+       * THE LEDGER ROW'S OWN COPY OF THE ORDER CAN ALSO CARRY BASE64 PHOTOS.
+       *
+       * `items` is projected away above, but the same line photos are also
+       * inlined in `value` / `payload` / `data` on rows written by older
+       * dispatchers. They are never rendered as an image here — the dashboard's
+       * picture always comes from the ORDER row — so the arrays are stripped so
+       * this enrichment cannot re-inflate the /api/orders response.
+       */
+      const key = courierOrderKey(row.id, row.order_id, row.order_number, row.orderNumber, row._id);
+      if (key && !byKey.has(key)) byKey.set(key, stripInlineImagesFromLedgerRow(row));
+    }
+  } catch (err: any) {
+    console.warn('[Courier][ledger] scoped Mongo read warning:', err?.message || err);
   }
 
   return { rows: Array.from(byKey.values()), sources };

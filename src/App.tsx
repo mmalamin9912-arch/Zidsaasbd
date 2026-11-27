@@ -894,11 +894,32 @@ export default function App() {
     const loadAppProducts = async () => {
       const { mapApiProduct } = await import('./utils/catalogPayload');
       try {
+        /*
+         * A NON-OK ANSWER IS NOT "NO PRODUCTS".
+         *
+         * `res.json()` was parsed unconditionally: a 504 / a truncated 2 MB body
+         * / the platform's HTML error page all threw (or returned junk) and the
+         * code silently continued to the file-mirror fallback, which on a
+         * serverless deployment is empty — so the Products tab rendered
+         * "No products found" while MongoDB held the catalogue. Status and content
+         * type are checked now, and only a real array is applied.
+         */
         const res = await fetch(`/api/products?${productQuery.toString()}`);
-        const data = await res.json().catch(() => null);
-        if (isMounted && Array.isArray(data) && data.length > 0) {
-          setProducts(data.map((p: any) => mapApiProduct(p)));
-          return;
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && (!contentType || contentType.includes('application/json'))) {
+          const data = await res.json().catch(() => null);
+          if (isMounted && Array.isArray(data) && data.length > 0) {
+            setProducts(data.map((p: any) => mapApiProduct(p)));
+            return;
+          }
+          if (isMounted && Array.isArray(data) && data.length === 0) {
+            // The server answered authoritatively: this store really has none of
+            // the rows it could see. Do not overwrite with the file mirror.
+            setProducts((prev) => (prev.length === 0 ? prev : []));
+            return;
+          }
+        } else {
+          console.warn(`[App] /api/products answered ${res.status} (${contentType || 'no content-type'}) — trying the file mirror`);
         }
       } catch (err) {
         console.warn('[App] Product load warning:', err);

@@ -89,8 +89,19 @@ function jsonHeaders(): Record<string, string> {
 export async function listSupabaseLedger(
   cfg: CourierLedgerStoreConfig,
   limit = 500,
+  /**
+   * Caller-supplied deadline. The ledger is an ENRICHMENT for `/api/orders`;
+   * a caller that must answer quickly passes an `AbortSignal` here so this
+   * function's own 10s-per-request retry ladder (table → plain → fallback → …)
+   * cannot hold the order list hostage.
+   */
+  signal?: AbortSignal,
 ): Promise<{ rows: CourierLedgerRow[]; source: 'table' | 'fallback' | 'none'; error?: string }> {
   if (!cfg.supabaseUrl || !cfg.supabaseKey) return { rows: [], source: 'none', error: 'Supabase is not configured.' };
+  const timeoutSignal = (ms: number) => (AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
+  const requestSignal = signal && AbortSignal.any
+    ? AbortSignal.any([signal, timeoutSignal(10_000)].filter(Boolean) as AbortSignal[])
+    : (signal || timeoutSignal(10_000));
 
   const tableUrl =
     `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_TABLE}` +
@@ -99,7 +110,7 @@ export async function listSupabaseLedger(
   try {
     const res = await fetch(tableUrl, {
       headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
-      signal: AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
+      signal: requestSignal,
     });
     if (res.ok) {
       const rows = await res.json().catch(() => []);
@@ -116,7 +127,7 @@ export async function listSupabaseLedger(
         `${cfg.supabaseUrl}/rest/v1/${COURIER_LEDGER_TABLE}?select=*&limit=${Math.min(Math.max(limit, 1), 2000)}`,
         {
           headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
-          signal: AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
+          signal: requestSignal,
         },
       ).catch(() => null);
       if (plain?.ok) {
@@ -132,13 +143,17 @@ export async function listSupabaseLedger(
     console.warn('[CourierLedger] table read threw:', err?.message || err);
   }
 
-  return readFallbackRows(cfg);
+  return readFallbackRows(cfg, signal);
 }
 
 /** Read the `platform_config` fallback documents. */
 async function readFallbackRows(
   cfg: CourierLedgerStoreConfig,
+  signal?: AbortSignal,
 ): Promise<{ rows: CourierLedgerRow[]; source: 'fallback' | 'none'; error?: string }> {
+  const requestSignal = signal && AbortSignal.any
+    ? AbortSignal.any([signal, AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined].filter(Boolean) as AbortSignal[])
+    : (signal || (AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined));
   try {
     // 1. Try config_key (the standard column in 0004_platform_config.sql)
     let res = await fetch(
@@ -146,7 +161,7 @@ async function readFallbackRows(
       `?select=*&config_key=like.${encodeURIComponent(FALLBACK_KEY_PREFIX_LC + '*')}&limit=2000`,
       {
         headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
-        signal: AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
+        signal: requestSignal,
       },
     );
 
@@ -157,7 +172,7 @@ async function readFallbackRows(
         `?select=*&key=like.${encodeURIComponent(FALLBACK_KEY_PREFIX_LC + '*')}&limit=2000`,
         {
           headers: { apikey: cfg.supabaseKey, Authorization: `Bearer ${cfg.supabaseKey}`, Accept: 'application/json' },
-          signal: AbortSignal.timeout ? AbortSignal.timeout(10_000) : undefined,
+          signal: requestSignal,
         },
       );
     }
