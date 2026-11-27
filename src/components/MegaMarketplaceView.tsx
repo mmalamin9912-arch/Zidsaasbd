@@ -49,6 +49,7 @@ import {
   type FeaturedConfig,
 } from '../lib/marketplaceStorefrontApi';
 import { fetchTaxonomy, type TaxonomyTree } from '../lib/categoryTaxonomyApi';
+import { resolveProductPricing, discountLabel } from '../utils/productPricing';
 import { useMarketplaceBasket } from '../lib/useMarketplaceBasket';
 import { useMarketplaceWishlist } from '../lib/useMarketplaceWishlist';
 import {
@@ -555,7 +556,16 @@ const ProductCard: React.FC<{
     : '';
   const t = (key: string, vars?: Record<string, string | number>) => marketplaceCopy(key, lang, vars);
   const compareAt = Number(p.compare_at_price || 0);
-  const discount = Number(p.discount_percent || 0);
+  /*
+   * PERCENTAGE OFF — from the shared helper, NOT from a single stored column.
+   *
+   * `discount_percent` is only populated when the product carries a
+   * `compare_at_price`. A product the merchant discounted by AMOUNT has no such
+   * column, so the card used to show no percentage at all. The helper derives it
+   * from `selling + discount` in exactly the same way the storefront does.
+   */
+  const pricing = resolveProductPricing(p as any);
+  const discount = pricing.discountPercent || Number(p.discount_percent || 0);
   const stockStatus = String(p.stock_status || 'in_stock');
   const tags: string[] = Array.isArray(p.category_tags) && p.category_tags.length
     ? p.category_tags
@@ -595,10 +605,12 @@ const ProductCard: React.FC<{
         />
         {discount > 0 && (
           <span
-            className="absolute left-2 top-2 rounded-md px-1.5 py-0.5 text-[10px] font-black tracking-wide text-white shadow-sm"
+            className="absolute left-2 top-2 flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-black tracking-wide text-white shadow-sm"
             style={{ backgroundColor: THEME.danger }}
           >
-            -{discount}%
+            <span className="uppercase">SALE</span>
+            <span aria-hidden="true">·</span>
+            <span>{discountLabel(discount)}</span>
           </span>
         )}
         {soldOut && (
@@ -4437,14 +4449,20 @@ const QuickView: React.FC<{
 
           <div className="mt-3 flex items-baseline gap-2">
             <span className="text-2xl font-black" style={{ color: THEME.ink }}>{bdt(Number(product.priceBDT || 0))}</span>
-            {Number(p.compare_at_price || 0) > Number(product.priceBDT || 0) && (
-              <>
-                <span className="text-sm line-through" style={{ color: THEME.inkSubtle }}>{bdt(Number(p.compare_at_price))}</span>
-                <span className="rounded px-1.5 py-0.5 text-[11px] font-black text-white" style={{ backgroundColor: THEME.danger }}>
-                  -{p.discount_percent}%
-                </span>
-              </>
-            )}
+            {(() => {
+              // Shared helper, so an amount-only discount also shows its
+              // original price and a clean `10% OFF` badge here.
+              const detailPricing = resolveProductPricing(product as any);
+              if (!detailPricing.onSale || !detailPricing.compareAt) return null;
+              return (
+                <>
+                  <span className="text-sm line-through" style={{ color: THEME.inkSubtle }}>{bdt(detailPricing.compareAt)}</span>
+                  <span className="rounded px-1.5 py-0.5 text-[11px] font-black text-white" style={{ backgroundColor: THEME.danger }}>
+                    {discountLabel(detailPricing.discountPercent)}
+                  </span>
+                </>
+              );
+            })()}
           </div>
 
           {p.descriptionEn || p.description_en ? (

@@ -34,6 +34,7 @@ import {
 } from '../lib/storeModulesApi';
 import { normalizeOrders, safeDate, safeAmount } from '../utils/orderUtils';
 import { resolveProductImage as resolveAnyProductImage } from '../utils/imageFallback';
+import { resolveProductPricing, discountLabel } from '../utils/productPricing';
 import {
   WALLET_PROVIDERS,
   WALLET_LABELS,
@@ -4552,6 +4553,16 @@ The render below must not guess. A merchant may paste
                             Sale
                           </span>
                         )}
+                        {/* Prominent percentage: a shopper reads `10% OFF` faster than a struck-out price. */}
+                        {(() => {
+                          const pricing = resolveProductPricing(p);
+                          if (!pricing.onSale) return null;
+                          return (
+                            <span className="absolute bottom-3 left-3 bg-rose-600 text-white text-[11px] font-black px-2 py-1 rounded-lg shadow-lg tracking-wide">
+                              {discountLabel(pricing.discountPercent)}
+                            </span>
+                          );
+                        })()}
                         {(p.stock ?? 99) <= 0 && (
                           <span className="absolute top-3 right-3 bg-white/90 text-rose-600 text-[9px] font-bold px-2 py-0.5 rounded-full backdrop-blur-sm">
                             Sold Out
@@ -4579,9 +4590,25 @@ The render below must not guess. A merchant may paste
                         </h4>
                         <div className="flex items-center gap-2 pt-0.5">
                           <span className="text-sm font-bold text-slate-900">৳{(p.priceBDT ?? 0).toLocaleString()}</span>
-                          {p.compareAtPriceBDT && (
-                            <span className="text-xs text-slate-400 line-through">৳{(p.compareAtPriceBDT ?? 0).toLocaleString()}</span>
-                          )}
+                          {(() => {
+                            // The struck-through price comes from the shared helper, so
+                            // a product discounted by amount (no stored compare-at) still
+                            // shows its original price here.
+                            const pricing = resolveProductPricing(p);
+                            if (!pricing.compareAt) return null;
+                            return (
+                              <span className="text-xs text-slate-400 line-through">৳{pricing.compareAt.toLocaleString()}</span>
+                            );
+                          })()}
+                          {(() => {
+                            const pricing = resolveProductPricing(p);
+                            if (!pricing.onSale) return null;
+                            return (
+                              <span className="text-[10px] font-black text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded">
+                                {discountLabel(pricing.discountPercent)}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </div>
                     </div>
@@ -4722,11 +4749,24 @@ The render below must not guess. A merchant may paste
                             <div className="text-sm font-black text-amber-400 tracking-tight">
                               ৳{(p.priceBDT ?? 0).toLocaleString()}
                             </div>
-                            {p.compareAtPriceBDT && (
-                              <div className="text-[10px] text-slate-500 line-through font-mono">
-                                ৳{(p.compareAtPriceBDT ?? 0).toLocaleString()}
-                              </div>
-                            )}
+                            {(() => {
+                              const pricing = resolveProductPricing(p);
+                              if (!pricing.compareAt) return null;
+                              return (
+                                <div className="text-[10px] text-slate-500 line-through font-mono">
+                                  ৳{pricing.compareAt.toLocaleString()}
+                                </div>
+                              );
+                            })()}
+                            {(() => {
+                              const pricing = resolveProductPricing(p);
+                              if (!pricing.onSale) return null;
+                              return (
+                                <span className="inline-block bg-rose-600 text-white text-[10px] font-black px-1.5 py-0.5 rounded">
+                                  {discountLabel(pricing.discountPercent)}
+                                </span>
+                              );
+                            })()}
                             {/* This product's own delivery charge, so the customer
                                 knows the landed cost before opening the cart. */}
                             {(() => {
@@ -6711,14 +6751,23 @@ The render below must not guess. A merchant may paste
                   <div className="text-xs text-slate-400">Price</div>
                   <div className="text-xl font-black text-amber-400">৳{(quickViewProduct.priceBDT ?? 0).toLocaleString()}</div>
                 </div>
-                {quickViewProduct.compareAtPriceBDT && (
-                  <div className="text-right">
-                    <div className="text-[10px] text-slate-500 line-through font-mono">৳{quickViewProduct.compareAtPriceBDT.toLocaleString()}</div>
-                    <div className="text-[10px] font-black text-emerald-400">
-                      Save ৳{(quickViewProduct.compareAtPriceBDT - (quickViewProduct.priceBDT || 0)).toLocaleString()}
+                {(() => {
+                  // Same shared pricing as the cards: shows the line-up price, the
+                  // money saved AND the percentage for an amount-only discount too.
+                  const qv = resolveProductPricing(quickViewProduct as any);
+                  if (!qv.onSale || !qv.compareAt) return null;
+                  return (
+                    <div className="text-right space-y-0.5">
+                      <span className="inline-block bg-rose-600 text-white text-[10px] font-black px-2 py-0.5 rounded">
+                        {discountLabel(qv.discountPercent)}
+                      </span>
+                      <div className="text-[10px] text-slate-500 line-through font-mono">৳{qv.compareAt.toLocaleString()}</div>
+                      <div className="text-[10px] font-black text-emerald-400">
+                        Save ৳{(qv.compareAt - qv.price).toLocaleString()}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
 
               <div className="grid grid-cols-2 gap-2">

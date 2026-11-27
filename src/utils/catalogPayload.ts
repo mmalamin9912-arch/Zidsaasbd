@@ -64,6 +64,9 @@ export function mapApiProduct(raw: any): any {
     priceBDT: Number(raw.priceBDT ?? raw.price ?? raw.price_bdt ?? 0),
     costPriceBDT: raw.costPriceBDT != null ? Number(raw.costPriceBDT) : (raw.cost_price != null ? Number(raw.cost_price) : undefined),
     compareAtPriceBDT: raw.compareAtPriceBDT != null ? Number(raw.compareAtPriceBDT) : (raw.compare_at_price != null ? Number(raw.compare_at_price) : undefined),
+    // The monetary discount is what lets a product WITHOUT a stored compare-at
+    // price still show a percentage (see src/utils/productPricing.ts).
+    discountPriceBDT: raw.discountPriceBDT != null ? Number(raw.discountPriceBDT) : (raw.discount_price != null ? Number(raw.discount_price) : undefined),
     stock: Number(raw.stock ?? 0),
     status: raw.status || 'Active',
     image:

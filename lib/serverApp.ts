@@ -6716,6 +6716,48 @@ function slimProductForApi(p: any, opts: ProductListViewOptions = {}): any {
   return out;
 }
 
+/**
+ * Attach the derived `compare_at_price` / `discount_percent` pair to an API row.
+ *
+ * WHY
+ * ---
+ * The marketplace card, the storefront card and the mega-menu facets all read
+ * `compare_at_price` to decide whether to show a percentage. A product the
+ * merchant discounted by AMOUNT stores only `discountPriceBDT`, so every one of
+ * those surfaces showed no discount at all.
+ *
+ * This mirrors `src/utils/productPricing.ts` for the server bundle (which must
+ * stay free of `src/` imports): an explicit compare-at price wins, otherwise the
+ * original price is `selling + discount`. The percentage is rounded to a whole
+ * number and clamped to 1–99, so the badge always reads cleanly (`10% OFF`).
+ */
+function withDerivedDiscount(p: any): any {
+  if (!p || typeof p !== 'object') return p;
+  const amount = (value: unknown): number => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  const price = amount(p.priceBDT ?? p.price ?? p.price_bdt);
+  const explicit = amount(p.compareAtPriceBDT ?? p.compare_at_price ?? p.compareAtPrice);
+  const discountAmount = amount(p.discountPriceBDT ?? p.discount_price ?? p.discount);
+
+  let compareAt = 0;
+  if (explicit > price) compareAt = explicit;
+  // `discount === price` would mean "free" — not a percentage we can show.
+  else if (discountAmount > 0 && discountAmount < price) compareAt = Math.round(price + discountAmount);
+
+  if (!(compareAt > price) || price <= 0) {
+    return { ...p, compare_at_price: null, discount_percent: 0 };
+  }
+  const percent = Math.min(99, Math.max(1, Math.round(((compareAt - price) / compareAt) * 100)));
+  return {
+    ...p,
+    compare_at_price: compareAt,
+    compareAtPriceBDT: p.compareAtPriceBDT ?? compareAt,
+    discount_percent: percent,
+  };
+}
+
 app.get('/api/products', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
@@ -7140,7 +7182,7 @@ app.get('/api/products', async (req, res) => {
      * only.
      */
     const slimProds = prods.map((p) =>
-      slimProductForApi(p, lightImagePayload ? { inlineImageBudget: 0 } : {})
+      withDerivedDiscount(slimProductForApi(p, lightImagePayload ? { inlineImageBudget: 0 } : {}))
     );
 
     return res.status(200).json(Array.isArray(slimProds) ? slimProds : []);

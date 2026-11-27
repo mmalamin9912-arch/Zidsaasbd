@@ -3,6 +3,7 @@ import { Product, WarehouseStock, ProductVariant, MerchantProfile } from '../../
 import { buildProductDbPayload, newCatalogId } from '../../utils/catalogPayload';
 import { fetchTaxonomy, type TaxonomyTree } from '../../lib/categoryTaxonomyApi';
 import { buildDeliveryFeeFields } from '../../utils/deliveryCharges';
+import { resolveProductPricing, discountLabel } from '../../utils/productPricing';
 import {
   PRODUCT_DELIVERY_ZONES,
   buildCanonicalZoneRates,
@@ -769,6 +770,29 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
   const profitBDT = numSellingPrice - numCostPrice;
   const marginPercent = numSellingPrice > 0 ? Math.round((profitBDT / numSellingPrice) * 100) : 0;
 
+  /*
+   * LIVE DISCOUNT — ONE RULE, SHARED WITH THE STOREFRONT + MARKETPLACE.
+   *
+   * `resolveProductPricing()` derives the percentage from whichever pricing the
+   * merchant actually filled in:
+   *   • a separate compare-at (original) price, when there is one, OR
+   *   • the Discount amount alone, which implies an original price of
+   *     `selling + discount` (the discount is deducted from the selling price).
+   *
+   * This form has no compare-at input, so before this the live preview could only
+   * show a `SALE` tag when the merchant remembered to tick the promotional
+   * checkbox AND a compare-at price happened to be stored — a Discount on its own
+   * produced no badge at all.
+   */
+  const liveDiscount = resolveProductPricing({
+    priceBDT: numSellingPrice,
+    compareAtPriceBDT: numComparePrice,
+    discountPriceBDT: numDiscountPrice,
+  });
+  // The discount badge is shown whenever the pricing actually discounts — the
+  // checkbox is an additional opt-in, never a requirement.
+  const showDiscountBadge = hasDiscount || liveDiscount.onSale;
+
   // Handlers for Inventory Management
   const handleInventoryStockChange = (id: string, stock: number) => {
     setInventories(inventories.map(inv => inv.id === id ? { ...inv, stock: Math.max(0, stock) } : inv));
@@ -941,15 +965,22 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       return;
     }
 
-    // A discount price must actually be a discount, otherwise the storefront
+    // Discount amount must actually be a discount, otherwise the storefront
     // shows a crossed-out price that is higher than the real one.
-    if (hasDiscount) {
-      const compareValue = Number(numComparePrice);
-      if (!Number.isFinite(compareValue) || compareValue <= priceValue) {
-        setFormError('Compare-at price must be higher than the selling price.');
-        toast.error('The compare-at (original) price must be higher than the selling price.');
-        return;
-      }
+    //
+    // THE FORM HAS NO COMPARE-AT INPUT, so a Compare-at error here is
+    // unfixable for the merchant: the value it complains about is one this
+    // screen never collects. Publishing with a Discount alone is therefore
+    // VALID — the implied original price (`selling + discount`) is derived at
+    // save time and the percentage follows from it.
+    //
+    // A compare-at price is only checked when it is genuinely present, and only
+    // because a stored value lower than the selling price would render a wrong
+    // "was #####" line on every card.
+    if (hasDiscount && numComparePrice > 0 && numComparePrice <= priceValue) {
+      setFormError('Original (compare-at) price must be higher than the selling price.');
+      toast.error('The original (compare-at) price must be higher than the selling price.');
+      return;
     }
 
     // Discount is mandatory: must be provided, non-negative, and not exceed the
@@ -1014,7 +1045,21 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       ...(storeCollection.trim() ? { storeCollection: storeCollection.trim(), store_collection: storeCollection.trim() } : {}),
       priceBDT: numSellingPrice,
       costPriceBDT: numCostPrice,
-      compareAtPriceBDT: hasDiscount ? numComparePrice : undefined,
+      /*
+       * PERSIST THE DERIVED ORIGINAL PRICE.
+       *
+       * `compareAtPriceBDT` used to be written ONLY when the promotional checkbox
+       * was ticked — and only from a compare-at input this form does not have —
+       * so a Discount on its own stored no original price at all. The marketplace
+       * and storefront cards compute their percentage from
+       * `compare_at_price` vs `price`, so they had nothing to show.
+       *
+       * `liveDiscount.compareAt` is the resolved line-up price (an explicit
+       * compare-at when valid, otherwise `selling + discount`), so saving with a
+       * Discount now yields a real percentage on every surface. A product with no
+       * discount still stores `undefined`, exactly as before.
+       */
+      compareAtPriceBDT: liveDiscount.onSale && liveDiscount.compareAt ? liveDiscount.compareAt : undefined,
       discountPriceBDT: numDiscountPrice,
       weightKg: Math.round(finalWeightKg * 100) / 100,
       stock: totalStock,
@@ -1042,7 +1087,7 @@ export const SingleProductForm: React.FC<SingleProductFormProps> = ({
       templateStyle,
       requiresShipping,
       isTaxExempt,
-      hasDiscount,
+      hasDiscount: showDiscountBadge,
       // Persist the canonical, named zone list plus the explicit per-zone fields.
       // Sub-Dhaka can be blank; checkout then falls back to this product's Inside
       // City fee. Inside and Outside are validated above and always have values.
@@ -1433,6 +1478,21 @@ onClick={suggestPricing}
                       ৳
                     </span>
                   </div>
+                  {/*
+                   * LIVE PERCENTAGE — computed from `selling + discount`, so the
+                   * merchant sees exactly what the storefront badge will read
+                   * before saving. Rounded to a whole number by the shared helper.
+                   */}
+                  {liveDiscount.onSale && (
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <span className="bg-rose-500 text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-sm">
+                        {discountLabel(liveDiscount.discountPercent)}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-semibold">
+                        was ৳{(liveDiscount.compareAt || 0).toLocaleString()}
+                      </span>
+                    </div>
+                  )}
                   <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
                     Mandatory marketing discount. Deducted from the selling price at checkout.
                   </p>
@@ -2751,9 +2811,16 @@ onClick={suggestPricing}
                   </div>
                 )}
 
-                {hasDiscount && (
+                {showDiscountBadge && (
                   <span className="absolute top-2 left-2 bg-rose-500 text-white font-extrabold text-[10px] px-2 py-0.5 rounded-full shadow-md">
                     SALE
+                  </span>
+                )}
+
+                {/* Prominent percentage badge — what the shopper actually reacts to. */}
+                {showDiscountBadge && liveDiscount.discountPercent > 0 && (
+                  <span className="absolute bottom-2 right-2 bg-rose-600 text-white font-black text-xs px-2.5 py-1 rounded-lg shadow-lg tracking-wide">
+                    {discountLabel(liveDiscount.discountPercent)}
                   </span>
                 )}
 
@@ -2788,11 +2855,12 @@ onClick={suggestPricing}
                 <div className="mt-2 flex items-center justify-between">
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-sm font-black text-[#00D68F]">৳{numSellingPrice.toLocaleString()}</span>
-                    {numDiscountPrice > 0 && (
-                      <span className="text-[11px] text-rose-400 line-through">৳{(numSellingPrice - numDiscountPrice).toLocaleString()}</span>
+                    {/* One struck-through line-up price, resolved by the shared helper. */}
+                    {showDiscountBadge && liveDiscount.compareAt && (
+                      <span className="text-[11px] text-slate-500 line-through">৳{liveDiscount.compareAt.toLocaleString()}</span>
                     )}
-                    {hasDiscount && numComparePrice > numSellingPrice && (
-                      <span className="text-[11px] text-slate-500 line-through">৳{numComparePrice.toLocaleString()}</span>
+                    {showDiscountBadge && liveDiscount.discountPercent > 0 && (
+                      <span className="text-[10px] font-black text-rose-400">{discountLabel(liveDiscount.discountPercent)}</span>
                     )}
                   </div>
 
