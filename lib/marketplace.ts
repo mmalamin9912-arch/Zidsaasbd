@@ -99,9 +99,10 @@ export async function resolveStoreRef(rawRef: string): Promise<StoreRef> {
   const ref: StoreRef = {};
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clean);
   const isCode = /^ZID-BD-\d+$/i.test(clean);
+  const isObjectId = /^[0-9a-f]{24}$/i.test(clean);
   if (isUuid) ref.storeId = clean;
   else if (isCode) ref.code = upper;
-  else ref.slug = clean;
+  else ref.slug = clean; // placeholder; overwritten below if the store is found by _id
 
   try {
     const db = await getMongoDb(DB_NAME);
@@ -115,6 +116,14 @@ export async function resolveStoreRef(rawRef: string): Promise<StoreRef> {
       { domain: clean },
     ];
     if (isUuid) or.push({ id: clean }, { _id: clean }, { store_id: clean });
+    // A 24-char hex string is a Mongo _id, not a slug. Look the store up by its
+    // document key so ref.storeId / ref.slug come from the real store row.
+    if (isObjectId) {
+      try {
+        const { ObjectId } = await import('mongodb');
+        or.push({ _id: new ObjectId(clean) }, { _id: clean }, { id: clean }, { store_id: clean });
+      } catch { /* ignore */ }
+    }
     const doc: any = await db.collection('stores').findOne({ $or: or });
     if (doc) {
       if (doc.id) ref.storeId = String(doc.id);

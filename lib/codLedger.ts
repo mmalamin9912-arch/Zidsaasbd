@@ -728,7 +728,13 @@ export async function reconcileVendorWalletWithPaidOrders(
     // with a Mongo `_id`, which is a unique document key but not the value the
     // order rows carry.
     const vendorId = String(ref.storeId || '').trim() || identities.ids[0] || String(vendorRef).trim();
-    const slug = String(ref.slug || '').trim().toLowerCase() || identities.slugs[0] || '';
+    // `ref.slug` can be a wrong guess (e.g. a Mongo _id treated as a slug by
+    // `resolveStoreRef`). Prefer the real store slug resolved from the store row
+    // in `identities.slugs`, falling back to ref.slug only when nothing else is
+    // known. ObjectId-shaped strings are never store slugs.
+    const isObjectIdShape = /^[0-9a-f]{24}$/i;
+    const realSlug = identities.slugs.find((s) => !isObjectIdShape.test(s)) || identities.slugs[0] || '';
+    const slug = String(realSlug || ref.slug || '').trim().toLowerCase();
 
     // Exactly the identifiers this vendor's orders/products carry.
     const identityOr = identityClauses(identities);
@@ -757,6 +763,20 @@ export async function reconcileVendorWalletWithPaidOrders(
         .limit(limit)
         .toArray()
         .catch(() => [] as any[]);
+
+      // Diagnostic: how many Paid orders this db holds for this vendor.
+      console.log('[Wallet] orders scanned on db', {
+        vendor: vendorRef, slug, vendorId,
+        rowsFound: rows.length, limit,
+        sampleIds: rows.slice(0, 3).map((r: any) => ({
+          order_number: r.order_number || r.orderNumber || r.id,
+          payment_status: r.payment_status || r.paymentStatus,
+          status: r.status,
+          store_id: r.store_id || r.storeId,
+          store_slug: r.store_slug || r.storeSlug,
+          vendor_id: r.vendor_id || r.vendorId,
+        })),
+      });
 
       for (const row of rows as any[]) {
         result.scanned += 1;
@@ -906,17 +926,27 @@ export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean;
      */
     const inFlightKey = String(vendorRef).toLowerCase();
     const existingRun = reconcileInFlight.get(inFlightKey);
+    let reconcileResult: any = undefined;
     if (existingRun) {
       await existingRun.catch(() => undefined);
+      reconcileResult = { fromFlight: true };
     } else {
-      const run = reconcileVendorWalletWithPaidOrders(vendorRef).catch(() => undefined);
+      const run = reconcileVendorWalletWithPaidOrders(vendorRef).catch((err: any) => ({ error: err?.message || err }));
       reconcileInFlight.set(inFlightKey, run as Promise<any>);
       try {
-        await run;
+        reconcileResult = await run;
       } finally {
         reconcileInFlight.delete(inFlightKey);
       }
     }
+
+    // Diagnostic: result of the self-heal reconcile pass before reading wallets.
+    console.log('[Wallet] reconcile result', {
+      vendor: vendorRef, slug, vendorId,
+      scanned: reconcileResult?.scanned, creditedCount: reconcileResult?.creditedCount,
+      creditedBDT: reconcileResult?.creditedBDT, skipped: reconcileResult?.skipped,
+      error: reconcileResult?.error, fromFlight: reconcileResult?.fromFlight,
+    });
 
     let best: Record<string, any> | null = null;
     let walletsSeen = 0;
@@ -925,6 +955,11 @@ export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean;
       if (!wallet) continue;
       walletsSeen += 1;
       const plain = toPlain(wallet);
+      console.log('[Wallet] wallet doc on db', {
+        vendor: vendorRef, vendor_id: plain.vendor_id, store_slug: plain.store_slug,
+        available_bdt: plain.available_bdt, lifetime_credit_bdt: plain.lifetime_credit_bdt,
+        lifetime_paid_bdt: plain.lifetime_paid_bdt, pending_payout_bdt: plain.pending_payout_bdt,
+      });
       // Prefer the wallet that actually carries money (or history); an empty
       // stray document must not hide a funded one on another cluster.
       if (!best || toNum(plain?.lifetime_credit_bdt) > toNum(best?.lifetime_credit_bdt)) best = plain;
