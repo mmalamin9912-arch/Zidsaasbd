@@ -913,6 +913,7 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
    */
   const [verificationOrders, setVerificationOrders] = useState<Order[]>([]);
   const [verificationLoading, setVerificationLoading] = useState(false);
+  const [processingVerificationId, setProcessingVerificationId] = useState<string | null>(null);
 
   // Courier Orders List state — dispatched orders with merchant/store info
   const [courierOrders, setCourierOrders] = useState<any[]>([]);
@@ -1033,6 +1034,10 @@ export const SuperAdminPortalView: React.FC<SuperAdminPortalViewProps> = ({
   useEffect(() => {
     if (activeSubTab !== 'orders') return;
     void fetchVerificationOrders();
+    const interval = setInterval(() => {
+      void fetchVerificationOrders();
+    }, 5000);
+    return () => clearInterval(interval);
   }, [activeSubTab, fetchVerificationOrders]);
 
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
@@ -3906,15 +3911,52 @@ if (m.storeSlug) {
                           </td>
                           <td className="p-3.5 text-right">
                             {/*
-                             * Decisions are made from the Telegram alert's
-                             * inline buttons. This dash simply reflects the
-                             * state — a row that has been decided disappears
-                             * from the queue on the next poll.
+                             * Decisions are made from the Telegram alert's inline buttons
+                             * or directly right here via quick Approve.
+                             * Decided rows update immediately in MongoDB & disappear on the next poll.
                              */}
-                            <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                              Awaiting Telegram
-                            </span>
+                            <div className="flex items-center justify-end gap-2">
+                              <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                Awaiting Telegram
+                              </span>
+                              <button
+                                type="button"
+                                disabled={processingVerificationId === (ord.id || ord.orderNumber)}
+                                onClick={async () => {
+                                  const targetId = String(ord.orderNumber || ord.id || '').replace(/^#/, '').trim();
+                                  if (!targetId) return;
+                                  setProcessingVerificationId(ord.id || ord.orderNumber);
+                                  try {
+                                    const res = await fetch(`/api/admin/orders/${encodeURIComponent(targetId)}/payment-verification`, {
+                                      method: 'PATCH',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({
+                                        action: 'approve',
+                                        processed_by: 'super_admin_ui',
+                                        order_number: targetId,
+                                        orderNumber: targetId,
+                                      }),
+                                    });
+                                    const json = await res.json().catch(() => null);
+                                    if (json?.ok) {
+                                      toast.success(`Payment verified & approved for ${targetId}`);
+                                      void fetchVerificationOrders();
+                                    } else {
+                                      toast.error(json?.error || 'Verification failed');
+                                    }
+                                  } catch (err: any) {
+                                    toast.error(err?.message || 'Verification request failed');
+                                  } finally {
+                                    setProcessingVerificationId(null);
+                                  }
+                                }}
+                                className="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/40 rounded-lg text-[10px] font-bold transition flex items-center gap-1 disabled:opacity-50"
+                                title="Approve payment directly from Super Admin"
+                              >
+                                {processingVerificationId === (ord.id || ord.orderNumber) ? 'Approving…' : 'Approve'}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );

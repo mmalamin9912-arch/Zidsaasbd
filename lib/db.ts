@@ -684,17 +684,30 @@ export async function getMongoDb(
   // MONGODB_URI_2-only deployment resolves a database instead of returning null.
   if (listMongoUriCandidates().length === 0) return null;
   if (role === 'secondary') {
-    const connection = await connectToSecondaryDatabase(dbName);
-    return connection.db ?? null;
+    try {
+      const connection = await connectToSecondaryDatabase(dbName);
+      return connection.db ?? (connection.getClient ? connection.getClient().db(dbName) : null);
+    } catch {
+      return null;
+    }
   }
-  await connectToDatabase(dbName);
-  // `readyState` 1 = connected. A handle is only usable in that state; returning
-  // `mongoose.connection.db` while the pool is connecting/reconnecting/disconnected
-  // handed callers a non-null object whose queries then failed (bufferCommands is
-  // off), which surfaced as "database unavailable" and an empty dashboard even
-  // though the data was there. Returning null lets each route use its explicit
-  // cache/fallback path instead.
-  if ((mongoose.connection.readyState as number) !== 1) return null;
+  try {
+    await connectToDatabase(dbName);
+    if ((mongoose.connection.readyState as number) === 1) {
+      const db = mongoose.connection.db || (mongoose.connection as any).getClient?.()?.db?.(dbName);
+      if (db) return db;
+    }
+  } catch (err: any) {
+    console.warn('[MongoDB] getMongoDb primary connection attempt warning:', err?.message || err);
+  }
+
+  // Fallback to secondary if primary is unavailable
+  if (readMongoUri(SECONDARY_DB_ROLE) && readMongoUri(SECONDARY_DB_ROLE) !== readMongoUri('primary')) {
+    try {
+      const connection = await connectToSecondaryDatabase(dbName);
+      return connection.db ?? (connection.getClient ? connection.getClient().db(dbName) : null);
+    } catch {}
+  }
   return mongoose.connection.db ?? null;
 }
 

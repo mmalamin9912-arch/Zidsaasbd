@@ -22176,6 +22176,46 @@ function rememberRecentOrders(orders: any[]) {
   })();
 }
 
+function updateRecentOrdersCache(order: any) {
+  if (!order || typeof order !== 'object') return;
+  const now = Date.now();
+  const searchValues = [
+    order.id,
+    order._id,
+    order.order_number,
+    order.orderNumber,
+    order.order_id,
+    order.orderId,
+  ].map((v) => String(v || '').replace(/^#/, '').trim()).filter(Boolean);
+
+  const searchSet = new Set(searchValues);
+
+  for (const [k, v] of recentOrdersCache.entries()) {
+    const vVals = [
+      v?.id,
+      v?._id,
+      v?.order_number,
+      v?.orderNumber,
+      v?.order_id,
+      v?.orderId,
+    ].map((x) => String(x || '').replace(/^#/, '').trim()).filter(Boolean);
+
+    if (searchValues.includes(k) || vVals.some((val) => searchSet.has(val))) {
+      recentOrdersCache.set(k, {
+        ...v,
+        ...order,
+        _cachedAt: now,
+      });
+    }
+  }
+
+  for (const k of searchValues) {
+    if (!recentOrdersCache.has(k)) {
+      recentOrdersCache.set(k, { ...order, _cachedAt: now });
+    }
+  }
+}
+
 function getMatchingCachedOrders(opts: { phone?: string; digits?: string; last10?: string; storeRef?: string }): any[] {
   const matches: any[] = [];
   const { phone, digits, last10, storeRef } = opts;
@@ -22916,6 +22956,26 @@ app.get('/api/orders', async (req, res) => {
           const key = String((row as any)?.id ?? (row as any)?._id ?? '');
           if (key && seenOrderKeys.has(key)) continue;
           if (key) seenOrderKeys.add(key);
+
+          // If this order was already approved/verified or credited by admin, ensure it is represented as Paid
+          if (row && (row.wallet_credited === true || row.wallet_credited === 'true' || row.payment_verified_at)) {
+            const curStatus = canonicalPaymentStatus(row.payment_status || row.paymentStatus);
+            if (curStatus === 'Pending Verification' || curStatus === 'Unpaid') {
+              row.paymentStatus = 'Paid';
+              row.payment_status = 'paid';
+              if (!row.status || row.status === 'New') {
+                row.status = 'Processing';
+                row.order_status = 'Processing';
+              }
+              // Auto-heal in MongoDB in background
+              void updateOrderFields(String(row._id || row.id || row.order_number), {
+                paymentStatus: 'Paid',
+                payment_status: 'paid',
+                status: 'Processing',
+                order_status: 'Processing',
+              }).catch(() => null);
+            }
+          }
           orders.push(row);
         }
       }
@@ -22928,7 +22988,8 @@ app.get('/api/orders', async (req, res) => {
     // cache below is pure memory and needs no extra round-trip.
 
     const cachedOrders = getMatchingCachedOrdersForVendor(refValues);
-    const combinedOrders = [...(Array.isArray(orders) ? orders : []), ...cachedOrders];
+    // Database truth takes precedence over cache: put cachedOrders first so fresh MongoDB orders overwrite any stale cache entries
+    const combinedOrders = [...cachedOrders, ...(Array.isArray(orders) ? orders : [])];
 
     const dedupedOrders = Array.from(
       new Map(
@@ -26542,6 +26603,11 @@ app.get('/api/admin/orders', async (req, res) => {
       ],
     };
 
+    if (isPendingQueue) {
+      query.wallet_credited = { $nin: [true, 'true'] };
+      query.payment_verified_at = { $in: [null, undefined] };
+    }
+
     let orders: any[] = [];
     let queryFailed = false;
     if (dbConnected) {
@@ -26562,9 +26628,13 @@ app.get('/api/admin/orders', async (req, res) => {
       // Same rule as the database query. `canonicalPaymentStatus` already folds
       // `pending` / `pending_payment` / `awaiting_verification` into
       // 'Pending Verification', so this single comparison is the whole family.
+      if (isPendingQueue) {
+        if (o?.wallet_credited === true || o?.wallet_credited === 'true' || o?.payment_verified_at) return false;
+      }
       return canonicalPaymentStatus(o?.payment_status || o?.paymentStatus) === 'Pending Verification';
     });
-    const combinedOrders = [...orders, ...cachedOrders];
+    // DATABASE TRUTH TAKES PRECEDENCE: put cachedOrders first so fresh Mongo orders overwrite any stale cache entries
+    const combinedOrders = [...cachedOrders, ...orders];
     const dedupedOrders = Array.from(
       new Map(
         combinedOrders.map((item: any) => [
@@ -26574,10 +26644,18 @@ app.get('/api/admin/orders', async (req, res) => {
       ).values()
     ).sort((a, b) => new Date(b.created_at || b.createdAt || 0).getTime() - new Date(a.created_at || a.createdAt || 0).getTime()).slice(0, limit);
 
+    const verifiedOrPendingFilter = isPendingQueue
+      ? dedupedOrders.filter((o) => {
+          const s = canonicalPaymentStatus(o.payment_status || o.paymentStatus);
+          const credited = o.wallet_credited === true || o.wallet_credited === 'true' || Boolean(o.payment_verified_at);
+          return s === 'Pending Verification' && !credited;
+        })
+      : dedupedOrders;
+
     // The queue renders `.toLocaleString()` on amounts and reads camelCase, so
     // every row leaves here in the dashboard's shape — a raw Mongo row put an
     // `undefined` amount on screen and looked like a broken/empty queue.
-    const ordersWithImages = dedupedOrders
+    const ordersWithImages = verifiedOrPendingFilter
       .map((row) => hydrateOrderItemImages(normalizeOrderRow(row) || row))
       .filter(Boolean);
     const degraded = !dbConnected || queryFailed;
@@ -27933,27 +28011,43 @@ async function applyPaymentVerification(args: {
       };
     }
     /*
-     * A MASTER WITH SPLIT CHILDREN — decide the child that holds the money.
+     * A MASTER WITH SPLIT CHILDREN — synchronize master AND all children.
      *
      * A multi-vendor basket stores each seller's payable on a CHILD
-     * (`<master>-<n>`). The alert carries the MASTER number, so approving only
-     * the master leaves the child (what the seller's dashboard and the payout
-     * ledger read) still "Pending Verification". When the located row is a
-     * master whose `child_order_ids` are known, the FIRST child is resolved and
-     * the decision is applied to it — `findOrder` already walks back to the
-     * parent when a child number is given.
+     * (`<master>-<n>`). The alert carries the MASTER number.
+     * Previously, approving only decided the first child and left the master
+     * (and other children) still "Pending Verification". Now, the decision
+     * updates the master AND all child orders in MongoDB and in-memory caches,
+     * while vendor wallet crediting targets the seller holding the payable.
      */
-    let effectiveDoc = located.doc as Record<string, any>;
-    const childIds = Array.isArray(effectiveDoc?.child_order_ids) ? effectiveDoc.child_order_ids : [];
-    if (effectiveDoc?.order_type === 'master' && childIds.length > 0) {
-      const firstChild = await findOrder(String(childIds[0]), {
-        order_number: String(childIds[0]),
-        store_id: effectiveDoc.store_id,
-        store_slug: effectiveDoc.store_slug,
-      }).catch(() => ({ doc: null }));
-      if (firstChild.doc) effectiveDoc = firstChild.doc;
+    const initialLocatedDoc = located.doc as Record<string, any>;
+    const isMaster = Boolean(
+      initialLocatedDoc?.order_type === 'master' ||
+      (Array.isArray(initialLocatedDoc?.child_order_ids) && initialLocatedDoc.child_order_ids.length > 0)
+    );
+    const masterDoc = isMaster ? initialLocatedDoc : null;
+    const childIds: string[] = isMaster && Array.isArray(initialLocatedDoc?.child_order_ids)
+      ? initialLocatedDoc.child_order_ids.map(String)
+      : [];
+
+    // If initialLocatedDoc is a child order, resolve its parent master order if present
+    let parentMasterDoc: Record<string, any> | null = null;
+    if (!isMaster && initialLocatedDoc?.parent_order_id) {
+      const parentRes = await findOrder(String(initialLocatedDoc.parent_order_id)).catch(() => ({ doc: null }));
+      if (parentRes.doc) parentMasterDoc = parentRes.doc;
     }
-    const doc = effectiveDoc;
+
+    let firstChildDoc: Record<string, any> | null = null;
+    if (isMaster && childIds.length > 0) {
+      const firstChildRes = await findOrder(String(childIds[0]), {
+        order_number: String(childIds[0]),
+        store_id: initialLocatedDoc.store_id,
+        store_slug: initialLocatedDoc.store_slug,
+      }).catch(() => ({ doc: null }));
+      if (firstChildRes.doc) firstChildDoc = firstChildRes.doc;
+    }
+
+    const doc = firstChildDoc || initialLocatedDoc;
     /*
      * The id the WRITE is keyed on.
      *
@@ -27975,19 +28069,48 @@ async function applyPaymentVerification(args: {
     const netPayable = round2(Math.max(0, toNumeric(doc.vendor_net_payable_bdt ?? doc.vendorNetPayableBdt ?? totalBDT - commissionBDT, 0)));
 
     if (action === 'reject') {
-      const result = await updateOrderFields(canonicalOrderId, {
+      const rejectFields: Record<string, any> = {
+        status: 'Cancelled',
+        order_status: 'Cancelled',
         paymentStatus: 'Voided',
         payment_status: 'voided',
         payment_verified_at: new Date(),
         payment_verified_by: String(body.processed_by || 'super_admin'),
-      }, { ...extra, order_number: orderNumber });
-      /*
-       * Mirror the decision into Supabase. Awaited, but not fatal: MongoDB is
-       * authoritative for the dashboards, so a Supabase hiccup is reported in
-       * `supabase` rather than turning a completed rejection into an error.
-       */
+      };
+      const result = await updateOrderFields(canonicalOrderId, rejectFields, { ...extra, order_number: orderNumber });
+
+      // Synchronize master and all children
+      if (masterDoc) {
+        const masterId = masterDoc._id ? String(masterDoc._id) : String(masterDoc.order_number || masterDoc.id);
+        const masterNum = String(masterDoc.order_number || masterDoc.id || id).replace(/^#/, '').trim();
+        await updateOrderFields(masterId, rejectFields, { ...extra, order_number: masterNum }).catch(() => null);
+      }
+      if (parentMasterDoc) {
+        const parentId = parentMasterDoc._id ? String(parentMasterDoc._id) : String(parentMasterDoc.order_number || parentMasterDoc.id);
+        const parentNum = String(parentMasterDoc.order_number || parentMasterDoc.id).replace(/^#/, '').trim();
+        await updateOrderFields(parentId, rejectFields, { ...extra, order_number: parentNum }).catch(() => null);
+      }
+      for (const cId of childIds) {
+        const cleanCId = String(cId).replace(/^#/, '').trim();
+        if (cleanCId && cleanCId !== String(canonicalOrderId) && cleanCId !== String(orderNumber)) {
+          await updateOrderFields(cleanCId, rejectFields, { order_number: cleanCId }).catch(() => null);
+        }
+      }
+
+      // In-memory cache update
+      const allAffected = [
+        { ...doc, ...rejectFields },
+        ...(masterDoc ? [{ ...masterDoc, ...rejectFields }] : []),
+        ...(parentMasterDoc ? [{ ...parentMasterDoc, ...rejectFields }] : []),
+      ];
+      rememberRecentOrders(allAffected);
+      for (const aff of allAffected) {
+        updateRecentOrdersCache(aff);
+      }
+
+      const syncNum = String(masterDoc?.order_number || parentMasterDoc?.order_number || orderNumber);
       const supabase = result.ok
-        ? await syncOrderStatusToSupabase(orderNumber, canonicalOrderId, {
+        ? await syncOrderStatusToSupabase(syncNum, canonicalOrderId, {
           payment_status: 'voided',
           order_status: 'Cancelled',
         })
@@ -28005,7 +28128,7 @@ async function applyPaymentVerification(args: {
     // approve — both spellings are written, because the queue and the
     // storefront read different ones and a partial write left the row still
     // listed as 'Pending Verification' after a successful approval.
-    const statusResult = await updateOrderFields(canonicalOrderId, {
+    const approveFields: Record<string, any> = {
       status: 'Processing',
       order_status: 'Processing',
       fulfillment_status: 'Unfulfilled',
@@ -28016,13 +28139,45 @@ async function applyPaymentVerification(args: {
       ...(body.transaction_id || body.transactionId
         ? { transaction_id: String(body.transaction_id || body.transactionId) }
         : {}),
-    }, { ...extra, order_number: orderNumber });
+    };
+
+    const statusResult = await updateOrderFields(canonicalOrderId, approveFields, { ...extra, order_number: orderNumber });
     if (!statusResult.ok) {
       return { ok: false, action: 'approved', error: statusResult.error || 'Could not mark the order paid.', orderNumber };
     }
 
+    // Synchronize master order and all children so all dashboards reflect Paid
+    if (masterDoc) {
+      const masterId = masterDoc._id ? String(masterDoc._id) : String(masterDoc.order_number || masterDoc.id);
+      const masterNum = String(masterDoc.order_number || masterDoc.id || id).replace(/^#/, '').trim();
+      await updateOrderFields(masterId, approveFields, { ...extra, order_number: masterNum }).catch(() => null);
+    }
+    if (parentMasterDoc) {
+      const parentId = parentMasterDoc._id ? String(parentMasterDoc._id) : String(parentMasterDoc.order_number || parentMasterDoc.id);
+      const parentNum = String(parentMasterDoc.order_number || parentMasterDoc.id).replace(/^#/, '').trim();
+      await updateOrderFields(parentId, approveFields, { ...extra, order_number: parentNum }).catch(() => null);
+    }
+    for (const cId of childIds) {
+      const cleanCId = String(cId).replace(/^#/, '').trim();
+      if (cleanCId && cleanCId !== String(canonicalOrderId) && cleanCId !== String(orderNumber)) {
+        await updateOrderFields(cleanCId, approveFields, { order_number: cleanCId }).catch(() => null);
+      }
+    }
+
+    // In-memory cache update
+    const allAffected = [
+      { ...doc, ...approveFields },
+      ...(masterDoc ? [{ ...masterDoc, ...approveFields }] : []),
+      ...(parentMasterDoc ? [{ ...parentMasterDoc, ...approveFields }] : []),
+    ];
+    rememberRecentOrders(allAffected);
+    for (const aff of allAffected) {
+      updateRecentOrdersCache(aff);
+    }
+
     // Same mirror as the reject branch — see the note there.
-    const supabaseSync = await syncOrderStatusToSupabase(orderNumber, canonicalOrderId, {
+    const syncNum = String(masterDoc?.order_number || parentMasterDoc?.order_number || orderNumber);
+    const supabaseSync = await syncOrderStatusToSupabase(syncNum, canonicalOrderId, {
       payment_status: 'paid',
       order_status: 'Processing',
     });
@@ -28044,6 +28199,15 @@ async function applyPaymentVerification(args: {
         await updateOrderFields(canonicalOrderId, {
           wallet_credited: true,
         }, { ...extra, order_number: orderNumber }).catch(() => undefined);
+
+        if (masterDoc) {
+          const masterId = masterDoc._id ? String(masterDoc._id) : String(masterDoc.order_number || masterDoc.id);
+          const masterNum = String(masterDoc.order_number || masterDoc.id || id).replace(/^#/, '').trim();
+          await updateOrderFields(masterId, { wallet_credited: true }, { ...extra, order_number: masterNum }).catch(() => undefined);
+        }
+
+        updateRecentOrdersCache({ ...doc, wallet_credited: true });
+        if (masterDoc) updateRecentOrdersCache({ ...masterDoc, wallet_credited: true });
       }
     }
 

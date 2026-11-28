@@ -431,10 +431,12 @@ export async function updateOrderFields(
   if (supaCfg) {
     try {
       const cleanNum = key.replace(/^#/, '').trim();
+      const extraNum = String(extra.order_number || extra.orderNumber || '').replace(/^#/, '').trim();
+      const patchNumber = extraNum || cleanNum;
       const patchRes = await postgrestWrite(
         supaCfg.supabaseUrl,
         supaCfg.supabaseKey,
-        `/rest/v1/orders?order_number=eq.${encodeURIComponent(cleanNum)}`,
+        `/rest/v1/orders?order_number=eq.${encodeURIComponent(patchNumber)}`,
         {
           method: 'PATCH',
           body: toSupabaseLedgerPayload(set),
@@ -443,7 +445,7 @@ export async function updateOrderFields(
       );
       supaPatched = patchRes.ok;
       if (supaPatched) {
-        console.log(`[Courier][updateOrderFields] Supabase orders table updated for ${cleanNum}`);
+        console.log(`[Courier][updateOrderFields] Supabase orders table updated for ${patchNumber}`);
       }
     } catch (supaErr: any) {
       console.warn('[Courier][updateOrderFields] Supabase patch warning:', supaErr?.message || supaErr);
@@ -483,23 +485,55 @@ export async function updateOrderFields(
       { $set: set }
     );
 
-    // Synchronize any legacy duplicate records with the same order_number
-    const orderNum = located.doc.order_number || key.replace(/^#/, '');
+    let matchedCount = res.matchedCount;
+
+    // Synchronize records with the same order_number
+    const orderNum = String(located.doc.order_number || located.doc.orderNumber || extra.order_number || extra.orderNumber || key).replace(/^#/, '').trim();
     if (orderNum) {
-      await db.collection(ORDERS_COLLECTION).updateMany(
-        { order_number: orderNum, _id: { $ne: located.doc._id } },
+      const numUpdate = await db.collection(ORDERS_COLLECTION).updateMany(
+        { $or: [{ order_number: orderNum }, { orderNumber: orderNum }] },
         { $set: set }
       ).catch(() => null);
+      if (matchedCount === 0 && numUpdate && numUpdate.matchedCount > 0) {
+        matchedCount = numUpdate.matchedCount;
+      }
     }
 
+    // Synchronize records with the same client id / order_id
+    const idVal = String(located.doc.id || extra.id || extra.orderId || '').replace(/^#/, '').trim();
+    if (idVal && idVal !== orderNum) {
+      const idUpdate = await db.collection(ORDERS_COLLECTION).updateMany(
+        { $or: [{ id: idVal }, { order_id: idVal }, { orderId: idVal }] },
+        { $set: set }
+      ).catch(() => null);
+      if (matchedCount === 0 && idUpdate && idUpdate.matchedCount > 0) {
+        matchedCount = idUpdate.matchedCount;
+      }
+    }
+
+    // Also synchronize via Mongoose Order model if loaded
+    try {
+      const { default: mongoose } = await import('mongoose');
+      const OrderModel = mongoose.models?.Order;
+      if (OrderModel && typeof OrderModel.updateMany === 'function') {
+        const queryOr: any[] = [{ _id: located.doc._id }];
+        if (orderNum) queryOr.push({ order_number: orderNum }, { orderNumber: orderNum });
+        if (idVal) queryOr.push({ id: idVal });
+        await OrderModel.updateMany({ $or: queryOr }, { $set: set }).catch(() => null);
+      }
+    } catch {}
+
     // Re-read so the response carries the authoritative single document.
-    const fresh = await db.collection(ORDERS_COLLECTION).findOne({ _id: located.doc._id });
+    const fresh = (await db.collection(ORDERS_COLLECTION).findOne({ _id: located.doc._id }))
+      || (orderNum ? await db.collection(ORDERS_COLLECTION).findOne({ $or: [{ order_number: orderNum }, { orderNumber: orderNum }] }) : null)
+      || (idVal ? await db.collection(ORDERS_COLLECTION).findOne({ $or: [{ id: idVal }, { order_id: idVal }] }) : null);
+
     return {
-      ok: res.matchedCount > 0,
+      ok: matchedCount > 0 || Boolean(fresh),
       order: fresh ? { ...fresh } : null,
       updated: Object.keys(set).filter((k) => k !== 'updated_at'),
-      matched: res.matchedCount,
-      error: res.matchedCount > 0 ? undefined : 'The order could not be updated.',
+      matched: matchedCount > 0 ? matchedCount : (fresh ? 1 : 0),
+      error: (matchedCount > 0 || fresh) ? undefined : 'The order could not be updated.',
     };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Order update failed.' };
