@@ -908,10 +908,14 @@ export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean;
     // defined so no ReferenceError can escape to the wallet handler.
     const slug = String(identities.slugs[0] || ref.slug || vendorRef).trim().toLowerCase();
 
+    // The vendor id used for diagnostics and the read query; mirrors the safe
+    // derivation in reconcileVendorWalletWithPaidOrders. Always defined.
+    const vendorId = String(ref.storeId || identities.ids[0] || vendorRef).trim();
+
     // Diagnostic: who this wallet read is for and which clusters it will ask.
     // No secrets — store identifiers only.
     console.log('[Wallet] getVendorWallet', {
-      vendor: vendorRef, slug, ids: identities.ids, slugs: identities.slugs,
+      vendor: vendorRef, slug, vendorId, ids: identities.ids, slugs: identities.slugs,
       ref: { storeId: ref.storeId, slug: ref.slug }, dbs: dbs.length,
     });
 
