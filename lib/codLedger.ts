@@ -903,10 +903,15 @@ export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean;
     const or = identityClauses(identities);
     if (ref.slug) or.push({ store_slug: ref.slug }, { storeSlug: ref.slug });
 
+    // The real store slug for diagnostics; prefer the slug resolved from the
+    // store row, falling back to ref.slug then the vendor ref itself. Always
+    // defined so no ReferenceError can escape to the wallet handler.
+    const slug = String(identities.slugs[0] || ref.slug || vendorRef).trim().toLowerCase();
+
     // Diagnostic: who this wallet read is for and which clusters it will ask.
     // No secrets — store identifiers only.
     console.log('[Wallet] getVendorWallet', {
-      vendor: vendorRef, ids: identities.ids, slugs: identities.slugs,
+      vendor: vendorRef, slug, ids: identities.ids, slugs: identities.slugs,
       ref: { storeId: ref.storeId, slug: ref.slug }, dbs: dbs.length,
     });
 
