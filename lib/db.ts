@@ -572,6 +572,25 @@ export function uriDatabaseName(uri: string): string {
   }
 }
 
+/**
+ * NO SILENT FAILOVER TO THE OTHER CLUSTER BEFORE THE WRITE IS AUTHORITATIVE.
+ *
+ * The primary URI handshake can fail transiently (Atlas blip, IP allow-list
+ * propagation) while the mongoose connection is still in a non-zero state, and
+ * `connectWithFailover` legitimately answers "reuse the shared connection". On
+ * this deployment that shared connection is the SECONDARY cluster — the empty
+ * one — so a caller that trusted the returned handle wrote its data (and read
+ * nothing back) on the WRONG cluster and reported "saved" with ৳0 everywhere.
+ *
+ * `connectWithFailover` returns the `mongoose` MODULE (not a connection) for
+ * that reuse case. A caller that needs to be certain of the cluster can detect
+ * it: `conn === mongoose` means "the primary URI did NOT authenticate here",
+ * and the shared connection may belong to any cluster.
+ */
+function connectionIsFailoverReuse(connection: any): boolean {
+  return connection === mongoose;
+}
+
 export async function connectToSecondaryDatabase(dbName: string = DB_NAME): Promise<mongoose.Connection> {
   /* SECONDARY is a preference, not a requirement. A deployment with only
    * MONGODB_URI set used to throw here and every catalogue read silently
@@ -596,6 +615,31 @@ export async function connectToPrimaryDatabase(dbName: string = DB_NAME): Promis
   const uri = readMongoUri('primary');
   if (!uri) throw new Error('[MongoDB] MONGODB_URI is not set for the primary database.');
   return connectNamedPool('primary-direct', uri, primaryDirectCached, dbName);
+}
+
+/**
+ * The SAME database `getMongoDb()` uses, but it tells the caller when that
+ * handle is only a failover reuse (see `connectionIsFailoverReuse`).
+ *
+ * Used by the wallet: writing a credit into the wrong cluster is worse than
+ * failing, because the money then "disappears" while every screen says Paid.
+ */
+export async function getPrimaryTrustedDb(dbName: string = DB_NAME): Promise<any | null> {
+  if (listMongoUriCandidates().length === 0) return null;
+  try {
+    const connection: any = await connectToDatabase(dbName);
+    if (connectionIsFailoverReuse(connection)) {
+      // The primary did not authenticate on this attempt: the shared pool may be
+      // the empty secondary, so do NOT hand it out as "primary".
+      const state = (mongoose.connection.readyState as number);
+      if (state !== 1) return null;
+    }
+    const client = typeof mongoose.connection.getClient === 'function' ? mongoose.connection.getClient() : null;
+    const db = client ? client.db(dbName) : mongoose.connection.db;
+    return db || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Shared implementation for the named, non-default connection pools. */
@@ -701,8 +745,15 @@ export async function getMongoDb(
     console.warn('[MongoDB] getMongoDb primary connection attempt warning:', err?.message || err);
   }
 
-  // Fallback to secondary if primary is unavailable
-  if (readMongoUri(SECONDARY_DB_ROLE) && readMongoUri(SECONDARY_DB_ROLE) !== readMongoUri('primary')) {
+  // Fallback to secondary if primary is unavailable.
+  //
+  // `SECONDARY_DB_ROLE` only exists in serverApp.ts; using it here threw
+  // `ReferenceError: SECONDARY_DB_ROLE is not defined` (swallowed by the catch
+  // above), so this module ALWAYS answered `null` when the shared pool was not
+  // ready — which is how the wallet and every other reader of `getMongoDb()`
+  // saw zero rows while the same data loaded fine through the orders route's
+  // tenant handles. The role name is inlined instead.
+  if (readMongoUri('secondary') && readMongoUri('secondary') !== readMongoUri('primary')) {
     try {
       const connection = await connectToSecondaryDatabase(dbName);
       return connection.db ?? (connection.getClient ? connection.getClient().db(dbName) : null);
@@ -749,4 +800,109 @@ export function resetConnection(): void {
   secondaryCached.promise = null;
   secondaryCached.conn = null;
   console.log('[MongoDB] Connection state reset forced');
+}
+
+/**
+ * EVERY database that may hold merchant data, best candidate first.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The deployment configures TWO different Atlas clusters:
+ *
+ *   • MONGODB_URI   → `cluster0…` : the live merchant data (stores, orders,
+ *                    products, wallets).
+ *   • MONGODB_URI_2 → `zidsaasbd…` : a separate cluster that answers fine but
+ *                    holds almost nothing (measured: 1 store, 0 orders).
+ *
+ * `getMongoDb()` returns the SHARED pool only. The shared pool is opened by
+ * `connectToDatabase()`, which fails over MONGODB_URI → MONGODB_URI_2. When the
+ * primary is momentarily rejected (a fresh Atlas user/password, a transient auth
+ * blip), the shared pool settles on the EMPTY cluster — and every reader that
+ * trusted `getMongoDb()`, the vendor wallet among them, found zero rows while
+ * `/api/orders` (which reads the tenant handles below) happily listed the same
+ * merchant's orders.
+ *
+ * This helper is the one place that answers "which databases can I read?":
+ *   primary (direct)  →  shared pool  →  secondary.
+ * Callers iterate it and use the first handle that actually ANSWERS, so an empty
+ * cluster can never mask the data — and a single-cluster deployment behaves
+ * exactly as before (one handle, no extra cost).
+ *
+ * A cluster whose credentials were RECENTLY REJECTED is skipped for a few
+ * minutes (see `clusterRejectedUntil`): retrying a wrong password cannot
+ * succeed, and doing it on every dashboard read made the page wait on a
+ * 5-second server-selection timeout each time.
+ */
+const clusterRejectedUntil = new Map<string, number>();
+const CLUSTER_REJECT_RETRY_MS = 5 * 60 * 1000;
+
+function isClusterRejected(key: string): boolean {
+  const until = clusterRejectedUntil.get(key);
+  if (!until) return false;
+  if (Date.now() < until) return true;
+  clusterRejectedUntil.delete(key);
+  return false;
+}
+
+function markClusterRejected(key: string, message: string): void {
+  if (/bad auth|authentication failed|invalid credentials/i.test(message)) {
+    clusterRejectedUntil.set(key, Date.now() + CLUSTER_REJECT_RETRY_MS);
+  }
+}
+
+export async function getTenantDbs(dbName: string = DB_NAME): Promise<any[]> {
+  const handles: any[] = [];
+  const push = (db: any) => {
+    if (db && typeof db.collection === 'function' && !handles.includes(db)) handles.push(db);
+  };
+
+  // 1. The data-bearing cluster, opened directly (never affected by failover).
+  if (!isClusterRejected('primary')) {
+    try {
+      const primary = await connectToPrimaryDatabase(dbName);
+      const client = typeof (primary as any).getClient === 'function' ? (primary as any).getClient() : null;
+      push(client ? client.db((primary as any).name || dbName) : (primary as any).db);
+    } catch (err: any) {
+      markClusterRejected('primary', String(err?.message || err));
+      console.warn('[MongoDB] getTenantDbs primary warning:', err?.message || err);
+    }
+  }
+
+  // 2. The shared pool (may be pinned to either cluster).
+  //
+  //    `connectToDatabase()` fails over MONGODB_URI → MONGODB_URI_2, and each
+  //    failed attempt costs a 5s server-selection timeout. When the primary was
+  //    recently rejected, asking the shared pool would pay that timeout again on
+  //    EVERY dashboard read, so the secondary is attached directly instead.
+  //
+  //    When the primary is rejected, asking the shared pool would pay that
+  //    timeout again on EVERY dashboard read, so the secondary is attached
+  //    directly instead.
+  if (!isClusterRejected('primary')) {
+    try {
+      const shared = await getMongoDb(dbName);
+      if (shared && typeof shared.collection === 'function') {
+        push(shared);
+      }
+    } catch (err: any) {
+      console.warn('[MongoDB] getTenantDbs shared warning:', err?.message || err);
+    }
+  }
+
+  // 3. The secondary cluster — normally empty, but kept as a last resort so a
+  //    secondary-only deployment still resolves a database at all.
+  if (!isClusterRejected('secondary')) {
+    try {
+      const secondary = await connectToSecondaryDatabase(dbName);
+      const client = typeof (secondary as any).getClient === 'function' ? (secondary as any).getClient() : null;
+      push(client ? client.db((secondary as any).name || dbName) : (secondary as any).db);
+    } catch (err: any) {
+      markClusterRejected('secondary', String(err?.message || err));
+      console.warn('[MongoDB] getTenantDbs secondary warning:', err?.message || err);
+    }
+  }
+
+  // 4. Anything still missing goes last.
+
+  return handles;
 }

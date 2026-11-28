@@ -47,7 +47,7 @@
  * dashboard action. Every function returns a result object instead of throwing.
  */
 import mongoose from 'mongoose';
-import { getMongoDb, DB_NAME } from './db.js';
+import { getMongoDb, getTenantDbs, getPrimaryTrustedDb, DB_NAME } from './db.js';
 import { resolveStoreRef, storeMatchClauses, resolveCommission, PAYOUT_COLLECTION } from './marketplace.js';
 
 export const COD_LEDGER_COLLECTION = 'cod_ledger';
@@ -159,9 +159,20 @@ function vendorIdentityOf(order: Record<string, any>) {
  */
 export async function creditVendorWallet(
   vendor: { vendorId: string; storeSlug?: string; vendorName?: string },
-  amounts: { available: number; gross: number; commission: number; courierFee: number; orderNumber: string }
+  amounts: { available: number; gross: number; commission: number; courierFee: number; orderNumber: string },
+  /**
+   * Optional database to credit. The wallet MUST live on the same cluster as
+   * the order it settles: the shared pool can be pinned to MONGODB_URI_2 (a
+   * different, empty cluster), so a credit issued through it created a brand
+   * new zero-history wallet there while the real wallet sat untouched on the
+   * primary. Omitted by existing callers → unchanged behaviour.
+   */
+  dbOverride?: any
 ): Promise<Record<string, any> | null> {
-  const db = await getMongoDb(DB_NAME);
+  // The shared pool can be a FAILOVER REUSE of the empty cluster. When the
+  // caller did not name a database, prefer the verified primary handle and only
+  // fall back to `getMongoDb()` if that is unavailable.
+  const db = dbOverride || (await getPrimaryTrustedDb(DB_NAME)) || (await getMongoDb(DB_NAME));
   if (!db) return null;
 
   const identity = {
@@ -468,6 +479,178 @@ export async function listCodLedger(query: LedgerQuery = {}): Promise<{
 
 /* ─────────────── backfill: already-Paid orders → wallet ─────────────── */
 
+/**
+ * RESOLVE ANY VENDOR REFERENCE TO EVERY SPELLING THIS MERCHANT'S ROWS USE.
+ *
+ * The dashboard sends `vendor_id=<id>`, and that value can be the store's
+ * Mongo `_id` (`6acfd031…`), its `id`/`store_id` (a UUID or `ZID-BD-…`), the
+ * slug (`mystore`) or an email — four different identities for one merchant.
+ * 
+ * `resolveStoreRef()` only recognises UUID / ZID code / slug, so it treats a
+ * Mongo `_id` as a SLUG and resolves nothing; matching on that literal value
+ * then finds no order and no wallet. Here the id is looked up in `stores` first
+ * (ObjectId or string) and its canonical id + slug are added to the candidate
+ * set, so the query is correct whatever spelling the browser sent.
+ *
+ * A slug with no `stores` row is still a valid identity: the merchant's rows
+ * are keyed on it, so it is kept and matched as a slug.
+ */
+async function resolveVendorIdentities(
+  vendorRef: string
+): Promise<{ ids: string[]; slugs: string[]; name?: string }> {
+  const raw = String(vendorRef || '').split(':')[0].trim();
+  const ids = new Set<string>();
+  const slugs = new Set<string>();
+  let name: string | undefined;
+  if (!raw) return { ids: [], slugs: [] };
+  ids.add(raw);
+
+  // A Mongo ObjectId arrives as a 24-char hex string; it is a document key, not
+  // a slug, so it is never matched as one.
+  const isObjectId = /^[0-9a-f]{24}$/i.test(raw);
+  if (!isObjectId) slugs.add(raw.toLowerCase());
+
+  const ref = await resolveStoreRef(raw).catch(() => ({} as any));
+  if (ref?.storeId) ids.add(String(ref.storeId));
+  if (ref?.slug) slugs.add(String(ref.slug).toLowerCase());
+
+  try {
+    const dbs = await getTenantDbs(DB_NAME);
+    for (const db of dbs) {
+      const orClauses: Record<string, any>[] = [
+        { id: raw }, { store_id: raw }, { store_code: raw }, { store_code: raw.toUpperCase() },
+        { store_slug: raw }, { storeSlug: raw },
+        { store_slug: raw.toLowerCase() }, { storeSlug: raw.toLowerCase() },
+      ];
+      if (isObjectId) {
+        try {
+          const { ObjectId } = await import('mongodb');
+          orClauses.push({ _id: new ObjectId(raw) } as any);
+        } catch { /* ignore */ }
+        orClauses.push({ _id: raw } as any);
+      }
+      const store = await db.collection('stores').findOne({ $or: orClauses }).catch(() => null);
+      if (!store) continue;
+      for (const value of [store.id, store.store_id, store.store_code, store._id && String(store._id)]) {
+        if (value) ids.add(String(value));
+      }
+      if (store.store_slug || store.storeSlug) {
+        slugs.add(String(store.store_slug || store.storeSlug).toLowerCase());
+      }
+      // The wallet shows this name; a single-store order record carries no
+      // `vendor_name`, so it is taken from the store row itself.
+      name = String(store.store_name || store.storeName || store.name || '').trim() || undefined;
+      break; // first database that knows this store wins
+    }
+  } catch (err: any) {
+    console.warn('[COD] resolveVendorIdentities warning:', err?.message || err);
+  }
+
+  return { ids: Array.from(ids).filter(Boolean), slugs: Array.from(slugs).filter(Boolean), ...(name ? { name } : {}) };
+}
+
+/**
+ * Mongo clauses matching an order/wallet row that belongs to these identities.
+ * `ids` cover `vendor_id` AND the single-store spellings (`store_id`,
+ * `merchant_id`), because an order created for one store carries those and may
+ * have no `vendor_id` at all.
+ */
+function identityClauses(identities: { ids: string[]; slugs: string[] }): Record<string, any>[] {
+  const clauses: Record<string, any>[] = [];
+  for (const id of identities.ids) {
+    clauses.push(
+      { vendor_id: id }, { vendorId: id },
+      { store_id: id }, { storeId: id },
+      { merchant_id: id }, { merchantId: id },
+    );
+  }
+  for (const slug of identities.slugs) clauses.push({ store_slug: slug }, { storeSlug: slug });
+  return clauses;
+}
+
+/**
+ * Settlement clauses (`vendor_payouts` / `cod_ledger` rows) for one order.
+ *
+ * A checkout-written payout row is keyed by `vendor_id`/`store_slug`; a
+ * single-store order's own record says `store_id`. Both are matched, so an
+ * order that was ALREADY settled is never credited twice just because it was
+ * written by a different path.
+ */
+function settlementClausesForOrder(
+  orderNumber: string,
+  identities: { ids: string[]; slugs: string[] },
+  orderDoc: Record<string, any>,
+): Record<string, any>[] {
+  const orderIds = Array.from(new Set([
+    ...identities.ids,
+    orderDoc.vendor_id, orderDoc.vendorId,
+    orderDoc.store_id, orderDoc.storeId,
+    orderDoc.merchant_id, orderDoc.merchantId,
+  ].map((v) => String(v || '').trim()).filter(Boolean)));
+
+  const clauses: Record<string, any>[] = [];
+  for (const id of orderIds) {
+    clauses.push({ order_number: orderNumber, vendor_id: id });
+    clauses.push({ child_order_number: orderNumber, vendor_id: id });
+    clauses.push({ order_key: `${id}::${orderNumber}` });
+  }
+  for (const slug of identities.slugs) {
+    clauses.push({ order_number: orderNumber, store_slug: slug });
+  }
+  if (orderDoc.id) {
+    clauses.push({ child_order_id: String(orderDoc.id) });
+  }
+  return clauses;
+}
+
+/**
+ * One reconcile pass per vendor at a time.
+ *
+ * The wallet panel and the payout list load together, and every read heals the
+ * wallet. Without this lock two overlapping passes could both read the same
+ * "not yet credited" gap and both write it. A pass takes a few hundred ms, so
+ * sharing one promise is invisible to the UI and keeps the balance exact.
+ */
+const reconcileInFlight = new Map<string, Promise<any>>();
+
+/**
+ * Is this order a TRUE cash-on-delivery parcel that must not be wallet-credited
+ * here?
+ *
+ * `buildOrderRecord` stores `payment_method: 'COD'` whenever the checkout did
+ * not send one, so a bKash / Telegram-approved order commonly arrives looking
+ * exactly like a COD order. Skipping on the payment method alone therefore
+ * SKIPPED THE VERY ORDERS THIS FUNCTION EXISTS TO CREDIT ("Paid", ৳1,071, no
+ * wallet entry).
+ *
+ * A COD parcel is identified by what actually happened to it:
+ *   • `cod_reconciled` / a `cod_gross_collected` figure — the courier collected
+ *     the cash and `cod_ledger` already settled it (that ledger row is handled
+ *     separately, and authoritatively, in `creditedAmountForOrder`), or
+ *   • the advance (delivery fee paid up front) already covers the whole order,
+ *     so there is nothing left to collect at the door.
+ *
+ * NOTE: `cod_amount` is NOT evidence — every order carries it (it is set from
+ * the order total in `buildOrderRecord`).
+ */
+function isTrueCodOrder(orderDoc: Record<string, any>): boolean {
+  if (orderDoc.cod_reconciled === true) return true;
+  if (toNum(orderDoc.cod_gross_collected, 0) > 0) return true;
+  const total = toNum(orderDoc.totalBDT ?? orderDoc.total_price ?? orderDoc.total, 0);
+  const advance = toNum(orderDoc.advance_delivery_paid ?? orderDoc.advanceDeliveryPaidBDT, 0);
+  if (total > 0 && advance >= total) return true;
+  return false;
+}
+
+/** Any evidence the customer actually paid through a channel (not at the door). */
+function hasPrepaidEvidence(orderDoc: Record<string, any>): boolean {
+  const method = String(orderDoc.payment_method || orderDoc.paymentMethod || '').toLowerCase();
+  if (method && !method.includes('cod') && !method.includes('cash')) return true;
+  if (String(orderDoc.transaction_id || orderDoc.transactionId || orderDoc.trx_id || '').trim()) return true;
+  if (String(orderDoc.payment_verified_at || orderDoc.paymentVerifiedAt || '').trim()) return true;
+  return false;
+}
+
 /** Money already credited to this wallet, from ANY settlement path. */
 async function creditedAmountForOrder(
   db: any,
@@ -475,17 +658,23 @@ async function creditedAmountForOrder(
 ): Promise<{ credited: number; settled: boolean }> {
   if (!filters.length) return { credited: 0, settled: false };
   let credited = 0;
-  let settled = false;
   const done = async (collection: string, pick: (doc: any) => number) => {
     const doc = await db.collection(collection).findOne({ $or: filters }).catch(() => null);
     if (doc) credited = Math.max(credited, pick(doc));
-    return Boolean(doc);
+    return doc;
   };
   await done(PAYOUT_COLLECTION, (d: any) =>
     toNum(d?.net_payout_bdt ?? d?.net_payable_amount_bdt ?? d?.net_payable_bdt ?? d?.amount_bdt, 0));
-  // A `cod_ledger` row is the authoritative cash settlement: its vendor_credit
-  // already had the courier fee deducted, so that order needs no top-up.
-  settled = await done(COD_LEDGER_COLLECTION, (d: any) => toNum(d?.vendor_credit ?? d?.net_settlement, 0));
+  /*
+   * A `cod_ledger` row is the authoritative cash settlement: its vendor_credit
+   * already had the courier fee deducted, so that order needs no top-up.
+   *
+   * It only counts when it actually CARRIES a credit — a zero/absent value means
+   * the ledger row exists but nothing was released, and treating that as
+   * "settled" would leave the merchant permanently at ৳0.
+   */
+  const ledgerRow = await done(COD_LEDGER_COLLECTION, (d: any) => toNum(d?.vendor_credit ?? d?.net_settlement, 0));
+  const settled = Boolean(ledgerRow) && toNum((ledgerRow as any)?.vendor_credit ?? (ledgerRow as any)?.net_settlement, 0) > 0;
   return { credited, settled };
 }
 
@@ -519,113 +708,129 @@ export async function reconcileVendorWalletWithPaidOrders(
 ): Promise<{ ok: boolean; scanned: number; creditedCount: number; creditedBDT: number; error?: string }> {
   const result = { ok: false, scanned: 0, creditedCount: 0, creditedBDT: 0, error: undefined as string | undefined };
   try {
-    const db = await getMongoDb(DB_NAME);
-    if (!db) return { ...result, error: 'The database is unavailable.' };
     if (!vendorRef) return { ...result, error: 'A vendor id or store slug is required.' };
 
+    // Every cluster that may hold this merchant's data — the shared pool alone
+    // can be pinned to the EMPTY secondary (see `getTenantDbs`).
+    const dbs = await getTenantDbs(DB_NAME);
+    if (!dbs.length) return { ...result, error: 'The database is unavailable.' };
+
+    const identities = await resolveVendorIdentities(vendorRef);
     const ref = await resolveStoreRef(vendorRef).catch(() => ({} as any));
-    const vendorId = String(ref.storeId || vendorRef).trim();
-    const slug = String(ref.slug || '').trim().toLowerCase();
+    // Prefer the STORE's canonical id when known: `identities.ids` may start
+    // with a Mongo `_id`, which is a unique document key but not the value the
+    // order rows carry.
+    const vendorId = String(ref.storeId || '').trim() || identities.ids[0] || String(vendorRef).trim();
+    const slug = String(ref.slug || '').trim().toLowerCase() || identities.slugs[0] || '';
 
     // Exactly the identifiers this vendor's orders/products carry.
-    const identityOr: Record<string, any>[] = Array.from(new Set([
-      String(vendorRef),
-      vendorId,
-      ...(ref.storeId ? [String(ref.storeId)] : []),
-    ].filter(Boolean))).flatMap((id) => [{ vendor_id: id }, { vendorId: id }]);
+    const identityOr = identityClauses(identities);
     if (slug) identityOr.push({ store_slug: slug }, { storeSlug: slug });
 
     const limit = Math.min(500, Math.max(1, Math.floor(toNum(opts.limit, 200))));
-    const rows = await db
-      .collection('orders')
-      .find({
-        $and: [
-          { $or: identityOr },
-          { $or: [{ payment_status: /^paid$/i }, { paymentStatus: /^paid$/i }] },
-          { status: { $not: /^(cancelled|canceled|refunded|void|voided)$/i } },
-        ],
-      })
-      .limit(limit)
-      .toArray()
-      .catch(() => [] as any[]);
+    /**
+     * ORDER NUMBERS ALREADY HANDLED — by ANY database.
+     *
+     * Two clusters can both carry a row for the same order number. Without this
+     * guard each database's copy would be credited once, doubling the money.
+     * The set is shared across handles so each order is settled exactly once.
+     */
+    const handled = new Set<string>();
 
-    for (const row of rows as any[]) {
-      result.scanned += 1;
-      const orderDoc = toPlain(row);
-      const orderNumber = String(
-        orderDoc.order_number || orderDoc.orderNumber || orderDoc.id || ''
-      ).replace(/^#/, '').trim();
-      if (!orderNumber) continue;
+    for (const db of dbs) {
+      const rows = await db
+        .collection('orders')
+        .find({
+          $and: [
+            { $or: identityOr },
+            { $or: [{ payment_status: /^paid$/i }, { paymentStatus: /^paid$/i }] },
+            { status: { $not: /^(cancelled|canceled|refunded|void|voided)$/i } },
+          ],
+        })
+        .limit(limit)
+        .toArray()
+        .catch(() => [] as any[]);
 
-      /*
-       * SKIP WHAT THIS PASS MUST NOT TOUCH:
-       *
-       *   • COD — its cash is settled by `cod_ledger` on delivery (courier fee
-       *     deducted). Crediting the order total here would pay the vendor the
-       *     courier's cut a second time.
-       *   • A MASTER basket — the payable lives on each vendor CHILD, so paying
-       *     the master as well would double-credit the whole basket.
-       */
-      const paymentMethod = String(orderDoc.payment_method || orderDoc.paymentMethod || '').toLowerCase();
-      if (paymentMethod.includes('cod') || paymentMethod.includes('cash')) continue;
-      const isMaster = orderDoc.order_type === 'master' ||
-        (Array.isArray(orderDoc.child_order_ids) && orderDoc.child_order_ids.length > 0) ||
-        (Array.isArray(orderDoc.childOrderIds) && orderDoc.childOrderIds.length > 0);
-      if (isMaster) continue;
+      for (const row of rows as any[]) {
+        result.scanned += 1;
+        const orderDoc = toPlain(row);
+        const orderNumber = String(
+          orderDoc.order_number || orderDoc.orderNumber || orderDoc.id || ''
+        ).replace(/^#/, '').trim();
+        if (!orderNumber) continue;
+        // Already settled from another cluster's copy of this same order.
+        if (handled.has(orderNumber)) continue;
+        handled.add(orderNumber);
 
-      // Settlements are keyed by vendor + order; probe every id spelling. Each
-      // clause is scoped to THIS order so a sibling child of the same basket can
-      // never make this one look settled.
-      const settlementFilters: Record<string, any>[] = [
-        { order_number: orderNumber, vendor_id: vendorId },
-        { order_key: `${vendorId}::${orderNumber}` },
-        ...(String(vendorRef) !== vendorId ? [{ order_number: orderNumber, vendor_id: String(vendorRef) }] : []),
-        ...(slug ? [{ order_number: orderNumber, store_slug: slug }] : []),
-        ...(orderDoc.id ? [{ child_order_id: String(orderDoc.id), vendor_id: vendorId }] : []),
-      ];
+        /*
+         * SKIP WHAT THIS PASS MUST NOT TOUCH:
+         *
+         *   • A TRUE COD parcel — its cash is settled by `cod_ledger` on delivery
+         *     (courier fee deducted). Crediting the order total here would pay the
+         *     vendor the courier's cut a second time. See `isTrueCodOrder`: a mere
+         *     'COD' label with no cash evidence is the checkout default and IS
+         *     credited.
+         *   • A MASTER basket — the payable lives on each vendor CHILD, so paying
+         *     the master as well would double-credit the whole basket.
+         */
+        const paymentMethod = String(orderDoc.payment_method || orderDoc.paymentMethod || '').toLowerCase();
+        const labelledCod = paymentMethod.includes('cod') || paymentMethod.includes('cash');
+        if (labelledCod && (!hasPrepaidEvidence(orderDoc) || isTrueCodOrder(orderDoc))) continue;
+        const isMaster = orderDoc.order_type === 'master' ||
+          (Array.isArray(orderDoc.child_order_ids) && orderDoc.child_order_ids.length > 0) ||
+          (Array.isArray(orderDoc.childOrderIds) && orderDoc.childOrderIds.length > 0);
+        if (isMaster) continue;
 
-      const totalBDT = round2(Math.max(0, toNum(
-        orderDoc.totalBDT ?? orderDoc.total_price ?? orderDoc.total_bdt ??
-        orderDoc.cod_amount ?? orderDoc.total, 0
-      )));
-      const commissionBDT = round2(Math.max(0, toNum(orderDoc.commission_bdt ?? orderDoc.commissionBdt, 0)));
-      const payable = round2(Math.max(
-        0,
-        toNum(orderDoc.vendor_net_payable_bdt ?? orderDoc.vendorNetPayableBdt, totalBDT - commissionBDT)
-      ));
-      if (payable <= 0) continue;
+        // Settlements are keyed by vendor + order; probe every id spelling that
+        // this order and this store can be known by (see settlementClausesForOrder).
+        const settlementFilters = settlementClausesForOrder(orderNumber, identities, orderDoc);
 
-      const settlement = await creditedAmountForOrder(db, settlementFilters);
-      // A COD settlement or an explicit "already released" flag is final.
-      if (settlement.settled) continue;
-      let credited = settlement.credited;
-      if (String(orderDoc.wallet_credited || '').trim().toLowerCase() === 'true') {
-        credited = Math.max(credited, payable);
+        const totalBDT = round2(Math.max(0, toNum(
+          orderDoc.totalBDT ?? orderDoc.total_price ?? orderDoc.total_bdt ??
+          orderDoc.cod_amount ?? orderDoc.total, 0
+        )));
+        const commissionBDT = round2(Math.max(0, toNum(orderDoc.commission_bdt ?? orderDoc.commissionBdt, 0)));
+        const payable = round2(Math.max(
+          0,
+          toNum(orderDoc.vendor_net_payable_bdt ?? orderDoc.vendorNetPayableBdt, totalBDT - commissionBDT)
+        ));
+        if (payable <= 0) continue;
+
+        const settlement = await creditedAmountForOrder(db, settlementFilters);
+        // A COD settlement or an explicit "already released" flag is final.
+        if (settlement.settled) continue;
+        let credited = settlement.credited;
+        if (String(orderDoc.wallet_credited || '').trim().toLowerCase() === 'true') {
+          credited = Math.max(credited, payable);
+        }
+
+        const gap = round2(payable - credited);
+        if (gap <= 0.004) continue; // already settled — nothing to do
+
+        // Credited on the SAME cluster the order was read from (see
+        // `creditVendorWallet`), so the real wallet is the one that grows.
+        const wallet = await creditVendorWallet(
+          {
+            vendorId,
+            ...(slug ? { storeSlug: slug } : {}),
+            ...(String(orderDoc.vendor_name || orderDoc.store_name || identities.name || '').trim()
+              ? { vendorName: String(orderDoc.vendor_name || orderDoc.store_name || identities.name).trim() }
+              : {}),
+          },
+          { available: gap, gross: totalBDT, commission: commissionBDT, courierFee: 0, orderNumber },
+          db
+        );
+        if (!wallet) continue;
+
+        result.creditedCount += 1;
+        result.creditedBDT = round2(result.creditedBDT + gap);
+
+        await db.collection('orders').updateOne(
+          { _id: row._id },
+          { $set: { wallet_credited: true, wallet_credited_at: new Date(), updated_at: new Date() } }
+        ).catch(() => undefined);
+        console.log('[COD] wallet backfilled from a Paid order', { orderNumber, vendor: slug || vendorId, gap });
       }
-
-      const gap = round2(payable - credited);
-      if (gap <= 0.004) continue; // already settled — nothing to do
-
-      const wallet = await creditVendorWallet(
-        {
-          vendorId,
-          ...(slug ? { storeSlug: slug } : {}),
-          ...(String(orderDoc.vendor_name || orderDoc.store_name || '').trim()
-            ? { vendorName: String(orderDoc.vendor_name || orderDoc.store_name).trim() }
-            : {}),
-        },
-        { available: gap, gross: totalBDT, commission: commissionBDT, courierFee: 0, orderNumber }
-      );
-      if (!wallet) continue;
-
-      result.creditedCount += 1;
-      result.creditedBDT = round2(result.creditedBDT + gap);
-
-      await db.collection('orders').updateOne(
-        { _id: row._id },
-        { $set: { wallet_credited: true, wallet_credited_at: new Date(), updated_at: new Date() } }
-      ).catch(() => undefined);
-      console.log('[COD] wallet backfilled from a Paid order', { orderNumber, vendor: slug || vendorId, gap });
     }
 
     return { ...result, ok: true };
@@ -638,41 +843,70 @@ export async function reconcileVendorWalletWithPaidOrders(
 /** Read (or lazily create) one vendor's wallet. */
 export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean; wallet: Record<string, any> | null; error?: string }> {
   try {
-    const db = await getMongoDb(DB_NAME);
-    if (!db) return { ok: false, wallet: null, error: 'The database is unavailable.' };
     if (!vendorRef) return { ok: false, wallet: null, error: 'A vendor id or store slug is required.' };
 
+    /*
+     * READ FROM EVERY CLUSTER THAT COULD HOLD THIS MERCHANT.
+     *
+     * `getMongoDb()` alone answers from the shared pool, and that pool fails
+     * over to MONGODB_URI_2 — a DIFFERENT cluster with no orders and no wallet.
+     * A merchant whose orders live on the primary then got a perfectly valid
+     * HTTP 200 carrying `available_bdt: 0`, because the only database this
+     * function ever asked held nothing. The first handle that actually HAS a
+     * wallet wins; if none has one, the summed orders decision below applies.
+     */
+    const dbs = await getTenantDbs(DB_NAME);
+    if (!dbs.length) return { ok: false, wallet: null, error: 'The database is unavailable.' };
+
+    const identities = await resolveVendorIdentities(vendorRef);
     const ref = await resolveStoreRef(vendorRef);
-    const or = [
-      { vendor_id: String(vendorRef) },
-      ...(ref.storeId ? [{ vendor_id: ref.storeId }] : []),
-      ...(ref.slug ? [{ store_slug: ref.slug }] : []),
-    ];
+    const or = identityClauses(identities);
+    if (ref.slug) or.push({ store_slug: ref.slug }, { storeSlug: ref.slug });
 
     /*
-     * SELF-HEAL BEFORE READING.
+     * SELF-HEAL BEFORE READING — EXACTLY ONCE.
      *
      * An order can be Paid without its approval having credited this wallet
      * (the credit used to live only on one approval path), which is exactly the
      * "orders say Paid, wallet says ৳0" state. `reconcileVendorWalletWithPaidOrders`
-     * credits only the MISSING difference — idempotent and never above the
-     * order's payable — so running it on a read is safe: the first read after a
-     * missing credit fixes the balance, and every later read adds nothing.
+     * expands the reference to every id/slug spelling itself and credits only the
+     * MISSING difference, so a single call covers the merchant.
+     *
+     * It must be ONE call, not one per identity: two concurrent reconciles could
+     * both read the same gap and both credit it. `reconcileInFlight` additionally
+     * collapses parallel wallet reads (the UI asks for wallet + payouts together)
+     * onto one pass.
      */
-    await Promise.all(
-      Array.from(new Set([String(vendorRef), ref.storeId ? String(ref.storeId) : ''].filter(Boolean))).map((candidate) =>
-        reconcileVendorWalletWithPaidOrders(candidate).catch(() => undefined)
-      )
-    );
+    const inFlightKey = String(vendorRef).toLowerCase();
+    const existingRun = reconcileInFlight.get(inFlightKey);
+    if (existingRun) {
+      await existingRun.catch(() => undefined);
+    } else {
+      const run = reconcileVendorWalletWithPaidOrders(vendorRef).catch(() => undefined);
+      reconcileInFlight.set(inFlightKey, run as Promise<any>);
+      try {
+        await run;
+      } finally {
+        reconcileInFlight.delete(inFlightKey);
+      }
+    }
 
-    const existing = await db.collection(VENDOR_WALLETS_COLLECTION).findOne({ $or: or }).catch(() => null);
-    if (existing) return { ok: true, wallet: toPlain(existing) };
+    let best: Record<string, any> | null = null;
+    for (const db of dbs) {
+      const wallet = await db.collection(VENDOR_WALLETS_COLLECTION).findOne({ $or: or }).catch(() => null);
+      if (!wallet) continue;
+      const plain = toPlain(wallet);
+      // Prefer the wallet that actually carries money (or history); an empty
+      // stray document must not hide a funded one on another cluster.
+      if (!best || toNum(plain?.lifetime_credit_bdt) > toNum(best?.lifetime_credit_bdt)) best = plain;
+    }
+    if (best) return { ok: true, wallet: best };
 
     // No settlement yet — answer with a zeroed wallet rather than a 404 so the
     // dashboard can render "৳0 available" instead of an error state.
     const empty = {
-      vendor_id: ref.storeId || String(vendorRef),
-      store_slug: ref.slug || null,
+      vendor_id: identities.ids[0] || String(vendorRef),
+      store_slug: identities.slugs[0] || ref.slug || null,
       available_bdt: 0,
       pending_payout_bdt: 0,
       lifetime_credit_bdt: 0,
