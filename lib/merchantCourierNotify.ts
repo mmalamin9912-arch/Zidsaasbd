@@ -46,8 +46,8 @@ export interface CourierNotificationInput {
   courierName?: string;
   /** Note / issue / cancellation reason typed by the admin. */
   note?: string;
-  /** Set for a label upload rather than a status change. */
-  label?: { filename: string; mimeType: string; base64: string; note?: string } | null;
+  /** Set for a label upload or message dispatch with label. */
+  label?: { filename: string; mimeType: string; base64?: string; note?: string; url?: string } | null;
 }
 
 export interface CourierNotificationResult {
@@ -104,6 +104,7 @@ export function buildCourierMessage(input: CourierNotificationInput, contact: Me
     lines.push('');
     lines.push(`📎 Label attached: ${input.label.filename}`);
     if (input.label.note) lines.push(`Label note: ${input.label.note}`);
+    if (input.label.url) lines.push(`🔗 View/Download Token: ${input.label.url}`);
   }
 
   lines.push('');
@@ -135,7 +136,7 @@ function buildCourierHtml(input: CourierNotificationInput, contact: MerchantCont
     row('Courier', input.courierName || '') +
     row('Tracking / Token', input.trackingCode || '') +
     row(problem ? 'Reason' : 'Note', input.note || '') +
-    row('Label', input.label ? input.label.filename : '') +
+    row('Label', input.label ? (input.label.url ? `<a href="${esc(input.label.url)}" style="color:#0ea5e9;text-decoration:underline">${esc(input.label.filename)}</a>` : input.label.filename) : '') +
     `</table>` +
     `<p style="margin-top:20px"><a href="${esc(dashboardUrl)}" style="background:#0f172a;color:#fff;` +
     `padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;font-size:13px">Open in dashboard</a></p>` +

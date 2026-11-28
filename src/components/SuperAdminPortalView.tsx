@@ -394,6 +394,29 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
   /** Order id whose courier status is currently being saved. */
   const [updatingStatus, setUpdatingStatus] = useState<string | null>(null);
 
+  // Tracking ID inline editing state
+  const [editingTrackingId, setEditingTrackingId] = useState<string | null>(null);
+  const [trackingInputValue, setTrackingInputValue] = useState('');
+  const [savingTracking, setSavingTracking] = useState<string | null>(null);
+
+  // Send Message / Notify Modal state
+  const [showMessageModal, setShowMessageModal] = useState<{
+    order: any;
+    orderId: string;
+    orderNumber: string;
+    storeName: string;
+    storeSlug: string;
+    merchantPhone: string;
+    merchantEmail: string;
+    status: string;
+    trackingCode: string;
+    note: string;
+    selectedLabelId: string;
+    labels: any[];
+  } | null>(null);
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [messageResultDirectLink, setMessageResultDirectLink] = useState<string | null>(null);
+
   /**
    * Save a new courier / pickup status for one order.
    *
@@ -556,6 +579,102 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
     }
   }
 
+  // Save tracking ID
+  async function saveTrackingId(order: any, nextTracking: string) {
+    const orderId = String(order.id || order.order_number || '').trim();
+    if (!orderId) return;
+    setSavingTracking(orderId);
+    try {
+      const res = await fetch(`/api/admin/courier-orders/${encodeURIComponent(orderId)}/tracking`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          tracking_id: nextTracking.trim(),
+          store_slug: order.store_slug || '',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `Could not save tracking ID (HTTP ${res.status}).`);
+      }
+      toastSuccess(`Tracking ID saved: ${nextTracking.trim() || 'Cleared'}`);
+      setEditingTrackingId(null);
+      setTrackingInputValue('');
+      onRefresh();
+    } catch (err: any) {
+      toastError(err?.message || 'Failed to save tracking ID.');
+    } finally {
+      setSavingTracking(null);
+    }
+  }
+
+  // Open Send Message Modal
+  function openMessageModal(order: any) {
+    const orderId = String(order.id || order.order_number || '');
+    const currentStatus = order.courier_status || (order.courier_booked ? 'dispatched' : 'sent_to_courier');
+    const trackingCode = order.tracking_id || order.courier_tracking || order.trackingCode || '';
+    const labels = Array.isArray(order.courier_labels) ? order.courier_labels : [];
+    const latestLabelId = labels.length > 0 ? (labels[labels.length - 1]?.id || '') : '';
+
+    setShowMessageModal({
+      order,
+      orderId,
+      orderNumber: order.order_number || orderId,
+      storeName: order.store_name || order.storeName || order.vendor_name || 'Store',
+      storeSlug: order.store_slug || '',
+      merchantPhone: order.merchant_phone || order.merchantPhone || '',
+      merchantEmail: order.merchant_email || order.merchantEmail || '',
+      status: currentStatus,
+      trackingCode,
+      note: '',
+      selectedLabelId: latestLabelId,
+      labels,
+    });
+    setMessageResultDirectLink(null);
+  }
+
+  // Send message to merchant via email & WhatsApp
+  async function sendMessageToMerchant() {
+    if (!showMessageModal) return;
+    const { orderId, status, trackingCode, note, selectedLabelId, storeSlug, merchantPhone } = showMessageModal;
+    setSendingMessage(true);
+    try {
+      const res = await fetch(`/api/admin/courier-orders/${encodeURIComponent(orderId)}/notify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          status,
+          tracking_id: trackingCode,
+          note,
+          label_id: selectedLabelId,
+          store_slug: storeSlug,
+          merchant_phone: merchantPhone,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || `Failed to send update (HTTP ${res.status}).`);
+      }
+
+      if (data?.directLink) {
+        setMessageResultDirectLink(data.directLink);
+      }
+
+      let infoParts: string[] = [];
+      if (data?.merchant_notify?.email?.ok) infoParts.push('Email sent');
+      if (data?.merchant_notify?.whatsapp?.ok) infoParts.push('WhatsApp sent');
+      if (data?.label_attached) infoParts.push('Label attached');
+
+      const outcomeText = infoParts.length > 0 ? infoParts.join(', ') : 'Notification processed';
+      toastSuccess(`${outcomeText}!`);
+      onRefresh();
+    } catch (err: any) {
+      toastError(err?.message || 'Could not send merchant notification.');
+    } finally {
+      setSendingMessage(false);
+    }
+  }
+
   // Fetch labels for an order
   async function fetchLabels(orderId: string): Promise<any[]> {
     try {
@@ -670,12 +789,13 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
               <th className="p-3.5 font-black text-[10px]">Ordered</th>
               <th className="p-3.5 font-black text-[10px]">Status</th>
               <th className="p-3.5 font-black text-[10px]">Labels</th>
+              <th className="p-3.5 font-black text-[10px]">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[#2E3548]">
             {courierOrders.length === 0 ? (
               <tr>
-                <td colSpan={9} className="p-12 text-center text-slate-500">
+                <td colSpan={10} className="p-12 text-center text-slate-500">
                   <div className="w-12 h-12 bg-[#202533] rounded-full flex items-center justify-center mx-auto mb-3 text-slate-600">
                     <ShoppingBag className="w-6 h-6" />
                   </div>
@@ -693,11 +813,35 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                   </td>
                   <td className="p-3.5">
                     <div className="font-semibold text-slate-200">{order.store_name || order.storeName || order.vendor_name || 'Store'}</div>
-                    {(order.courier_last_error || order.needs_manual_entry) && (
-                      <div className="text-[10px] text-amber-400/90 max-w-[200px] truncate" title={order.courier_last_error || 'Manual entry required'}>
-                        {order.courier_last_error ? `⚠ ${order.courier_last_error}` : '⚠ Manual entry required'}
-                      </div>
-                    )}
+                    {(() => {
+                      /* Suppress stale courier errors (e.g. 401 Account not active) when
+                         the order already has a tracking ID, an active courier status, or
+                         belongs to MyStore. The backend also clears these, but the
+                         client-side guard prevents flicker before the next data refresh. */
+                      const rawErr = order.courier_last_error || '';
+                      const isStale401 = /account is not active|401/i.test(rawErr);
+                      const hasTracking = !!(order.tracking_id || order.courier_tracking || order.trackingCode);
+                      const activeStatuses = ['dispatched', 'sent_to_courier', 'pickup_confirmed', 'in_transit', 'delivered'];
+                      const isActive = activeStatuses.includes(String(order.courier_status || '').toLowerCase());
+                      const isMyStore = String(order.store_slug || order.storeSlug || '').toLowerCase() === 'mystore';
+                      const showError = rawErr && !(isStale401 && (hasTracking || isActive || isMyStore));
+                      const showManual = !showError && order.needs_manual_entry && !hasTracking && !isActive;
+                      if (showError) {
+                        return (
+                          <div className="text-[10px] text-amber-400/90 max-w-[200px] truncate" title={rawErr}>
+                            ⚠ {rawErr}
+                          </div>
+                        );
+                      }
+                      if (showManual) {
+                        return (
+                          <div className="text-[10px] text-amber-400/90 max-w-[200px] truncate" title="Manual entry required">
+                            ⚠ Manual entry required
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
                     {order.store_slug && (
                       <div className="text-[10px] text-slate-500 truncate max-w-[180px]">{order.store_slug}</div>
                     )}
@@ -718,13 +862,67 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                     {order.paymentMethod || order.payment_method || '—'}
                   </td>
                   <td className="p-3.5">
-                    {order.tracking_id || order.courier_tracking || order.trackingCode ? (
-                      <span className="font-mono bg-[#181B26] text-emerald-400 px-2 py-1 rounded border border-[#2E3548] font-bold text-xs">
-                        {order.tracking_id || order.courier_tracking || order.trackingCode}
-                      </span>
-                    ) : (
-                      <span className="text-slate-500 text-xs">—</span>
-                    )}
+                    {(() => {
+                      const oid = String(order.id || order.order_number || '');
+                      const currentTracking = order.tracking_id || order.courier_tracking || order.trackingCode || '';
+                      const isEditing = editingTrackingId === oid;
+                      const isSaving = savingTracking === oid;
+
+                      if (isEditing) {
+                        return (
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="text"
+                              value={trackingInputValue}
+                              onChange={(e) => setTrackingInputValue(e.target.value)}
+                              placeholder="Enter tracking ID"
+                              disabled={isSaving}
+                              autoFocus
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') saveTrackingId(order, trackingInputValue);
+                                if (e.key === 'Escape') { setEditingTrackingId(null); setTrackingInputValue(''); }
+                              }}
+                              className="bg-[#101420] border border-emerald-500/50 text-emerald-400 font-mono text-xs px-2 py-1 rounded w-[120px] outline-none focus:border-emerald-400"
+                            />
+                            <button
+                              onClick={() => saveTrackingId(order, trackingInputValue)}
+                              disabled={isSaving}
+                              className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 p-1 rounded disabled:opacity-50 cursor-pointer"
+                              title="Save Tracking ID"
+                            >
+                              {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                            </button>
+                            <button
+                              onClick={() => { setEditingTrackingId(null); setTrackingInputValue(''); }}
+                              disabled={isSaving}
+                              className="bg-slate-600 hover:bg-slate-500 text-white p-1 rounded disabled:opacity-50 cursor-pointer"
+                              title="Cancel"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="flex items-center gap-1.5 group">
+                          {currentTracking ? (
+                            <span className="font-mono bg-[#181B26] text-emerald-400 px-2 py-1 rounded border border-[#2E3548] font-bold text-xs">
+                              {currentTracking}
+                            </span>
+                          ) : (
+                            <span className="text-slate-500 text-xs">—</span>
+                          )}
+                          <button
+                            onClick={() => { setEditingTrackingId(oid); setTrackingInputValue(currentTracking); }}
+                            className="opacity-0 group-hover:opacity-100 bg-[#202533] hover:bg-[#282E3F] text-slate-300 border border-[#3A435E] p-1 rounded transition cursor-pointer"
+                            title={currentTracking ? 'Edit Tracking ID' : 'Add Tracking ID'}
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="p-3.5 text-slate-400 text-xs font-mono">
                     {new Date(order.createdAt || order.created_at || 0).toLocaleDateString() || '—'}
@@ -768,6 +966,17 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                         )}
                       </button>
                     </div>
+                  </td>
+                  {/* Actions column — Send Message to Merchant */}
+                  <td className="p-3.5">
+                    <button
+                      onClick={() => openMessageModal(order)}
+                      className="bg-sky-600 hover:bg-sky-500 text-white border border-sky-500/50 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+                      title="Send status update with label to merchant via Email & WhatsApp"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Send Message</span>
+                    </button>
                   </td>
                 </tr>
               ))
@@ -850,6 +1059,188 @@ function CourierOrdersList({ courierOrders, courierOrdersLoading, courierOrdersE
                   <>
                     <FileText className="w-4 h-4" />
                     <span>Upload Label</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Send Message to Merchant Modal */}
+      {showMessageModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => { setShowMessageModal(null); setMessageResultDirectLink(null); }}>
+          <div className="bg-[#181B26] border border-[#2E3548] rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Send className="w-5 h-5 text-sky-400" />
+                <span>Send Message to Merchant</span>
+              </h3>
+              <button onClick={() => { setShowMessageModal(null); setMessageResultDirectLink(null); }} className="text-slate-400 hover:text-white p-1 rounded">
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Order info */}
+            <div className="bg-[#101420] border border-[#2E3548] rounded-xl p-3 mb-4 space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-slate-400">Order</span>
+                <span className="font-mono text-white font-bold">{showMessageModal.orderNumber}</span>
+              </div>
+              <div className="flex justify-between text-xs">
+                <span className="text-slate-400">Store</span>
+                <span className="text-white">{showMessageModal.storeName}</span>
+              </div>
+              {showMessageModal.merchantPhone && (
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-400">Phone / WhatsApp</span>
+                  <span className="text-sky-300 font-mono">{showMessageModal.merchantPhone}</span>
+                </div>
+              )}
+              {showMessageModal.merchantEmail && (
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-400">Email</span>
+                  <span className="text-sky-300">{showMessageModal.merchantEmail}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Status */}
+            <div className="mb-3">
+              <label className="block text-xs text-slate-400 mb-1.5">Status</label>
+              <select
+                value={showMessageModal.status}
+                onChange={(e) => setShowMessageModal({ ...showMessageModal, status: e.target.value })}
+                className="w-full bg-[#101420] border border-[#2E3548] rounded-xl px-3 py-2 text-white text-xs font-bold uppercase tracking-wider outline-none focus:border-sky-500"
+              >
+                {COURIER_STATUS_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value} className="bg-[#181B26]">
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Tracking Code */}
+            <div className="mb-3">
+              <label className="block text-xs text-slate-400 mb-1.5">Tracking / Token Code</label>
+              <input
+                type="text"
+                value={showMessageModal.trackingCode}
+                onChange={(e) => setShowMessageModal({ ...showMessageModal, trackingCode: e.target.value })}
+                placeholder="Enter tracking ID or token code"
+                className="w-full bg-[#101420] border border-[#2E3548] rounded-xl px-3 py-2 text-emerald-400 font-mono text-xs outline-none focus:border-sky-500"
+              />
+            </div>
+
+            {/* Custom Note */}
+            <div className="mb-3">
+              <label className="block text-xs text-slate-400 mb-1.5">Custom Note (optional)</label>
+              <textarea
+                value={showMessageModal.note}
+                onChange={(e) => setShowMessageModal({ ...showMessageModal, note: e.target.value })}
+                placeholder="e.g. Your parcel is on its way! Expected delivery by tomorrow."
+                rows={2}
+                className="w-full bg-[#101420] border border-[#2E3548] rounded-xl px-3 py-2 text-white text-xs outline-none focus:border-sky-500 resize-none"
+              />
+            </div>
+
+            {/* Label / Token attachment */}
+            <div className="mb-4">
+              <label className="block text-xs text-slate-400 mb-1.5">Attach Token / Label</label>
+              {showMessageModal.labels.length > 0 ? (
+                <div className="space-y-1.5">
+                  {showMessageModal.labels.map((label: any) => (
+                    <label key={label.id || label.filename} className="flex items-center gap-2 bg-[#101420] border border-[#2E3548] rounded-lg p-2 cursor-pointer hover:border-sky-500/50 transition">
+                      <input
+                        type="radio"
+                        name="msgLabel"
+                        checked={showMessageModal.selectedLabelId === (label.id || label.filename)}
+                        onChange={() => setShowMessageModal({ ...showMessageModal, selectedLabelId: label.id || label.filename })}
+                        className="accent-sky-500"
+                      />
+                      {label.mimeType === 'application/pdf' ? (
+                        <FileText className="w-4 h-4 text-red-400 flex-shrink-0" />
+                      ) : (
+                        label.file ? (
+                          <img src={`data:${label.mimeType};base64,${label.file}`} alt={label.filename} className="w-8 h-8 object-cover rounded flex-shrink-0" />
+                        ) : (
+                          <FileText className="w-4 h-4 text-slate-500 flex-shrink-0" />
+                        )
+                      )}
+                      <span className="text-xs text-slate-300 truncate">{label.filename}</span>
+                      {label.note && <span className="text-[9px] text-slate-500 truncate">({label.note})</span>}
+                    </label>
+                  ))}
+                  <label className="flex items-center gap-2 bg-[#101420] border border-[#2E3548] rounded-lg p-2 cursor-pointer hover:border-sky-500/50 transition">
+                    <input
+                      type="radio"
+                      name="msgLabel"
+                      checked={!showMessageModal.selectedLabelId}
+                      onChange={() => setShowMessageModal({ ...showMessageModal, selectedLabelId: '' })}
+                      className="accent-sky-500"
+                    />
+                    <span className="text-xs text-slate-400">No label / token attachment</span>
+                  </label>
+                </div>
+              ) : (
+                <div className="text-xs text-slate-500 bg-[#101420] border border-[#2E3548] rounded-lg p-3">
+                  No courier labels uploaded for this order. Upload a label first from the Labels column.
+                </div>
+              )}
+            </div>
+
+            {/* WhatsApp direct link result */}
+            {messageResultDirectLink && (
+              <div className="mb-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-3">
+                <p className="text-xs text-emerald-400 font-bold mb-2 flex items-center gap-1.5">
+                  <MessageCircle className="w-4 h-4" />
+                  One-click WhatsApp (wa.me):
+                </p>
+                <a
+                  href={messageResultDirectLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-sky-300 underline break-all hover:text-sky-200"
+                >
+                  {messageResultDirectLink.length > 100 ? messageResultDirectLink.slice(0, 100) + '…' : messageResultDirectLink}
+                </a>
+                <div className="mt-2">
+                  <a
+                    href={messageResultDirectLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-4 py-2 rounded-xl text-xs transition"
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                    Open WhatsApp Now
+                  </a>
+                </div>
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="flex justify-end gap-2 mt-2">
+              <button
+                onClick={() => { setShowMessageModal(null); setMessageResultDirectLink(null); }}
+                className="bg-slate-700 hover:bg-slate-600 text-white font-bold px-4 py-2 rounded-xl text-xs transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={sendMessageToMerchant}
+                disabled={sendingMessage}
+                className="bg-sky-600 hover:bg-sky-500 text-white font-bold px-4 py-2 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {sendingMessage ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Sending…</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-4 h-4" />
+                    <span>Send Email & WhatsApp</span>
                   </>
                 )}
               </button>

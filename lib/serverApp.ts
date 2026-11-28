@@ -302,6 +302,7 @@ import {
   normaliseWhatsAppNumber,
   courierStatusLabel,
   whatsAppDirectLink,
+  buildCourierMessage,
   type MerchantContact,
   type CourierNotificationResult,
 } from './merchantCourierNotify.js';
@@ -8940,7 +8941,7 @@ async function notifyMerchantAboutCourierChange(
     trackingCode?: string;
     courierName?: string;
     note?: string;
-    label?: { filename: string; mimeType: string; base64: string; note?: string } | null;
+    label?: { filename: string; mimeType: string; base64?: string; note?: string; url?: string } | null;
   },
 ): Promise<CourierNotificationResult> {
   try {
@@ -26921,6 +26922,23 @@ app.get('/api/admin/courier-orders', async (req, res) => {
          * snake_case columns — so it used to render a blank customer and ৳0.
          */
         const amount = Number(order.amount ?? order.total_price ?? order.totalBDT ?? order.cod_amount ?? 0) || 0;
+        const trackingId =
+          order.tracking_id || order.courier_tracking || order.tracking_code ||
+          order.trackingCode || order.consignment_id || '';
+        const courierStatus =
+          order.courier_status ||
+          (order.courier_booked === true ? 'booked' : order.courier_label ? 'dispatched' : 'sent_to_courier');
+
+        // Clean stale courier errors (e.g. 401 - Account is not active) if tracking is present, active status or mystore
+        let courierLastError = order.courier_last_error || '';
+        let needsManualEntry = Boolean(order.needs_manual_entry);
+        const isStaleError = /account is not active|401/i.test(courierLastError);
+        const isActiveStatus = ['dispatched', 'sent_to_courier', 'pickup_confirmed', 'in_transit', 'delivered'].includes(String(courierStatus).toLowerCase());
+        if (isStaleError && (trackingId || isActiveStatus || String(storeSlug).toLowerCase() === 'mystore')) {
+          courierLastError = '';
+          needsManualEntry = false;
+        }
+
         return {
           ...order,
           merchant_phone: merchantPhone,
@@ -26941,17 +26959,15 @@ app.get('/api/admin/courier-orders', async (req, res) => {
           totalBDT: amount,
           paymentMethod: order.payment_method || order.paymentMethod || 'COD',
           paymentStatus: order.payment_status || order.paymentStatus || '',
+          courier_last_error: courierLastError,
+          needs_manual_entry: needsManualEntry,
           /*
            * A ledger row written by an older build may have no status yet; it
            * is still a real dispatch attempt, so it must not fall back to a
            * value the admin dropdown cannot display.
            */
-          courier_status:
-            order.courier_status ||
-            (order.courier_booked === true ? 'booked' : order.courier_label ? 'dispatched' : 'sent_to_courier'),
-          tracking_id:
-            order.tracking_id || order.courier_tracking || order.tracking_code ||
-            order.trackingCode || order.consignment_id || '',
+          courier_status: courierStatus,
+          tracking_id: trackingId,
           createdAt: order.created_at || order.createdAt || new Date().toISOString(),
         };
       })
@@ -27624,6 +27640,329 @@ app.delete('/api/admin/courier-orders/:orderId/label/:labelId', async (req, res)
   } catch (err: any) {
     console.error('[Server] DELETE /api/admin/courier-orders/:orderId/label/:labelId error:', err);
     return res.status(500).json({ ok: false, error: err?.message || 'Could not delete label.' });
+  }
+});
+
+/**
+ * GET /api/courier-labels/:orderId/:labelId
+ *
+ * Public accessible download/view endpoint for a courier label (image or PDF).
+ * Included in merchant WhatsApp and email links so the merchant can view/download
+ * the token/label file on any device without logging in.
+ */
+app.get('/api/courier-labels/:orderId/:labelId', async (req, res) => {
+  try {
+    const { orderId, labelId } = req.params;
+    let labelRecord: any = null;
+
+    // 1. Try Supabase
+    const supabaseCfg = readSupabaseEnv();
+    if (supabaseCfg) {
+      const found = await findSupabaseLedgerRow(supabaseCfg, orderId);
+      const labels = found.row?.courier_labels;
+      let parsedLabels = Array.isArray(labels) ? labels : [];
+      if (typeof labels === 'string') {
+        try { parsedLabels = JSON.parse(labels); } catch {}
+      }
+      if (Array.isArray(parsedLabels)) {
+        labelRecord = parsedLabels.find((l: any) => String(l?.id) === String(labelId) || String(l?.filename) === String(labelId));
+      }
+    }
+
+    // 2. Try MongoDB if not found in Supabase
+    if (!labelRecord) {
+      try {
+        await connectToMongoDB();
+        if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+          const target = await resolveCourierOrderTarget(orderId);
+          if (target && Array.isArray(target.doc?.courier_labels)) {
+            labelRecord = target.doc.courier_labels.find((l: any) => String(l?.id) === String(labelId) || String(l?.filename) === String(labelId));
+          }
+          if (!labelRecord) {
+            const ledgerKey = courierOrderKey(orderId, target?.doc?.order_number, target?.doc?.orderNumber);
+            const ledgerDoc = await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any)
+              .findOne({ _id: ledgerKey as any }, { projection: { courier_labels: 1 } })
+              .catch(() => null);
+            if (ledgerDoc && Array.isArray(ledgerDoc.courier_labels)) {
+              labelRecord = ledgerDoc.courier_labels.find((l: any) => String(l?.id) === String(labelId) || String(l?.filename) === String(labelId));
+            }
+          }
+        }
+      } catch (dbErr: any) {
+        console.warn('[CourierLabel] Mongo lookup error:', dbErr?.message || dbErr);
+      }
+    }
+
+    if (!labelRecord || !labelRecord.file) {
+      return res.status(404).send('Courier label not found or empty.');
+    }
+
+    const mimeType = labelRecord.mimeType || 'application/octet-stream';
+    const filename = labelRecord.filename || `courier-label-${labelId}`;
+    const fileBuffer = Buffer.from(labelRecord.file, 'base64');
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Length', String(fileBuffer.length));
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.end(fileBuffer);
+  } catch (err: any) {
+    console.error('[Server] GET /api/courier-labels/:orderId/:labelId error:', err);
+    return res.status(500).send('Error retrieving courier label.');
+  }
+});
+
+/**
+ * PATCH /api/admin/courier-orders/:orderId/tracking
+ *
+ * Explicitly save and confirm tracking ID / token for an order.
+ * Updates MongoDB orders, courier_orders ledger, Supabase, and recentOrdersCache.
+ * Clears stale courier errors (e.g. 401 - Account is not active) and needs_manual_entry.
+ */
+app.patch('/api/admin/courier-orders/:orderId/tracking', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { orderId } = req.params;
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const trackingCode = String(body.tracking_id || body.tracking_code || body.trackingCode || '').trim();
+
+    if (!orderId) {
+      return res.status(400).json({ ok: false, error: 'Order ID is required.' });
+    }
+
+    const updateFields: Record<string, any> = {
+      tracking_id: trackingCode,
+      tracking_code: trackingCode,
+      trackingCode: trackingCode,
+      courier_tracking: trackingCode,
+      courier_tracking_id: trackingCode,
+      consignment_id: trackingCode,
+      courier_last_error: '',
+      needs_manual_entry: false,
+      updated_at: new Date(),
+    };
+
+    // 1. Update in MongoDB orders
+    const mongoResult = await updateOrderFields(orderId, updateFields, {
+      store_slug: body.store_slug || body.storeSlug || '',
+    });
+
+    // 2. Mirror into Supabase ledger
+    let ledgerMirrored = false;
+    const ledgerPatch: Record<string, any> = {
+      tracking_id: trackingCode,
+      courier_tracking: trackingCode,
+      courier_last_error: '',
+      needs_manual_entry: false,
+      updated_at: new Date().toISOString(),
+    };
+
+    const supabaseCfg = readSupabaseEnv();
+    if (supabaseCfg) {
+      const patched = await patchSupabaseLedgerRow(supabaseCfg, orderId, ledgerPatch);
+      ledgerMirrored = patched.ok;
+    }
+
+    // 3. Mirror into MongoDB courier_orders ledger
+    if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+      const ledgerKey = courierOrderKey(orderId);
+      if (ledgerKey) {
+        await (mongoose.connection.db.collection(COURIER_ORDERS_COLLECTION) as any).updateOne(
+          { _id: ledgerKey as any },
+          { $set: { ...ledgerPatch, updated_at: new Date() } },
+        ).catch(() => null);
+      }
+    }
+
+    // 4. Update memory cache
+    updateRecentOrdersCache(orderId, updateFields);
+
+    return res.status(200).json({
+      ok: true,
+      tracking_id: trackingCode,
+      message: 'Tracking ID updated successfully.',
+      order: mongoResult.order || null,
+      ledgerMirrored,
+    });
+  } catch (err: any) {
+    console.error('[Server] PATCH /api/admin/courier-orders/:orderId/tracking error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not update tracking ID.' });
+  }
+});
+
+/**
+ * POST /api/admin/courier-orders/:orderId/notify
+ *
+ * Explicit Send Message action for Courier Orders.
+ * Sends email (with token/label attached as file) and WhatsApp (with token/label link & text)
+ * and returns direct wa.me link for immediate admin manual dispatch if desired.
+ */
+app.post('/api/admin/courier-orders/:orderId/notify', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { orderId } = req.params;
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+
+    if (!orderId) {
+      return res.status(400).json({ ok: false, error: 'Order ID is required.' });
+    }
+
+    // Fetch order doc
+    let orderDoc: any = null;
+    let target: any = null;
+    try {
+      await connectToMongoDB();
+      if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+        target = await resolveCourierOrderTarget(orderId);
+        orderDoc = target?.doc || null;
+      }
+    } catch (e: any) {
+      console.warn('[CourierNotify] Mongo lookup warning:', e?.message || e);
+    }
+
+    // If tracking code was provided and differs, also save it
+    const trackingCode = String(body.tracking_id || body.tracking_code || body.trackingCode || orderDoc?.tracking_id || orderDoc?.tracking_code || orderDoc?.courier_tracking || '').trim();
+    if (body.tracking_id || body.tracking_code || body.trackingCode) {
+      const trackUpdate = {
+        tracking_id: trackingCode,
+        tracking_code: trackingCode,
+        trackingCode: trackingCode,
+        courier_tracking: trackingCode,
+        courier_last_error: '',
+        needs_manual_entry: false,
+        updated_at: new Date(),
+      };
+      await updateOrderFields(orderId, trackUpdate, { store_slug: body.store_slug || orderDoc?.store_slug || '' });
+      updateRecentOrdersCache(orderId, trackUpdate);
+    }
+
+    // If status was provided, update it too
+    const statusVal = String(body.status || body.courier_status || '').trim();
+    if (statusVal) {
+      const statusUpdate: Record<string, any> = {
+        courier_status: statusVal,
+        courierStatus: statusVal,
+        courier_status_updated_at: new Date(),
+        updated_at: new Date(),
+      };
+      await updateOrderFields(orderId, statusUpdate, { store_slug: body.store_slug || orderDoc?.store_slug || '' });
+    }
+
+    // Resolve courier label (if requested or order has labels)
+    let labelToSend: { filename: string; mimeType: string; base64?: string; note?: string; url?: string } | null = null;
+    const requestedLabelId = String(body.label_id || body.labelId || '').trim();
+
+    // Check body direct label first
+    if (body.label && body.label.filename && (body.label.base64 || body.label.file)) {
+      labelToSend = {
+        filename: body.label.filename,
+        mimeType: body.label.mimeType || 'application/octet-stream',
+        base64: body.label.base64 || body.label.file,
+        note: body.label.note || '',
+      };
+    } else {
+      // Look up in order / ledger
+      let collectedLabels: any[] = [];
+      if (orderDoc && Array.isArray(orderDoc.courier_labels)) {
+        collectedLabels.push(...orderDoc.courier_labels);
+      }
+      const supabaseCfg = readSupabaseEnv();
+      if (supabaseCfg) {
+        const found = await findSupabaseLedgerRow(supabaseCfg, orderId);
+        const l = found.row?.courier_labels;
+        if (Array.isArray(l)) collectedLabels.push(...l);
+        else if (typeof l === 'string') {
+          try { collectedLabels.push(...JSON.parse(l)); } catch {}
+        }
+      }
+
+      if (collectedLabels.length > 0) {
+        let chosen = requestedLabelId
+          ? collectedLabels.find((l: any) => String(l?.id) === requestedLabelId || String(l?.filename) === requestedLabelId)
+          : collectedLabels[collectedLabels.length - 1]; // latest
+        if (chosen) {
+          labelToSend = {
+            filename: chosen.filename,
+            mimeType: chosen.mimeType,
+            base64: chosen.file,
+            note: chosen.note || '',
+          };
+          if (chosen.id) {
+            const baseUrl = `${process.env.APP_PUBLIC_URL || process.env.PUBLIC_APP_URL || ''}`.replace(/\/$/, '');
+            if (baseUrl) {
+              labelToSend.url = `${baseUrl}/api/courier-labels/${encodeURIComponent(orderId)}/${encodeURIComponent(chosen.id)}`;
+            } else {
+              labelToSend.url = `/api/courier-labels/${encodeURIComponent(orderId)}/${encodeURIComponent(chosen.id)}`;
+            }
+          }
+        }
+      }
+    }
+
+    // Determine status label
+    const orderNumber = String(orderDoc?.order_number || orderDoc?.orderNumber || (orderDoc as any)?.invoice_id || orderId);
+    const effectiveStatus = statusVal || orderDoc?.courier_status || orderDoc?.status || 'dispatched';
+    const statusLabel = courierStatusLabel(effectiveStatus);
+    const courierName = String(body.courier_name || orderDoc?.courier_name || orderDoc?.courierName || orderDoc?.shipping_courier || 'Courier');
+    const note = body.note ? String(body.note).slice(0, 500) : '';
+
+    // Trigger notification
+    const notifyOutcome = await notifyMerchantAboutCourierChange(orderId, orderDoc, {
+      orderNumber,
+      statusLabel,
+      trackingCode,
+      courierName,
+      note,
+      label: labelToSend,
+    });
+
+    // Also build a one-click WhatsApp direct link that admin can click directly
+    let directLink = notifyOutcome.whatsapp?.directLink || '';
+    if (!directLink) {
+      // Find merchant phone
+      const storeRef = String(orderDoc?.store_slug || orderDoc?.storeSlug || body.store_slug || '').trim();
+      let merchantPhone = '';
+      if (storeRef) {
+        const store = await resolveStoreRecordFlexible(storeRef).catch(() => null);
+        if (store) {
+          merchantPhone = String(store.whatsappNumber || store.whatsapp_number || store.whatsapp || store.phone || store.store_phone || '').trim();
+        }
+      }
+      if (!merchantPhone) {
+        merchantPhone = String(orderDoc?.merchant_phone || orderDoc?.merchantPhone || body.merchant_phone || '').trim();
+      }
+
+      const digits = normaliseWhatsAppNumber(merchantPhone);
+      if (digits) {
+        const contactDummy: MerchantContact = {
+          email: '',
+          whatsapp: digits,
+          phone: digits,
+          storeName: String(orderDoc?.store_name || orderDoc?.storeName || storeRef || 'Store'),
+          storeSlug: storeRef,
+        };
+        const textMsg = buildCourierMessage({
+          orderNumber,
+          statusLabel,
+          trackingCode,
+          courierName,
+          note,
+          label: labelToSend,
+        }, contactDummy);
+        directLink = whatsAppDirectLink(digits, textMsg);
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Merchant notification processed.',
+      merchant_notify: notifyOutcome,
+      directLink,
+      label_attached: Boolean(labelToSend),
+    });
+  } catch (err: any) {
+    console.error('[Server] POST /api/admin/courier-orders/:orderId/notify error:', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'Could not send merchant notification.' });
   }
 });
 
