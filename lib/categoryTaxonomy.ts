@@ -351,9 +351,28 @@ async function upsertNode(node: TaxonomyNode): Promise<{ ok: boolean; error?: st
   if (!db) return { ok: false, error: 'The database is unavailable.' };
   try {
     const now = new Date().toISOString();
+    /*
+     * `created_at` / `createdAt` MUST NOT travel inside `$set` while they are also
+     * listed in `$setOnInsert`.
+     *
+     * MongoDB rejects any update that names the same path in two operators:
+     *   "Updating the path 'created_at' would create a conflict at 'created_at'"
+     *
+     * An UPDATE used to spread the whole stored node into `$set` — and a stored
+     * node always carries `created_at` (stamped on insert) — so every "Edit
+     * category" save failed with that conflict while creates still worked.
+     * The creation time is owned by the database: it is only written on INSERT
+     * (from the caller's value when present) and is never rewritten on update.
+     * `_id` is immutable and is stripped for the same reason.
+     */
+    const { _id: _ignoredId, created_at: nodeCreatedAt, createdAt: _createdAtAlias, ...rest } = node as any;
+    const $set = toJsonPlain({ ...rest, updated_at: now }) as Record<string, unknown>;
+    delete $set.created_at;
+    delete $set.createdAt;
+    const $setOnInsert = { created_at: nodeCreatedAt || now };
     await db.collection(TAXONOMY_COLLECTION).updateOne(
       { id: node.id },
-      { $set: toJsonPlain({ ...node, updated_at: now }), $setOnInsert: { created_at: node.created_at || now } },
+      { $set, $setOnInsert },
       { upsert: true },
     );
     return { ok: true };

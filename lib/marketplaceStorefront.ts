@@ -271,11 +271,19 @@ async function writeConfigDoc(configKey: string, payload: Record<string, any>): 
   try {
     const now = new Date().toISOString();
 
+    // Same rule as every other upsert here: a created-* field may not appear in
+    // `$set` and `$setOnInsert` at once (MongoDB: "Updating the path 'created_at'
+    // would create a conflict at 'created_at'"). The stored value is only kept on
+    // INSERT; an existing document keeps the creation time it already has.
+    const { created_at: createdAt, createdAt: _createdAtAlias, ...rest } = (payload || {}) as Record<string, any>;
+
     // Large base64 uploads (a hero image saved as a data-URL when no object
     // store is wired up) would push this document toward Mongo's 16MB ceiling
     // and make every read pay for the payload. Uploads are downscaled client
     // side to keep this rare; the guard below is the backstop.
-    const clean = toJsonPlain({ ...payload, config_key: configKey, updated_at: now }) as Record<string, any>;
+    const clean = toJsonPlain({ ...rest, config_key: configKey, updated_at: now }) as Record<string, any>;
+    delete clean.created_at;
+    delete clean.createdAt;
     const estimate = JSON.stringify(clean, (key, value) => {
       if (key === 'image' || key === 'cover' || key === 'imageUrl') return undefined;
       return value;
@@ -287,7 +295,7 @@ async function writeConfigDoc(configKey: string, payload: Record<string, any>): 
 
     await db.collection(MARKETPLACE_CONFIG_COLLECTION).updateOne(
       { config_key: configKey },
-      { $set: clean, $setOnInsert: { created_at: now } },
+      { $set: clean, $setOnInsert: { created_at: createdAt || now } },
       { upsert: true }
     );
     return { ok: true };

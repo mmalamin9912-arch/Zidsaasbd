@@ -116,11 +116,22 @@ async function upsertMongoDoc(
   if (!db) return { ok: false, error };
 
   const now = new Date().toISOString();
-  const doc = { ...record, [matchColumn]: matchValue, updated_at: now, updatedAt: now };
+  /*
+   * `created_at` must not be named in `$set` as well as `$setOnInsert` — MongoDB
+   * aborts the write with "Updating the path 'created_at' would create a conflict
+   * at 'created_at'". `record` may be a previously-read row (it then carries
+   * `created_at`), so it is pulled out here and only applied on INSERT.
+   */
+  const {
+    created_at: createdAt,
+    createdAt: _createdAtAlias,
+    ...rest
+  } = record || ({} as Record<string, any>);
+  const doc = { ...rest, [matchColumn]: matchValue, updated_at: now, updatedAt: now };
   try {
     await db.collection(collection).updateOne(
       { [matchColumn]: matchValue },
-      { $set: doc, $setOnInsert: { created_at: now, createdAt: now } },
+      { $set: doc, $setOnInsert: { created_at: createdAt || now, createdAt: now } },
       { upsert: true }
     );
     return { ok: true };
