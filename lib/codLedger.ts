@@ -521,6 +521,10 @@ async function resolveVendorIdentities(
         { id: raw }, { store_id: raw }, { store_code: raw }, { store_code: raw.toUpperCase() },
         { store_slug: raw }, { storeSlug: raw },
         { store_slug: raw.toLowerCase() }, { storeSlug: raw.toLowerCase() },
+        // A merchant may hold the store under its email (the dashboard can send
+        // the merchant email as the vendor ref). Harmless when stores have no
+        // email field — those clauses simply never match.
+        ...(/@/.test(raw) ? [{ email: raw }, { storeEmail: raw }] : []),
       ];
       if (isObjectId) {
         try {
@@ -707,13 +711,16 @@ export async function reconcileVendorWalletWithPaidOrders(
   opts: { limit?: number } = {}
 ): Promise<{ ok: boolean; scanned: number; creditedCount: number; creditedBDT: number; error?: string }> {
   const result = { ok: false, scanned: 0, creditedCount: 0, creditedBDT: 0, error: undefined as string | undefined };
+  // Why scanned orders were skipped — diagnostic only, no secrets.
+  const skipped: Record<string, number> = {};
+  const bump = (reason: string) => { skipped[reason] = (skipped[reason] || 0) + 1; };
   try {
-    if (!vendorRef) return { ...result, error: 'A vendor id or store slug is required.' };
+    if (!vendorRef) return { ...result, error: 'A vendor id or store slug is required.', skipped };
 
     // Every cluster that may hold this merchant's data — the shared pool alone
     // can be pinned to the EMPTY secondary (see `getTenantDbs`).
     const dbs = await getTenantDbs(DB_NAME);
-    if (!dbs.length) return { ...result, error: 'The database is unavailable.' };
+    if (!dbs.length) return { ...result, error: 'The database is unavailable.', skipped };
 
     const identities = await resolveVendorIdentities(vendorRef);
     const ref = await resolveStoreRef(vendorRef).catch(() => ({} as any));
@@ -757,9 +764,9 @@ export async function reconcileVendorWalletWithPaidOrders(
         const orderNumber = String(
           orderDoc.order_number || orderDoc.orderNumber || orderDoc.id || ''
         ).replace(/^#/, '').trim();
-        if (!orderNumber) continue;
+        if (!orderNumber) { bump('no_order_number'); continue; }
         // Already settled from another cluster's copy of this same order.
-        if (handled.has(orderNumber)) continue;
+        if (handled.has(orderNumber)) { bump('duplicate_cross_cluster'); continue; }
         handled.add(orderNumber);
 
         /*
@@ -767,19 +774,24 @@ export async function reconcileVendorWalletWithPaidOrders(
          *
          *   • A TRUE COD parcel — its cash is settled by `cod_ledger` on delivery
          *     (courier fee deducted). Crediting the order total here would pay the
-         *     vendor the courier's cut a second time. See `isTrueCodOrder`: a mere
-         *     'COD' label with no cash evidence is the checkout default and IS
-         *     credited.
+         *     vendor the courier's cut a second time. `isTrueCodOrder` decides this
+         *     from actual evidence (`cod_reconciled`, `cod_gross_collected`, or a
+         *     fully prepaid advance) — NOT from the payment-method label.
          *   • A MASTER basket — the payable lives on each vendor CHILD, so paying
          *     the master as well would double-credit the whole basket.
+         *
+         * A PAID order is owed its vendor credit whatever its payment-method label:
+         * `buildOrderRecord()` defaults the label to 'COD' when checkout sends none,
+         * so a bKash/Telegram-approved order looks like a COD parcel. Skipping on
+         * the label alone skipped exactly the orders this pass exists to credit.
          */
-        const paymentMethod = String(orderDoc.payment_method || orderDoc.paymentMethod || '').toLowerCase();
-        const labelledCod = paymentMethod.includes('cod') || paymentMethod.includes('cash');
-        if (labelledCod && (!hasPrepaidEvidence(orderDoc) || isTrueCodOrder(orderDoc))) continue;
+        // Only a TRUE COD parcel is settled elsewhere (cod_ledger); skip it here.
+        if (isTrueCodOrder(orderDoc)) { bump('true_cod_parcel'); continue; }
+
         const isMaster = orderDoc.order_type === 'master' ||
           (Array.isArray(orderDoc.child_order_ids) && orderDoc.child_order_ids.length > 0) ||
           (Array.isArray(orderDoc.childOrderIds) && orderDoc.childOrderIds.length > 0);
-        if (isMaster) continue;
+        if (isMaster) { bump('master_order'); continue; }
 
         // Settlements are keyed by vendor + order; probe every id spelling that
         // this order and this store can be known by (see settlementClausesForOrder).
@@ -794,18 +806,18 @@ export async function reconcileVendorWalletWithPaidOrders(
           0,
           toNum(orderDoc.vendor_net_payable_bdt ?? orderDoc.vendorNetPayableBdt, totalBDT - commissionBDT)
         ));
-        if (payable <= 0) continue;
+        if (payable <= 0) { bump('zero_payable'); continue; }
 
         const settlement = await creditedAmountForOrder(db, settlementFilters);
         // A COD settlement or an explicit "already released" flag is final.
-        if (settlement.settled) continue;
+        if (settlement.settled) { bump('already_settled'); continue; }
         let credited = settlement.credited;
         if (String(orderDoc.wallet_credited || '').trim().toLowerCase() === 'true') {
           credited = Math.max(credited, payable);
         }
 
         const gap = round2(payable - credited);
-        if (gap <= 0.004) continue; // already settled — nothing to do
+        if (gap <= 0.004) { bump('already_settled'); continue; } // already settled — nothing to do
 
         // Credited on the SAME cluster the order was read from (see
         // `creditVendorWallet`), so the real wallet is the one that grows.
@@ -820,7 +832,7 @@ export async function reconcileVendorWalletWithPaidOrders(
           { available: gap, gross: totalBDT, commission: commissionBDT, courierFee: 0, orderNumber },
           db
         );
-        if (!wallet) continue;
+        if (!wallet) { bump('credit_failed'); continue; }
 
         result.creditedCount += 1;
         result.creditedBDT = round2(result.creditedBDT + gap);
@@ -833,10 +845,18 @@ export async function reconcileVendorWalletWithPaidOrders(
       }
     }
 
-    return { ...result, ok: true };
+    // Diagnostic summary for Render logs: how many Paid orders were scanned,
+    // how many were skipped and why, and how much was credited. No secrets.
+    console.log('[Wallet] reconcile pass', {
+      vendor: vendorRef, slug, vendorId, dbs: dbs.length,
+      scanned: result.scanned, skipped,
+      creditedCount: result.creditedCount, creditedBDT: result.creditedBDT,
+    });
+
+    return { ...result, ok: true, skipped };
   } catch (err: any) {
     console.warn('[COD] reconcileVendorWalletWithPaidOrders warning:', err?.message || err);
-    return { ...result, error: err?.message || 'The wallet could not be reconciled.' };
+    return { ...result, error: err?.message || 'The wallet could not be reconciled.', skipped };
   }
 }
 
@@ -862,6 +882,13 @@ export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean;
     const ref = await resolveStoreRef(vendorRef);
     const or = identityClauses(identities);
     if (ref.slug) or.push({ store_slug: ref.slug }, { storeSlug: ref.slug });
+
+    // Diagnostic: who this wallet read is for and which clusters it will ask.
+    // No secrets — store identifiers only.
+    console.log('[Wallet] getVendorWallet', {
+      vendor: vendorRef, ids: identities.ids, slugs: identities.slugs,
+      ref: { storeId: ref.storeId, slug: ref.slug }, dbs: dbs.length,
+    });
 
     /*
      * SELF-HEAL BEFORE READING — EXACTLY ONCE.
@@ -892,15 +919,28 @@ export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean;
     }
 
     let best: Record<string, any> | null = null;
+    let walletsSeen = 0;
     for (const db of dbs) {
       const wallet = await db.collection(VENDOR_WALLETS_COLLECTION).findOne({ $or: or }).catch(() => null);
       if (!wallet) continue;
+      walletsSeen += 1;
       const plain = toPlain(wallet);
       // Prefer the wallet that actually carries money (or history); an empty
       // stray document must not hide a funded one on another cluster.
       if (!best || toNum(plain?.lifetime_credit_bdt) > toNum(best?.lifetime_credit_bdt)) best = plain;
     }
-    if (best) return { ok: true, wallet: best };
+    if (best) {
+      console.log('[Wallet] getVendorWallet hit', {
+        vendor: vendorRef, walletsSeen, available_bdt: best.available_bdt,
+        lifetime_credit_bdt: best.lifetime_credit_bdt, lifetime_paid_bdt: best.lifetime_paid_bdt,
+        pending_payout_bdt: best.pending_payout_bdt, vendor_id: best.vendor_id, store_slug: best.store_slug,
+      });
+      return { ok: true, wallet: best };
+    }
+
+    console.log('[Wallet] getVendorWallet empty', {
+      vendor: vendorRef, walletsSeen, reason: 'no_wallet_document_across_clusters',
+    });
 
     // No settlement yet — answer with a zeroed wallet rather than a 404 so the
     // dashboard can render "৳0 available" instead of an error state.
