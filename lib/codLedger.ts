@@ -48,7 +48,7 @@
  */
 import mongoose from 'mongoose';
 import { getMongoDb, DB_NAME } from './db.js';
-import { resolveStoreRef, storeMatchClauses, resolveCommission } from './marketplace.js';
+import { resolveStoreRef, storeMatchClauses, resolveCommission, PAYOUT_COLLECTION } from './marketplace.js';
 
 export const COD_LEDGER_COLLECTION = 'cod_ledger';
 export const VENDOR_WALLETS_COLLECTION = 'vendor_wallets';
@@ -466,6 +466,175 @@ export async function listCodLedger(query: LedgerQuery = {}): Promise<{
   }
 }
 
+/* ─────────────── backfill: already-Paid orders → wallet ─────────────── */
+
+/** Money already credited to this wallet, from ANY settlement path. */
+async function creditedAmountForOrder(
+  db: any,
+  filters: Record<string, any>[]
+): Promise<{ credited: number; settled: boolean }> {
+  if (!filters.length) return { credited: 0, settled: false };
+  let credited = 0;
+  let settled = false;
+  const done = async (collection: string, pick: (doc: any) => number) => {
+    const doc = await db.collection(collection).findOne({ $or: filters }).catch(() => null);
+    if (doc) credited = Math.max(credited, pick(doc));
+    return Boolean(doc);
+  };
+  await done(PAYOUT_COLLECTION, (d: any) =>
+    toNum(d?.net_payout_bdt ?? d?.net_payable_amount_bdt ?? d?.net_payable_bdt ?? d?.amount_bdt, 0));
+  // A `cod_ledger` row is the authoritative cash settlement: its vendor_credit
+  // already had the courier fee deducted, so that order needs no top-up.
+  settled = await done(COD_LEDGER_COLLECTION, (d: any) => toNum(d?.vendor_credit ?? d?.net_settlement, 0));
+  return { credited, settled };
+}
+
+/**
+ * BRING A VENDOR'S WALLET IN LINE WITH THE ORDERS ALREADY MARKED PAID.
+ *
+ * The wallet was credited at the moment a payment was approved. Any approval
+ * that happened through a path which did not credit (or an approval that was
+ * only mirrored to Supabase) left a Paid order with ৳0 in the wallet: the
+ * orders screen says "Paid", the wallet says "nothing yet".
+ *
+ * This pass reconciles the two — it is safe to run on every wallet read:
+ *
+ *   • MISSING CREDIT — a Paid order that no settlement record covers is
+ *     credited now, through the SAME `creditVendorWallet` used everywhere else,
+ *     so the wallet shape never diverges.
+ *   • TOP-UP — a settlement that exists but credited less than the order's
+ *     payable (e.g. only the platform payout row was written) is topped up to
+ *     the payable, never above it.
+ *   • NO DOUBLE CREDIT — the credit is the DIFFERENCE between what the order
+ *     pays and what its settlement rows already granted, so a repeated read (or
+ *     a second tab) adds zero. Re-running this forever is a no-op.
+ *
+ * Refuses a payment the platform voided/cancelled, and only looks at orders
+ * belonging to this very vendor, so one merchant's wallet can never absorb
+ * another's money.
+ */
+export async function reconcileVendorWalletWithPaidOrders(
+  vendorRef: string,
+  opts: { limit?: number } = {}
+): Promise<{ ok: boolean; scanned: number; creditedCount: number; creditedBDT: number; error?: string }> {
+  const result = { ok: false, scanned: 0, creditedCount: 0, creditedBDT: 0, error: undefined as string | undefined };
+  try {
+    const db = await getMongoDb(DB_NAME);
+    if (!db) return { ...result, error: 'The database is unavailable.' };
+    if (!vendorRef) return { ...result, error: 'A vendor id or store slug is required.' };
+
+    const ref = await resolveStoreRef(vendorRef).catch(() => ({} as any));
+    const vendorId = String(ref.storeId || vendorRef).trim();
+    const slug = String(ref.slug || '').trim().toLowerCase();
+
+    // Exactly the identifiers this vendor's orders/products carry.
+    const identityOr: Record<string, any>[] = Array.from(new Set([
+      String(vendorRef),
+      vendorId,
+      ...(ref.storeId ? [String(ref.storeId)] : []),
+    ].filter(Boolean))).flatMap((id) => [{ vendor_id: id }, { vendorId: id }]);
+    if (slug) identityOr.push({ store_slug: slug }, { storeSlug: slug });
+
+    const limit = Math.min(500, Math.max(1, Math.floor(toNum(opts.limit, 200))));
+    const rows = await db
+      .collection('orders')
+      .find({
+        $and: [
+          { $or: identityOr },
+          { $or: [{ payment_status: /^paid$/i }, { paymentStatus: /^paid$/i }] },
+          { status: { $not: /^(cancelled|canceled|refunded|void|voided)$/i } },
+        ],
+      })
+      .limit(limit)
+      .toArray()
+      .catch(() => [] as any[]);
+
+    for (const row of rows as any[]) {
+      result.scanned += 1;
+      const orderDoc = toPlain(row);
+      const orderNumber = String(
+        orderDoc.order_number || orderDoc.orderNumber || orderDoc.id || ''
+      ).replace(/^#/, '').trim();
+      if (!orderNumber) continue;
+
+      /*
+       * SKIP WHAT THIS PASS MUST NOT TOUCH:
+       *
+       *   • COD — its cash is settled by `cod_ledger` on delivery (courier fee
+       *     deducted). Crediting the order total here would pay the vendor the
+       *     courier's cut a second time.
+       *   • A MASTER basket — the payable lives on each vendor CHILD, so paying
+       *     the master as well would double-credit the whole basket.
+       */
+      const paymentMethod = String(orderDoc.payment_method || orderDoc.paymentMethod || '').toLowerCase();
+      if (paymentMethod.includes('cod') || paymentMethod.includes('cash')) continue;
+      const isMaster = orderDoc.order_type === 'master' ||
+        (Array.isArray(orderDoc.child_order_ids) && orderDoc.child_order_ids.length > 0) ||
+        (Array.isArray(orderDoc.childOrderIds) && orderDoc.childOrderIds.length > 0);
+      if (isMaster) continue;
+
+      // Settlements are keyed by vendor + order; probe every id spelling. Each
+      // clause is scoped to THIS order so a sibling child of the same basket can
+      // never make this one look settled.
+      const settlementFilters: Record<string, any>[] = [
+        { order_number: orderNumber, vendor_id: vendorId },
+        { order_key: `${vendorId}::${orderNumber}` },
+        ...(String(vendorRef) !== vendorId ? [{ order_number: orderNumber, vendor_id: String(vendorRef) }] : []),
+        ...(slug ? [{ order_number: orderNumber, store_slug: slug }] : []),
+        ...(orderDoc.id ? [{ child_order_id: String(orderDoc.id), vendor_id: vendorId }] : []),
+      ];
+
+      const totalBDT = round2(Math.max(0, toNum(
+        orderDoc.totalBDT ?? orderDoc.total_price ?? orderDoc.total_bdt ??
+        orderDoc.cod_amount ?? orderDoc.total, 0
+      )));
+      const commissionBDT = round2(Math.max(0, toNum(orderDoc.commission_bdt ?? orderDoc.commissionBdt, 0)));
+      const payable = round2(Math.max(
+        0,
+        toNum(orderDoc.vendor_net_payable_bdt ?? orderDoc.vendorNetPayableBdt, totalBDT - commissionBDT)
+      ));
+      if (payable <= 0) continue;
+
+      const settlement = await creditedAmountForOrder(db, settlementFilters);
+      // A COD settlement or an explicit "already released" flag is final.
+      if (settlement.settled) continue;
+      let credited = settlement.credited;
+      if (String(orderDoc.wallet_credited || '').trim().toLowerCase() === 'true') {
+        credited = Math.max(credited, payable);
+      }
+
+      const gap = round2(payable - credited);
+      if (gap <= 0.004) continue; // already settled — nothing to do
+
+      const wallet = await creditVendorWallet(
+        {
+          vendorId,
+          ...(slug ? { storeSlug: slug } : {}),
+          ...(String(orderDoc.vendor_name || orderDoc.store_name || '').trim()
+            ? { vendorName: String(orderDoc.vendor_name || orderDoc.store_name).trim() }
+            : {}),
+        },
+        { available: gap, gross: totalBDT, commission: commissionBDT, courierFee: 0, orderNumber }
+      );
+      if (!wallet) continue;
+
+      result.creditedCount += 1;
+      result.creditedBDT = round2(result.creditedBDT + gap);
+
+      await db.collection('orders').updateOne(
+        { _id: row._id },
+        { $set: { wallet_credited: true, wallet_credited_at: new Date(), updated_at: new Date() } }
+      ).catch(() => undefined);
+      console.log('[COD] wallet backfilled from a Paid order', { orderNumber, vendor: slug || vendorId, gap });
+    }
+
+    return { ...result, ok: true };
+  } catch (err: any) {
+    console.warn('[COD] reconcileVendorWalletWithPaidOrders warning:', err?.message || err);
+    return { ...result, error: err?.message || 'The wallet could not be reconciled.' };
+  }
+}
+
 /** Read (or lazily create) one vendor's wallet. */
 export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean; wallet: Record<string, any> | null; error?: string }> {
   try {
@@ -479,6 +648,23 @@ export async function getVendorWallet(vendorRef: string): Promise<{ ok: boolean;
       ...(ref.storeId ? [{ vendor_id: ref.storeId }] : []),
       ...(ref.slug ? [{ store_slug: ref.slug }] : []),
     ];
+
+    /*
+     * SELF-HEAL BEFORE READING.
+     *
+     * An order can be Paid without its approval having credited this wallet
+     * (the credit used to live only on one approval path), which is exactly the
+     * "orders say Paid, wallet says ৳0" state. `reconcileVendorWalletWithPaidOrders`
+     * credits only the MISSING difference — idempotent and never above the
+     * order's payable — so running it on a read is safe: the first read after a
+     * missing credit fixes the balance, and every later read adds nothing.
+     */
+    await Promise.all(
+      Array.from(new Set([String(vendorRef), ref.storeId ? String(ref.storeId) : ''].filter(Boolean))).map((candidate) =>
+        reconcileVendorWalletWithPaidOrders(candidate).catch(() => undefined)
+      )
+    );
+
     const existing = await db.collection(VENDOR_WALLETS_COLLECTION).findOne({ $or: or }).catch(() => null);
     if (existing) return { ok: true, wallet: toPlain(existing) };
 

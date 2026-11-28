@@ -325,7 +325,14 @@ export async function fetchCodLedger(params: {
   return result.data ? { ...EMPTY_LEDGER, ...result.data } : EMPTY_LEDGER;
 }
 
-/** Read the merchant's wallet (available COD earnings + payout rules). */
+/**
+ * Read the merchant's wallet (available COD earnings + payout rules).
+ *
+ * The READ self-heals: the server reconciles the wallet against this vendor's
+ * already-`Paid` orders before answering (`reconcileVendorWalletWithPaidOrders`,
+ * idempotent — it only credits the missing difference). So "orders say Paid,
+ * wallet says ৳0" can never stick.
+ */
 export async function fetchVendorWallet(params: {
   vendorId?: string;
   storeSlug?: string;
